@@ -1,0 +1,46 @@
+"""
+Application configuration loaded from environment variables.
+All secrets live in .env (never committed to git).
+"""
+
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+
+
+class Settings(BaseSettings):
+    # --- Meta APIs (optional for local testing without webhooks) ---
+    meta_app_secret: str = ""
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_verify_token: str = ""
+    instagram_access_token: str = ""
+    instagram_verify_token: str = ""
+
+    # --- LLM Providers (at least one is required) ---
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+
+    # --- Database ---
+    database_url: str  # postgresql://user:pass@host:port/dbname
+
+    # --- Google Sheets ---
+    google_sheets_credentials_b64: str  # Base64-encoded service account JSON
+    product_sheet_id: str
+
+    # --- Telegram (admin notifications) ---
+    telegram_bot_token: str = ""
+    telegram_admin_chat_id: str = ""
+
+    # --- App config ---
+    store_name: str = "Tu Tienda VS"
+    owner_name: str = "Admin"
+    app_base_url: str = "http://localhost:8000"
+    debug: bool = False
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+
+@lru_cache()
+def get_config() -> Settings:
+    """Cached settings instance. Call this anywhere you need config."""
+    return Settings()

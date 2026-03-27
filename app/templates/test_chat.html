@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VS Chatbot - Test Chat</title>
+<link rel="stylesheet" href="/static/css/test_chat.css">
+</head>
+<body>
+
+<div class="header">
+  <h1>VS Chatbot - Test Mode</h1>
+  <div class="topbar">
+    <select id="channel" title="Canal">
+      <option value="whatsapp">WhatsApp</option>
+      <option value="instagram">Instagram</option>
+    </select>
+    <input id="sender" value="test_user_1" class="sender-input" title="Sender ID">
+    <button class="reset-btn" onclick="resetChat()" title="Borrar historial">Reset</button>
+  </div>
+</div>
+
+<div class="chat" id="chat"></div>
+
+<div class="input-area">
+  <input id="input" placeholder="Escribe un mensaje..." autocomplete="off" onkeydown="if(event.key==='Enter')sendMsg()">
+  <button onclick="sendMsg()">&#10148;</button>
+</div>
+
+<script src="/static/js/test_chat.js"></script>
+</body>
+</html>
