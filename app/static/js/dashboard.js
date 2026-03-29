@@ -32,8 +32,21 @@ function sortArrow(table, col) {
   return s.asc ? ' ↑' : ' ↓';
 }
 
+// -- Dark Mode --
+function toggleDarkMode() {
+  const isDark = document.documentElement.classList.toggle('dark');
+  localStorage.setItem('darkMode', isDark);
+  document.getElementById('dark-toggle').textContent = isDark ? '☀️' : '🌙';
+}
+
+function initDarkModeButton() {
+  const isDark = document.documentElement.classList.contains('dark');
+  document.getElementById('dark-toggle').textContent = isDark ? '☀️' : '🌙';
+}
+
 // -- Init --
 document.addEventListener('DOMContentLoaded', async () => {
+  initDarkModeButton();
   MODELS = await fetch(API + '/providers').then(r => r.json());
   const settings = await fetch(API + '/').then(r => r.json());
   updateAiToggleUI(settings.ai_enabled !== false);
@@ -148,9 +161,9 @@ async function loadOverview() {
     document.getElementById('stat-cost').textContent = '$' + (usage.total_estimated_cost_usd || 0).toFixed(3);
 
     if (usage.breakdown && usage.breakdown.length) {
-      let html = '<table class="w-full"><thead><tr class="text-left text-gray-500"><th class="pb-2">Proveedor</th><th>Llamadas</th><th>Tokens</th><th>Costo</th></tr></thead><tbody>';
+      let html = '<table class="w-full"><thead><tr class="text-left text-gray-500 dark:text-gray-400"><th class="pb-2">Proveedor</th><th>Llamadas</th><th>Tokens</th><th>Costo</th></tr></thead><tbody class="dark:text-gray-300">';
       for (const row of usage.breakdown) {
-        html += `<tr class="border-t border-gray-100"><td class="py-2">${row.provider}/${row.model}</td><td>${row.calls}</td><td>${row.input_tokens}/${row.output_tokens}</td><td>$${row.estimated_cost_usd.toFixed(4)}</td></tr>`;
+        html += `<tr class="border-t border-gray-100 dark:border-gray-700"><td class="py-2">${row.provider}/${row.model}</td><td>${row.calls}</td><td>${row.input_tokens}/${row.output_tokens}</td><td>$${row.estimated_cost_usd.toFixed(4)}</td></tr>`;
       }
       html += '</tbody></table>';
       document.getElementById('usage-table').innerHTML = html;
@@ -196,7 +209,7 @@ function renderCustomers(customers) {
   if (hasEscalated) {
     html += '<div class="mb-3"><button class="btn btn-primary text-sm" onclick="resolveAllCustomers()">Resolver todas las escalaciones</button></div>';
   }
-  html += `<table class="w-full"><thead><tr class="text-left text-gray-500 border-b">
+  html += `<table class="w-full"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortCustomers('name')">Cliente${sortArrow('customers','name')}</th>
     <th class="sortable" onclick="sortCustomers('channel')">Canal${sortArrow('customers','channel')}</th>
     <th>Tags</th>
@@ -212,7 +225,7 @@ function renderCustomers(customers) {
     const resolveBtn = c.conversation_state === 'escalated'
       ? `<button class="btn btn-secondary text-xs" onclick="resolveCustomer('${c.id}')">Resolver</button>`
       : '';
-    html += `<tr class="border-t border-gray-100">
+    html += `<tr class="border-t border-gray-100 dark:border-gray-700">
       <td class="py-2">${c.display_name || c.platform_id}</td>
       <td>${c.channel}</td>
       <td>${tagHtml}</td>
@@ -286,7 +299,7 @@ async function loadOrders() {
 }
 
 function renderOrders(orders) {
-  let html = `<table class="w-full"><thead><tr class="text-left text-gray-500 border-b">
+  let html = `<table class="w-full"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortOrders('name')">Cliente${sortArrow('orders','name')}</th>
     <th>Items</th>
     <th class="sortable" onclick="sortOrders('total')">Total${sortArrow('orders','total')}</th>
@@ -299,7 +312,7 @@ function renderOrders(orders) {
     const itemSummary = items.map(i => `${i.product_name} (${i.size})`).join(', ');
     const statusBadge = {pending:'badge-yellow', proof_received:'badge-blue', confirmed:'badge-green', rejected:'badge-red'}[o.payment_status] || 'badge-gray';
     const date = new Date(o.created_at).toLocaleDateString();
-    html += `<tr class="border-t border-gray-100">
+    html += `<tr class="border-t border-gray-100 dark:border-gray-700">
       <td class="py-2">${o.display_name || o.platform_id}</td>
       <td class="truncate max-w-xs" title="${itemSummary}">${itemSummary}</td>
       <td>$${(o.total || 0).toFixed(2)}</td>
@@ -339,7 +352,7 @@ async function loadBroadcasts() {
 }
 
 function renderBroadcasts(data) {
-  let html = `<table class="w-full"><thead><tr class="text-left text-gray-500 border-b">
+  let html = `<table class="w-full"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortBroadcasts('name')">Nombre${sortArrow('broadcasts','name')}</th>
     <th class="sortable" onclick="sortBroadcasts('template')">Plantilla${sortArrow('broadcasts','template')}</th>
     <th>Tags</th>
@@ -350,8 +363,10 @@ function renderBroadcasts(data) {
   for (const b of data) {
     const statusBadge = {draft:'badge-gray', scheduled:'badge-yellow', sending:'badge-blue', sent:'badge-green', failed:'badge-red'}[b.status] || 'badge-gray';
     const tags = JSON.parse(b.target_tags || '[]').join(', ');
-    const sendBtn = b.status === 'draft' ? `<button class="btn btn-primary text-xs" onclick="sendBroadcast('${b.id}')">Enviar</button>` : '';
-    html += `<tr class="border-t border-gray-100">
+    let sendBtn = '';
+    if (b.status === 'draft') sendBtn = `<button class="btn btn-primary text-xs" onclick="sendBroadcast('${b.id}')">Enviar</button>`;
+    else if (b.status === 'sending' || b.status === 'failed') sendBtn = `<button class="btn btn-danger text-xs" onclick="resetBroadcast('${b.id}')">Resetear</button>`;
+    html += `<tr class="border-t border-gray-100 dark:border-gray-700">
       <td class="py-2 font-medium">${b.name}</td>
       <td>${b.template_name}</td>
       <td>${tags}</td>
@@ -398,6 +413,13 @@ async function sendBroadcast(id) {
   if (!confirm('Enviar este broadcast ahora?')) return;
   await fetch(API.replace('/settings', '') + `/broadcasts/${id}/send`, {method: 'POST'});
   toast('Broadcast enviado');
+  loadBroadcasts();
+}
+
+async function resetBroadcast(id) {
+  if (!confirm('¿Resetear este broadcast a borrador?')) return;
+  await fetch(API.replace('/settings', '') + `/broadcasts/${id}/reset`, {method: 'POST'});
+  toast('Broadcast reseteado a borrador');
   loadBroadcasts();
 }
 
@@ -468,6 +490,10 @@ async function loadSettings() {
   document.getElementById('set-fallback').checked = settings.auto_fallback === true;
   document.getElementById('set-fb-provider').value = settings.fallback_provider || 'anthropic';
 
+  document.getElementById('set-max-tokens').value = settings.llm_max_tokens || 500;
+  document.getElementById('set-max-history').value = settings.max_conversation_history || 20;
+  document.getElementById('set-abtest').checked = settings.ab_test_enabled === true;
+
   populateModels('set-model', settings.llm_provider || 'openai', settings.llm_model);
   populateModels('set-fb-model', settings.fallback_provider || 'anthropic', settings.fallback_model);
 }
@@ -497,11 +523,28 @@ async function saveProviderSettings() {
   const provider = document.getElementById('set-provider').value;
   const model = document.getElementById('set-model').value;
   const temp = parseFloat(document.getElementById('set-temp').value);
+  const maxTokens = parseInt(document.getElementById('set-max-tokens').value);
+  const maxHistory = parseInt(document.getElementById('set-max-history').value);
+
+  if (isNaN(maxTokens) || maxTokens < 100 || maxTokens > 2000) {
+    toast('Max tokens debe ser entre 100 y 2000', '#dc2626'); return;
+  }
+  if (isNaN(maxHistory) || maxHistory < 5 || maxHistory > 50) {
+    toast('Historial debe ser entre 5 y 50', '#dc2626'); return;
+  }
 
   await fetch(API + '/switch-provider?provider=' + provider + '&model=' + model, {method: 'POST'});
   await fetch(API + '/llm_temperature', {
     method: 'PUT', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({value: temp}),
+  });
+  await fetch(API + '/llm_max_tokens', {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: maxTokens}),
+  });
+  await fetch(API + '/max_conversation_history', {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: maxHistory}),
   });
 
   toast('Configuracion guardada');
@@ -512,10 +555,12 @@ async function saveFallbackSettings() {
   const enabled = document.getElementById('set-fallback').checked;
   const provider = document.getElementById('set-fb-provider').value;
   const model = document.getElementById('set-fb-model').value;
+  const abTest = document.getElementById('set-abtest').checked;
 
   await fetch(API + '/auto_fallback', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:enabled})});
   await fetch(API + '/fallback_provider', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:provider})});
   await fetch(API + '/fallback_model', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:model})});
+  await fetch(API + '/ab_test_enabled', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:abTest})});
 
-  toast('Fallback guardado');
+  toast('Fallback y A/B testing guardado');
 }

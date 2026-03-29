@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-AI-powered sales chatbot ("VS Chatbot" / "Luna") for a Venezuelan Victoria's Secret resale business. Handles customer conversations on WhatsApp and Instagram DMs in Spanish, with a Telegram admin bot, broadcast campaigns, analytics/A/B testing, and a web admin dashboard. Supports hot-swapping between OpenAI and Anthropic as LLM providers via direct SDK calls (no LangChain).
+AI-powered sales chatbot ("VS Chatbot" / "Eva") for a Venezuelan Victoria's Secret resale business. Handles customer conversations on WhatsApp and Instagram DMs in Spanish, with a Telegram admin bot, broadcast campaigns, analytics/A/B testing, and a web admin dashboard. Supports hot-swapping between OpenAI and Anthropic as LLM providers via direct SDK calls (no LangChain).
 
 ## Commands
 
@@ -23,7 +23,7 @@ No tests or linting configured. Python 3.12.
 - `http://localhost:8000/test/ui` — Browser-based chat UI simulating WhatsApp conversations through the full AI pipeline (no Meta APIs needed)
 - `http://localhost:8000/test/catalog` — View loaded products from Google Sheets
 - `http://localhost:8000/health` — System health status
-- `http://localhost:8000/admin/dashboard` — Web admin panel (5 tabs: Resumen, Clientes, Pedidos, Broadcasts, Configuracion)
+- `http://localhost:8000/admin/dashboard` — Web admin panel with dark mode (5 tabs: Resumen, Clientes, Pedidos, Broadcasts, Configuracion). Dark mode persists via localStorage and auto-detects OS preference.
 
 ```bash
 # Test chat via curl
@@ -53,9 +53,9 @@ Only `OPENAI_API_KEY`, `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, `PRODUCT
 - `app/ai/vision.py` — Payment screenshot analysis via LLM vision API
 - `app/crm/` — Customer, conversation, and order management (all DB-backed via Supabase PostgreSQL)
 - `app/catalog/sheets.py` — Google Sheets product catalog with in-memory cache and periodic refresh
-- `app/broadcast/` — Campaign system: `api.py` (CRUD endpoints), `sender.py` (WhatsApp template messages), `scheduler.py` (APScheduler jobs for scheduled sends + catalog refresh)
+- `app/broadcast/` — Campaign system: `api.py` (CRUD + reset endpoints), `sender.py` (WhatsApp template messages with crash recovery), `scheduler.py` (APScheduler jobs for scheduled sends + catalog refresh)
 - `app/catalog/pdf_generator.py` — Generates a branded PDF product catalog from the Google Sheets data using fpdf2
-- `app/admin/` — Settings API, web dashboard (HTML served from `dashboard.py`), Telegram bot (`telegram_bot.py` with 22 commands), notification helpers (`notify.py`), analytics API
+- `app/admin/` — Settings API, web dashboard with dark mode (HTML served from `dashboard.py`, CSS in `app/static/css/dashboard.css`, JS in `app/static/js/dashboard.js`), Telegram bot (`telegram_bot.py` with 22 commands), notification helpers (`notify.py`), analytics API
 - `app/analytics.py` — Tracks response times, fallback usage, conversion funnels, product popularity
 - `app/db.py` — Async DB wrapper using `databases` library with a 60-second settings cache
 - `app/test_endpoint.py` — `/test/ui` chat UI + `/test/chat` API for local testing without Meta APIs
@@ -70,13 +70,18 @@ Only `OPENAI_API_KEY`, `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, `PRODUCT
 
 - The AI system prompt is in `prompts/system_prompt.md` (Spanish-language, sales-focused). The Python code in `app/ai/prompts.py` injects dynamic context (catalog, customer history, order status) into it.
 - With <200 products, the entire catalog is stuffed into the system prompt — no RAG or vector database needed.
-- Settings (provider, model, temperature, fallback, A/B test) are stored in the DB `settings` table and cached for 60s. Use `db.invalidate_settings_cache()` after writes.
+- Settings (provider, model, temperature, max_tokens, max_conversation_history, fallback, A/B test, ai_enabled, catalog_pdf_interval_hours) are stored in the DB `settings` table and cached for 60s. Use `db.invalidate_settings_cache()` after writes. All settings are configurable from the dashboard, Telegram bot, and REST API.
 - Tool calls are provider-agnostic: defined once in `app/ai/functions.py`, converted per-provider. Adding a new tool means adding it there and handling it in `engine.py`. Current tools: `check_inventory`, `tag_customer`, `create_order`, `update_payment_status`, `escalate_to_human`, `send_interactive_buttons`, `send_catalog_pdf`.
 - WhatsApp supports interactive buttons; Instagram uses quick replies. The engine returns an `interactive` dict that the channel sender interprets.
 - A/B testing assigns new customers randomly to a provider; existing customers keep their assignment.
 - Global AI pause (`ai_enabled` setting) and per-customer escalation (`conversation_state = 'escalated'`) both suppress auto-replies. Messages are stored and the owner is notified via Telegram only once (first unanswered message), not on every subsequent message.
 - Customer shipping addresses are saved on the customer record after order creation (`last_shipping_address`, `last_shipping_city`, `last_shipping_method`). The AI offers to reuse the saved address for returning customers.
 - OpenAI newer models require `max_completion_tokens` instead of `max_tokens` (changed in `openai_provider.py`).
+- Dashboard dark mode uses Tailwind CDN with `darkMode: 'class'` config. The `tailwind.config` must be set after the CDN `<script>` loads (not before, or `tailwind` is undefined). Custom component dark styles (`.dark .card`, etc.) live in `dashboard.css`. The `dark` class is toggled on `<html>` via `toggleDarkMode()` in `dashboard.js`.
+- Dashboard settings tab exposes all configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, fallback provider/model/auto-enable, A/B testing toggle, catalog PDF interval, and AI pause. These map to `PUT /admin/settings/{key}` calls.
+- Broadcast execution wraps the send loop in try/except — if it crashes after setting status to `'sending'`, it auto-sets status to `'failed'`. A `POST /{id}/reset` endpoint resets stuck broadcasts back to `'draft'`. The dashboard shows a "Resetear" button for broadcasts in `sending` or `failed` status.
+- The `databases` library returns record objects that support `[]` bracket access but not `.get()`. Use `record["key"]` with a conditional fallback, not `record.get("key", default)`.
+- JSONB queries with the `databases` library must use `CAST(:param AS jsonb)` instead of `:param::jsonb` because the `::` cast syntax conflicts with SQLAlchemy's `:param` bind parameter syntax.
 
 ## API endpoints
 
@@ -86,12 +91,15 @@ Health:         GET /, GET /health
 Settings:       GET /admin/settings/, GET /admin/settings/providers, PUT /admin/settings/{key}
                 POST /admin/settings/switch-provider, GET /admin/settings/usage-summary
                 GET /admin/settings/stats/conversations, POST /admin/settings/telegram/setup-webhook
-                POST /admin/settings/instagram/setup-ice-breakers, /subscribe-page
-                POST /admin/settings/catalog/generate-pdf, GET /catalog/pdf-status, GET /catalog/download-pdf
-Customers:      GET /admin/settings/customers, POST /customers/{id}/resolve, POST /customers/resolve-all
-                GET /customers/{id}/tags, POST /customers/{id}/tags, DELETE /customers/{id}/tags/{tag}
+                POST /admin/settings/instagram/setup-ice-breakers, POST /admin/settings/instagram/subscribe-page
+                POST /admin/settings/catalog/generate-pdf, GET /admin/settings/catalog/pdf-status
+                GET /admin/settings/catalog/download-pdf
+Customers:      GET /admin/settings/customers, GET /admin/settings/orders
+                POST /admin/settings/customers/{id}/resolve, POST /admin/settings/customers/resolve-all
+                GET /admin/settings/customers/{id}/tags, POST /admin/settings/customers/{id}/tags
+                DELETE /admin/settings/customers/{id}/tags/{tag}
 Dashboard:      GET /admin/dashboard
-Broadcasts:     POST /admin/broadcasts/create, /preview, GET /list, POST /{id}/send
+Broadcasts:     POST /admin/broadcasts/create, /preview, GET /list, POST /{id}/send, POST /{id}/reset
 Analytics:      GET /admin/analytics/conversion, /response-times, /popular-products, /ab-test, /daily
                 POST /admin/analytics/build-daily
 Testing:        GET /test/ui, POST /test/chat, GET /test/catalog

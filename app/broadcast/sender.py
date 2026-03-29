@@ -49,76 +49,77 @@ async def execute_broadcast(broadcast_id: str) -> dict:
         {"id": broadcast_id},
     )
 
-    target_tags = broadcast["target_tags"]
-    if isinstance(target_tags, str):
-        target_tags = json.loads(target_tags)
+    try:
+        target_tags = broadcast["target_tags"]
+        if isinstance(target_tags, str):
+            target_tags = json.loads(target_tags)
 
-    template_name = broadcast["template_name"]
-    template_params = broadcast["template_params"]
-    if isinstance(template_params, str):
-        template_params = json.loads(template_params)
+        template_name = broadcast["template_name"]
+        template_params = broadcast["template_params"]
+        if isinstance(template_params, str):
+            template_params = json.loads(template_params)
 
-    # Query matching customers
-    customers = await _query_customers_by_tags(
-        tags=target_tags,
-        channel=broadcast.get("target_channel", "whatsapp"),
-    )
+        channel = broadcast["target_channel"] if broadcast["target_channel"] else "whatsapp"
+        customers = await _query_customers_by_tags(tags=target_tags, channel=channel)
 
-    if not customers:
+        if not customers:
+            await db.execute(
+                "UPDATE broadcasts SET status = 'sent', recipients = 0 WHERE id = :id",
+                {"id": broadcast_id},
+            )
+            return {"broadcast_id": broadcast_id, "recipients": 0, "message": "No matching customers found."}
+
+        # Send to each customer
+        sent = 0
+        errors = 0
+
+        for customer in customers:
+            try:
+                params = _personalize_params(template_params, customer)
+                await send_template(
+                    to=customer["platform_id"],
+                    template_name=template_name,
+                    language="es",
+                    parameters=params,
+                )
+                sent += 1
+                await asyncio.sleep(SEND_DELAY)
+            except Exception as e:
+                logger.error(f"Broadcast send failed for {customer['platform_id']}: {e}")
+                errors += 1
+
+        # Update broadcast record
+        final_status = "sent" if errors == 0 else ("sent" if sent > 0 else "failed")
         await db.execute(
-            "UPDATE broadcasts SET status = 'sent', recipients = 0 WHERE id = :id",
+            "UPDATE broadcasts SET status = :status, recipients = :sent WHERE id = :id",
+            {"status": final_status, "sent": sent, "id": broadcast_id},
+        )
+
+        # Notify admin
+        await notify_owner(
+            f"📢 *Broadcast completado*\n\n"
+            f"*Nombre:* {broadcast['name']}\n"
+            f"*Enviados:* {sent}\n"
+            f"*Errores:* {errors}\n"
+            f"*Plantilla:* {template_name}"
+        )
+
+        logger.info(f"Broadcast {broadcast_id} complete: {sent} sent, {errors} errors.")
+
+        return {
+            "broadcast_id": broadcast_id,
+            "recipients": sent,
+            "errors": errors,
+            "status": final_status,
+        }
+
+    except Exception as e:
+        logger.error(f"Broadcast {broadcast_id} crashed: {e}")
+        await db.execute(
+            "UPDATE broadcasts SET status = 'failed' WHERE id = :id",
             {"id": broadcast_id},
         )
-        return {"broadcast_id": broadcast_id, "recipients": 0, "message": "No matching customers found."}
-
-    # Send to each customer
-    sent = 0
-    errors = 0
-
-    for customer in customers:
-        try:
-            # Build personalized parameters
-            params = _personalize_params(template_params, customer)
-
-            await send_template(
-                to=customer["platform_id"],
-                template_name=template_name,
-                language="es",
-                parameters=params,
-            )
-            sent += 1
-
-            # Rate limit: pause between sends
-            await asyncio.sleep(SEND_DELAY)
-
-        except Exception as e:
-            logger.error(f"Broadcast send failed for {customer['platform_id']}: {e}")
-            errors += 1
-
-    # Update broadcast record
-    final_status = "sent" if errors == 0 else ("sent" if sent > 0 else "failed")
-    await db.execute(
-        "UPDATE broadcasts SET status = :status, recipients = :sent WHERE id = :id",
-        {"status": final_status, "sent": sent, "id": broadcast_id},
-    )
-
-    # Notify admin
-    await notify_owner(
-        f"📢 *Broadcast completado*\n\n"
-        f"*Nombre:* {broadcast['name']}\n"
-        f"*Enviados:* {sent}\n"
-        f"*Errores:* {errors}\n"
-        f"*Plantilla:* {template_name}"
-    )
-
-    logger.info(f"Broadcast {broadcast_id} complete: {sent} sent, {errors} errors.")
-
-    return {
-        "broadcast_id": broadcast_id,
-        "recipients": sent,
-        "errors": errors,
-        "status": final_status,
-    }
+        raise
 
 
 async def _query_customers_by_tags(tags: list[str], channel: str = "whatsapp") -> list[dict]:
@@ -131,28 +132,20 @@ async def _query_customers_by_tags(tags: list[str], channel: str = "whatsapp") -
     if not tags:
         return []
 
-    # Build conditions: tags @> '["tag1"]' AND tags @> '["tag2"]'
-    conditions = []
-    values = {"channel": channel}
+    # Build a single JSONB containment check: tags must contain ALL specified tags
+    tags_json = json.dumps(tags)
 
-    for i, tag in enumerate(tags):
-        key = f"tag_{i}"
-        conditions.append(f"tags @> :tag_{i}::jsonb")
-        values[key] = json.dumps([tag])
-
-    where_clause = " AND ".join(conditions)
-
-    query = f"""
+    query = """
         SELECT id, platform_id, display_name, tags
         FROM customers
         WHERE channel = :channel
           AND is_blocked = FALSE
           AND conversation_state != 'blocked'
-          AND {where_clause}
+          AND CAST(tags AS jsonb) @> CAST(:tags_json AS jsonb)
         ORDER BY last_active DESC
     """
 
-    rows = await db.fetch_all(query, values)
+    rows = await db.fetch_all(query, {"channel": channel, "tags_json": tags_json})
     return [dict(r) for r in rows]
 
 
@@ -222,7 +215,7 @@ async def list_broadcasts(limit: int = 20) -> list[dict]:
         SELECT id, name, template_name, target_tags, target_channel,
                scheduled_at, sent_at, recipients, status
         FROM broadcasts
-        ORDER BY COALESCE(scheduled_at, sent_at, id::text::timestamp) DESC
+        ORDER BY COALESCE(scheduled_at, sent_at) DESC NULLS LAST
         LIMIT :limit
         """,
         {"limit": limit},

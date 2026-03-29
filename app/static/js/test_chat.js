@@ -85,7 +85,7 @@ async function sendMsg() {
 
   const typing = document.createElement('div');
   typing.className = 'typing';
-  typing.textContent = 'Luna esta escribiendo...';
+  typing.textContent = 'Eva esta escribiendo...';
   chat.appendChild(typing);
   chat.scrollTop = chat.scrollHeight;
 

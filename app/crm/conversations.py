@@ -89,7 +89,7 @@ async def get_recent_summary(customer_id: str, limit: int = 5) -> str:
 
     lines = []
     for row in reversed(rows):
-        prefix = "Cliente" if row["role"] == "user" else "Luna"
+        prefix = "Cliente" if row["role"] == "user" else "Eva"
         lines.append(f"[{prefix}]: {row['content']}")
 
     return "\n".join(lines) if lines else "(Sin mensajes previos)"

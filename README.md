@@ -4,7 +4,7 @@ AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan
 Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM
 providers, with hot-swapping from the admin panel. Features a PDF product catalog,
 global AI pause/resume, per-customer escalation, customer address memory,
-admin tag management, and sortable dashboard tables.
+admin tag management, sortable dashboard tables, and a dark mode admin dashboard.
 
 ## Quick start
 
@@ -73,6 +73,7 @@ Customer (WhatsApp or Instagram DM)
 | POST | `/admin/settings/catalog/generate-pdf` | Generate product catalog PDF |
 | GET | `/admin/settings/catalog/pdf-status` | Check PDF status |
 | GET | `/admin/settings/catalog/download-pdf` | Download catalog PDF |
+| GET | `/admin/settings/orders` | List recent orders |
 | GET | `/admin/settings/customers` | List customers (optional `?tag=` filter) |
 | POST | `/admin/settings/customers/{id}/resolve` | Resolve escalated customer |
 | POST | `/admin/settings/customers/resolve-all` | Resolve all escalated customers |
@@ -162,5 +163,7 @@ Open `/admin/dashboard` in a browser. Five tabs:
 - **Resumen**: Stats cards, per-channel breakdown, LLM usage by provider, AI on/off toggle
 - **Clientes**: Sortable customer table, tag management (add/remove per customer), resolve escalations individually or all at once
 - **Pedidos**: Sortable order table with status badges
-- **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts
-- **Configuracion**: LLM provider/model/temperature, fallback settings, catalog PDF generation and download
+- **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, reset stuck broadcasts
+- **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, fallback settings, A/B testing toggle, catalog PDF generation/download/auto-refresh interval
+
+Dark mode toggle in the header (persists via localStorage, auto-detects OS preference).

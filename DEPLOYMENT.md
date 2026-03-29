@@ -361,10 +361,12 @@ Open `https://your-app.railway.app/admin/dashboard` in any browser. Five tabs:
 - **Resumen**: Today's stats, per-channel breakdown, token usage by provider, AI on/off toggle
 - **Clientes**: Sortable customer table, inline tag management (add/remove), resolve escalations individually or all at once
 - **Pedidos**: Sortable order table with status badges
-- **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts
-- **Configuracion**: Switch LLM provider/model, adjust temperature, configure fallback, catalog PDF generation and download
+- **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, reset stuck broadcasts (sending/failed)
+- **Configuracion**: Switch LLM provider/model, adjust temperature/max tokens/conversation history, configure fallback, A/B testing toggle, catalog PDF generation/download/auto-refresh interval
 
 All tables in Clientes, Pedidos, and Broadcasts are sortable by clicking column headers. Click once for ascending, again for descending.
+
+Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto-detects OS preference on first visit.
 
 For production security, consider adding basic auth or IP whitelisting to the `/admin/*` routes.
 
@@ -433,11 +435,13 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 
 ```
 [ ] GET /health -> status=healthy, scheduler=running, both providers, catalog > 0
-[ ] GET /admin/settings/ -> 11 settings including ab_test_enabled
+[ ] GET /admin/settings/ -> Settings including ab_test_enabled, llm_max_tokens, max_conversation_history
 [ ] POST /admin/settings/switch-provider?provider=anthropic -> switches cleanly
 [ ] GET /admin/settings/usage-summary -> JSON response
 [ ] GET /admin/settings/stats/conversations -> channel breakdown
 [ ] Open /admin/dashboard -> 5-tab interface loads
+[ ] Toggle dark mode -> UI switches, persists on refresh
+[ ] Configuracion tab -> All settings visible (provider, temp, max tokens, history, fallback, A/B test, PDF interval)
 [ ] Send /start to Telegram bot -> 18-command menu appears
 ```
 
@@ -509,6 +513,7 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 [ ] /preview [tags] -> Shows customer count and estimated cost
 [ ] Send broadcast -> Messages delivered, Telegram notification received
 [ ] Scheduled broadcast -> Auto-sends at scheduled time
+[ ] Reset stuck broadcast (dashboard "Resetear" button or POST /{id}/reset) -> Returns to "draft"
 ```
 
 ### 9.6 Analytics and A/B testing
@@ -587,11 +592,15 @@ Catalog PDF:
 Dashboard:
   GET  /admin/dashboard
 
+Orders:
+  GET  /admin/settings/orders
+
 Broadcasts:
   POST /admin/broadcasts/create
   POST /admin/broadcasts/preview
   GET  /admin/broadcasts/list
   POST /admin/broadcasts/{id}/send
+  POST /admin/broadcasts/{id}/reset
 
 Analytics:
   GET  /admin/analytics/conversion
@@ -636,6 +645,8 @@ Analytics:
 **WhatsApp "not registered"** - Number must be registered with Cloud API, not regular WhatsApp.
 
 **Broadcasts send 0 messages** - Tags don't match any customers. Use `/preview` first. Verify template name matches Meta Business Manager exactly.
+
+**Broadcast stuck in "sending"** - The send crashed mid-execution. Use the "Resetear" button in the dashboard or `POST /admin/broadcasts/{id}/reset` to return it to draft. Crash recovery now auto-sets failed broadcasts to "failed" status.
 
 **Payment screenshots not recognized** - Check active model supports vision (GPT-4o-mini and Claude Haiku 4.5 do). Check logs for errors.
 

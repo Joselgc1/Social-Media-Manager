@@ -70,3 +70,22 @@ async def send_broadcast_endpoint(broadcast_id: str):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+@router.post("/{broadcast_id}/reset")
+async def reset_broadcast_endpoint(broadcast_id: str):
+    """Reset a stuck broadcast back to draft status."""
+    from app import db
+
+    broadcast = await db.fetch_one(
+        "SELECT id, status FROM broadcasts WHERE id = :id",
+        {"id": broadcast_id},
+    )
+    if not broadcast:
+        raise HTTPException(status_code=404, detail="Broadcast not found")
+
+    await db.execute(
+        "UPDATE broadcasts SET status = 'draft', sent_at = NULL, recipients = 0 WHERE id = :id",
+        {"id": broadcast_id},
+    )
+    return {"broadcast_id": broadcast_id, "status": "draft", "message": "Broadcast reset to draft"}

@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Extras
+google_data.json
+
 # C extensions
 *.so
 
