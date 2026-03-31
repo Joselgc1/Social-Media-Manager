@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Master Control Plane - Test Mode</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; }
+        .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .btn { padding: 8px 16px; border-radius: 8px; font-weight: 600; font-size: 0.875rem; cursor: pointer; border: none; }
+        .btn-primary { background: #4f46e5; color: white; }
+        .btn-primary:hover { background: #4338ca; }
+        .btn-danger { background: #fee2e2; color: #991b1b; }
+        .btn-danger:hover { background: #fecaca; }
+        .btn-secondary { background: #f3f4f6; color: #374151; }
+        .btn-secondary:hover { background: #e5e7eb; }
+        .btn-success { background: #dcfce7; color: #166534; }
+        .btn-success:hover { background: #bbf7d0; }
+        pre { background: #1e293b; color: #e2e8f0; border-radius: 8px; padding: 16px; overflow-x: auto; font-size: 0.8rem; max-height: 300px; overflow-y: auto; }
+        .test-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #f3f4f6; }
+        .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+        .badge-green { background: #dcfce7; color: #166534; }
+        .badge-red { background: #fecaca; color: #991b1b; }
+        .badge-blue { background: #dbeafe; color: #1e40af; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen p-6">
+
+    <div class="max-w-4xl mx-auto">
+        <div class="flex items-center justify-between mb-6">
+            <div>
+                <h1 class="text-2xl font-bold">Master Control Plane - Test Mode</h1>
+                <p class="text-gray-500 text-sm">Local testing tools for the master service</p>
+            </div>
+            <div class="flex gap-2">
+                <a href="/dashboard" class="btn btn-secondary text-sm">Dashboard (needs ?token=)</a>
+            </div>
+        </div>
+
+        <!-- Quick checks -->
+        <div class="card mb-4">
+            <h2 class="font-bold text-lg mb-3">Quick Checks</h2>
+            <div class="test-row">
+                <span class="flex-1 font-semibold">Database Connection</span>
+                <span id="db-status" class="badge badge-blue">...</span>
+                <button onclick="checkDb()" class="btn btn-secondary text-xs">Check</button>
+            </div>
+            <div class="test-row">
+                <span class="flex-1 font-semibold">Encryption Round-Trip</span>
+                <span id="crypto-status" class="badge badge-blue">...</span>
+                <button onclick="checkCrypto()" class="btn btn-secondary text-xs">Check</button>
+            </div>
+            <div class="test-row">
+                <span class="flex-1 font-semibold">Health Endpoint</span>
+                <span id="health-status" class="badge badge-blue">...</span>
+                <button onclick="checkHealth()" class="btn btn-secondary text-xs">Check</button>
+            </div>
+            <div class="test-row" style="border: none;">
+                <span class="flex-1 font-semibold">Railway API</span>
+                <span id="railway-status" class="badge badge-blue">...</span>
+                <button onclick="checkRailway()" class="btn btn-secondary text-xs">Check</button>
+            </div>
+        </div>
+
+        <!-- Seed / Reset -->
+        <div class="card mb-4">
+            <h2 class="font-bold text-lg mb-3">Test Data</h2>
+            <p class="text-sm text-gray-500 mb-3">Seed creates 3 sample stores with fake credentials. Reset deletes everything.</p>
+            <div class="flex gap-2">
+                <button onclick="seedData()" class="btn btn-primary">Seed Test Stores</button>
+                <button onclick="resetData()" class="btn btn-danger">Reset All Data</button>
+            </div>
+            <div id="seed-result" class="mt-3"></div>
+        </div>
+
+        <!-- Auth helper -->
+        <div class="card mb-4">
+            <h2 class="font-bold text-lg mb-3">Dashboard Access</h2>
+            <p class="text-sm text-gray-500 mb-2">Enter your MASTER_SECRET_KEY to generate a dashboard link:</p>
+            <div class="flex gap-2">
+                <input id="token-input" type="text" placeholder="Paste your MASTER_SECRET_KEY" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <button onclick="openDashboard()" class="btn btn-primary">Open Dashboard</button>
+            </div>
+            <p id="dashboard-link" class="text-sm mt-2 text-gray-500"></p>
+        </div>
+
+        <!-- API tester -->
+        <div class="card mb-4">
+            <h2 class="font-bold text-lg mb-3">API Tester</h2>
+            <p class="text-sm text-gray-500 mb-3">Test master API endpoints. Auth token is required for most endpoints.</p>
+            <div class="flex gap-2 mb-3">
+                <select id="api-method" class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                    <option value="DELETE">DELETE</option>
+                </select>
+                <input id="api-path" type="text" value="/health" placeholder="/api/stores/" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                <button onclick="runApiTest()" class="btn btn-primary">Send</button>
+            </div>
+            <div class="mb-3">
+                <label class="text-sm text-gray-500">Request body (JSON, for POST/PUT):</label>
+                <textarea id="api-body" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono mt-1" placeholder='{"key": "value"}'></textarea>
+            </div>
+            <div>
+                <label class="text-sm text-gray-500">Response:</label>
+                <pre id="api-response">Send a request to see the response...</pre>
+            </div>
+        </div>
+
+        <!-- Common endpoints quick links -->
+        <div class="card">
+            <h2 class="font-bold text-lg mb-3">Common Endpoints</h2>
+            <div class="grid grid-cols-2 gap-2 text-sm">
+                <button onclick="quickApi('GET', '/health')" class="btn btn-secondary text-left">GET /health</button>
+                <button onclick="quickApi('GET', '/api/stores/')" class="btn btn-secondary text-left">GET /api/stores/</button>
+                <button onclick="quickApi('GET', '/api/stores/audit/log')" class="btn btn-secondary text-left">GET /api/stores/audit/log</button>
+                <button onclick="quickApi('GET', '/test/db-check')" class="btn btn-secondary text-left">GET /test/db-check</button>
+                <button onclick="quickApi('GET', '/test/crypto?value=hello')" class="btn btn-secondary text-left">GET /test/crypto?value=hello</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    const tokenInput = () => document.getElementById('token-input').value;
+    const authHeaders = () => ({
+        'Authorization': `Bearer ${tokenInput()}`,
+        'Content-Type': 'application/json'
+    });
+
+    async function fetchJson(path, options = {}) {
+        const resp = await fetch(path, options);
+        return resp.json();
+    }
+
+    function setBadge(id, ok, text) {
+        const el = document.getElementById(id);
+        el.className = `badge ${ok ? 'badge-green' : 'badge-red'}`;
+        el.textContent = text;
+    }
+
+    async function checkDb() {
+        try {
+            const data = await fetchJson('/test/db-check');
+            setBadge('db-status', data.status === 'ok',
+                data.status === 'ok' ? `OK (${data.tables.stores} stores)` : data.message);
+        } catch (e) { setBadge('db-status', false, e.message); }
+    }
+
+    async function checkCrypto() {
+        try {
+            const data = await fetchJson('/test/crypto?value=test-123');
+            setBadge('crypto-status', data.round_trip_ok,
+                data.round_trip_ok ? 'OK (round-trip passed)' : 'FAILED');
+        } catch (e) { setBadge('crypto-status', false, e.message); }
+    }
+
+    async function checkHealth() {
+        try {
+            const data = await fetchJson('/health');
+            setBadge('health-status', data.status === 'healthy',
+                `${data.status} (${data.total_stores} stores, ${data.active_stores} active)`);
+        } catch (e) { setBadge('health-status', false, e.message); }
+    }
+
+    async function checkRailway() {
+        try {
+            const data = await fetchJson('/test/railway-check', { headers: authHeaders() });
+            if (data.status === 'connected') {
+                setBadge('railway-status', true, `Connected (${data.user?.name || data.user?.email || '?'})`);
+            } else if (data.status === 'not_configured') {
+                setBadge('railway-status', false, 'Not configured');
+            } else {
+                setBadge('railway-status', false, data.message || 'Error');
+            }
+        } catch (e) { setBadge('railway-status', false, e.message); }
+    }
+
+    async function seedData() {
+        try {
+            const data = await fetchJson('/test/seed', { method: 'POST' });
+            document.getElementById('seed-result').innerHTML =
+                `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        } catch (e) {
+            document.getElementById('seed-result').innerHTML =
+                `<p class="text-red-500">${e.message}</p>`;
+        }
+    }
+
+    async function resetData() {
+        if (!confirm('Delete ALL stores, credentials, and audit logs?')) return;
+        try {
+            const data = await fetchJson('/test/reset', { method: 'DELETE' });
+            document.getElementById('seed-result').innerHTML =
+                `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        } catch (e) {
+            document.getElementById('seed-result').innerHTML =
+                `<p class="text-red-500">${e.message}</p>`;
+        }
+    }
+
+    function openDashboard() {
+        const token = tokenInput();
+        if (!token) { alert('Enter your MASTER_SECRET_KEY first'); return; }
+        const url = `/dashboard?token=${encodeURIComponent(token)}`;
+        document.getElementById('dashboard-link').innerHTML =
+            `<a href="${url}" target="_blank" class="text-indigo-600 underline">${url}</a>`;
+        window.open(url, '_blank');
+    }
+
+    async function runApiTest() {
+        const method = document.getElementById('api-method').value;
+        const path = document.getElementById('api-path').value;
+        const bodyText = document.getElementById('api-body').value.trim();
+
+        const options = { method, headers: authHeaders() };
+        if ((method === 'POST' || method === 'PUT') && bodyText) {
+            options.body = bodyText;
+        }
+
+        try {
+            const resp = await fetch(path, options);
+            const text = await resp.text();
+            let formatted;
+            try { formatted = JSON.stringify(JSON.parse(text), null, 2); }
+            catch { formatted = text; }
+            document.getElementById('api-response').textContent =
+                `HTTP ${resp.status} ${resp.statusText}\n\n${formatted}`;
+        } catch (e) {
+            document.getElementById('api-response').textContent = `Error: ${e.message}`;
+        }
+    }
+
+    function quickApi(method, path) {
+        document.getElementById('api-method').value = method;
+        document.getElementById('api-path').value = path;
+        document.getElementById('api-body').value = '';
+        runApiTest();
+    }
+
+    // Run checks on load
+    checkDb();
+    checkCrypto();
+    checkHealth();
+    </script>
+</body>
+</html>

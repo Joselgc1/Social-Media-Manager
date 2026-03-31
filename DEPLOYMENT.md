@@ -6,6 +6,8 @@ The guide has 10 parts. Parts 1 through 4 set up external services. Part 5 deplo
 
 Estimated total time: 3-5 hours for the core system (same day), plus 1-4 weeks for Instagram (waiting on Meta App Review).
 
+> **Running multiple stores?** This guide covers deploying a single store. For managing multiple stores from a centralized dashboard, see [master/DEPLOYMENT.md](master/DEPLOYMENT.md).
+
 ---
 
 ## Part 1: External accounts and API keys
@@ -24,15 +26,9 @@ postgresql://postgres:[YOUR-PASSWORD]@db.xyzabc.supabase.co:5432/postgres
 
 Copy this. It goes in your `.env` as `DATABASE_URL`.
 
-Now run both migrations. Go to the SQL Editor in Supabase's dashboard:
+Run the migration. Go to the SQL Editor in Supabase's dashboard:
 
-1. Paste the entire contents of `migrations/001_initial.sql` and click "Run." This creates 6 tables: customers, conversations, orders, broadcasts, settings, and usage_log.
-
-2. Paste the entire contents of `migrations/002_analytics.sql` and click "Run." This adds analytics columns (response_time_ms, was_fallback, channel) to usage_log, an ab_provider column to customers, and creates the daily_analytics and product_analytics tables.
-
-3. Paste the entire contents of `migrations/003_order_address.sql` and click "Run." This adds a shipping_address column to orders.
-
-4. Paste the entire contents of `migrations/004_customer_address.sql` and click "Run." This adds last_shipping_address, last_shipping_city, and last_shipping_method columns to customers (for address memory on repeat orders).
+Paste the entire contents of `store/migrations/001_schema.sql` and click "Run." This creates all tables: customers, conversations, orders, broadcasts, settings, usage_log, daily_analytics, and product_analytics.
 
 Verify by going to Table Editor. You should see the `settings` table pre-populated with 11 rows (llm_provider, llm_model, ab_test_enabled, etc.).
 
@@ -131,13 +127,13 @@ cd vs-chatbot
 python3 -m venv .venv
 source .venv/bin/activate    # Windows: .venv\Scripts\activate
 
-pip install -r requirements.txt
+pip install -r store/requirements.txt
 ```
 
 ### 2.2 Configure environment variables
 
 ```bash
-cp .env.example .env
+cp store/.env.example store/.env
 ```
 
 Open `.env` and fill in every value from Part 1:
@@ -165,7 +161,7 @@ DEBUG=true
 ### 2.3 Test locally
 
 ```bash
-uvicorn app.main:app --reload --port 8000
+cd store && uvicorn app.main:app --reload --port 8000
 ```
 
 You should see:
@@ -185,16 +181,20 @@ Test these endpoints:
 # Health check
 curl http://localhost:8000/health
 
-# Settings
-curl http://localhost:8000/admin/settings/
+# Settings (requires auth when ADMIN_PASSWORD is set; skipped in DEBUG mode without password)
+curl -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" http://localhost:8000/admin/settings/
 
 # Provider switching
-curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=anthropic"
-curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=openai"
+curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=anthropic" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
+curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=openai" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 
-# Admin dashboard (open in browser)
-open http://localhost:8000/admin/dashboard
+# Admin dashboard (open in browser — first visit with ?password= sets a session cookie)
+open http://localhost:8000/admin/dashboard?password=YOUR_ADMIN_PASSWORD
 ```
+
+> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, `ADMIN_PASSWORD` is required — admin routes return 403 without it.
 
 ---
 
@@ -247,7 +247,7 @@ git push -u origin main
 
 ### 5.2 Deploy on Railway
 
-Go to railway.app. "New Project" > "Deploy from GitHub Repo" > select your repo. Add all `.env` variables in the Variables tab. Set `DEBUG=false`.
+Go to railway.app. "New Project" > "Deploy from GitHub Repo" > select your repo. Add all `.env` variables in the Variables tab. Set `DEBUG=false`. **Set `ADMIN_PASSWORD` to a strong random string** — this protects the admin dashboard and all admin API endpoints in production.
 
 After deploy, get your URL (e.g., `https://vs-chatbot-production.up.railway.app`). Update `APP_BASE_URL` in Railway variables.
 
@@ -264,10 +264,11 @@ https://vs-chatbot-production.up.railway.app/webhooks/whatsapp
 
 ### 6.1 Telegram admin bot
 
-Register the Telegram webhook (run once):
+Register the Telegram webhook (run once, requires admin auth):
 
 ```bash
-curl -X POST "https://vs-chatbot-production.up.railway.app/admin/settings/telegram/setup-webhook"
+curl -X POST "https://vs-chatbot-production.up.railway.app/admin/settings/telegram/setup-webhook" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 ```
 
 Open Telegram, send `/start` to your bot. You should get the full command menu.
@@ -293,8 +294,10 @@ After approval:
 
 3. Subscribe the page and set up Ice Breakers:
 ```bash
-curl -X POST "https://your-app.railway.app/admin/settings/instagram/subscribe-page?page_id=YOUR_PAGE_ID"
-curl -X POST "https://your-app.railway.app/admin/settings/instagram/setup-ice-breakers?ig_user_id=YOUR_IG_USER_ID"
+curl -X POST "https://your-app.railway.app/admin/settings/instagram/subscribe-page?page_id=YOUR_PAGE_ID" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
+curl -X POST "https://your-app.railway.app/admin/settings/instagram/setup-ice-breakers?ig_user_id=YOUR_IG_USER_ID" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 ```
 
 4. Set the Meta app to **Live** mode.
@@ -330,10 +333,12 @@ Submit for approval (usually takes hours).
 # Create a draft
 curl -X POST "https://your-app.railway.app/admin/broadcasts/create" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
   -d '{"name": "New pajamas March", "template_name": "new_arrivals", "target_tags": ["interested:pajamas"], "template_params": ["{first_name}", "pijamas de primavera"]}'
 
 # Send it
-curl -X POST "https://your-app.railway.app/admin/broadcasts/[BROADCAST_ID]/send"
+curl -X POST "https://your-app.railway.app/admin/broadcasts/[BROADCAST_ID]/send" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 ```
 
 **Via Telegram:**
@@ -350,6 +355,7 @@ Add `scheduled_at` when creating:
 ```bash
 curl -X POST "https://your-app.railway.app/admin/broadcasts/create" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
   -d '{"name": "Weekend promo", "template_name": "vip_exclusive", "target_tags": ["vip"], "template_params": ["{first_name}", "descuento de fin de semana"], "scheduled_at": "2026-03-28T10:00:00Z"}'
 ```
 
@@ -357,7 +363,7 @@ The scheduler checks every minute and sends automatically.
 
 ### 7.4 Admin dashboard
 
-Open `https://your-app.railway.app/admin/dashboard` in any browser. Five tabs:
+Open `https://your-app.railway.app/admin/dashboard?password=YOUR_ADMIN_PASSWORD` in any browser. On first visit, the password is validated, a session cookie is set, and you're redirected to the clean URL (no password in the URL bar). Five tabs:
 - **Resumen**: Today's stats, per-channel breakdown, token usage by provider, AI on/off toggle
 - **Clientes**: Sortable customer table, inline tag management (add/remove), resolve escalations individually or all at once
 - **Pedidos**: Sortable order table with status badges
@@ -368,7 +374,11 @@ All tables in Clientes, Pedidos, and Broadcasts are sortable by clicking column 
 
 Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto-detects OS preference on first visit.
 
-For production security, consider adding basic auth or IP whitelisting to the `/admin/*` routes.
+**Dashboard and API protection:** `ADMIN_PASSWORD` is **required** in production. It protects the dashboard (via `?password=` on first visit, then HTTP-only session cookie), all `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API endpoints (via `Authorization: Bearer YOUR_PASSWORD` header or session cookie). Without `ADMIN_PASSWORD` set in production (`DEBUG=false`), all admin routes return 403. This is managed from the Master Control Plane when running multiple stores (see [master/DEPLOYMENT.md](master/DEPLOYMENT.md)).
+
+**Custom AI persona:** Set `SYSTEM_PROMPT_OVERRIDE` to replace the default `store/prompts/system_prompt.md` template for a specific store deployment. Must use the same `{store_name}`, `{product_catalog}`, etc. placeholders.
+
+**Centralized LLM control:** Set `LLM_MANAGED_EXTERNALLY=true` to lock the store's LLM provider/model/temperature controls. When enabled, the store dashboard hides AI settings, the settings API rejects LLM changes (403), and Telegram `/provider` + `/abmode` commands are disabled. The Master Admin controls these settings from the Master Dashboard instead. This is recommended for all managed stores.
 
 ---
 
@@ -386,12 +396,16 @@ Analytics track everything automatically as conversations happen.
 /products            -> Most-asked-about products
 ```
 
-**Via API:**
+**Via API (requires admin auth):**
 ```bash
-curl "https://your-app.railway.app/admin/analytics/conversion?days=7"
-curl "https://your-app.railway.app/admin/analytics/response-times?days=7"
-curl "https://your-app.railway.app/admin/analytics/popular-products?days=30"
-curl "https://your-app.railway.app/admin/analytics/daily?days=14"
+curl -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
+  "https://your-app.railway.app/admin/analytics/conversion?days=7"
+curl -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
+  "https://your-app.railway.app/admin/analytics/response-times?days=7"
+curl -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
+  "https://your-app.railway.app/admin/analytics/popular-products?days=30"
+curl -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
+  "https://your-app.railway.app/admin/analytics/daily?days=14"
 ```
 
 ### 8.2 A/B testing
@@ -419,8 +433,10 @@ When you've decided, disable and set the winner:
 
 Runs automatically at 1:00 AM for yesterday's data. To backfill:
 ```bash
-curl -X POST "https://your-app.railway.app/admin/analytics/build-daily"
-curl -X POST "https://your-app.railway.app/admin/analytics/build-daily?target_date=2026-03-20"
+curl -X POST "https://your-app.railway.app/admin/analytics/build-daily" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
+curl -X POST "https://your-app.railway.app/admin/analytics/build-daily?target_date=2026-03-20" \
+  -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 ```
 
 ### 8.4 Payment screenshot recognition
@@ -435,14 +451,18 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 
 ```
 [ ] GET /health -> status=healthy, scheduler=running, both providers, catalog > 0
-[ ] GET /admin/settings/ -> Settings including ab_test_enabled, llm_max_tokens, max_conversation_history
-[ ] POST /admin/settings/switch-provider?provider=anthropic -> switches cleanly
-[ ] GET /admin/settings/usage-summary -> JSON response
-[ ] GET /admin/settings/stats/conversations -> channel breakdown
-[ ] Open /admin/dashboard -> 5-tab interface loads
+[ ] GET /admin/settings/ without auth -> 401 (when ADMIN_PASSWORD is set)
+[ ] GET /admin/settings/ with Bearer header -> Settings including ab_test_enabled, llm_max_tokens
+[ ] POST /admin/settings/switch-provider?provider=anthropic with auth -> switches cleanly
+[ ] GET /admin/settings/usage-summary with auth -> JSON response
+[ ] GET /admin/settings/stats/conversations with auth -> channel breakdown
+[ ] Open /admin/dashboard?password=ADMIN_PASSWORD -> sets cookie, redirects to clean URL
+[ ] Subsequent visits to /admin/dashboard -> works via cookie (no password in URL)
 [ ] Toggle dark mode -> UI switches, persists on refresh
 [ ] Configuracion tab -> All settings visible (provider, temp, max tokens, history, fallback, A/B test, PDF interval)
 [ ] Send /start to Telegram bot -> 18-command menu appears
+[ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
+[ ] GET /test/ui with DEBUG=true -> test page loads
 ```
 
 ### 9.2 WhatsApp conversations
@@ -556,16 +576,16 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 ### All endpoints
 
 ```
-Webhooks (Meta/Telegram call these):
+Webhooks (Meta/Telegram call these — no auth, verified by signature):
   GET/POST  /webhooks/whatsapp
   GET/POST  /webhooks/instagram
   POST      /webhooks/telegram
 
-Health:
+Health (no auth):
   GET  /
   GET  /health
 
-Settings:
+Settings (require ADMIN_PASSWORD via Bearer header or session cookie):
   GET  /admin/settings/
   GET  /admin/settings/providers
   PUT  /admin/settings/{key}
@@ -576,7 +596,7 @@ Settings:
   POST /admin/settings/instagram/setup-ice-breakers
   POST /admin/settings/instagram/subscribe-page
 
-Customers:
+Customers (require admin auth):
   GET  /admin/settings/customers
   POST /admin/settings/customers/{id}/resolve
   POST /admin/settings/customers/resolve-all
@@ -584,31 +604,38 @@ Customers:
   POST /admin/settings/customers/{id}/tags
   DELETE /admin/settings/customers/{id}/tags/{tag}
 
-Catalog PDF:
+Catalog PDF (require admin auth):
   POST /admin/settings/catalog/generate-pdf
   GET  /admin/settings/catalog/pdf-status
   GET  /admin/settings/catalog/download-pdf
 
-Dashboard:
+Dashboard (require ?password= on first visit, then session cookie):
   GET  /admin/dashboard
 
-Orders:
+Orders (require admin auth):
   GET  /admin/settings/orders
 
-Broadcasts:
+Broadcasts (require admin auth):
   POST /admin/broadcasts/create
   POST /admin/broadcasts/preview
   GET  /admin/broadcasts/list
   POST /admin/broadcasts/{id}/send
   POST /admin/broadcasts/{id}/reset
 
-Analytics:
+Analytics (require admin auth):
   GET  /admin/analytics/conversion
   GET  /admin/analytics/response-times
   GET  /admin/analytics/popular-products
   GET  /admin/analytics/ab-test
   GET  /admin/analytics/daily
   POST /admin/analytics/build-daily
+
+Testing (DEBUG=true only — disabled in production):
+  GET  /test/ui
+  POST /test/chat
+  GET  /test/catalog
+  GET  /test/history
+  DELETE /test/reset
 ```
 
 ### All Telegram commands
@@ -632,7 +659,11 @@ Analytics:
 
 **Bot gives wrong product info** - Google Sheets stale. Restart server to force refresh. Verify column headers match exactly.
 
-**Bot responds in English** - Check `prompts/system_prompt.md` hasn't been modified.
+**Bot responds in English** - Check `store/prompts/system_prompt.md` hasn't been modified.
+
+**Bot replies with raw JSON** - The model narrated internal tool results instead of generating a real response. Check that system prompt rule 13 is intact ("NEVER output raw JSON..."). Also check `MAX_TOOL_ROUNDS` in `engine.py` — if it's set below 6, the model may hit the limit before generating text; the final round must pass `tools=None` to force a text response.
+
+**Bot reveals stock numbers ("stock: 4")** - `_tool_check_inventory` in `engine.py` should not include a `"stock"` key in its return dict — only `"in_stock": true/false`. Check that key isn't present. Also verify system prompt rule 2 contains the "NEVER reveal stock quantities" clause.
 
 **"Could not load catalog"** - Service account email needs Viewer access to the sheet.
 
@@ -655,3 +686,14 @@ Analytics:
 **Daily analytics empty** - Runs at 1 AM for yesterday. Manually trigger: `POST /admin/analytics/build-daily`.
 
 **Scheduler not running** - Check `/health`. Restart Railway deployment if stopped.
+
+---
+
+## Next: Multi-store deployment
+
+To manage multiple stores (e.g., for family members or additional businesses), see the **[Master Control Plane Deployment Guide](master/DEPLOYMENT.md)**. It covers:
+
+- Setting up the centralized master dashboard
+- Registering stores and managing encrypted credentials
+- Pushing env vars to Railway and triggering redeploys from one place
+- Local testing with both services running side by side

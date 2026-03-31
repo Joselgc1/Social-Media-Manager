@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Master Control Plane</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="/static/css/master_dashboard.css">
+    <script>
+        // Apply dark mode before render to prevent flash
+        if (localStorage.getItem('master-dark-mode') === 'true' ||
+            (localStorage.getItem('master-dark-mode') === null && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.documentElement.classList.add('dark');
+        }
+      </script>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors duration-200">
+
+    <div class="max-w-6xl mx-auto px-4 py-8">
+
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-8">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Master Control Plane</h1>
+            <p class="text-gray-500 dark:text-gray-400 text-sm mt-1" id="master-health-status">Loading...</p>
+        </div>
+        <div class="flex gap-2 items-center">
+            <span id="master-stores-badge" class="badge badge-green">...</span>
+            <span id="master-active-badge" class="badge badge-blue">...</span>
+            <button onclick="loadStores()" class="btn btn-secondary" title="Actualizar datos">&#x21bb;</button>
+            <button id="dark-toggle" onclick="toggleDarkMode()" class="btn btn-secondary">🌙</button>
+        </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700">
+        <div class="tab active" data-tab="overview" onclick="switchTab('overview')">Stores</div>
+        <div class="tab" data-tab="detail" onclick="if(selectedStoreId) switchTab('detail')">Store Detail</div>
+        <div class="tab" data-tab="audit" onclick="switchTab('audit')">Audit Log</div>
+    </div>
+
+    <!-- Overview Tab -->
+    <div id="tab-overview" class="tab-content">
+        
+        <!-- Platform Cost Summary -->
+        <div id="platform-costs" class="card mb-6 hidden">
+            <div class="flex items-center justify-between">
+                <h3 class="font-bold text-lg">Platform LLM Costs</h3>
+                <div class="flex items-center gap-2">
+                    <button onclick="loadPlatformCosts()" class="btn btn-secondary text-xs" title="Actualizar datos">&#x21bb;</button>
+                    <button id="platform-costs-toggle" class="btn btn-secondary text-xs" onclick="togglePlatformCosts()">&#x25B2;</button>
+                </div>
+            </div>
+            <div id="platform-costs-content" class="mt-3">
+                <p class="text-gray-500">Loading...</p>
+            </div>
+        </div>
+
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold">All Stores</h2>
+            <button onclick="showAddStoreModal()" class="btn btn-primary">+ Add Store</button>
+        </div>
+        <div id="stores-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <p class="text-gray-500">Loading...</p>
+        </div>
+    </div>
+
+    <!-- Detail Tab -->
+    <div id="tab-detail" class="tab-content hidden">
+        <div id="store-detail-content">
+            <p class="text-gray-500">Select a store from the overview.</p>
+        </div>
+    </div>
+
+    <!-- Audit Tab -->
+    <div id="tab-audit" class="tab-content hidden">
+        <div class="card">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="font-bold text-lg">Audit Log</h3>
+                <button id="audit-filter-toggle" class="btn btn-secondary text-sm" onclick="toggleAuditFilters()">Filters &#x25BC;</button>
+            </div>
+            <div id="audit-filters" class="flex flex-wrap items-center gap-2 mb-4" style="display:none">
+                <select id="audit-action-filter" class="text-sm rounded border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 px-2 py-1" onchange="loadAuditLog()">
+                    <option value="">All actions</option>
+                    <option value="create_store">Create store</option>
+                    <option value="update_store">Update store</option>
+                    <option value="delete_store">Delete store</option>
+                    <option value="set_credential">Set credential</option>
+                    <option value="delete_credential">Delete credential</option>
+                    <option value="update_llm_settings">Update LLM settings</option>
+                    <option value="deploy_credentials">Deploy credentials</option>
+                    <option value="deploy_failed">Deploy failed</option>
+                </select>
+                <select id="audit-store-filter" class="text-sm rounded border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 px-2 py-1" onchange="loadAuditLog()">
+                    <option value="">All stores</option>
+                </select>
+                <input id="audit-search" type="text" placeholder="Search details..." class="text-sm rounded border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 px-2 py-1 w-40" onkeydown="if(event.key==='Enter')loadAuditLog()">
+                <span class="text-sm text-gray-500 dark:text-gray-400">From</span>
+                <input id="audit-date-from" type="date" class="text-sm rounded border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 px-2 py-1" onchange="loadAuditLog()">
+                <span class="text-sm text-gray-500 dark:text-gray-400">To</span>
+                <input id="audit-date-to" type="date" class="text-sm rounded border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 px-2 py-1" onchange="loadAuditLog()">
+                <button class="btn btn-secondary text-sm" onclick="clearAuditFilters()">Clear</button>
+            </div>
+            <div id="audit-log-content">
+                <p class="text-gray-500">Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    </div>
+
+    <div id="toast" class="toast" style="display:none"></div>
+
+    <script src="/static/js/master_dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+"""
+Authentication for the store admin API.
+Checks ADMIN_PASSWORD via Bearer header or cookie.
+"""
+
+import hashlib
+import hmac
+
+from fastapi import Request, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from app.config import get_config
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+COOKIE_NAME = "admin_session"
+
+
+def _make_cookie_token(password: str) -> str:
+    """Derive a cookie token from the admin password using HMAC."""
+    return hmac.new(
+        password.encode("utf-8"),
+        b"store-admin-session",
+        hashlib.sha256,
+    ).hexdigest()
+
+
+async def require_admin(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+):
+    """
+    Dependency that validates admin access.
+    Checks (in order): Bearer header, session cookie.
+    If ADMIN_PASSWORD is not set, all admin routes are blocked in production.
+    """
+    config = get_config()
+
+    if not config.admin_password:
+        if config.debug:
+            return True
+        raise HTTPException(
+            status_code=403,
+            detail="ADMIN_PASSWORD must be set to access admin endpoints.",
+        )
+
+    # Check Bearer header
+    if credentials and hmac.compare_digest(credentials.credentials, config.admin_password):
+        return True
+
+    # Check session cookie
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie and hmac.compare_digest(cookie, _make_cookie_token(config.admin_password)):
+        return True
+
+    raise HTTPException(status_code=401, detail="Invalid or missing admin credentials")
