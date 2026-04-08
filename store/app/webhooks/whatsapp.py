@@ -18,6 +18,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _mask_sender(sender: str) -> str:
+    if len(sender) <= 4:
+        return sender
+    return f"{sender[:2]}***{sender[-2:]}"
+
+
+async def _safe_send_apology(sender: str):
+    try:
+        await send_text(
+            to=sender,
+            text="Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo en un momento? 🙏",
+        )
+    except Exception as send_error:
+        logger.error(f"Failed to send WhatsApp fallback reply to {_mask_sender(sender)}: {send_error}")
+
+
+async def _notify_delivery_failure(sender: str, detail: str):
+    await notify_owner(
+        f"⚠️ *Fallo enviando respuesta por WhatsApp*\n\n"
+        f"*Cliente:* `{_mask_sender(sender)}`\n"
+        f"*Detalle:* {detail[:400]}"
+    )
+
+
 # ── Webhook verification (GET) ───────────────────────────────
 
 @router.get("/webhooks/whatsapp")
@@ -124,7 +148,7 @@ async def _process_message(message: dict, value: dict):
     if not text.strip():
         return
 
-    logger.info(f"WhatsApp message from {sender}: {text[:100]}")
+    logger.info(f"WhatsApp message received from {_mask_sender(sender)} ({msg_type})")
 
     # Mark the message as read (blue checkmarks)
     try:
@@ -140,13 +164,19 @@ async def _process_message(message: dict, value: dict):
             message_text=text,
             media_url=media_url,
         )
+    except Exception as e:
+        logger.exception(f"Error generating WhatsApp response for {_mask_sender(sender)}: {e}")
+        await _safe_send_apology(sender)
+        return
 
-        if result.get("paused") or result.get("escalated"):
-            # AI is off — owner handles this conversation directly.
-            # Message was already stored and owner notified by the engine.
-            return
+    if result.get("paused"):
+        return
+    if result.get("escalated") and not (
+        result.get("text") or result.get("interactive") or result.get("catalog_pdf")
+    ):
+        return
 
-        # Send the AI's response
+    try:
         if result.get("catalog_pdf") and result["catalog_pdf"].get("type") == "catalog_pdf":
             pdf_url = f"{get_config().app_base_url}/static/catalog/catalog.pdf"
             await send_document(
@@ -155,7 +185,6 @@ async def _process_message(message: dict, value: dict):
                 filename="Catalogo VS.pdf",
                 caption=result["catalog_pdf"].get("caption", ""),
             )
-            # Also send any accompanying text
             if result.get("text"):
                 await send_text(to=sender, text=result["text"])
         elif result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
@@ -166,14 +195,9 @@ async def _process_message(message: dict, value: dict):
             )
         elif result.get("text"):
             await send_text(to=sender, text=result["text"])
-
     except Exception as e:
-        logger.exception(f"Error processing WhatsApp message from {sender}: {e}")
-        # Send a fallback message so the customer isn't left hanging
-        await send_text(
-            to=sender,
-            text="Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo en un momento? 🙏",
-        )
+        logger.exception(f"Error sending WhatsApp response to {_mask_sender(sender)}: {e}")
+        await _notify_delivery_failure(sender, str(e))
 
 
 # ── Signature verification ───────────────────────────────────
@@ -183,7 +207,7 @@ def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bo
     Verify the X-Hub-Signature-256 header to ensure the request
     actually came from Meta and wasn't spoofed.
     """
-    if not signature_header:
+    if not signature_header or not app_secret:
         return False
 
     expected = "sha256=" + hmac.new(

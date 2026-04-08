@@ -6,8 +6,11 @@ import json
 import logging
 from app import db
 from app.catalog.sheets import deduct_stock
+from app.crm import customers
 
 logger = logging.getLogger(__name__)
+
+PAID_STATUSES = {"proof_received", "confirmed"}
 
 
 async def create_order(
@@ -60,6 +63,78 @@ async def create_order(
     }
 
 
+async def _apply_paid_customer_updates(customer_id: str, amount: float):
+    """Increment paid-order totals and attach repeat-buyer tags when thresholds are met."""
+    await customers.increment_orders(customer_id, amount)
+    customer = await db.fetch_one(
+        "SELECT total_orders, total_spent FROM customers WHERE id = :id",
+        {"id": customer_id},
+    )
+    if not customer:
+        return
+
+    tags = []
+    if customer["total_orders"] >= 2:
+        tags.append("repeat_buyer")
+    if customer["total_orders"] >= 3 or float(customer["total_spent"]) >= 100:
+        tags.append("vip")
+    if tags:
+        await customers.add_tags(customer_id, tags)
+
+
+async def update_order_payment_status(order_id: str, status: str, note: str | None = None) -> dict | None:
+    """
+    Update an order payment status.
+    Customer lifetime totals are applied exactly once, when the order first becomes paid.
+    """
+    async with db.get_db().transaction():
+        row = await db.fetch_one(
+            """
+            SELECT id, customer_id, total, payment_status, customer_totals_applied
+            FROM orders
+            WHERE id = :oid
+            FOR UPDATE
+            """,
+            {"oid": order_id},
+        )
+        if not row:
+            return None
+
+        await db.execute(
+            """
+            UPDATE orders
+            SET payment_status = :status,
+                payment_proof = COALESCE(:note, payment_proof),
+                updated_at = NOW()
+            WHERE id = :oid
+            """,
+            {"status": status, "note": note, "oid": order_id},
+        )
+
+        applied_now = False
+        if (
+            status in PAID_STATUSES
+            and not row["customer_totals_applied"]
+            and row["customer_id"] is not None
+        ):
+            await _apply_paid_customer_updates(str(row["customer_id"]), float(row["total"]))
+            await db.execute(
+                """
+                UPDATE orders
+                SET customer_totals_applied = TRUE, updated_at = NOW()
+                WHERE id = :oid
+                """,
+                {"oid": order_id},
+            )
+            applied_now = True
+
+    return {
+        "order_id": str(order_id),
+        "payment_status": status,
+        "customer_totals_applied": bool(row["customer_totals_applied"] or applied_now),
+    }
+
+
 async def update_payment_status(customer_id: str, status: str, note: str | None = None) -> dict | None:
     """
     Update the payment status of the customer's most recent pending order.
@@ -78,16 +153,7 @@ async def update_payment_status(customer_id: str, status: str, note: str | None 
     if not row:
         return None
 
-    await db.execute(
-        """
-        UPDATE orders
-        SET payment_status = :status, payment_proof = :note, updated_at = NOW()
-        WHERE id = :oid
-        """,
-        {"status": status, "note": note, "oid": row["id"]},
-    )
-
-    return {"order_id": str(row["id"]), "payment_status": status}
+    return await update_order_payment_status(str(row["id"]), status=status, note=note)
 
 
 async def get_customer_orders(customer_id: str, limit: int = 5) -> list[dict]:

@@ -3,6 +3,7 @@ CRUD API for managing stores and their credentials.
 """
 
 import asyncio
+import json
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -12,8 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from app import db
 from app.auth import require_auth
 from app.config import get_config
-from app.stores.models import StoreCreate, StoreUpdate, CredentialSet, LLMSettingsUpdate
+from app.stores.models import StoreCreate, StoreUpdate, CredentialSet, RuntimeSettingsUpdate, LLMSettingsUpdate
 from app.stores.crypto import encrypt, decrypt, mask
+from app.stores.runtime_settings import DEFAULT_RUNTIME_SETTINGS, SYNCABLE_RUNTIME_SETTING_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +235,151 @@ async def delete_credential(store_id: str, key: str):
     return {"ok": True}
 
 
+# ── Store DB helpers ─────────────────────────────────────────
+
+# Available models per provider (must match store app's AVAILABLE_MODELS)
+AVAILABLE_MODELS = {
+    "openai": ["gpt-5.4-nano", "gpt-5.4-mini"],
+    "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-6"],
+}
+
+
+def _decode_setting_value(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return value
+    return value
+
+
+async def _get_store_row(store_id: str):
+    store = await db.fetch_one(
+        "SELECT db_url_encrypted, name FROM stores WHERE id = :id", {"id": store_id}
+    )
+    if not store:
+        raise HTTPException(status_code=404, detail="Store not found")
+    return store
+
+
+async def _get_store_connection(store_id: str):
+    store = await _get_store_row(store_id)
+    try:
+        store_db_url = decrypt(store["db_url_encrypted"])
+    except Exception:
+        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL")
+    store_db = await _get_store_db(store_db_url)
+    return store, store_db
+
+
+async def _ensure_store_runtime_defaults(store_db: db_lib.Database):
+    query = (
+        "INSERT INTO settings (key, value) VALUES (:key, :val) "
+        "ON CONFLICT (key) DO NOTHING"
+    )
+    for key, value in DEFAULT_RUNTIME_SETTINGS.items():
+        await store_db.execute(query, {"key": key, "val": json.dumps(value)})
+
+
+async def _read_store_runtime_settings(store_db: db_lib.Database) -> dict:
+    await _ensure_store_runtime_defaults(store_db)
+    rows = await store_db.fetch_all(
+        "SELECT key, value FROM settings WHERE key = ANY(:keys)",
+        {"keys": list(SYNCABLE_RUNTIME_SETTING_KEYS)},
+    )
+    settings = {key: DEFAULT_RUNTIME_SETTINGS[key] for key in SYNCABLE_RUNTIME_SETTING_KEYS}
+    for row in rows:
+        settings[row["key"]] = _decode_setting_value(row["value"])
+    return settings
+
+
+def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
+    invalid = set(fields) - SYNCABLE_RUNTIME_SETTING_KEYS
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid settings: {sorted(invalid)}")
+
+    normalized = dict(fields)
+
+    if "llm_temperature" in normalized:
+        temp = float(normalized["llm_temperature"])
+        if not (0.0 <= temp <= 1.0):
+            raise HTTPException(status_code=400, detail="Temperature must be between 0.0 and 1.0")
+        normalized["llm_temperature"] = temp
+
+    if "llm_max_tokens" in normalized:
+        tokens = int(normalized["llm_max_tokens"])
+        if not (100 <= tokens <= 2000):
+            raise HTTPException(status_code=400, detail="Max tokens must be between 100 and 2000")
+        normalized["llm_max_tokens"] = tokens
+
+    if "max_conversation_history" in normalized:
+        history = int(normalized["max_conversation_history"])
+        if not (5 <= history <= 50):
+            raise HTTPException(status_code=400, detail="Conversation history must be between 5 and 50")
+        normalized["max_conversation_history"] = history
+
+    if "catalog_pdf_interval_hours" in normalized:
+        hours = int(normalized["catalog_pdf_interval_hours"])
+        if not (1 <= hours <= 168):
+            raise HTTPException(status_code=400, detail="Catalog PDF interval must be between 1 and 168 hours")
+        normalized["catalog_pdf_interval_hours"] = hours
+
+    provider = normalized.get("llm_provider", current_settings.get("llm_provider", "openai"))
+    if provider not in AVAILABLE_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+    if "llm_provider" in normalized and "llm_model" not in normalized:
+        normalized["llm_model"] = AVAILABLE_MODELS[provider][0]
+
+    if "llm_model" in normalized:
+        model = str(normalized["llm_model"])
+        if model not in AVAILABLE_MODELS.get(provider, []):
+            raise HTTPException(status_code=400, detail=f"Model '{model}' not available for '{provider}'")
+        normalized["llm_model"] = model
+
+    fallback_provider = normalized.get(
+        "fallback_provider", current_settings.get("fallback_provider", "anthropic")
+    )
+    if fallback_provider not in AVAILABLE_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unknown fallback provider: {fallback_provider}")
+
+    if "fallback_provider" in normalized and "fallback_model" not in normalized:
+        normalized["fallback_model"] = AVAILABLE_MODELS[fallback_provider][0]
+
+    if "fallback_model" in normalized:
+        fallback_model = str(normalized["fallback_model"])
+        if fallback_model not in AVAILABLE_MODELS.get(fallback_provider, []):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model '{fallback_model}' not available for '{fallback_provider}'",
+            )
+        normalized["fallback_model"] = fallback_model
+
+    for key in ("auto_fallback", "ai_enabled"):
+        if key in normalized:
+            normalized[key] = bool(normalized[key])
+
+    for key in (
+        "payment_zelle_details",
+        "payment_binance_details",
+        "payment_zinli_details",
+        "payment_bolivares_details",
+    ):
+        if key in normalized:
+            normalized[key] = str(normalized[key]).strip()
+
+    return normalized
+
+
+async def _write_store_runtime_settings(store_db: db_lib.Database, fields: dict):
+    for key, value in fields.items():
+        await store_db.execute(
+            """INSERT INTO settings (key, value) VALUES (:key, :val)
+               ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()""",
+            {"key": key, "val": json.dumps(value)},
+        )
+
+
 # ── Store Stats (read from store's own DB) ───────────────────
 
 @router.get("/{store_id}/stats")
@@ -241,20 +388,9 @@ async def get_store_stats(store_id: str):
     Connect to a store's own database and pull today's stats.
     Uses a single combined query + settings query for speed.
     """
-    store = await db.fetch_one(
-        "SELECT db_url_encrypted, name FROM stores WHERE id = :id", {"id": store_id}
-    )
-    if not store:
-        raise HTTPException(status_code=404, detail="Store not found")
-
-    try:
-        store_db_url = decrypt(store["db_url_encrypted"])
-    except Exception:
-        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL")
-
     async with _stats_semaphore():
         try:
-            store_db = await _get_store_db(store_db_url)
+            store, store_db = await _get_store_connection(store_id)
 
             # Single combined query for counts
             stats_row, settings_rows = await asyncio.gather(
@@ -266,7 +402,7 @@ async def get_store_stats(store_id: str):
                 ),
                 store_db.fetch_all("SELECT key, value FROM settings"),
             )
-            settings = {row["key"]: row["value"] for row in settings_rows}
+            settings = {row["key"]: _decode_setting_value(row["value"]) for row in settings_rows}
 
             return {
                 "store_name": store["name"],
@@ -275,130 +411,82 @@ async def get_store_stats(store_id: str):
                 "total_customers": stats_row["customers"] if stats_row else 0,
                 "llm_provider": settings.get("llm_provider", "unknown"),
                 "llm_model": settings.get("llm_model", "unknown"),
-                "ai_enabled": settings.get("ai_enabled", "true"),
+                "ai_enabled": settings.get("ai_enabled", True),
             }
         except Exception as e:
             logger.warning(f"Could not fetch stats for store {store_id}: {e}")
             return {
-                "store_name": store["name"],
+                "store_name": store["name"] if 'store' in locals() else store_id,
                 "error": "Could not connect to store database",
             }
 
 
-# ── LLM Settings (read/write on store's DB) ─────────────────
-
-# Available models per provider (must match store app's AVAILABLE_MODELS)
-AVAILABLE_MODELS = {
-    "openai": ["gpt-5.4-nano", "gpt-5.4-mini"],
-    "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-6"],
-}
-
-_LLM_SETTING_KEYS = {
-    "llm_provider", "llm_model", "llm_temperature", "llm_max_tokens",
-    "fallback_provider", "fallback_model", "auto_fallback", "ab_test_enabled",
-    "max_conversation_history", "ai_enabled",
-}
+# ── Runtime Settings (read/write on store's DB) ─────────────
 
 
-@router.get("/{store_id}/llm-settings")
-async def get_llm_settings(store_id: str):
-    """Read LLM-related settings from a store's own database."""
-    import json as _json
-
-    store = await db.fetch_one(
-        "SELECT db_url_encrypted, name FROM stores WHERE id = :id", {"id": store_id}
-    )
-    if not store:
-        raise HTTPException(status_code=404, detail="Store not found")
-
-    try:
-        store_db_url = decrypt(store["db_url_encrypted"])
-    except Exception:
-        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL")
-
+@router.get("/{store_id}/settings")
+async def get_store_settings(store_id: str):
+    """Read dashboard-managed runtime settings from a store database."""
     async with _stats_semaphore():
         try:
-            store_db = await _get_store_db(store_db_url)
-            rows = await store_db.fetch_all(
-                "SELECT key, value FROM settings WHERE key = ANY(:keys)",
-                {"keys": list(_LLM_SETTING_KEYS)},
-            )
-            settings = {}
-            for row in rows:
-                try:
-                    settings[row["key"]] = _json.loads(row["value"])
-                except (ValueError, TypeError):
-                    settings[row["key"]] = row["value"]
+            store, store_db = await _get_store_connection(store_id)
+            settings = await _read_store_runtime_settings(store_db)
             return {
                 "store_name": store["name"],
                 "settings": settings,
                 "available_models": AVAILABLE_MODELS,
             }
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.warning(f"Could not read LLM settings for store {store_id}: {e}")
+            logger.warning(f"Could not read runtime settings for store {store_id}: {e}")
             raise HTTPException(status_code=502, detail="Could not connect to store database")
 
 
-@router.put("/{store_id}/llm-settings")
-async def update_llm_settings(store_id: str, update: LLMSettingsUpdate):
-    """Write LLM-related settings to a store's own database."""
-    import json as _json
-
-    store = await db.fetch_one(
-        "SELECT db_url_encrypted, name FROM stores WHERE id = :id", {"id": store_id}
-    )
-    if not store:
-        raise HTTPException(status_code=404, detail="Store not found")
-
+@router.put("/{store_id}/settings")
+async def update_store_settings(store_id: str, update: RuntimeSettingsUpdate):
+    """Write dashboard-managed runtime settings to a store database."""
     fields = {k: v for k, v in update.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Validate provider/model combinations
-    if "llm_provider" in fields or "llm_model" in fields:
-        provider = fields.get("llm_provider")
-        model = fields.get("llm_model")
-        if provider and provider not in AVAILABLE_MODELS:
-            raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
-        if model and provider and model not in AVAILABLE_MODELS.get(provider, []):
-            raise HTTPException(status_code=400, detail=f"Model '{model}' not available for '{provider}'")
-    if "fallback_provider" in fields or "fallback_model" in fields:
-        fp = fields.get("fallback_provider")
-        fm = fields.get("fallback_model")
-        if fp and fp not in AVAILABLE_MODELS:
-            raise HTTPException(status_code=400, detail=f"Unknown fallback provider: {fp}")
-        if fm and fp and fm not in AVAILABLE_MODELS.get(fp, []):
-            raise HTTPException(status_code=400, detail=f"Model '{fm}' not available for '{fp}'")
-    if "llm_temperature" in fields:
-        if not (0.0 <= fields["llm_temperature"] <= 1.0):
-            raise HTTPException(status_code=400, detail="Temperature must be between 0.0 and 1.0")
-    if "llm_max_tokens" in fields:
-        if not (100 <= fields["llm_max_tokens"] <= 2000):
-            raise HTTPException(status_code=400, detail="Max tokens must be between 100 and 2000")
-    if "max_conversation_history" in fields:
-        if not (5 <= fields["max_conversation_history"] <= 50):
-            raise HTTPException(status_code=400, detail="Conversation history must be between 5 and 50")
-
-    try:
-        store_db_url = decrypt(store["db_url_encrypted"])
-    except Exception:
-        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL")
-
     async with _stats_semaphore():
         try:
-            store_db = await _get_store_db(store_db_url)
-            for key, value in fields.items():
-                json_val = _json.dumps(value)
-                await store_db.execute(
-                    """INSERT INTO settings (key, value) VALUES (:key, :val)
-                       ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()""",
-                    {"key": key, "val": json_val},
-                )
-            await _audit("update_llm_settings", store_id, f"Updated: {list(fields.keys())}")
-            return {"ok": True, "store": store["name"], "updated": list(fields.keys())}
+            store, store_db = await _get_store_connection(store_id)
+            current_settings = await _read_store_runtime_settings(store_db)
+            normalized = _normalize_runtime_fields(fields, current_settings)
+            await _write_store_runtime_settings(store_db, normalized)
+            await _audit("update_runtime_settings", store_id, f"Updated: {sorted(normalized.keys())}")
+            return {"ok": True, "store": store["name"], "updated": sorted(normalized.keys())}
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.warning(f"Could not update LLM settings for store {store_id}: {e}")
+            logger.warning(f"Could not update runtime settings for store {store_id}: {e}")
             raise HTTPException(status_code=502, detail="Could not write to store database")
+
+
+@router.get("/{store_id}/llm-settings")
+async def get_llm_settings(store_id: str):
+    """Backward-compatible LLM settings view backed by shared runtime settings."""
+    data = await get_store_settings(store_id)
+    settings = {
+        key: value
+        for key, value in data["settings"].items()
+        if key.startswith("llm_")
+        or key.startswith("fallback_")
+        or key in {"auto_fallback", "max_conversation_history", "ai_enabled"}
+    }
+    return {
+        "store_name": data["store_name"],
+        "settings": settings,
+        "available_models": data["available_models"],
+    }
+
+
+@router.put("/{store_id}/llm-settings")
+async def update_llm_settings(store_id: str, update: LLMSettingsUpdate):
+    """Backward-compatible LLM settings write backed by shared runtime settings."""
+    return await update_store_settings(store_id, update)
 
 
 @router.get("/{store_id}/llm-usage")

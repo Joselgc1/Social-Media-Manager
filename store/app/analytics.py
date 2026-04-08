@@ -1,12 +1,11 @@
 """
 Analytics module.
 Provides conversion metrics, response time tracking, product popularity,
-per-provider performance comparison, and A/B test analysis.
+and per-provider performance comparison.
 """
 
 import json
 import logging
-import random
 from datetime import date, timedelta
 from app import db
 
@@ -191,87 +190,6 @@ async def get_popular_products(days: int = 30) -> list[dict]:
             pass
 
     return products
-
-
-# ── A/B test analysis ────────────────────────────────────────
-
-async def get_ab_test_results(days: int = 14) -> dict:
-    """
-    Compare performance between providers for A/B-tested customers.
-    Only includes customers with an ab_provider assignment.
-    """
-    since = date.today() - timedelta(days=days)
-
-    rows = await db.fetch_all(
-        """
-        SELECT
-            c.ab_provider,
-            COUNT(DISTINCT c.id) as customers,
-            COUNT(DISTINCT o.id) as orders,
-            COALESCE(SUM(o.total), 0) as revenue,
-            COUNT(DISTINCT o.id) FILTER (WHERE o.payment_status IN ('proof_received', 'confirmed')) as paid_orders
-        FROM customers c
-        LEFT JOIN orders o ON o.customer_id = c.id AND o.created_at >= :since
-        WHERE c.ab_provider IS NOT NULL
-          AND c.first_contact >= :since
-        GROUP BY c.ab_provider
-        """,
-        {"since": since},
-    )
-
-    results = {}
-    for r in rows:
-        prov = r["ab_provider"]
-        custs = r["customers"]
-        results[prov] = {
-            "customers": custs,
-            "orders": r["orders"],
-            "paid_orders": r["paid_orders"],
-            "revenue": float(r["revenue"]),
-            "conversion_rate": f"{(r['paid_orders']/custs*100):.1f}%" if custs > 0 else "0%",
-            "avg_order_value": f"${(float(r['revenue'])/r['orders']):.2f}" if r["orders"] > 0 else "$0",
-        }
-
-    # Response time comparison for A/B groups
-    rt_rows = await db.fetch_all(
-        """
-        SELECT
-            u.provider,
-            AVG(u.response_time_ms)::int as avg_ms,
-            COUNT(*) as calls
-        FROM usage_log u
-        JOIN customers c ON u.customer_id = c.id
-        WHERE c.ab_provider IS NOT NULL
-          AND u.response_time_ms IS NOT NULL
-          AND u.created_at >= :since
-        GROUP BY u.provider
-        """,
-        {"since": since},
-    )
-
-    response_times = {r["provider"]: {"avg_ms": r["avg_ms"], "calls": r["calls"]} for r in rt_rows}
-
-    return {
-        "period_days": days,
-        "groups": results,
-        "response_times": response_times,
-        "note": "Customers are randomly assigned to a provider on first contact when A/B mode is enabled.",
-    }
-
-
-async def assign_ab_group(customer_id: str) -> str:
-    """
-    Randomly assign a new customer to an A/B test group.
-    Returns the assigned provider name.
-    """
-    provider = random.choice(["openai", "anthropic"])
-
-    await db.execute(
-        "UPDATE customers SET ab_provider = :provider WHERE id = :id",
-        {"provider": provider, "id": customer_id},
-    )
-
-    return provider
 
 
 # ── Daily aggregate builder ──────────────────────────────────

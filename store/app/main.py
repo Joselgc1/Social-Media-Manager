@@ -45,6 +45,51 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
 
+def _validate_startup_config(config):
+    """Fail fast on incomplete production configuration."""
+    errors = []
+
+    if not (config.openai_api_key or config.anthropic_api_key):
+        errors.append("At least one LLM API key must be configured.")
+
+    if not config.debug:
+        if not config.admin_password:
+            errors.append("ADMIN_PASSWORD must be set when DEBUG is false.")
+
+        required_whatsapp = {
+            "META_APP_SECRET": config.meta_app_secret,
+            "WHATSAPP_ACCESS_TOKEN": config.whatsapp_access_token,
+            "WHATSAPP_PHONE_NUMBER_ID": config.whatsapp_phone_number_id,
+            "WHATSAPP_VERIFY_TOKEN": config.whatsapp_verify_token,
+        }
+        missing_whatsapp = [name for name, value in required_whatsapp.items() if not value]
+        if missing_whatsapp:
+            errors.append(
+                "WhatsApp is required for launch. Missing: " + ", ".join(missing_whatsapp)
+            )
+
+        optional_integrations = {
+            "Instagram": {
+                "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
+                "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
+            },
+            "Telegram": {
+                "TELEGRAM_BOT_TOKEN": config.telegram_bot_token,
+                "TELEGRAM_ADMIN_CHAT_ID": config.telegram_admin_chat_id,
+            },
+        }
+        for label, fields in optional_integrations.items():
+            present = [name for name, value in fields.items() if value]
+            if present and len(present) != len(fields):
+                missing = [name for name, value in fields.items() if not value]
+                errors.append(
+                    f"{label} is partially configured. Missing: {', '.join(missing)}"
+                )
+
+    if errors:
+        raise RuntimeError("Startup configuration is invalid:\n- " + "\n- ".join(errors))
+
+
 # ── Lifespan (startup + shutdown) ────────────────────────────
 
 @asynccontextmanager
@@ -58,10 +103,15 @@ async def lifespan(app: FastAPI):
 
     # ── Startup ──────────────────────────────────────────────
     logger.info(f"Starting {config.store_name} chatbot...")
+    _validate_startup_config(config)
 
     # 1. Connect to PostgreSQL
     await db.connect()
     logger.info("Database connected.")
+
+    # 1b. Ensure runtime settings exist for old databases
+    await db.ensure_default_settings()
+    logger.info("Runtime settings verified.")
 
     # 2. Initialize LLM providers (only those with valid API keys)
     init_providers(

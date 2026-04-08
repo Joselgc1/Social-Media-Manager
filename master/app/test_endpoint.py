@@ -132,6 +132,7 @@ async def seed_test_data():
             payment_method  TEXT,
             payment_status  TEXT DEFAULT 'pending',
             payment_proof   TEXT,
+            customer_totals_applied BOOLEAN NOT NULL DEFAULT FALSE,
             shipping_method TEXT,
             shipping_city   TEXT,
             shipping_status TEXT DEFAULT 'pending',
@@ -170,7 +171,13 @@ async def seed_test_data():
                 ('fallback_provider', '"anthropic"'),
                 ('fallback_model',    '"claude-haiku-4-5"'),
                 ('auto_fallback',     'true'),
-                ('ai_enabled',        'true')
+                ('max_conversation_history', '20'),
+                ('ai_enabled',        'true'),
+                ('catalog_pdf_interval_hours', '24'),
+                ('payment_zelle_details', '""'),
+                ('payment_binance_details', '""'),
+                ('payment_zinli_details', '""'),
+                ('payment_bolivares_details', '""')
             ON CONFLICT (key) DO NOTHING
         """)
 

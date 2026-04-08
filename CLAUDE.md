@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-AI-powered sales chatbot ("VS Chatbot" / "Eva") for a Venezuelan Victoria's Secret resale business. Handles customer conversations on WhatsApp and Instagram DMs in Spanish, with a Telegram admin bot, broadcast campaigns, analytics/A/B testing, and a web admin dashboard. Supports hot-swapping between OpenAI and Anthropic as LLM providers via direct SDK calls (no LangChain).
+AI-powered sales chatbot ("VS Chatbot" / "Eva") for a Venezuelan Victoria's Secret resale business. Handles customer conversations on WhatsApp and Instagram DMs in Spanish, with a Telegram admin bot, broadcast campaigns, analytics, and a web admin dashboard. Supports hot-swapping between OpenAI and Anthropic as LLM providers via direct SDK calls (no LangChain).
 
-**Multi-store platform:** The system supports multiple independent store deployments managed from a centralized Master Control Plane (`master/`). Each store runs this same app with its own database, API keys, and channels. The master service monitors all stores, manages encrypted credentials, controls LLM provider/model selection per store, tracks platform-wide AI costs, and can push env vars to Railway + trigger redeploys.
+**Multi-store platform:** The system supports multiple independent store deployments managed from a centralized Master Control Plane (`master/`). Each store runs this same app with its own database, API keys, and channels. The master service monitors all stores, manages encrypted credentials, reads/writes each store's runtime settings directly in the store DB, tracks platform-wide AI costs, and can push env vars to Railway + trigger redeploys.
 
 ## Commands
 
@@ -21,19 +21,21 @@ cd master && uvicorn app.main:app --reload --port 9000
 uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-No tests or linting configured. Python 3.12.
+Python 3.12. Tests use pytest + pytest-asyncio (see `tests/`). Linting uses ruff.
 
 ### Local testing endpoints (store app — port 8000)
 
 - `http://localhost:8000/test/ui` — Browser-based chat UI simulating WhatsApp conversations through the full AI pipeline (no Meta APIs needed)
 - `http://localhost:8000/test/catalog` — View loaded products from Google Sheets
 - `http://localhost:8000/health` — System health status
-- `http://localhost:8000/admin/dashboard` — Web admin panel with dark mode (5 tabs: Resumen, Clientes, Pedidos, Broadcasts, Configuracion). Requires `ADMIN_PASSWORD` (via `?password=` on first visit — sets HTTP-only cookie and redirects to clean URL). All `/admin/` API routes also require auth via Bearer header or session cookie.
+- `http://localhost:8000/admin/login` — Store admin login page. Successful login sets the `admin_session` HTTP-only cookie and redirects to `/admin/dashboard`.
+- `http://localhost:8000/admin/dashboard` — Web admin panel with dark mode (5 tabs: Resumen, Clientes, Pedidos, Broadcasts, Configuracion). Requires a valid session cookie or Bearer auth on the underlying `/admin/` APIs.
 
 ### Local testing endpoints (master — port 9000)
 
 - `http://localhost:9000/test/ui` — Browser-based test UI with quick checks, seed data, API tester
-- `http://localhost:9000/dashboard?token=SECRET` — Master dashboard (store overview with platform costs, per-store API key management, LLM config, usage/costs with time-range toggles, grouped credentials, Railway deploy, audit log). On first visit with `?token=`, sets HTTP-only cookie and redirects to clean URL.
+- `http://localhost:9000/login` — Master dashboard login page. Successful login sets the `master_session` HTTP-only cookie and redirects to `/dashboard`.
+- `http://localhost:9000/dashboard` — Master dashboard (store overview with platform costs, per-store API key management, shared runtime settings, usage/costs with time-range toggles, grouped credentials, Railway deploy, audit log).
 - `http://localhost:9000/test/seed` — Create 3 sample stores with fake credentials (localhost only)
 - `http://localhost:9000/test/db-check` — Verify master DB connectivity (localhost only)
 - `http://localhost:9000/test/crypto?value=hello` — Test encryption round-trip (localhost only)
@@ -47,7 +49,77 @@ curl -X POST http://localhost:8000/test/chat \
 
 ### Minimal .env for local testing
 
-Only `OPENAI_API_KEY`, `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, `PRODUCT_SHEET_ID`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_ADMIN_CHAT_ID` are required. All Meta/Instagram/Anthropic fields default to empty strings and the app still starts.
+For local debug, `OPENAI_API_KEY`, `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, and `PRODUCT_SHEET_ID` are the core minimum. Meta and Telegram fields may stay empty when `DEBUG=true`. In production (`DEBUG=false`), startup validation now requires `ADMIN_PASSWORD` plus the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`); Instagram and Telegram remain optional but must be all-or-nothing if enabled.
+
+## Development workflow
+
+### Running locally
+
+- Store: `/run-store` or `cd store && DEBUG=true uvicorn app.main:app --reload --port 8000`
+- Master: `/run-master` or `cd master && uvicorn app.main:app --reload --port 9000`
+
+### Testing
+
+- Run all tests: `python3 -m pytest tests/ -v`
+- Generate tests for a module: `/write-tests <module path>`
+- Test the chatbot: `/test-chat <message>`
+- Install dev deps: `pip install -r requirements-dev.txt`
+
+### Code quality
+
+- Lint: `ruff check store/ master/`
+- Review changes: `/review` (checks project-specific patterns)
+
+### Deploying
+
+- `/deploy store`, `/deploy master`, or `/deploy both`
+- Push to main triggers Railway auto-deploy
+
+### Available skills and commands
+
+- `/review` — code review with project-specific checklist (auto-invoked)
+- `/add-tool` — scaffold a new AI tool/function (auto-invoked)
+- `/new-endpoint` — scaffold a new API endpoint (auto-invoked)
+- `/write-tests` — generate pytest tests (auto-invoked)
+- `/tune-prompt` — iterate on the system prompt (auto-invoked)
+- `/deploy` — deploy to Railway (manual)
+- `/db-query` — read-only SQL against store DB (manual)
+- `/analyze-conversations` — chatbot performance analysis (manual, runs in forked subagent)
+- `/run-store`, `/run-master` — start services locally
+- `/test-chat` — test the chatbot via curl
+- `/check-health` — check service health
+
+## Common tasks
+
+### Add a new AI tool
+
+Use `/add-tool <description>` or modify manually:
+
+1. `store/app/ai/functions.py` — add tool definition (JSON Schema format, provider-agnostic)
+2. `store/app/ai/engine.py` — add `_tool_*` handler function + wire in dispatch chain
+
+### Add a new setting
+
+1. Add the default in `store/app/runtime_settings.py` and seed it in a migration under `store/migrations/`
+2. If the setting should sync with `master/`, add it to `master/app/stores/runtime_settings.py` and `RuntimeSettingsUpdate`
+3. Handle validation in `store/app/admin/settings.py` and `master/app/stores/api.py`
+4. Expose it in the relevant dashboard JS (`store/app/static/js/dashboard.js` and/or `master/app/static/js/master_dashboard.js`)
+5. Use it in the relevant module via `await db.get_settings()`
+
+### Add a new endpoint
+
+Use `/new-endpoint <description>` or follow the patterns in:
+
+- `store/app/admin/settings.py` for store admin endpoints
+- `master/app/stores/api.py` for master API endpoints
+- Always add auth, rate limiting, and register the router in `main.py`
+
+### Update LLM model costs
+
+When adding new models, update BOTH files:
+
+- `store/app/ai/providers/__init__.py` (`cost_per_m_tokens`)
+- `master/app/stores/api.py` (`_MODEL_COSTS` dict)
 
 ## Architecture
 
@@ -56,12 +128,14 @@ Only `OPENAI_API_KEY`, `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, `PRODUCT
 **Webhook channels:** WhatsApp (`store/app/webhooks/whatsapp.py`), Instagram (`store/app/webhooks/instagram.py`), Telegram admin bot (`store/app/admin/telegram_bot.py` at `/webhooks/telegram`).
 
 **Request flow (WhatsApp/Instagram):**
+
 1. Meta sends webhook → `store/app/webhooks/{whatsapp,instagram}.py` normalizes the message
 2. Normalized message → `store/app/ai/engine.py` (central orchestrator)
 3. Engine builds prompt (`store/app/ai/prompts.py` + `store/prompts/system_prompt.md`), calls active LLM provider, executes tool calls in a loop (max 6 rounds)
 4. Response sent back via `store/app/channels/{whatsapp,instagram}_sender.py`
 
 **Key modules:**
+
 - `store/app/ai/providers/` — Provider abstraction with `base.py` (LLMResponse dataclass + abstract base), `openai_provider.py`, `anthropic_provider.py`. Provider-agnostic tool definitions live in `store/app/ai/functions.py` (JSON Schema format); each provider converts them to its native format.
 - `store/app/ai/vision.py` — Payment screenshot analysis via LLM vision API
 - `store/app/crm/` — Customer, conversation, and order management (all DB-backed via Supabase PostgreSQL)
@@ -75,7 +149,7 @@ Only `OPENAI_API_KEY`, `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, `PRODUCT
 
 **Background scheduler** (`store/app/broadcast/scheduler.py`): 5 APScheduler jobs — catalog refresh, broadcast execution, daily analytics aggregation (1 AM), token usage reminders, catalog PDF auto-refresh.
 
-**Database:** Supabase PostgreSQL. Schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor). Tables: customers, conversations, orders, broadcasts, settings, usage_log, daily_analytics, product_analytics.
+**Database:** Supabase PostgreSQL. Fresh installs use the consolidated schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor). Tables: customers, conversations, orders, broadcasts, settings, usage_log, daily_analytics, product_analytics.
 
 **Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Multi-store fields: `admin_password` (protects store dashboard), `system_prompt_override` (replaces prompt template file), and `llm_managed_externally` (when True, locks LLM controls in store dashboard/Telegram/API — managed from master instead).
 
@@ -86,13 +160,14 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 **Entry point:** `master/app/main.py` — FastAPI app with lifespan that connects to the master DB and starts a background health check loop (asyncio task, not APScheduler).
 
 **Key modules:**
-- `master/app/stores/api.py` — CRUD for stores + credentials + stats + Railway deploy + audit log. All endpoints require Bearer token auth.
+
+- `master/app/stores/api.py` — CRUD for stores + credentials + stats + shared runtime settings + Railway deploy + audit log. Browser access uses the login cookie; API clients can still use Bearer auth.
 - `master/app/stores/crypto.py` — Fernet symmetric encryption for credentials at rest. Uses `ENCRYPTION_KEY` from `master/.env`.
 - `master/app/stores/railway.py` — Railway GraphQL API client: upsert env vars, trigger redeploys, get service/deployment/environment info.
 - `master/app/stores/health.py` — Periodic health checker that pings each store's `/health` endpoint.
 - `master/app/stores/models.py` — Pydantic request models (StoreCreate, StoreUpdate, CredentialSet).
-- `master/app/auth.py` — Bearer token auth. Checks `Authorization` header or `?token=` query param against `MASTER_SECRET_KEY`.
-- `master/app/dashboard/router.py` — Serves master dashboard HTML (auth-protected).
+- `master/app/auth.py` — Bearer token auth plus the master session cookie.
+- `master/app/dashboard/router.py` — Serves the master login page, logout route, and dashboard HTML.
 - `master/app/test_endpoint.py` — `/test/ui`, `/test/seed`, `/test/reset`, `/test/db-check`, `/test/crypto`, `/test/railway-check`.
 
 **Stats aggregation:** The `GET /api/stores/{id}/stats` endpoint connects directly to each store's Supabase DB (decrypting the URL from the master DB) and queries `conversations`, `orders`, `customers`, and `settings` tables. Concurrency is capped by `STORE_STATS_MAX_CONCURRENT` to avoid exhausting Supabase session pooler slots.
@@ -103,9 +178,9 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 
 ## Security
 
-- **Store admin auth:** All `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API routes require authentication via `ADMIN_PASSWORD` (Bearer header or `admin_session` HTTP-only cookie). The `require_admin` dependency in `store/app/admin/auth.py` enforces this. Without `ADMIN_PASSWORD` set, admin routes are blocked unless `DEBUG=true`.
-- **Master auth:** All `/api/stores/` routes require Bearer token (`MASTER_SECRET_KEY`). Token comparisons use `hmac.compare_digest` (timing-safe). The master dashboard also accepts a `master_session` HTTP-only cookie.
-- **Cookie-based sessions:** Both dashboards accept a password/token via query param on first visit, set an HTTP-only secure cookie, and redirect to the clean URL (stripping the secret from the URL bar, browser history, and logs).
+- **Store admin auth:** All `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API routes require authentication via `ADMIN_PASSWORD` (Bearer header or `admin_session` HTTP-only cookie). Browser sessions are created via `GET/POST /admin/login` and cleared via `POST /admin/logout`.
+- **Master auth:** All `/api/stores/` routes require Bearer token (`MASTER_SECRET_KEY`) or the `master_session` cookie. Browser sessions are created via `GET/POST /login` and cleared via `POST /logout`.
+- **Cookie-based sessions:** Both dashboards now use normal login forms. Secrets are no longer accepted in query params.
 - **Test endpoints:** Store test routes (`/test/`) are only available when `DEBUG=true`. Master test routes are only available when `APP_BASE_URL` contains `localhost` or `127.0.0.1`.
 - **Rate limiting:** Both apps use `slowapi` — store app: 60 req/min, master: 30 req/min per IP.
 - **CORS:** Restricted to the app's own origin (`APP_BASE_URL`). Only `GET/POST/PUT/DELETE` with `Authorization` and `Content-Type` headers.
@@ -117,29 +192,29 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 
 - The AI system prompt is in `store/prompts/system_prompt.md` (Spanish-language, sales-focused). The Python code in `store/app/ai/prompts.py` injects dynamic context (catalog, customer history, order status) into it.
 - With <200 products, the entire catalog is stuffed into the system prompt — no RAG or vector database needed.
-- Settings (provider, model, temperature, max_tokens, max_conversation_history, fallback, A/B test, ai_enabled, catalog_pdf_interval_hours) are stored in the DB `settings` table and cached for 60s. Use `db.invalidate_settings_cache()` after writes. All settings are configurable from the dashboard, Telegram bot, and REST API.
+- Dashboard-managed runtime settings (provider, model, temperature, fallback, ai_enabled, catalog_pdf_interval_hours, and per-store payment instructions) are stored in the store DB `settings` table. The store app uses version-aware cache invalidation, and `master/` reads/writes the same rows through `GET/PUT /api/stores/{id}/settings`, so both dashboards stay in sync after refresh or save.
 - Tool calls are provider-agnostic: defined once in `store/app/ai/functions.py`, converted per-provider. Adding a new tool means adding it there and handling it in `store/app/ai/engine.py`. Current tools: `check_inventory`, `tag_customer`, `create_order`, `update_payment_status`, `escalate_to_human`, `send_interactive_buttons`, `send_catalog_pdf`.
 - **Tool call loop** (`store/app/ai/engine.py`): `MAX_TOOL_ROUNDS = 6`. The loop processes **one tool call per iteration** — if the LLM returns multiple tool calls in one response, only the first is executed and the while loop re-evaluates afterward. This prevents stale history from being passed to subsequent `continue_after_tool` calls. On the final round (`rounds == MAX_TOOL_ROUNDS`), tools are withheld (`tools=None`) so the model is forced to produce a text response instead of another tool call. If `send_interactive_buttons` was called and the model returned no text, the `body_text` of the interactive payload is used as the reply.
 - **Inventory privacy:** `_tool_check_inventory` returns `in_stock` (boolean) only — never the raw `stock` count. This prevents the LLM from revealing exact inventory levels to customers. System prompt rule 13 also explicitly prohibits outputting raw JSON, tool results, or technical metadata.
 - WhatsApp supports interactive buttons; Instagram uses quick replies. The engine returns an `interactive` dict that the channel sender interprets.
-- A/B testing assigns new customers randomly to a provider; existing customers keep their assignment.
 - Global AI pause (`ai_enabled` setting) and per-customer escalation (`conversation_state = 'escalated'`) both suppress auto-replies. Messages are stored and the owner is notified via Telegram only once (first unanswered message), not on every subsequent message.
 - Customer shipping addresses are saved on the customer record after order creation (`last_shipping_address`, `last_shipping_city`, `last_shipping_method`). The AI offers to reuse the saved address for returning customers.
 - OpenAI newer models require `max_completion_tokens` instead of `max_tokens` (changed in `openai_provider.py`).
 - Dashboard dark mode uses Tailwind CDN with `darkMode: 'class'` config. The `tailwind.config` must be set after the CDN `<script>` loads (not before, or `tailwind` is undefined). Custom component dark styles (`.dark .card`, etc.) live in `store/app/static/css/dashboard.css`. The `dark` class is toggled on `<html>` via `toggleDarkMode()` in `store/app/static/js/dashboard.js`.
-- Dashboard settings tab exposes all configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, fallback provider/model/auto-enable, A/B testing toggle, catalog PDF interval, and AI pause. These map to `PUT /admin/settings/{key}` calls.
+- Dashboard settings tab exposes all configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, fallback provider/model/auto-enable, catalog PDF interval, payment instructions, and AI pause. These map to `PUT /admin/settings/{key}` calls.
 - Broadcast execution wraps the send loop in try/except — if it crashes after setting status to `'sending'`, it auto-sets status to `'failed'`. A `POST /{id}/reset` endpoint resets stuck broadcasts back to `'draft'`. The dashboard shows a "Resetear" button for broadcasts in `sending` or `failed` status.
 - The `databases` library returns record objects that support `[]` bracket access but not `.get()`. Use `record["key"]` with a conditional fallback, not `record.get("key", default)`.
 - JSONB queries with the `databases` library must use `CAST(:param AS jsonb)` instead of `:param::jsonb` because the `::` cast syntax conflicts with SQLAlchemy's `:param` bind parameter syntax.
 - **Multi-store: separate deployments, not multi-tenant.** Each store is a full independent deployment of this app with its own `.env` and database. The master service is a separate FastAPI app (not a router on the store app). This gives true data isolation and means a bug in one store doesn't affect others.
 - **System prompt override:** If the `SYSTEM_PROMPT_OVERRIDE` env var is set, `store/app/ai/prompts.py` uses its value instead of reading `store/prompts/system_prompt.md`. The override must use the same `{store_name}`, `{product_catalog}`, etc. placeholders.
-- **Centralized LLM control:** When `LLM_MANAGED_EXTERNALLY=true` is set on a store, the store dashboard hides the LLM provider/model/temperature/fallback/A/B controls, the settings API rejects writes to those keys (403), and the Telegram `/provider` and `/abmode` commands respond with "managed by admin". The Master Control Plane reads/writes LLM settings directly to each store's DB via `GET/PUT /api/stores/{id}/llm-settings`. This gives the platform operator full control over which provider and model each store uses, and lets them see aggregated costs via `GET /api/stores/llm-costs/aggregate`.
+- **Centralized runtime settings:** `master/` reads/writes shared runtime settings directly in each store DB via `GET/PUT /api/stores/{id}/settings`. That includes AI config, operational settings like `catalog_pdf_interval_hours`, and per-store payment instructions. When `LLM_MANAGED_EXTERNALLY=true` is set on a store, the store dashboard hides LLM-only controls and rejects writes to those keys (403), but payment and other non-LLM runtime settings remain editable locally.
+- **Deployment shape:** Keep the store service single-instance/single-worker in this phase because broadcasts and scheduled jobs run in-process.
 
 ## API endpoints
 
 ### Store app (port 8000)
 
-```
+```text
 Webhooks:       GET/POST /webhooks/whatsapp, /webhooks/instagram, POST /webhooks/telegram
 Health:         GET /, GET /health
 Settings:       GET /admin/settings/, GET /admin/settings/providers, PUT /admin/settings/{key}
@@ -152,7 +227,7 @@ Customers:      GET /admin/settings/customers, GET /admin/settings/orders
                 POST /admin/settings/customers/{id}/resolve, POST /admin/settings/customers/resolve-all
                 GET /admin/settings/customers/{id}/tags, POST /admin/settings/customers/{id}/tags
                 DELETE /admin/settings/customers/{id}/tags/{tag}
-Dashboard:      GET /admin/dashboard
+Dashboard:      GET /admin/login, POST /admin/login, POST /admin/logout, GET /admin/dashboard
 Broadcasts:     POST /admin/broadcasts/create, /preview, GET /list, POST /{id}/send, POST /{id}/reset
 Analytics:      GET /admin/analytics/conversion, /response-times, /popular-products, /ab-test, /daily
                 POST /admin/analytics/build-daily
@@ -161,13 +236,13 @@ Testing:        GET /test/ui, POST /test/chat, GET /test/catalog
 
 ### Master control plane (port 9000)
 
-```
+```text
 Health:         GET /, GET /health
-Dashboard:      GET /dashboard?token=SECRET
+Dashboard:      GET /login, POST /login, POST /logout, GET /dashboard
 Stores:         GET/POST /api/stores/, GET/PUT/DELETE /api/stores/{id}
 Credentials:    GET/POST /api/stores/{id}/credentials, DELETE /api/stores/{id}/credentials/{key}
 Stats:          GET /api/stores/{id}/stats
-LLM Control:    GET/PUT /api/stores/{id}/llm-settings, GET /api/stores/{id}/llm-usage?days=N
+Runtime:        GET/PUT /api/stores/{id}/settings, GET /api/stores/{id}/llm-usage?days=N
                 GET /api/stores/llm-costs/aggregate?days=N
 Railway:        GET /api/stores/{id}/railway/status, POST /api/stores/{id}/deploy
 Audit:          GET /api/stores/audit/log
@@ -177,10 +252,10 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 
 ## Telegram admin commands
 
-```
+```text
 /start /stats /customers /orders /order /resolve /provider
 /broadcast /send /preview /settings /usage /conversion
-/performance /products /abtest /abmode /catalogpdf
+/performance /products /catalogpdf
 /ai /tags /tag
 ```
 
@@ -194,10 +269,10 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 
 ## Gotchas
 
-- **Settings cache:** DB settings are cached for 60s. After writing to the `settings` table, call `db.invalidate_settings_cache()` or changes won't be visible until the cache expires.
+- **Settings cache:** The store app keeps a version-aware cache of DB settings. After writing to the `settings` table locally, still call `db.invalidate_settings_cache()` so the current process picks the change up immediately; master-side writes are detected automatically on the next read.
 - **Telegram webhook:** Must be registered once via `POST /admin/settings/telegram/setup-webhook` before the Telegram bot responds. This sets the webhook URL using `APP_BASE_URL`.
 - **Catalog refresh:** The Google Sheets catalog is loaded into memory at startup and refreshed periodically by APScheduler. A stale catalog won't update until the next refresh cycle or a server restart.
-- **Migrations are manual:** Run SQL files from `store/migrations/` (001 through 004) directly in the Supabase SQL Editor. There is no migration framework.
+- **Migrations are manual:** For fresh store databases, run `store/migrations/001_schema.sql` directly in the Supabase SQL Editor. There is no migration framework.
 - **Database connection:** Direct Supabase connection (port 5432) may be unreachable from some networks. Use the Session Pooler URL (port 6543) instead.
 - **OpenAI max_tokens:** Newer OpenAI models (gpt-5.x) require `max_completion_tokens` instead of `max_tokens`. This is already handled in `openai_provider.py`.
 - **Master migrations are manual too:** Run `master/migrations/001_master_schema.sql` in the master Supabase project's SQL Editor. Separate project from any store.

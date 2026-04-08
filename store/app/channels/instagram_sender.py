@@ -215,21 +215,22 @@ async def subscribe_page_to_webhooks(page_id: str):
 # ── Internal helper ──────────────────────────────────────────
 
 async def _send(url: str, payload: dict, access_token: str):
-    """POST to the Instagram/Graph API with error logging."""
+    """POST to the Instagram/Graph API and raise on delivery failure."""
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=payload, headers=headers)
 
-            if resp.status_code != 200:
-                error_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
-                logger.error(f"Instagram API error ({resp.status_code}): {error_data}")
-            else:
-                logger.debug(f"Instagram message sent: {resp.json()}")
+    if not resp.is_success:
+        logger.error(f"Instagram API error ({resp.status_code})")
+        error_data = (
+            resp.json()
+            if resp.headers.get("content-type", "").startswith("application/json")
+            else resp.text
+        )
+        raise RuntimeError(f"Instagram API error {resp.status_code}: {error_data}")
 
-    except Exception as e:
-        logger.error(f"Failed to send Instagram message: {e}")
+    logger.debug(f"Instagram message sent: {resp.json()}")

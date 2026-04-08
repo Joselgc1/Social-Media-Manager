@@ -18,6 +18,7 @@ from app.config import get_config
 from app.admin.auth import require_admin
 from app.admin.telegram_bot import setup_telegram_webhook
 from app.crm.customers import add_tags, remove_tag
+from app.runtime_settings import STORE_EDITABLE_SETTING_KEYS, LLM_MANAGED_KEYS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/settings", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -35,11 +36,87 @@ class SettingUpdate(BaseModel):
     value: str | float | bool | int
 
 
-# LLM-related setting keys that are locked when managed from master
-_LLM_MANAGED_KEYS = {
-    "llm_provider", "llm_model", "llm_temperature", "llm_max_tokens",
-    "fallback_provider", "fallback_model", "auto_fallback", "ab_test_enabled",
-}
+def _validate_setting_value(key: str, value, current_settings: dict):
+    if key not in STORE_EDITABLE_SETTING_KEYS:
+        raise HTTPException(status_code=400, detail=f"Setting '{key}' is not editable.")
+
+    if key in ("payment_zelle_details", "payment_binance_details", "payment_zinli_details", "payment_bolivares_details"):
+        return str(value).strip()
+
+    if key in ("llm_provider", "fallback_provider"):
+        if value not in VALID_PROVIDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid provider '{value}'. Choose from: {sorted(VALID_PROVIDERS)}",
+            )
+        return value
+
+    if key in ("llm_model", "fallback_model"):
+        if value not in VALID_MODELS_FLAT:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown model '{value}'. Available: {sorted(VALID_MODELS_FLAT)}",
+            )
+        provider_key = "llm_provider" if key == "llm_model" else "fallback_provider"
+        provider = current_settings.get(provider_key, "openai")
+        provider_model_ids = [m["id"] for m in AVAILABLE_MODELS.get(provider, [])]
+        if value not in provider_model_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model '{value}' is not available for provider '{provider}'. "
+                       f"Available models: {provider_model_ids}",
+            )
+        return value
+
+    if key == "llm_temperature":
+        temp = float(value)
+        if not (0.0 <= temp <= 1.0):
+            raise HTTPException(
+                status_code=400,
+                detail="Temperature must be between 0.0 and 1.0.",
+            )
+        return temp
+
+    if key == "llm_max_tokens":
+        tokens = int(value)
+        if not (100 <= tokens <= 2000):
+            raise HTTPException(
+                status_code=400,
+                detail="Max tokens must be between 100 and 2000.",
+            )
+        return tokens
+
+    if key == "max_conversation_history":
+        history = int(value)
+        if not (5 <= history <= 50):
+            raise HTTPException(
+                status_code=400,
+                detail="Conversation history must be between 5 and 50.",
+            )
+        return history
+
+    if key == "catalog_pdf_interval_hours":
+        hours = int(value)
+        if not (1 <= hours <= 168):
+            raise HTTPException(
+                status_code=400,
+                detail="Catalog PDF interval must be between 1 and 168 hours.",
+            )
+        return hours
+
+    if key in ("auto_fallback", "ai_enabled", "escalation_telegram_enabled"):
+        return bool(value)
+
+    if key == "catalog_refresh_minutes":
+        minutes = int(value)
+        if not (1 <= minutes <= 1440):
+            raise HTTPException(
+                status_code=400,
+                detail="Catalog refresh must be between 1 and 1440 minutes.",
+            )
+        return minutes
+
+    return value
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -47,7 +124,7 @@ _LLM_MANAGED_KEYS = {
 @router.get("/")
 async def get_all_settings():
     """Return all current settings."""
-    settings = await db.get_settings()
+    settings = dict(await db.get_settings())
     config = get_config()
     settings["_llm_managed_externally"] = config.llm_managed_externally
     return settings
@@ -66,60 +143,14 @@ async def update_setting(key: str, body: SettingUpdate):
     Validates provider/model combinations to prevent misconfigurations.
     """
     config = get_config()
-    if config.llm_managed_externally and key in _LLM_MANAGED_KEYS:
+    if config.llm_managed_externally and key in LLM_MANAGED_KEYS:
         raise HTTPException(
             status_code=403,
             detail=f"LLM setting '{key}' is managed by the master admin. Contact your administrator.",
         )
 
-    value = body.value
-
-    # ── Validate provider changes ────────────────────────────
-    if key in ("llm_provider", "fallback_provider"):
-        if value not in VALID_PROVIDERS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid provider '{value}'. Choose from: {sorted(VALID_PROVIDERS)}",
-            )
-
-    # ── Validate model changes ───────────────────────────────
-    if key in ("llm_model", "fallback_model"):
-        if value not in VALID_MODELS_FLAT:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown model '{value}'. Available: {sorted(VALID_MODELS_FLAT)}",
-            )
-        # Check model belongs to the correct provider
-        provider_key = "llm_provider" if key == "llm_model" else "fallback_provider"
-        settings = await db.get_settings()
-        provider = settings.get(provider_key, "openai")
-        provider_model_ids = [m["id"] for m in AVAILABLE_MODELS.get(provider, [])]
-        if value not in provider_model_ids:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model '{value}' is not available for provider '{provider}'. "
-                       f"Available models: {provider_model_ids}",
-            )
-
-    # ── Validate temperature ─────────────────────────────────
-    if key == "llm_temperature":
-        temp = float(value)
-        if not (0.0 <= temp <= 1.0):
-            raise HTTPException(
-                status_code=400,
-                detail="Temperature must be between 0.0 and 1.0.",
-            )
-        value = temp
-
-    # ── Validate max_tokens ──────────────────────────────────
-    if key == "llm_max_tokens":
-        tokens = int(value)
-        if not (100 <= tokens <= 2000):
-            raise HTTPException(
-                status_code=400,
-                detail="Max tokens must be between 100 and 2000.",
-            )
-        value = tokens
+    settings = await db.get_settings()
+    value = _validate_setting_value(key, body.value, settings)
 
     # ── Write to database ────────────────────────────────────
     existing = await db.fetch_one(
@@ -140,7 +171,7 @@ async def update_setting(key: str, body: SettingUpdate):
     # Bust the cache so the change takes effect immediately
     db.invalidate_settings_cache()
 
-    logger.info(f"Setting updated: {key} = {value}")
+    logger.info(f"Setting updated: {key}")
     return {"key": key, "value": value, "status": "updated"}
 
 

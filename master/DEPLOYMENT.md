@@ -18,7 +18,7 @@ Go to supabase.com and create a **new project** (separate from any store project
 
 Once created, go to Settings > Database and copy the connection string. Use the **Session Pooler** URL (port 6543) to avoid network issues:
 
-```
+```text
 postgresql://postgres.xxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
 ```
 
@@ -57,7 +57,7 @@ cp .env.example .env
 
 Fill in the values:
 
-```bash
+```ini
 DATABASE_URL=postgresql://postgres.xxxx:password@aws-0-us-east-1.pooler.supabase.com:6543/postgres
 MASTER_SECRET_KEY=your-generated-secret-key
 ENCRYPTION_KEY=your-generated-fernet-key
@@ -79,7 +79,7 @@ uvicorn app.main:app --reload --port 9000
 
 You should see:
 
-```
+```text
 [INFO] Starting Master Control Plane...
 [INFO] Master database connected.
 [INFO] Health check loop started.
@@ -88,11 +88,11 @@ You should see:
 
 Open in browser:
 
-```
-http://localhost:9000/dashboard?token=YOUR_MASTER_SECRET_KEY
+```text
+http://localhost:9000/login
 ```
 
-On first visit, the token is validated, an HTTP-only session cookie is set, and you're redirected to the clean URL (`/dashboard` — no token in the URL bar, browser history, or server logs). Subsequent visits use the cookie automatically.
+Sign in with `MASTER_SECRET_KEY`. The login creates the `master_session` HTTP-only cookie and redirects to `/dashboard`. Subsequent visits use the cookie automatically.
 
 You should see the master dashboard with an empty "All Stores" grid and a button to add your first store.
 
@@ -106,7 +106,7 @@ The master service includes a test UI and test endpoints so you can verify every
 
 Open in your browser:
 
-```
+```text
 http://localhost:9000/test/ui
 ```
 
@@ -114,7 +114,7 @@ The test UI provides:
 
 - **Quick Checks**: One-click verification of database, encryption, health, and Railway connectivity
 - **Test Data**: Seed 3 sample stores with fake credentials, or reset everything
-- **Dashboard Access**: Enter your `MASTER_SECRET_KEY` to generate a clickable dashboard link
+- **Dashboard Access**: Enter your `MASTER_SECRET_KEY` to open the login form in a new tab and sign in automatically
 - **API Tester**: Send requests to any master API endpoint and see the response
 
 ### 2.2 Seed test stores
@@ -129,10 +129,10 @@ This creates 3 sample stores ("Eva - Tienda de Carlos", "Bella - Tienda de Maria
 
 ### 2.3 Test the dashboard
 
-Open the dashboard with your token:
+Open the dashboard login:
 
-```
-http://localhost:9000/dashboard?token=YOUR_MASTER_SECRET_KEY
+```text
+http://localhost:9000/login
 ```
 
 Verify:
@@ -171,7 +171,7 @@ To test the master alongside a store, run them on different ports:
 
 ```bash
 # Terminal 1: Store app on port 8000
-cd /path/to/Social-Media-Manager
+cd /path/to/Social-Media-Manager/store
 source .venv/bin/activate
 uvicorn app.main:app --reload --port 8000
 
@@ -240,11 +240,11 @@ curl https://your-master-url.railway.app/health
 
 Open the dashboard:
 
-```
-https://your-master-url.railway.app/dashboard?token=YOUR_MASTER_SECRET_KEY
+```text
+https://your-master-url.railway.app/login
 ```
 
-On first visit, the token is validated and a session cookie is set. You're redirected to the clean URL (`/dashboard`). Bookmark this clean URL — the cookie handles authentication on subsequent visits (24-hour expiry).
+Sign in with `MASTER_SECRET_KEY`. The login sets a session cookie and redirects to `/dashboard`. Bookmark `/dashboard` after the first login — the cookie handles authentication on subsequent visits (24-hour expiry).
 
 This is your central management interface.
 
@@ -270,10 +270,10 @@ You need:
 2. Click **"+ Add Store"**
 3. Fill in the form:
   - Store Name: `Eva - Tienda de Carlos`
-  - Owner Name: `Carlos`
-  - Owner Contact: `+58 412 123 4567`
-  - App URL: `https://vs-chatbot-production.up.railway.app`
-  - Database URL: `postgresql://postgres:...@db.xyz.supabase.co:6543/postgres`
+    - Owner Name: `Carlos`
+    - Owner Contact: `+58 412 123 4567`
+    - App URL: `https://vs-chatbot-production.up.railway.app`
+    - Database URL: `postgresql://postgres:...@db.xyz.supabase.co:6543/postgres`
 4. Click **"Add Store"**
 
 The store card should appear on the overview with live stats (today's chats, orders, customers, AI status).
@@ -295,17 +295,17 @@ Click **"+ Add Credential"** and add each one:
 | ...                        | (all other env vars) |
 
 
-All values are encrypted with Fernet before storage. The dashboard only shows masked values (e.g., `sk-p**`**).
+All values are encrypted with Fernet before storage. The dashboard only shows masked values (e.g., `sk-p`**).
 
 ### 4.4 Add admin password to the store (required)
 
 `ADMIN_PASSWORD` is **required** in production. Without it, all admin routes return 403. Add it to the store's Railway deployment:
 
-```
+```ini
 ADMIN_PASSWORD=some-strong-password-for-carlos
 ```
 
-After redeploy, the store dashboard and all admin API endpoints are protected. The dashboard at `/admin/dashboard?password=...` validates the password, sets an HTTP-only session cookie, and redirects to the clean URL. API calls require `Authorization: Bearer <password>`.
+After redeploy, the store dashboard and all admin API endpoints are protected. Browser access goes through `/admin/login`, which creates the `admin_session` cookie. API calls can use `Authorization: Bearer <password>`.
 
 Give this password to the store owner so they can access their own dashboard.
 
@@ -327,13 +327,12 @@ Follow **Parts 1.1 through 1.6** of the main `DEPLOYMENT.md` (in the project roo
 
 ### 5.2 Deploy a new Railway service
 
-Option A: **Same repo, new Railway service.** In Railway, add a new service to the store's Railway project, deploy from the same GitHub repo, but with different environment variables.
-
-Option B: **Fork the repo.** Create a separate GitHub repo for the new store and deploy from there.
+- **Option A:** Same repo, new Railway service. In Railway, add a new service to the store's Railway project, deploy from the same GitHub repo, but with different environment variables.
+- **Option B:** Fork the repo. Create a separate GitHub repo for the new store and deploy from there.
 
 Either way, set the root directory to `/` (the store app, not master), and add all environment variables for the new store. Key variables to customize:
 
-```bash
+```ini
 DATABASE_URL=postgresql://...          # NEW Supabase project
 WHATSAPP_ACCESS_TOKEN=...              # NEW phone number token
 WHATSAPP_PHONE_NUMBER_ID=...           # NEW phone number ID
@@ -353,8 +352,8 @@ Optionally, set `SYSTEM_PROMPT_OVERRIDE` to customize the AI persona for this st
 
 Follow **Parts 4 and 6** of the main `DEPLOYMENT.md`, using the new store's Railway URL:
 
-1. **WhatsApp webhook**: `https://store-maria.railway.app/webhooks/whatsapp`
-2. **Telegram webhook**: `POST https://store-maria.railway.app/admin/settings/telegram/setup-webhook`
+1. **WhatsApp webhook:** `https://store-maria.railway.app/webhooks/whatsapp`
+2. **Telegram webhook:** `POST https://store-maria.railway.app/admin/settings/telegram/setup-webhook`
 3. **Instagram webhook** (after App Review): `https://store-maria.railway.app/webhooks/instagram`
 
 ### 5.4 Register in the master dashboard
@@ -369,19 +368,19 @@ Set the `SYSTEM_PROMPT_OVERRIDE` environment variable in Railway to the full tex
 
 If you don't set this variable, the store uses the default prompt template from the file.
 
-### 5.6 Enable centralized LLM control (recommended)
+### 5.6 Enable centralized runtime settings control (recommended)
 
 To take full control of which AI provider and model each store uses:
 
 1. In the master dashboard, go to the store's credentials and add `LLM_MANAGED_EXTERNALLY` with value `true`
 2. Deploy the credential to Railway (see 5.7 below)
-3. Once deployed, the store's dashboard will hide all LLM provider/model controls, and the Telegram bot `/provider` and `/abmode` commands will be disabled
+3. Once deployed, the store's dashboard will hide all LLM provider/model controls, and the Telegram bot `/provider` command will be disabled
 
-Now you can manage the store's AI settings from the master dashboard:
+Now you can manage the store's shared runtime settings from the master dashboard:
 
-- Open a store's detail view → **AI Provider Configuration** panel
-- Set the provider (OpenAI/Anthropic), model, temperature, max tokens, fallback, and A/B testing
-- Click "Save AI Settings" — changes take effect within 60 seconds (the store's settings cache interval)
+- Open a store's detail view → **Runtime Settings** panel
+- Set the provider (OpenAI/Anthropic), model, temperature, max tokens, fallback, payment instructions, and catalog PDF interval
+- Click "Save Runtime Settings" — changes apply from the store DB and show up in the store dashboard after refresh
 
 The **LLM Usage (Today)** panel shows the store's API call count and estimated cost. The overview tab shows **Platform LLM Costs** aggregated across all stores.
 
@@ -399,8 +398,8 @@ Instead of manually editing environment variables in each store's Railway dashbo
 
 When adding or editing a store in the master dashboard, fill in:
 
-- **Railway Service ID**: Found in Railway dashboard > your store service > Settings > Service ID
-- **Railway Project ID**: Found in Railway dashboard > your project > Settings > Project ID
+- **Railway Service ID:** Found in Railway dashboard > your store service > Settings > Service ID
+- **Railway Project ID:** Found in Railway dashboard > your project > Settings > Project ID
 
 **Push credentials:**
 
@@ -414,7 +413,7 @@ The "Deploy Changes" button only appears when a store has both credentials and a
 
 **What happens during deploy:**
 
-```
+```text
 Master dashboard "Deploy Changes" clicked
   -> Decrypts all store credentials from master DB
   -> Calls Railway API: upsert environment variables on the service
@@ -441,9 +440,9 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 
 ### 6.1 Master Control Plane
 
-```
+```text
 [ ] GET /health -> status=healthy, total_stores and active_stores correct
-[ ] Dashboard loads with ?token= (no token -> 401)
+[ ] Dashboard redirects to /login when no valid cookie is present
 [ ] Store cards show live stats (chats, orders, customers, AI status)
 [ ] Status dots update: green (active), red (error), yellow (paused)
 [ ] "Add Store" creates a store, card appears on overview
@@ -460,9 +459,8 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 
 ### 6.2 Store-level additions
 
-```
-[ ] Store with ADMIN_PASSWORD set -> /admin/dashboard without ?password= returns 401
-[ ] Store with ADMIN_PASSWORD set -> /admin/dashboard?password=correct sets cookie, redirects to clean URL
+```text
+[ ] Store with ADMIN_PASSWORD set -> /admin/login accepts the password and redirects to /admin/dashboard
 [ ] Store dashboard -> subsequent visits work via cookie (no password in URL)
 [ ] Store with ADMIN_PASSWORD -> GET /admin/settings/ without auth returns 401
 [ ] Store with ADMIN_PASSWORD -> GET /admin/settings/ with Bearer header works
@@ -477,12 +475,13 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 [ ] Store without LLM_MANAGED_EXTERNALLY -> LLM controls work as normal
 ```
 
-### 6.2b LLM Management from Master
+### 6.2b Runtime Settings from Master
 
-```
-[ ] Master store detail shows "AI Provider Configuration" panel
+```text
+[ ] Master store detail shows "Runtime Settings" panel
 [ ] Changing provider updates model dropdown to matching models
-[ ] "Save AI Settings" writes to store's DB (verify via store dashboard /admin/settings/)
+[ ] "Save Runtime Settings" writes to the store DB (verify via the store dashboard /admin/settings/)
+[ ] Payment details edited in master appear in the store dashboard after refresh
 [ ] "LLM Usage (Today)" panel shows call counts and costs
 [ ] Overview tab shows "Platform LLM Costs" table with per-store costs and total
 [ ] Costs aggregate endpoint returns correct totals across all stores
@@ -490,7 +489,7 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 
 ### 6.3 Multi-store isolation
 
-```
+```text
 [ ] Send message to Store A's WhatsApp -> only Store A processes it
 [ ] Send message to Store B's WhatsApp -> only Store B processes it
 [ ] Each store shows only its own customers, orders, and conversations
@@ -500,7 +499,7 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 
 ### 6.4 Railway Deployment
 
-```
+```text
 [ ] Railway status shows "linked" for a store with service + project IDs
 [ ] Railway status shows "not_configured" when RAILWAY_API_TOKEN is empty
 [ ] Railway status shows "not_linked" for a store without service ID
@@ -512,7 +511,7 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 
 ### 6.5 Local Testing
 
-```
+```text
 [ ] GET /test/ui (localhost) -> test page loads
 [ ] GET /test/ui (production URL) -> 404 (test endpoints disabled)
 [ ] GET /test/db-check -> tables exist with correct counts
@@ -526,10 +525,10 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 
 ### 6.6 Security
 
-```
-[ ] Master dashboard without token or cookie -> 401
-[ ] Master dashboard with ?token= -> sets cookie, redirects to clean URL
-[ ] Master dashboard with valid cookie -> loads (no token in URL)
+```text
+[ ] Master dashboard without cookie -> redirects to /login
+[ ] Master dashboard login accepts MASTER_SECRET_KEY -> sets cookie and redirects to /dashboard
+[ ] Master dashboard with valid cookie -> loads cleanly
 [ ] Master API without Bearer header -> 401
 [ ] Credentials in master DB are encrypted (check directly in Supabase)
 [ ] Store dashboards with ADMIN_PASSWORD are protected (cookie-based after first login)
@@ -547,54 +546,57 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 
 ### Master Control Plane endpoints
 
-```
+```text
 Health:
-  GET  /               -> Basic status
-  GET  /health          -> Detailed status with store counts
+  GET  /                        -> Basic status
+  GET  /health                  -> Detailed status with store counts
 
 Dashboard:
-  GET  /dashboard?token=SECRET  -> Master dashboard UI
+  GET  /login                   -> Master login page
+  POST /login                   -> Create dashboard session
+  POST /logout                  -> Clear dashboard session
+  GET  /dashboard               -> Master dashboard UI
 
 Store CRUD (all require Bearer token):
-  GET    /api/stores/                          -> List all stores
-  GET    /api/stores/{id}                      -> Store detail
-  POST   /api/stores/                          -> Create store
-  PUT    /api/stores/{id}                      -> Update store metadata
-  DELETE /api/stores/{id}                      -> Delete store + credentials
+  GET    /api/stores/                           -> List all stores
+  GET    /api/stores/{id}                       -> Store detail
+  POST   /api/stores/                           -> Create store
+  PUT    /api/stores/{id}                       -> Update store metadata
+  DELETE /api/stores/{id}                       -> Delete store + credentials
 
 Store Credentials:
-  GET    /api/stores/{id}/credentials          -> List credentials (masked)
-  POST   /api/stores/{id}/credentials          -> Set/update a credential
-  DELETE /api/stores/{id}/credentials/{key}    -> Delete a credential
+  GET    /api/stores/{id}/credentials           -> List credentials (masked)
+  POST   /api/stores/{id}/credentials           -> Set/update a credential
+  DELETE /api/stores/{id}/credentials/{key}     -> Delete a credential
 
 Store Stats:
-  GET    /api/stores/{id}/stats                -> Live stats from store's DB
+  GET    /api/stores/{id}/stats                 -> Live stats from store's DB
 
-LLM Control:
-  GET    /api/stores/{id}/llm-settings         -> Read LLM settings from store's DB
-  PUT    /api/stores/{id}/llm-settings         -> Write LLM settings to store's DB
-  GET    /api/stores/{id}/llm-usage?days=N     -> Token usage + costs (default: today)
+Runtime Settings:
+  GET    /api/stores/{id}/settings              -> Read shared runtime settings from the store DB
+  PUT    /api/stores/{id}/settings              -> Write shared runtime settings to the store DB
+  GET    /api/stores/{id}/llm-usage?days=N      -> Token usage + costs (default: today)
   GET    /api/stores/llm-costs/aggregate?days=N -> Platform-wide costs (default: today)
 
 Railway Deployment:
-  GET    /api/stores/{id}/railway/status       -> Railway service + deploy status
-  POST   /api/stores/{id}/deploy               -> Push credentials + redeploy
+  GET    /api/stores/{id}/railway/status        -> Railway service + deploy status
+  POST   /api/stores/{id}/deploy                -> Push credentials + redeploy
 
 Audit Log:
-  GET    /api/stores/audit/log?limit=50        -> Recent audit entries
+  GET    /api/stores/audit/log?limit=50         -> Recent audit entries
 
 Testing (localhost only — returns 404 in production):
-  GET    /test/ui                              -> Browser-based test UI
-  GET    /test/db-check                        -> Database connectivity check
-  GET    /test/crypto?value=hello              -> Encryption round-trip test
-  POST   /test/seed                            -> Create sample stores + credentials
-  DELETE /test/reset                           -> Delete all test data
-  GET    /test/railway-check                   -> Railway API connectivity (needs auth)
+  GET    /test/ui                               -> Browser-based test UI
+  GET    /test/db-check                         -> Database connectivity check
+  GET    /test/crypto?value=hello               -> Encryption round-trip test
+  POST   /test/seed                             -> Create sample stores + credentials
+  DELETE /test/reset                            -> Delete all test data
+  GET    /test/railway-check                    -> Railway API connectivity (needs auth)
 ```
 
 ### Architecture overview
 
-```
+```text
 Master Control Plane (1 deployment)
   ├── Master Supabase DB (stores registry, encrypted credentials, audit log)
   ├── Dashboard: monitor all stores, manage AI settings, view costs, deploy changes
@@ -602,14 +604,14 @@ Master Control Plane (1 deployment)
   └── Health checker: pings each store every 5 minutes
 
 Store A (1 deployment)                   Store B (1 deployment)
-  ├── Own Supabase DB                      ├── Own Supabase DB
-  ├── Own WhatsApp number                  ├── Own WhatsApp number
-  ├── Own Instagram account                ├── Own Instagram account
-  ├── Own Telegram bot                     ├── Own Telegram bot
-  ├── Own Google Sheet catalog             ├── Own Google Sheet catalog
-  ├── Own LLM API keys                     ├── Own LLM API keys
-  └── Own admin dashboard                  └── Own admin dashboard
-      (protected by ADMIN_PASSWORD)            (protected by ADMIN_PASSWORD)
+  ├── Own Supabase DB                    ├── Own Supabase DB
+  ├── Own WhatsApp number                ├── Own WhatsApp number
+  ├── Own Instagram account              ├── Own Instagram account
+  ├── Own Telegram bot                   ├── Own Telegram bot
+  ├── Own Google Sheet catalog           ├── Own Google Sheet catalog
+  ├── Own LLM API keys                   ├── Own LLM API keys
+  └── Own admin dashboard                └── Own admin dashboard
+      (protected by ADMIN_PASSWORD)          (protected by ADMIN_PASSWORD)
 ```
 
 ### Cost estimate per store
@@ -629,30 +631,18 @@ Store A (1 deployment)                   Store B (1 deployment)
 
 ## Common issues and fixes
 
-**"401 Invalid or missing authentication token"** on master dashboard - On first visit, use `?token=YOUR_KEY` — this sets a session cookie and redirects. If the cookie has expired (24 hours), revisit with `?token=`. Check that the token matches `MASTER_SECRET_KEY` exactly.
+- **"401 Invalid or missing authentication token"** on master dashboard: Open `/login`, sign in with `MASTER_SECRET_KEY`, and let the browser create the session cookie. If the cookie expired (24 hours), sign in again. API calls still require `Authorization: Bearer YOUR_MASTER_SECRET_KEY`.
+- **Store card shows "Stats unavailable"**: The master can't connect to the store's database. Verify the DB URL is correct. Use the Session Pooler URL (port 6543). Check that the store's Supabase project allows connections from the master's IP/network.
+- **"MaxClientsInSessionMode" / "max clients reached" when loading the dashboard**: The dashboard requests stats for every store at once, and each request opens a short-lived connection to that store's database. Supabase's **Session** pooler only allows a small number of concurrent clients per pool. If the store app is also running (it holds its own pool slots), parallel stats calls can exceed the limit. The master caps concurrent stats queries and uses a single connection per request; if you still hit the limit, set `STORE_STATS_MAX_CONCURRENT=1` or `2` in the master's `.env`, or register fewer simultaneous stores during local testing.
+- **Store status shows red (error)**: The store's `/health` endpoint is unreachable. Check that the store's Railway deployment is running. Verify the `app_url` is correct in the master dashboard.
+- **"Cannot decrypt store database URL"**: The `ENCRYPTION_KEY` in the master `.env` has changed since the store was registered. If you rotated the key, you need to re-register all stores with the new key.
+- **Store dashboard returns 401**: `ADMIN_PASSWORD` is set but you don't have a valid session cookie. Visit `/admin/login` and sign in. For API calls, use `Authorization: Bearer YOUR_PASSWORD`.
+- **Store admin API returns 403**: `ADMIN_PASSWORD` is not set and `DEBUG=false`. Set `ADMIN_PASSWORD` in the store's Railway variables and redeploy.
+- **Test endpoints return 404**: This is expected in production. Test endpoints are only available when `DEBUG=true` (store app) or when `APP_BASE_URL` contains `localhost` (master).
+- **AI responds with wrong persona**: Check if `SYSTEM_PROMPT_OVERRIDE` is set for that store. If it is, verify the content is correct and uses the right placeholders.
+- **Health checks not updating**: The background task runs every `HEALTH_CHECK_INTERVAL_SECONDS` (default 300 = 5 minutes). Wait for the next cycle or restart the master service. Stores with status "paused" are skipped.
+- **"Deploy Changes" button not visible"**: The button only appears when a store has both credentials and a Railway Service ID configured. Add the service ID via the Edit button on the store detail page.
+- **"Railway API error" on deploy**: Check that `RAILWAY_API_TOKEN` is valid and has access to the store's Railway project. Regenerate the token at railway.app > Account Settings > Tokens if needed.
+- **Deploy succeeds but store doesn't restart**: Railway redeploys are asynchronous. Check the Railway Deployment section in the store detail for the latest deployment status. If it shows "FAILED", check Railway logs for build errors.
+- **Test seed stores show "Stats unavailable"**: This is expected. Seeded stores use the master DB URL as a placeholder, and the master DB doesn't have store tables (customers, conversations, etc.). CRUD, credentials, and audit logging still work correctly for testing.
 
-**Store card shows "Stats unavailable"** - The master can't connect to the store's database. Verify the DB URL is correct. Use the Session Pooler URL (port 6543). Check that the store's Supabase project allows connections from the master's IP/network.
-
-**"MaxClientsInSessionMode" / "max clients reached" when loading the dashboard** - The dashboard requests stats for every store at once, and each request opens a short-lived connection to that store's database. Supabase's **Session** pooler only allows a small number of concurrent clients per pool. If the store app is also running (it holds its own pool slots), parallel stats calls can exceed the limit. The master caps concurrent stats queries and uses a single connection per request; if you still hit the limit, set `STORE_STATS_MAX_CONCURRENT=1` or `2` in the master's `.env`, or register fewer simultaneous stores during local testing.
-
-**Store status shows red (error)** - The store's `/health` endpoint is unreachable. Check that the store's Railway deployment is running. Verify the `app_url` is correct in the master dashboard.
-
-**"Cannot decrypt store database URL"** - The `ENCRYPTION_KEY` in the master `.env` has changed since the store was registered. If you rotated the key, you need to re-register all stores with the new key.
-
-**Store dashboard returns 401** - `ADMIN_PASSWORD` is set but you don't have a valid session cookie. Visit `/admin/dashboard?password=...` to set one. The cookie lasts 24 hours. For API calls, use `Authorization: Bearer YOUR_PASSWORD`.
-
-**Store admin API returns 403** - `ADMIN_PASSWORD` is not set and `DEBUG=false`. Set `ADMIN_PASSWORD` in the store's Railway variables and redeploy.
-
-**Test endpoints return 404** - This is expected in production. Test endpoints are only available when `DEBUG=true` (store app) or when `APP_BASE_URL` contains `localhost` (master).
-
-**AI responds with wrong persona** - Check if `SYSTEM_PROMPT_OVERRIDE` is set for that store. If it is, verify the content is correct and uses the right placeholders.
-
-**Health checks not updating** - The background task runs every `HEALTH_CHECK_INTERVAL_SECONDS` (default 300 = 5 minutes). Wait for the next cycle or restart the master service. Stores with status "paused" are skipped.
-
-**"Deploy Changes" button not visible** - The button only appears when a store has both credentials and a Railway Service ID configured. Add the service ID via the Edit button on the store detail page.
-
-**"Railway API error" on deploy** - Check that `RAILWAY_API_TOKEN` is valid and has access to the store's Railway project. Regenerate the token at railway.app > Account Settings > Tokens if needed.
-
-**Deploy succeeds but store doesn't restart** - Railway redeploys are asynchronous. Check the Railway Deployment section in the store detail for the latest deployment status. If it shows "FAILED", check Railway logs for build errors.
-
-**Test seed stores show "Stats unavailable"** - This is expected. Seeded stores use the master DB URL as a placeholder, and the master DB doesn't have store tables (customers, conversations, etc.). CRUD, credentials, and audit logging still work correctly for testing.

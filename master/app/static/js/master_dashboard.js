@@ -1,5 +1,5 @@
 // Master Dashboard JS
-// Auth: relies on the HTTP-only session cookie set by /dashboard?token=...
+// Auth: relies on the HTTP-only session cookie set by /login.
 // The cookie is sent automatically with same-origin requests.
 
 const HEADERS = { 'Content-Type': 'application/json' };
@@ -39,8 +39,7 @@ async function api(path, options = {}) {
     if (resp.status === 401) {
         toast('Session expired — redirecting to login...', 'error');
         setTimeout(() => {
-            const token = prompt('Your session expired. Enter the master secret key:');
-            if (token) window.location.href = '/dashboard?token=' + encodeURIComponent(token);
+            window.location.href = '/login';
         }, 500);
         throw new Error('Unauthorized');
     }
@@ -49,6 +48,11 @@ async function api(path, options = {}) {
         throw new Error(err);
     }
     return resp.json();
+}
+
+async function logout() {
+    await fetch('/logout', { method: 'POST', credentials: 'same-origin' });
+    window.location.href = '/login';
 }
 
 async function apiPost(path, body) {
@@ -269,8 +273,8 @@ async function loadStoreDetail() {
             api(`/api/stores/${selectedStoreId}/credentials`),
         ]);
         renderStoreDetail(store, stats, creds);
-        // Load LLM settings, usage, and Railway status in parallel
-        const secondaryLoads = [loadLLMSettings(selectedStoreId), loadLLMUsage(selectedStoreId)];
+        // Load runtime settings, usage, and Railway status in parallel
+        const secondaryLoads = [loadRuntimeSettings(selectedStoreId), loadLLMUsage(selectedStoreId)];
         if (store.railway_service_id) secondaryLoads.push(loadRailwayStatus(selectedStoreId));
         await Promise.all(secondaryLoads);
     } catch (e) {
@@ -320,28 +324,39 @@ function renderStoreDetail(store, stats, creds) {
         <!-- API Keys -->
         ${renderApiKeysPanel(store, stats, creds)}
 
-        <!-- LLM Configuration -->
-        <div class="grid md:grid-cols-2 gap-4 mb-6">
-            <div class="card" id="llm-settings-panel">
+        <!-- AI + Usage -->
+        <div class="grid md:grid-cols-2 gap-4 mb-4">
+            <div class="card" id="ai-settings-panel">
                 <div class="flex items-center justify-between mb-3">
-                    <h3 class="font-bold text-lg">AI Provider Configuration</h3>
-                    <button onclick="loadLLMSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+                    <h3 class="font-bold text-lg">AI Settings</h3>
+                    <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
                 </div>
-                <div id="llm-settings-content">
-                    <p class="text-gray-500">Loading LLM settings...</p>
+                <div id="ai-settings-content">
+                    <p class="text-gray-500">Loading AI settings...</p>
                 </div>
             </div>
             <div class="card" id="llm-usage-panel">
                 <div class="flex items-center justify-between mb-3">
                     <h3 class="font-bold text-lg" id="llm-usage-heading">LLM Usage (Today)</h3>
-                    <div class="flex gap-2">
-                        <button onclick="openConversationViewer('${store.id}')" class="btn btn-primary text-xs">View details</button>
-                        <button onclick="loadLLMUsage('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
-                    </div>
+                    <button onclick="loadLLMUsage('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
                 </div>
                 <div id="llm-usage-content">
                     <p class="text-gray-500">Loading usage data...</p>
                 </div>
+                <div class="mt-4">
+                    <button onclick="openConversationViewer('${store.id}')" class="btn btn-primary w-full">View details</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Payment Settings -->
+        <div class="card mb-6" id="payment-settings-panel">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="font-bold text-lg">Store Payment Details</h3>
+                <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+            </div>
+            <div id="payment-settings-content">
+                <p class="text-gray-500">Loading payment details...</p>
             </div>
         </div>
 
@@ -428,32 +443,29 @@ function renderApiKeysPanel(store, stats, creds) {
 
 // ── Grouped Credentials ────────────────────────────────────
 const CRED_GROUPS = [
+    { name: 'LLM API Keys', test: k => /^(OPENAI_API_KEY|ANTHROPIC_API_KEY)$/.test(k) },
     { name: 'Channels', test: k => /^(WHATSAPP_|INSTAGRAM_|META_|TELEGRAM_)/.test(k) },
     { name: 'Infrastructure', test: k => /^(DATABASE_URL|GOOGLE_SHEETS_|APP_BASE_URL|PRODUCT_SHEET_ID)/.test(k) },
     { name: 'Customization', test: k => /^(STORE_NAME|OWNER_NAME|ADMIN_PASSWORD|SYSTEM_PROMPT_OVERRIDE|LLM_MANAGED_EXTERNALLY)/.test(k) },
 ];
 
 function renderGroupedCredentials(storeId, creds) {
-    // Filter out API keys (handled by dedicated panel)
-    const apiKeyNames = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY'];
-    const otherCreds = creds.filter(c => !apiKeyNames.includes(c.key));
-
-    if (otherCreds.length === 0) {
-        return '<p class="text-gray-500">No environment variables configured yet. Add API keys above, then add channel and infrastructure variables here.</p>';
+    if (creds.length === 0) {
+        return '<p class="text-gray-500">No environment variables configured yet. Add API keys, channel variables, and infrastructure variables to prepare the store.</p>';
     }
 
     const grouped = {};
     const used = new Set();
 
     for (const g of CRED_GROUPS) {
-        const matches = otherCreds.filter(c => g.test(c.key));
+        const matches = creds.filter(c => g.test(c.key));
         if (matches.length > 0) {
             grouped[g.name] = matches;
             matches.forEach(c => used.add(c.key));
         }
     }
 
-    const uncategorized = otherCreds.filter(c => !used.has(c.key));
+    const uncategorized = creds.filter(c => !used.has(c.key));
     if (uncategorized.length > 0) {
         grouped['Other'] = uncategorized;
     }
@@ -659,13 +671,14 @@ async function confirmDeleteCredential(storeId, key) {
     }
 }
 
-// ── LLM Settings & Usage ───────────────────────────────────
-async function loadLLMSettings(storeId) {
-    const container = document.getElementById('llm-settings-content');
-    if (!container) return;
+// ── Runtime Settings & Usage ───────────────────────────────
+async function loadRuntimeSettings(storeId) {
+    const aiContainer = document.getElementById('ai-settings-content');
+    const paymentContainer = document.getElementById('payment-settings-content');
+    if (!aiContainer && !paymentContainer) return;
 
     try {
-        const data = await api(`/api/stores/${storeId}/llm-settings`);
+        const data = await api(`/api/stores/${storeId}/settings`);
         const s = data.settings || {};
         const models = data.available_models || {};
 
@@ -686,7 +699,8 @@ async function loadLLMSettings(storeId) {
             `<option value="${m}" ${(s.fallback_model || '') === m ? 'selected' : ''}>${m}</option>`
         ).join('');
 
-        container.innerHTML = `
+        if (aiContainer) {
+            aiContainer.innerHTML = `
             <div class="space-y-3">
                 <div class="grid grid-cols-2 gap-3">
                     <div>
@@ -732,18 +746,49 @@ async function loadLLMSettings(storeId) {
                         <input id="llm-auto-fallback" type="checkbox" ${s.auto_fallback ? 'checked' : ''}>
                         <span class="text-sm">Auto Fallback</span>
                     </label>
-                    <label class="flex items-center gap-2 cursor-pointer">
-                        <input id="llm-ab-test" type="checkbox" ${s.ab_test_enabled ? 'checked' : ''}>
-                        <span class="text-sm">A/B Testing</span>
-                    </label>
                 </div>
-                <button onclick="saveLLMSettings('${storeId}')" class="btn btn-primary w-full">Save AI Settings</button>
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">Catalog PDF Interval (hours)</label>
+                    <input id="catalog-pdf-interval" type="number" step="1" min="1" max="168" value="${s.catalog_pdf_interval_hours ?? 24}" class="w-full">
+                </div>
+                <button onclick="saveAiSettings('${storeId}')" class="btn btn-primary w-full">Save AI Settings</button>
             </div>`;
+        }
+
+        if (paymentContainer) {
+            paymentContainer.innerHTML = `
+            <div class="space-y-3">
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Zelle</label>
+                        <textarea id="payment-zelle" rows="3" placeholder="Name, email or phone" class="w-full">${esc(s.payment_zelle_details || '')}</textarea>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Binance Pay</label>
+                        <textarea id="payment-binance" rows="3" placeholder="Pay ID or instructions" class="w-full">${esc(s.payment_binance_details || '')}</textarea>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Zinli</label>
+                        <textarea id="payment-zinli" rows="3" placeholder="Email, phone or instructions" class="w-full">${esc(s.payment_zinli_details || '')}</textarea>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Bolívares</label>
+                        <textarea id="payment-bolivares" rows="3" placeholder="Bank, account, ID and rate note" class="w-full">${esc(s.payment_bolivares_details || '')}</textarea>
+                    </div>
+                </div>
+                <button onclick="savePaymentSettings('${storeId}')" class="btn btn-primary w-full">Save Payment Details</button>
+            </div>`;
+        }
 
         // Store available models globally for provider change handlers
         window._llmModels = models;
     } catch (e) {
-        container.innerHTML = `<p class="text-red-500">Could not load LLM settings: ${esc(e.message)}</p>`;
+        if (aiContainer) {
+            aiContainer.innerHTML = `<p class="text-red-500">Could not load AI settings: ${esc(e.message)}</p>`;
+        }
+        if (paymentContainer) {
+            paymentContainer.innerHTML = `<p class="text-red-500">Could not load payment details: ${esc(e.message)}</p>`;
+        }
     }
 }
 
@@ -763,7 +808,7 @@ function onMasterFbProviderChange() {
     ).join('');
 }
 
-async function saveLLMSettings(storeId) {
+async function saveAiSettings(storeId) {
     const payload = {
         llm_provider: document.getElementById('llm-provider').value,
         llm_model: document.getElementById('llm-model').value,
@@ -772,8 +817,8 @@ async function saveLLMSettings(storeId) {
         fallback_provider: document.getElementById('llm-fb-provider').value,
         fallback_model: document.getElementById('llm-fb-model').value,
         auto_fallback: document.getElementById('llm-auto-fallback').checked,
-        ab_test_enabled: document.getElementById('llm-ab-test').checked,
         max_conversation_history: parseInt(document.getElementById('llm-max-history').value),
+        catalog_pdf_interval_hours: parseInt(document.getElementById('catalog-pdf-interval').value),
     };
 
     if (isNaN(payload.llm_temperature) || payload.llm_temperature < 0 || payload.llm_temperature > 1) {
@@ -785,12 +830,33 @@ async function saveLLMSettings(storeId) {
     if (isNaN(payload.max_conversation_history) || payload.max_conversation_history < 5 || payload.max_conversation_history > 50) {
         toast('Conversation history must be 5 - 50', 'error'); return;
     }
+    if (isNaN(payload.catalog_pdf_interval_hours) || payload.catalog_pdf_interval_hours < 1 || payload.catalog_pdf_interval_hours > 168) {
+        toast('Catalog PDF interval must be 1 - 168 hours', 'error'); return;
+    }
 
     try {
-        await apiPut(`/api/stores/${storeId}/llm-settings`, payload);
+        await apiPut(`/api/stores/${storeId}/settings`, payload);
         toast('AI settings saved!');
+        await loadStoreDetail();
     } catch (e) {
         toast('Error saving AI settings: ' + e.message, 'error');
+    }
+}
+
+async function savePaymentSettings(storeId) {
+    const payload = {
+        payment_zelle_details: document.getElementById('payment-zelle').value.trim(),
+        payment_binance_details: document.getElementById('payment-binance').value.trim(),
+        payment_zinli_details: document.getElementById('payment-zinli').value.trim(),
+        payment_bolivares_details: document.getElementById('payment-bolivares').value.trim(),
+    };
+
+    try {
+        await apiPut(`/api/stores/${storeId}/settings`, payload);
+        toast('Payment details saved!');
+        await loadStoreDetail();
+    } catch (e) {
+        toast('Error saving payment details: ' + e.message, 'error');
     }
 }
 
@@ -915,7 +981,7 @@ const _ACTION_LABELS = {
     delete_store: ['Delete store', 'badge-red'],
     set_credential: ['Set credential', 'badge-blue'],
     delete_credential: ['Delete credential', 'badge-red'],
-    update_llm_settings: ['LLM settings', 'badge-purple'],
+    update_runtime_settings: ['Runtime settings', 'badge-purple'],
     deploy_credentials: ['Deploy', 'badge-green'],
     deploy_failed: ['Deploy failed', 'badge-red'],
 };
@@ -1003,7 +1069,7 @@ async function toggleStoreAi(storeId) {
     const newVal = !isOn;
     if (!confirm(`Are you sure you want to turn AI ${newVal ? 'ON' : 'OFF'} for this store?`)) return;
     try {
-        await apiPut(`/api/stores/${storeId}/llm-settings`, { ai_enabled: newVal });
+        await apiPut(`/api/stores/${storeId}/settings`, { ai_enabled: newVal });
         toast(`AI ${newVal ? 'enabled' : 'disabled'} for this store`);
         await loadStoreDetail();
     } catch (e) {

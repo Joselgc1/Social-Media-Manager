@@ -29,6 +29,7 @@
             <span id="master-stores-badge" class="badge badge-green">...</span>
             <span id="master-active-badge" class="badge badge-blue">...</span>
             <button onclick="loadStores()" class="btn btn-secondary" title="Actualizar datos">&#x21bb;</button>
+            <button onclick="logout()" class="btn btn-secondary" title="Sign out">Sign out</button>
             <button id="dark-toggle" onclick="toggleDarkMode()" class="btn btn-secondary">🌙</button>
         </div>
     </div>
@@ -88,7 +89,7 @@
                     <option value="delete_store">Delete store</option>
                     <option value="set_credential">Set credential</option>
                     <option value="delete_credential">Delete credential</option>
-                    <option value="update_llm_settings">Update LLM settings</option>
+                    <option value="update_runtime_settings">Update runtime settings</option>
                     <option value="deploy_credentials">Deploy credentials</option>
                     <option value="deploy_failed">Deploy failed</option>
                 </select>

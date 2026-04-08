@@ -27,10 +27,11 @@ from app.config import get_config
 from app import db
 from app.admin.notify import notify_owner
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs
-from app.analytics import get_conversion_funnel, get_response_time_stats, get_ab_test_results, get_popular_products
+from app.analytics import get_conversion_funnel, get_response_time_stats, get_popular_products
 from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
 from app.crm.customers import set_conversation_state, add_tags, remove_tag
+from app.crm import orders
 from app.broadcast.sender import execute_broadcast, preview_broadcast, list_broadcasts
 
 logger = logging.getLogger(__name__)
@@ -105,10 +106,6 @@ async def _handle_command(command: str, args: str) -> str:
             return await _cmd_conversion(args)
         elif command == "/performance":
             return await _cmd_performance(args)
-        elif command == "/abtest":
-            return await _cmd_abtest(args)
-        elif command == "/abmode":
-            return await _cmd_abmode(args)
         elif command == "/products":
             return await _cmd_popular_products()
         elif command == "/catalogpdf":
@@ -157,8 +154,7 @@ def _cmd_start() -> str:
         "/conversion - Embudo de conversión\n"
         "/performance - Tiempos de respuesta\n"
         "/products - Productos populares\n"
-        "/abtest - Resultados A/B test\n"
-        "/abmode on/off - Activar/desactivar A/B\n\n"
+        "\n"
         "📄 *Catálogo*\n"
         "/catalogpdf - Generar PDF del catálogo\n\n"
         "🤖 *Control del AI*\n"
@@ -230,7 +226,7 @@ async def _cmd_customers(args: str) -> str:
             """
             SELECT id, display_name, channel, platform_id, tags, total_orders, last_active
             FROM customers
-            WHERE tags @> :tag::jsonb
+            WHERE tags @> CAST(:tag AS jsonb)
             ORDER BY COALESCE(display_name, platform_id) ASC LIMIT 10
             """,
             {"tag": json.dumps([tag_filter])},
@@ -314,10 +310,7 @@ async def _cmd_update_order(args: str) -> str:
 
     # Determine which column to update
     if new_status in ("pending", "confirmed", "proof_received", "failed"):
-        await db.execute(
-            "UPDATE orders SET payment_status = :s, updated_at = NOW() WHERE id = :id",
-            {"s": new_status, "id": row["id"]},
-        )
+        await orders.update_order_payment_status(str(row["id"]), status=new_status)
     elif new_status in ("shipped", "delivered"):
         await db.execute(
             "UPDATE orders SET shipping_status = :s, updated_at = NOW() WHERE id = :id",
@@ -516,60 +509,6 @@ async def _cmd_performance(args: str) -> str:
             f"    Min: {p['min_ms']}ms | Max: {p['max_ms']}ms | Calls: {p['calls']}"
         )
     return "\n".join(lines)
-
-
-async def _cmd_abtest(args: str) -> str:
-    days = int(args.strip()) if args.strip().isdigit() else 14
-    data = await get_ab_test_results(days=days)
-
-    if not data["groups"]:
-        return (
-            "🧪 *A/B Test:* Sin datos.\n"
-            "Activa el modo A/B con /abmode on para empezar a asignar clientes."
-        )
-
-    lines = [f"🧪 *Resultados A/B Test ({days} días)*\n"]
-    for prov, stats in data["groups"].items():
-        rt = data["response_times"].get(prov, {})
-        lines.append(
-            f"  *{prov}*\n"
-            f"    Clientes: {stats['customers']}\n"
-            f"    Pedidos pagados: {stats['paid_orders']}\n"
-            f"    Conversión: {stats['conversion_rate']}\n"
-            f"    Ingresos: ${stats['revenue']:.2f}\n"
-            f"    Valor promedio: {stats['avg_order_value']}\n"
-            f"    Respuesta avg: {rt.get('avg_ms', '?')}ms"
-        )
-
-    return "\n".join(lines)
-
-
-async def _cmd_abmode(args: str) -> str:
-    config = get_config()
-    if config.llm_managed_externally:
-        return "⚙️ El modo A/B es administrado por el Master Admin. Contacta a tu administrador para cambios."
-
-    mode = args.strip().lower()
-    if mode not in ("on", "off"):
-        return "Uso: /abmode on o /abmode off"
-
-    enabled = mode == "on"
-    await db.execute(
-        """
-        INSERT INTO settings (key, value) VALUES ('ab_test_enabled', :val)
-        ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()
-        """,
-        {"val": json.dumps(enabled)},
-    )
-    db.invalidate_settings_cache()
-
-    if enabled:
-        return (
-            "🧪 *Modo A/B activado*\n\n"
-            "Los nuevos clientes serán asignados aleatoriamente a OpenAI o Anthropic.\n"
-            "Usa /abtest para ver los resultados."
-        )
-    return "🧪 *Modo A/B desactivado*\nTodos los clientes usarán el proveedor principal."
 
 
 async def _cmd_ai_toggle(args: str) -> str:

@@ -5,7 +5,6 @@ the live product catalog and payment details at runtime.
 """
 
 import json
-import os
 from pathlib import Path
 
 # Resolve the prompts directory relative to the project root
@@ -38,16 +37,22 @@ def build_system_prompt(
     store_name: str = "Tu Tienda VS",
     channel: str = "whatsapp",
     customer: dict | None = None,
-    zelle_details: str = "[Configurar en .env]",
-    binance_details: str = "[Configurar en .env]",
-    zinli_details: str = "[Configurar en .env]",
-    bolivares_details: str = "[Configurar en .env]",
+    zelle_details: str = "",
+    binance_details: str = "",
+    zinli_details: str = "",
+    bolivares_details: str = "",
 ) -> str:
     """
     Assemble the final system prompt by injecting the live product catalog,
     payment details, channel info, and customer context into the template.
     """
     template = _load_template()
+    payment_methods_block = _build_payment_methods_block(
+        zelle_details=zelle_details,
+        binance_details=binance_details,
+        zinli_details=zinli_details,
+        bolivares_details=bolivares_details,
+    )
 
     prompt = template.format(
         store_name=store_name,
@@ -56,6 +61,7 @@ def build_system_prompt(
         binance_details=binance_details,
         zinli_details=zinli_details,
         bolivares_details=bolivares_details,
+        payment_methods_block=payment_methods_block,
     )
 
     # Append channel-specific instructions
@@ -71,12 +77,42 @@ def build_system_prompt(
     return prompt
 
 
+def _build_payment_methods_block(
+    zelle_details: str = "",
+    binance_details: str = "",
+    zinli_details: str = "",
+    bolivares_details: str = "",
+) -> str:
+    methods = []
+    if zelle_details.strip():
+        methods.append(f"- **Zelle**: {zelle_details.strip()}")
+    if binance_details.strip():
+        methods.append(f"- **Binance Pay**: {binance_details.strip()}")
+    if zinli_details.strip():
+        methods.append(f"- **Zinli**: {zinli_details.strip()}")
+    if bolivares_details.strip():
+        methods.append(
+            f"- **Bolívares (transferencia bancaria)**: {bolivares_details.strip()}\n"
+            "  - La tasa es Binance del día. El cliente debe confirmar la tasa actual."
+        )
+
+    if methods:
+        return "\n".join(methods)
+
+    return (
+        "No hay métodos de pago configurados en este momento. "
+        "Si el cliente está listo para pagar, explica que la tienda confirmará "
+        "los datos de pago manualmente y NO inventes cuentas ni instrucciones."
+    )
+
+
 def _build_channel_context(channel: str) -> str:
     """Return channel-specific instructions for the AI."""
     if channel == "whatsapp":
         return (
             "Estás hablando por WhatsApp. "
             "Puedes usar send_interactive_buttons para mostrar opciones con botones. "
+            "Úsalos solo cuando el cliente todavía no haya escogido una opción por texto. "
             "Los mensajes pueden ser más largos que en Instagram."
         )
     elif channel == "instagram":
@@ -158,18 +194,23 @@ def format_catalog_as_markdown(products: list[dict]) -> str:
         return "No hay productos disponibles en este momento."
 
     lines = [
-        "| SKU | Producto | Categoría | Tallas disponibles | Precio (USD) | Stock |",
-        "|-----|----------|-----------|-------------------|--------------|-------|",
+        "| SKU | Producto | Categoría | Tallas disponibles | Precio (USD) | Disponibilidad |",
+        "|-----|----------|-----------|-------------------|--------------|----------------|",
     ]
 
     for p in products:
+        try:
+            in_stock = float(p.get("stock", 0) or 0) > 0
+        except (TypeError, ValueError):
+            in_stock = False
+        availability = "Disponible" if in_stock else "Agotado"
         lines.append(
             f"| {p.get('sku', '')} "
             f"| {p.get('product_name', '')} "
             f"| {p.get('category', '')} "
             f"| {p.get('sizes', '')} "
             f"| ${p.get('price_usd', 0):.2f} "
-            f"| {p.get('stock', 0)} |"
+            f"| {availability} |"
         )
 
     return "\n".join(lines)

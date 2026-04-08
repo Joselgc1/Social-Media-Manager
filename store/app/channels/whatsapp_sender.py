@@ -128,22 +128,17 @@ async def mark_as_read(message_id: str):
 # ── Internal helper ──────────────────────────────────────────
 
 async def _send(url: str, payload: dict, access_token: str):
-    """POST to the WhatsApp Cloud API with error logging."""
+    """POST to the WhatsApp Cloud API and raise on delivery failure."""
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=payload, headers=headers)
 
-            if resp.status_code != 200:
-                logger.error(
-                    f"WhatsApp API error ({resp.status_code}): {resp.text}"
-                )
-            else:
-                logger.debug(f"WhatsApp message sent: {resp.json()}")
+    if not resp.is_success:
+        logger.error(f"WhatsApp API error ({resp.status_code})")
+        raise RuntimeError(f"WhatsApp API error {resp.status_code}: {resp.text}")
 
-    except Exception as e:
-        logger.error(f"Failed to send WhatsApp message: {e}")
+    logger.debug(f"WhatsApp message sent: {resp.json()}")

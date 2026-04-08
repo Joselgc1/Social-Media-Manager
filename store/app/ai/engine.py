@@ -9,6 +9,8 @@ the final text response.
 import json
 import time
 import logging
+import re
+import unicodedata
 from app import db
 from app import analytics
 from app.ai.providers import get_provider, AVAILABLE_MODELS, list_providers as _list_providers
@@ -20,11 +22,36 @@ from app.crm import customers, conversations, orders
 from app.admin.notify import notify_escalation, notify_incoming_message, notify_new_order
 from app.catalog.sheets import get_cached_catalog
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
+from app.config import get_config
 
 logger = logging.getLogger(__name__)
 
 # Maximum number of tool-call rounds per message (prevent infinite loops)
 MAX_TOOL_ROUNDS = 6
+
+_HOSTILE_MESSAGE_PATTERNS = [
+    (
+        re.compile(r"\b(estafa|estafadores?|ladrones?|fraude|timador(?:es)?|robo)\b"),
+        "Cliente acusa a la tienda de estafa o robo.",
+    ),
+    (
+        re.compile(
+            r"\b(maldit[oa]s?|idiot[ae]s?|imbecil(?:es)?|estupid[oa]s?|"
+            r"basura|porqueria|inutil(?:es)?|payas[oa]s?|mierda|asqueros[oa]s?)\b"
+        ),
+        "Cliente usa insultos o lenguaje agresivo hacia la tienda.",
+    ),
+    (
+        re.compile(
+            r"(voy a denunciar|te voy a denunciar|los voy a denunciar|"
+            r"voy a demandar|te voy a demandar|los voy a demandar|"
+            r"voy a quemar|te voy a quemar|los voy a quemar|"
+            r"voy a funar|te voy a exponer|los voy a exponer|"
+            r"me las van a pagar|les voy a caer)"
+        ),
+        "Cliente usa amenazas o lenguaje agresivo.",
+    ),
+]
 
 
 async def generate_response(
@@ -45,6 +72,7 @@ async def generate_response(
     """
     # ── 1. Load settings ─────────────────────────────────────
     settings = await db.get_settings()
+    config = get_config()
 
     # ── 2. Get or create customer ────────────────────────────
     customer = await customers.get_or_create_customer(
@@ -90,6 +118,45 @@ async def generate_response(
             "paused": not ai_enabled,
         }
 
+    # ── 2c. Auto-escalate abusive customers ─────────────────
+    hostility_reason = _detect_hostile_customer_message(message_text)
+    if hostility_reason:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="user",
+            content=message_text,
+            channel=channel,
+            media_url=media_url,
+        )
+        await customers.set_conversation_state(customer["id"], "escalated")
+        summary = await conversations.get_recent_summary(customer["id"], limit=5)
+        await notify_escalation(
+            customer_name=customer.get("display_name"),
+            customer_channel=channel,
+            customer_platform_id=sender_id,
+            reason=hostility_reason,
+            urgency="high",
+            conversation_summary=summary,
+        )
+        handoff_text = (
+            "Voy a dejar esta conversación en manos de una persona del equipo "
+            "para que te atienda directamente."
+        )
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="assistant",
+            content=handoff_text,
+            channel=channel,
+        )
+        return {
+            "text": handoff_text,
+            "interactive": None,
+            "catalog_pdf": None,
+            "customer_id": customer["id"],
+            "escalated": True,
+            "paused": False,
+        }
+
     # ── 3. Load conversation history ─────────────────────────
     max_history = settings.get("max_conversation_history", 20)
     history = await conversations.get_history(customer["id"], limit=max_history)
@@ -102,33 +169,19 @@ async def generate_response(
     catalog_md = format_catalog_as_markdown(catalog)
     system_prompt = build_system_prompt(
         catalog_markdown=catalog_md,
-        store_name=settings.get("store_name", "Tu Tienda VS"),
+        store_name=settings.get("store_name", config.store_name),
         channel=channel,
         customer=customer,
+        zelle_details=settings.get("payment_zelle_details", ""),
+        binance_details=settings.get("payment_binance_details", ""),
+        zinli_details=settings.get("payment_zinli_details", ""),
+        bolivares_details=settings.get("payment_bolivares_details", ""),
     )
 
     # ── 5. Call the LLM ──────────────────────────────────────
-    ab_mode = settings.get("ab_test_enabled", False)
     was_fallback = False
-
-    if ab_mode and customer.get("ab_provider"):
-        # A/B test: use the customer's assigned provider
-        provider_name = customer["ab_provider"]
-        # Find the default model for this provider
-        model = next(
-            (m["id"] for m in AVAILABLE_MODELS.get(provider_name, []) if m.get("default")),
-            settings.get("llm_model", "gpt-5.4-nano"),
-        )
-    elif ab_mode and not customer.get("ab_provider"):
-        # New customer in A/B mode: assign a group
-        provider_name = await analytics.assign_ab_group(customer["id"])
-        model = next(
-            (m["id"] for m in AVAILABLE_MODELS.get(provider_name, []) if m.get("default")),
-            settings.get("llm_model", "gpt-5.4-nano"),
-        )
-    else:
-        provider_name = settings.get("llm_provider", "openai")
-        model = settings.get("llm_model", "gpt-5.4-nano")
+    provider_name = settings.get("llm_provider", "openai")
+    model = settings.get("llm_model", "gpt-5.4-nano")
 
     temperature = settings.get("llm_temperature", 0.7)
     max_tokens = settings.get("llm_max_tokens", 500)
@@ -216,7 +269,7 @@ async def generate_response(
         args = tool_call["arguments"]
         tc_id = tool_call["id"]
 
-        logger.info(f"Tool call: {name}({json.dumps(args, ensure_ascii=False)})")
+        logger.info(f"Tool call: {name}")
         result = await _execute_tool(name, args, customer, channel)
         tool_log.append({"name": name, "args": args, "result": result})
 
@@ -301,6 +354,24 @@ async def generate_response(
     }
 
 
+def _detect_hostile_customer_message(message_text: str) -> str | None:
+    """
+    Detect clear insults, accusations, or threats from the customer.
+    High-confidence matches are escalated immediately to a human.
+    """
+    normalized = _normalize_text_for_moderation(message_text)
+    for pattern, reason in _HOSTILE_MESSAGE_PATTERNS:
+        if pattern.search(normalized):
+            return reason
+    return None
+
+
+def _normalize_text_for_moderation(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", (text or "").lower())
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
 # ── Tool execution ───────────────────────────────────────────
 
 async def _execute_tool(name: str, args: dict, customer: dict, channel: str) -> dict:
@@ -355,10 +426,6 @@ async def _execute_tool(name: str, args: dict, customer: dict, channel: str) -> 
 
         # Auto-tag
         await customers.add_tags(customer_id, [f"payment:{args.get('payment_method', '')}"])
-        if customer.get("total_orders", 0) >= 2:
-            await customers.add_tags(customer_id, ["repeat_buyer"])
-        if customer.get("total_orders", 0) >= 3 or customer.get("total_spent", 0) >= 100:
-            await customers.add_tags(customer_id, ["vip"])
 
         return order
 

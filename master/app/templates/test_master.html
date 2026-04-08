@@ -35,7 +35,7 @@
                 <p class="text-gray-500 text-sm">Local testing tools for the master service</p>
             </div>
             <div class="flex gap-2">
-                <a href="/dashboard" class="btn btn-secondary text-sm">Dashboard (needs ?token=)</a>
+                <a href="/login" class="btn btn-secondary text-sm">Dashboard Login</a>
             </div>
         </div>
 
@@ -204,10 +204,24 @@
     function openDashboard() {
         const token = tokenInput();
         if (!token) { alert('Enter your MASTER_SECRET_KEY first'); return; }
-        const url = `/dashboard?token=${encodeURIComponent(token)}`;
+        const url = '/dashboard';
         document.getElementById('dashboard-link').innerHTML =
-            `<a href="${url}" target="_blank" class="text-indigo-600 underline">${url}</a>`;
-        window.open(url, '_blank');
+            `<span class="text-indigo-600 underline">POST /login → ${url}</span>`;
+
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/login';
+        form.target = '_blank';
+
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'master_secret_key';
+        input.value = token;
+
+        form.appendChild(input);
+        document.body.appendChild(form);
+        form.submit();
+        form.remove();
     }
 
     async function runApiTest() {

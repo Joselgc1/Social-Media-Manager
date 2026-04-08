@@ -1,4 +1,5 @@
 -- Full store schema
+-- Consolidated base schema for fresh installs (includes launch hardening changes)
 -- Run this against your Supabase PostgreSQL instance
 
 -- Enable UUID generation
@@ -23,7 +24,6 @@ CREATE TABLE customers (
     notes                 TEXT,
     conversation_state    TEXT DEFAULT 'active',       -- "active", "escalated", "blocked"
     is_blocked            BOOLEAN DEFAULT FALSE,
-    ab_provider           TEXT,                        -- "openai" or "anthropic" or NULL (A/B test group)
     last_shipping_address TEXT,
     last_shipping_city    TEXT,
     last_shipping_method  TEXT,
@@ -61,6 +61,7 @@ CREATE TABLE orders (
     payment_method   TEXT,                        -- "zelle", "binance", "zinli", "bolivares"
     payment_status   TEXT DEFAULT 'pending',      -- "pending", "proof_received", "confirmed", "failed"
     payment_proof    TEXT,                        -- URL to payment screenshot
+    customer_totals_applied BOOLEAN NOT NULL DEFAULT FALSE,
     shipping_method  TEXT,                        -- "mrw" or "zoom"
     shipping_city    TEXT,
     shipping_address TEXT,
@@ -87,7 +88,7 @@ CREATE TABLE broadcasts (
     scheduled_at    TIMESTAMPTZ,
     sent_at         TIMESTAMPTZ,
     recipients      INTEGER DEFAULT 0,
-    status          TEXT DEFAULT 'draft'         -- "draft", "scheduled", "sending", "sent", "failed"
+    status          TEXT DEFAULT 'draft'         -- "draft", "scheduled", "sending", "sent", "partial", "failed"
 );
 
 -- ============================================================
@@ -107,10 +108,15 @@ INSERT INTO settings (key, value) VALUES
     ('fallback_provider',          '"anthropic"'),
     ('fallback_model',             '"claude-haiku-4-5"'),
     ('auto_fallback',              'true'),
+    ('ai_enabled',                 'true'),
     ('catalog_refresh_minutes',    '15'),
+    ('catalog_pdf_interval_hours', '24'),
     ('max_conversation_history',   '20'),
     ('escalation_telegram_enabled','true'),
-    ('ab_test_enabled',            'false');
+    ('payment_zelle_details',      '""'),
+    ('payment_binance_details',    '""'),
+    ('payment_zinli_details',      '""'),
+    ('payment_bolivares_details',  '""');
 
 -- ============================================================
 -- Usage tracking (for cost monitoring)

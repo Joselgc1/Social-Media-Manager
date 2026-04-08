@@ -25,6 +25,18 @@ def _make_cookie_token(password: str) -> str:
     ).hexdigest()
 
 
+def is_admin_cookie_valid(request: Request) -> bool:
+    """Return True when the request carries a valid admin session cookie."""
+    config = get_config()
+    if not config.admin_password:
+        return bool(config.debug)
+
+    cookie = request.cookies.get(COOKIE_NAME)
+    return bool(
+        cookie and hmac.compare_digest(cookie, _make_cookie_token(config.admin_password))
+    )
+
+
 async def require_admin(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
@@ -49,8 +61,7 @@ async def require_admin(
         return True
 
     # Check session cookie
-    cookie = request.cookies.get(COOKIE_NAME)
-    if cookie and hmac.compare_digest(cookie, _make_cookie_token(config.admin_password)):
+    if is_admin_cookie_valid(request):
         return True
 
     raise HTTPException(status_code=401, detail="Invalid or missing admin credentials")

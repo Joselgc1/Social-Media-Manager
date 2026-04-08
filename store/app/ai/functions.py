@@ -125,7 +125,7 @@ TOOLS = [
         "description": (
             "Transfer the conversation to the store owner. Call this for: "
             "complaints, refund requests, questions you cannot answer, "
-            "angry customers, payment disputes, or when the customer "
+            "angry or insulting customers, threats, payment disputes, or when the customer "
             "explicitly asks to speak with a human."
         ),
         "parameters": {
@@ -168,7 +168,9 @@ TOOLS = [
         "description": (
             "Send a message with clickable reply buttons to the customer. "
             "Only works on WhatsApp. Use for presenting 2-3 clear choices "
-            "like payment methods or shipping options."
+            "like payment methods or shipping options ONLY when the customer "
+            "has not already answered in plain text. Do NOT use buttons to "
+            "re-confirm a choice the customer already made."
         ),
         "parameters": {
             "type": "object",

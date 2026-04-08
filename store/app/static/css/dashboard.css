@@ -17,8 +17,25 @@ body { font-family: system-ui, -apple-system, sans-serif; }
 .btn-secondary:hover { background: #e5e7eb; }
 .btn-danger { background: #fee2e2; color: #991b1b; }
 .btn-danger:hover { background: #fecaca; }
-select, input { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px !important; font-size: 0.875rem; background: white; color: #111827; transition: background-color 0.2s, border-color 0.2s, color 0.2s; box-sizing: border-box; }
+select, input, textarea { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px !important; font-size: 0.875rem; background: white; color: #111827; transition: background-color 0.2s, border-color 0.2s, color 0.2s; box-sizing: border-box; }
 select { padding-right: 28px !important; }
+textarea { resize: vertical; min-height: 88px; }
+.payment-field {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  border: 1px solid #d1d5db !important;
+  border-radius: 8px !important;
+  padding: 8px 12px !important;
+  background: white !important;
+  color: #111827 !important;
+  box-sizing: border-box;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+  overflow: hidden;
+  background-clip: padding-box;
+}
+.payment-field::placeholder { color: #94a3b8; }
 .tab { padding: 8px 16px; cursor: pointer; font-weight: 500; border-bottom: 2px solid transparent; color: #6b7280; transition: color 0.2s; }
 .tab.active { color: #4f46e5; border-color: #4f46e5; }
 .fade-in { animation: fadeIn 0.3s ease-in; }
@@ -39,9 +56,15 @@ select { padding-right: 28px !important; }
 .dark .btn-secondary:hover { background: #4b5563; }
 .dark .btn-danger { background: #7f1d1d; color: #fca5a5; }
 .dark .btn-danger:hover { background: #991b1b; }
-.dark select, .dark input { background: #111827; border-color: #4b5563; color: #f3f4f6; }
-.dark select:focus, .dark input:focus { border-color: #6366f1; outline: none; }
-.dark input::placeholder { color: #6b7280; }
+.dark select, .dark input, .dark textarea { background: #111827; border-color: #4b5563; color: #f3f4f6; }
+.dark select:focus, .dark input:focus, .dark textarea:focus { border-color: #6366f1; outline: none; }
+.dark input::placeholder, .dark textarea::placeholder { color: #6b7280; }
+.dark .payment-field {
+  background: #0f172a !important;
+  border-color: #475569 !important;
+  color: #f1f5f9 !important;
+}
+.dark .payment-field::placeholder { color: #94a3b8 !important; }
 .dark .tab { color: #9ca3af; }
 .dark .tab.active { color: #818cf8; border-color: #818cf8; }
 .dark .tab:hover { color: #c7d2fe; }

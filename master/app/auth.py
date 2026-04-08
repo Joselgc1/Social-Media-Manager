@@ -23,13 +23,22 @@ def _make_cookie_token(secret: str) -> str:
     ).hexdigest()
 
 
+def is_master_cookie_valid(request: Request) -> bool:
+    """Return True when the request carries a valid master session cookie."""
+    config = get_config()
+    cookie = request.cookies.get(COOKIE_NAME)
+    return bool(
+        cookie and hmac.compare_digest(cookie, _make_cookie_token(config.master_secret_key))
+    )
+
+
 async def require_auth(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ):
     """
     Dependency that validates the Bearer token against MASTER_SECRET_KEY.
-    Checks (in order): Bearer header, session cookie, ?token= query param.
+    Checks (in order): Bearer header, session cookie.
     All comparisons are timing-safe.
     """
     config = get_config()
@@ -39,13 +48,7 @@ async def require_auth(
         return True
 
     # Check session cookie (timing-safe)
-    cookie = request.cookies.get(COOKIE_NAME)
-    if cookie and hmac.compare_digest(cookie, _make_cookie_token(config.master_secret_key)):
-        return True
-
-    # Fall back to ?token= query param (for browser access to dashboard)
-    token = request.query_params.get("token")
-    if token and hmac.compare_digest(token, config.master_secret_key):
+    if is_master_cookie_valid(request):
         return True
 
     raise HTTPException(status_code=401, detail="Invalid or missing authentication token")

@@ -1,6 +1,6 @@
 """
 Analytics API endpoints.
-Conversion funnels, response times, product popularity, and A/B test results.
+Conversion funnels, response times, and product popularity.
 """
 
 from datetime import date, timedelta
@@ -36,15 +36,6 @@ async def popular_products(days: int = 30):
     Most frequently asked-about products based on check_inventory calls.
     """
     return await analytics.get_popular_products(days=days)
-
-
-@router.get("/ab-test")
-async def ab_test_results(days: int = 14):
-    """
-    A/B test comparison between LLM providers.
-    Shows conversion rates, revenue, and response times per group.
-    """
-    return await analytics.get_ab_test_results(days=days)
 
 
 @router.post("/build-daily")

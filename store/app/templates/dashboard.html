@@ -30,6 +30,7 @@
         <span id="provider-badge" class="badge badge-blue">...</span>
         <span id="catalog-badge" class="badge badge-gray">...</span>
         <button class="btn btn-secondary" onclick="refreshCurrentTab()" title="Actualizar datos">&#x21bb;</button>
+        <button class="btn btn-secondary" onclick="logout()" title="Cerrar sesión">Salir</button>
         <button id="dark-toggle" class="btn btn-secondary" onclick="toggleDarkMode()" title="Modo oscuro/claro">🌙</button>
       </div>
     </div>
@@ -171,6 +172,30 @@
             </div>
           </div>
         </div>
+        <div class="card mb-4">
+          <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Métodos de pago</h3>
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Zelle</label>
+              <textarea id="payment-zelle" rows="3" placeholder="Nombre, correo o teléfono" class="w-full payment-field"></textarea>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Binance Pay</label>
+              <textarea id="payment-binance" rows="3" placeholder="Pay ID o instrucciones" class="w-full payment-field"></textarea>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Zinli</label>
+              <textarea id="payment-zinli" rows="3" placeholder="Correo, teléfono o instrucciones" class="w-full payment-field"></textarea>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Bolívares</label>
+                <textarea id="payment-bolivares" rows="3" placeholder="Banco, cuenta, cédula y nota de tasa" class="w-full payment-field"></textarea>
+            </div>
+          </div>
+          <div class="mt-4">
+            <button class="btn btn-primary" onclick="savePaymentSettings()">Guardar métodos de pago</button>
+          </div>
+        </div>
         <div id="llm-settings-section" class="grid md:grid-cols-2 gap-4">
           <div class="card">
             <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Proveedor LLM</h3>
@@ -204,12 +229,6 @@
           <div class="card">
             <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Fallback automatico</h3>
             <div class="space-y-3">
-              <div>
-                <label class="flex items-center gap-2 cursor-pointer">
-                  <input id="set-abtest" type="checkbox">
-                  <span class="text-sm dark:text-gray-300">Activar A/B testing entre proveedores</span>
-                </label>
-              </div>
               <div>
                 <label class="flex items-center gap-2 cursor-pointer">
                   <input id="set-fallback" type="checkbox">

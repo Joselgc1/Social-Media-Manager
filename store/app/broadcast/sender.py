@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 SEND_DELAY = 0.5
 
 
+def _mask_platform_id(value: str) -> str:
+    if len(value) <= 4:
+        return value
+    return f"{value[:2]}***{value[-2:]}"
+
+
 async def execute_broadcast(broadcast_id: str) -> dict:
     """
     Execute a broadcast: query matching customers, send templates, update status.
@@ -85,11 +91,11 @@ async def execute_broadcast(broadcast_id: str) -> dict:
                 sent += 1
                 await asyncio.sleep(SEND_DELAY)
             except Exception as e:
-                logger.error(f"Broadcast send failed for {customer['platform_id']}: {e}")
+                logger.error(f"Broadcast send failed for {_mask_platform_id(customer['platform_id'])}: {e}")
                 errors += 1
 
         # Update broadcast record
-        final_status = "sent" if errors == 0 else ("sent" if sent > 0 else "failed")
+        final_status = "sent" if errors == 0 else ("partial" if sent > 0 else "failed")
         await db.execute(
             "UPDATE broadcasts SET status = :status, recipients = :sent WHERE id = :id",
             {"status": final_status, "sent": sent, "id": broadcast_id},

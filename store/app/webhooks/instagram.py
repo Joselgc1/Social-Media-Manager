@@ -34,6 +34,30 @@ from app.admin.notify import notify_owner
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _mask_sender(sender: str) -> str:
+    if len(sender) <= 4:
+        return sender
+    return f"{sender[:2]}***{sender[-2:]}"
+
+
+async def _safe_send_apology(sender_id: str):
+    try:
+        await send_text(
+            to=sender_id,
+            text="Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo? 🙏",
+        )
+    except Exception as send_error:
+        logger.error(f"Failed to send Instagram fallback reply to {_mask_sender(sender_id)}: {send_error}")
+
+
+async def _notify_delivery_failure(sender_id: str, detail: str):
+    await notify_owner(
+        f"⚠️ *Fallo enviando respuesta por Instagram*\n\n"
+        f"*Cliente:* `{_mask_sender(sender_id)}`\n"
+        f"*Detalle:* {detail[:400]}"
+    )
+
 # Map Ice Breaker payloads to context hints for the AI
 ICE_BREAKER_CONTEXT = {
     "BROWSE_PRODUCTS": "El cliente quiere ver los productos disponibles.",
@@ -123,7 +147,7 @@ async def _process_event(event: dict):
 
     # Handle message deletions (acknowledge but don't act)
     if event.get("message", {}).get("is_deleted"):
-        logger.info(f"Instagram: message deleted by {sender_id}")
+        logger.info(f"Instagram: message deleted by {_mask_sender(sender_id)}")
         return
 
     # ── Regular messages ─────────────────────────────────────
@@ -190,7 +214,7 @@ async def _process_message(sender_id: str, message: dict):
     if not text.strip():
         return
 
-    logger.info(f"Instagram DM from {sender_id}: {text[:100]}")
+    logger.info(f"Instagram DM received from {_mask_sender(sender_id)}")
     await _route_to_ai(sender_id, text, media_url)
 
 
@@ -211,7 +235,7 @@ async def _process_postback(sender_id: str, postback: dict):
     else:
         text = f"[Postback: {payload}]"
 
-    logger.info(f"Instagram postback from {sender_id}: {payload} -> {text}")
+    logger.info(f"Instagram postback from {_mask_sender(sender_id)}")
     await _route_to_ai(sender_id, text)
 
 
@@ -231,7 +255,7 @@ async def _process_referral(sender_id: str, referral: dict):
     else:
         text = "Hola, quiero más información."
 
-    logger.info(f"Instagram referral from {sender_id}: source={source}")
+    logger.info(f"Instagram referral from {_mask_sender(sender_id)}: source={source}")
     await _route_to_ai(sender_id, text)
 
 
@@ -249,14 +273,19 @@ async def _route_to_ai(sender_id: str, text: str, media_url: str | None = None):
             message_text=text,
             media_url=media_url,
         )
+    except Exception as e:
+        logger.exception(f"Error generating Instagram response for {_mask_sender(sender_id)}: {e}")
+        await _safe_send_apology(sender_id)
+        return
 
-        if result.get("paused") or result.get("escalated"):
-            # AI is off — owner handles this conversation directly.
-            # Message was already stored and owner notified by the engine.
-            return
+    if result.get("paused"):
+        return
+    if result.get("escalated") and not (
+        result.get("text") or result.get("interactive") or result.get("catalog_pdf")
+    ):
+        return
 
-        # On Instagram, we can use Quick Replies instead of buttons
-        # Check if the AI wanted to send interactive buttons
+    try:
         if result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
             quick_replies = [
                 {"title": btn, "payload": btn.upper().replace(" ", "_")}
@@ -268,7 +297,6 @@ async def _route_to_ai(sender_id: str, text: str, media_url: str | None = None):
                 quick_replies=quick_replies,
             )
         elif result.get("text"):
-            # Split long messages (Instagram has a 1000-byte limit)
             reply = result["text"]
             if len(reply.encode("utf-8")) > 950:
                 chunks = _split_message(reply, max_bytes=950)
@@ -276,13 +304,9 @@ async def _route_to_ai(sender_id: str, text: str, media_url: str | None = None):
                     await send_text(to=sender_id, text=chunk)
             else:
                 await send_text(to=sender_id, text=reply)
-
     except Exception as e:
-        logger.exception(f"Error processing Instagram DM from {sender_id}: {e}")
-        await send_text(
-            to=sender_id,
-            text="Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo? 🙏",
-        )
+        logger.exception(f"Error sending Instagram response to {_mask_sender(sender_id)}: {e}")
+        await _notify_delivery_failure(sender_id, str(e))
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -314,7 +338,7 @@ def _split_message(text: str, max_bytes: int = 950) -> list[str]:
 
 def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bool:
     """Verify the X-Hub-Signature-256 header from Meta."""
-    if not signature_header:
+    if not signature_header or not app_secret:
         return False
 
     expected = "sha256=" + hmac.new(

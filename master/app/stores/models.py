@@ -65,7 +65,7 @@ class CredentialSet(BaseModel):
     value: str
 
 
-class LLMSettingsUpdate(BaseModel):
+class RuntimeSettingsUpdate(BaseModel):
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_temperature: float | None = None
@@ -73,7 +73,14 @@ class LLMSettingsUpdate(BaseModel):
     fallback_provider: str | None = None
     fallback_model: str | None = None
     auto_fallback: bool | None = None
-    ab_test_enabled: bool | None = None
     max_conversation_history: int | None = None
     ai_enabled: bool | None = None
+    catalog_pdf_interval_hours: int | None = None
+    payment_zelle_details: str | None = None
+    payment_binance_details: str | None = None
+    payment_zinli_details: str | None = None
+    payment_bolivares_details: str | None = None
 
+
+class LLMSettingsUpdate(RuntimeSettingsUpdate):
+    """Backward-compatible alias for older callers."""

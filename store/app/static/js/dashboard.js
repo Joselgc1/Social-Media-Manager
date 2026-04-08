@@ -16,8 +16,7 @@ async function apiFetch(url, options = {}) {
   if (resp.status === 401) {
     toast('Sesión expirada — redirigiendo al login...', '#dc2626');
     setTimeout(() => {
-      const pw = prompt('Tu sesión expiró. Ingresa el password de admin:');
-      if (pw) window.location.href = '/admin/dashboard?password=' + encodeURIComponent(pw);
+      window.location.href = '/admin/login';
     }, 500);
     throw new Error('Unauthorized');
   }
@@ -26,6 +25,11 @@ async function apiFetch(url, options = {}) {
     throw new Error('Forbidden');
   }
   return resp;
+}
+
+async function logout() {
+  await fetch('/admin/logout', { method: 'POST', credentials: 'same-origin' });
+  window.location.href = '/admin/login';
 }
 
 // -- Sorting state --
@@ -427,7 +431,7 @@ function renderBroadcasts(data) {
     <th></th>
   </tr></thead><tbody>`;
   for (const b of data) {
-    const statusBadge = {draft:'badge-gray', scheduled:'badge-yellow', sending:'badge-blue', sent:'badge-green', failed:'badge-red'}[b.status] || 'badge-gray';
+    const statusBadge = {draft:'badge-gray', scheduled:'badge-yellow', sending:'badge-blue', sent:'badge-green', partial:'badge-yellow', failed:'badge-red'}[b.status] || 'badge-gray';
     const tags = JSON.parse(b.target_tags || '[]').join(', ');
     let sendBtn = '';
     if (b.status === 'draft') sendBtn = `<button class="btn btn-primary text-xs" onclick="sendBroadcast('${b.id}')">Enviar</button>`;
@@ -543,34 +547,61 @@ async function savePdfInterval() {
     body: JSON.stringify({value: hours}),
   });
   toast('Intervalo de PDF guardado');
+  await loadSettings();
+}
+
+async function savePaymentSettings() {
+  const fields = [
+    ['payment_zelle_details', document.getElementById('payment-zelle').value],
+    ['payment_binance_details', document.getElementById('payment-binance').value],
+    ['payment_zinli_details', document.getElementById('payment-zinli').value],
+    ['payment_bolivares_details', document.getElementById('payment-bolivares').value],
+  ];
+
+  for (const [key, value] of fields) {
+    await apiFetch(API + '/' + key, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value}),
+    });
+  }
+
+  toast('Métodos de pago guardados');
+  await loadSettings();
 }
 
 // -- Settings --
 async function loadSettings() {
   const settings = await apiFetch(API + '/').then(r => r.json());
   document.getElementById('pdf-interval').value = settings.catalog_pdf_interval_hours || 24;
+  document.getElementById('payment-zelle').value = settings.payment_zelle_details || '';
+  document.getElementById('payment-binance').value = settings.payment_binance_details || '';
+  document.getElementById('payment-zinli').value = settings.payment_zinli_details || '';
+  document.getElementById('payment-bolivares').value = settings.payment_bolivares_details || '';
   loadCatalogPdfStatus();
 
   // Hide LLM controls when managed from master
+  const section = document.getElementById('llm-settings-section');
   if (settings._llm_managed_externally) {
-    const section = document.getElementById('llm-settings-section');
     if (section) {
       section.innerHTML = '<div class="card md:col-span-2"><p class="text-gray-500 dark:text-gray-400 text-center py-4">Para cualquier cambio en la configuracion de AI, contacta a tu administrador.</p></div>';
     }
+  } else if (section && !section.querySelector('#set-provider')) {
+    window.location.reload();
     return;
   }
 
-  document.getElementById('set-provider').value = settings.llm_provider || 'openai';
-  document.getElementById('set-temp').value = settings.llm_temperature || 0.7;
-  document.getElementById('set-fallback').checked = settings.auto_fallback === true;
-  document.getElementById('set-fb-provider').value = settings.fallback_provider || 'anthropic';
+  if (!settings._llm_managed_externally) {
+    document.getElementById('set-provider').value = settings.llm_provider || 'openai';
+    document.getElementById('set-temp').value = settings.llm_temperature || 0.7;
+    document.getElementById('set-fallback').checked = settings.auto_fallback === true;
+    document.getElementById('set-fb-provider').value = settings.fallback_provider || 'anthropic';
+    document.getElementById('set-max-tokens').value = settings.llm_max_tokens || 500;
+    document.getElementById('set-max-history').value = settings.max_conversation_history || 20;
 
-  document.getElementById('set-max-tokens').value = settings.llm_max_tokens || 500;
-  document.getElementById('set-max-history').value = settings.max_conversation_history || 20;
-  document.getElementById('set-abtest').checked = settings.ab_test_enabled === true;
-
-  populateModels('set-model', settings.llm_provider || 'openai', settings.llm_model);
-  populateModels('set-fb-model', settings.fallback_provider || 'anthropic', settings.fallback_model);
+    populateModels('set-model', settings.llm_provider || 'openai', settings.llm_model);
+    populateModels('set-fb-model', settings.fallback_provider || 'anthropic', settings.fallback_model);
+  }
 }
 
 function populateModels(selectId, provider, selectedModel) {
@@ -623,6 +654,7 @@ async function saveProviderSettings() {
   });
 
   toast('Configuracion guardada');
+  await loadSettings();
   loadOverview();
 }
 
@@ -630,12 +662,11 @@ async function saveFallbackSettings() {
   const enabled = document.getElementById('set-fallback').checked;
   const provider = document.getElementById('set-fb-provider').value;
   const model = document.getElementById('set-fb-model').value;
-  const abTest = document.getElementById('set-abtest').checked;
 
   await apiFetch(API + '/auto_fallback', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:enabled})});
   await apiFetch(API + '/fallback_provider', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:provider})});
   await apiFetch(API + '/fallback_model', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:model})});
-  await apiFetch(API + '/ab_test_enabled', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:abTest})});
 
-  toast('Fallback y A/B testing guardado');
+  toast('Fallback guardado');
+  await loadSettings();
 }
