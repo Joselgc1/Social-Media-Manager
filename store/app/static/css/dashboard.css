@@ -186,9 +186,10 @@ textarea { resize: vertical; min-height: 88px; }
   }
   .dashboard-header-actions {
     width: 100%;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+    align-items: stretch !important;
   }
   .dashboard-header-actions > * {
     width: 100%;
@@ -202,6 +203,22 @@ textarea { resize: vertical; min-height: 88px; }
     align-items: center;
     justify-content: center;
     text-align: center;
+  }
+  .dashboard-header-actions #catalog-badge,
+  .dashboard-header-actions #dark-toggle {
+    grid-column: 1 / -1;
+  }
+  .dashboard-header-actions #catalog-badge {
+    order: 3;
+  }
+  .dashboard-header-actions #header-refresh {
+    order: 4;
+  }
+  .dashboard-header-actions #header-logout {
+    order: 5;
+  }
+  .dashboard-header-actions #dark-toggle {
+    order: 6;
   }
   .dashboard-header-actions #provider-badge {
     font-size: 0.7rem;
