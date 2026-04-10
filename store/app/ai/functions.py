@@ -62,6 +62,10 @@ TOOLS = [
             "Only call this AFTER you have collected and confirmed ALL of these: "
             "the specific product(s), size(s), quantity, shipping method, "
             "full shipping address, and payment method. "
+            "The chosen payment method is the final checkout step. As soon as the customer chooses it "
+            "and the other checkout information is already complete, create the order immediately BEFORE "
+            "sending the payment details. "
+            "The new order should remain pending until a payment screenshot is validated. "
             "Do NOT call this from a payment-proof message or screenshot. "
             "The order must already exist before payment is validated."
         ),

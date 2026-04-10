@@ -227,6 +227,37 @@ async def generate_response(
             # Update the last message in history
             history[-1] = {"role": "user", "content": message_text}
 
+    open_order = await orders.get_latest_open_order(customer["id"])
+
+    if payment_proof_attempt and not open_order:
+        first_name = ((customer.get("display_name") or "").strip().split(" ")[0] or "").strip()
+        greeting_name = first_name or "hola"
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="user",
+            content=message_text,
+            channel=channel,
+            media_url=media_url,
+        )
+        reply_text = (
+            f"{greeting_name.capitalize()}, todavía no tengo el pedido registrado para poder validar ese comprobante. "
+            "Déjame primero dejarte el pedido armado y enseguida seguimos con el pago."
+        )
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="assistant",
+            content=reply_text,
+            channel=channel,
+        )
+        return {
+            "text": reply_text,
+            "interactive": None,
+            "catalog_pdf": None,
+            "product_image": None,
+            "customer_id": customer["id"],
+            "escalated": False,
+        }
+
     # ── 5c. LLM call with timing ─────────────────────────────
     t_start = time.monotonic()
 
