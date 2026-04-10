@@ -4,6 +4,7 @@ All secrets live in .env (never committed to git).
 """
 
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from functools import lru_cache
 
 
@@ -43,6 +44,16 @@ class Settings(BaseSettings):
     llm_managed_externally: bool = False  # If True, LLM provider/model controls are hidden from store dashboard and managed from master
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @field_validator("store_name", "owner_name", mode="before")
+    @classmethod
+    def _strip_wrapping_quotes(cls, value):
+        if value is None:
+            return value
+        text = str(value).strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+            return text[1:-1].strip()
+        return text
 
 
 @lru_cache()

@@ -186,12 +186,26 @@ textarea { resize: vertical; min-height: 88px; }
   }
   .dashboard-header-actions {
     width: 100%;
-    flex-wrap: wrap;
-    justify-content: flex-start;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .dashboard-header-actions > * {
+    width: 100%;
+    min-width: 0;
   }
   .dashboard-header-actions .btn,
   .dashboard-header-actions .badge {
-    min-height: 40px;
+    min-height: 44px;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+  }
+  .dashboard-header-actions #provider-badge {
+    font-size: 0.7rem;
+    line-height: 1.2;
   }
   .tab-bar {
     overflow-x: auto;
