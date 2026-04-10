@@ -20,8 +20,11 @@ router = APIRouter(prefix="/admin", tags=["dashboard"])
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 
-def _render_template(name: str) -> HTMLResponse:
-    return HTMLResponse((_TEMPLATES_DIR / name).read_text(encoding="utf-8"))
+def _render_template(name: str, replacements: dict[str, str] | None = None) -> HTMLResponse:
+    content = (_TEMPLATES_DIR / name).read_text(encoding="utf-8")
+    for key, value in (replacements or {}).items():
+        content = content.replace(key, value)
+    return HTMLResponse(content)
 
 
 def _redirect_to_login(error: str | None = None) -> RedirectResponse:
@@ -44,6 +47,7 @@ async def login_page(request: Request):
         return RedirectResponse(url="/admin/dashboard", status_code=303)
 
     page = (_TEMPLATES_DIR / "admin_login.html").read_text(encoding="utf-8")
+    page = page.replace("__STORE_NAME__", config.store_name)
     error = request.query_params.get("error", "")
     return HTMLResponse(page.replace("__ERROR__", json.dumps(error)))
 
@@ -86,13 +90,14 @@ async def logout():
 async def dashboard(request: Request):
     """Serve the admin dashboard as a single HTML page."""
     config = get_config()
+    replacements = {"__STORE_NAME__": config.store_name}
 
     if not config.admin_password:
         if config.debug:
-            return _render_template("dashboard.html")
+            return _render_template("dashboard.html", replacements)
         raise HTTPException(status_code=403, detail="ADMIN_PASSWORD must be set.")
 
     if is_admin_cookie_valid(request):
-        return _render_template("dashboard.html")
+        return _render_template("dashboard.html", replacements)
 
     return _redirect_to_login()

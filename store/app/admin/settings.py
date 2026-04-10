@@ -19,7 +19,7 @@ from app.admin.auth import require_admin
 from app.admin.telegram_bot import setup_telegram_webhook
 from app.crm import conversations, orders
 from app.crm import customers as customer_crm
-from app.crm.customers import add_tags, remove_tag
+from app.crm.customers import add_tags, remove_tag, normalize_tags
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
 from app.runtime_settings import STORE_EDITABLE_SETTING_KEYS, LLM_MANAGED_KEYS
 
@@ -457,7 +457,14 @@ async def list_customers(tag: str | None = None, limit: int = 200):
             """,
             {"limit": limit},
         )
-    return [dict(r) for r in rows]
+    customers = []
+    for row in rows:
+        item = dict(row)
+        raw_tags = item.get("tags")
+        parsed_tags = raw_tags if isinstance(raw_tags, list) else json.loads(raw_tags or "[]")
+        item["tags"] = normalize_tags(parsed_tags)
+        customers.append(item)
+    return customers
 
 
 @router.post("/customers/{customer_id}/resolve")
@@ -514,6 +521,7 @@ async def get_customer_tags(customer_id: str):
         raise HTTPException(status_code=404, detail="Customer not found")
 
     tags = row["tags"] if isinstance(row["tags"], list) else json.loads(row["tags"] or "[]")
+    tags = normalize_tags(tags)
     return {"customer_id": customer_id, "tags": tags}
 
 

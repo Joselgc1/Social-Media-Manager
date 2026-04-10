@@ -93,7 +93,7 @@ TOOLS = [
                 },
                 "shipping_address": {
                     "type": "string",
-                    "description": "Full delivery address (street, city, state, ZIP/postal code)",
+                    "description": "Exact delivery address. Collect the city separately; do not ask for state or ZIP/postal code.",
                 },
                 "shipping_method": {
                     "type": "string",

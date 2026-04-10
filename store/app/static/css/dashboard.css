@@ -1,7 +1,19 @@
 body { font-family: system-ui, -apple-system, sans-serif; }
 .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); transition: background-color 0.2s, box-shadow 0.2s; }
 .stat-number { font-size: 2rem; font-weight: 700; line-height: 1; }
-.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 2.1rem;
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.15;
+  vertical-align: middle;
+}
 .badge-green { background: #dcfce7; color: #166534; }
 .badge-yellow { background: #fef9c3; color: #854d0e; }
 .badge-red { background: #fecaca; color: #991b1b; }
@@ -36,7 +48,7 @@ textarea { resize: vertical; min-height: 88px; }
   background-clip: padding-box;
 }
 .payment-field::placeholder { color: #94a3b8; }
-.tab { padding: 8px 16px; cursor: pointer; font-weight: 500; border-bottom: 2px solid transparent; color: #6b7280; transition: color 0.2s; }
+.tab { padding: 12px 22px; cursor: pointer; font-weight: 600; border-bottom: 2px solid transparent; color: #6b7280; transition: color 0.2s; }
 .tab.active { color: #4f46e5; border-color: #4f46e5; }
 .fade-in { animation: fadeIn 0.3s ease-in; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
@@ -64,11 +76,56 @@ textarea { resize: vertical; min-height: 88px; }
 }
 .status-dropdown.hidden { display: none; }
 .orders-table td { vertical-align: top; }
+.orders-table th { padding-bottom: 12px; vertical-align: middle; }
 .orders-table .order-items-cell { max-width: 360px; }
 .orders-table .order-actions-cell { width: 96px; text-align: right; }
 .orders-empty {
   padding: 24px 0;
   color: #6b7280;
+}
+.customers-table { border-collapse: separate; border-spacing: 0; }
+.customers-table th { padding-bottom: 14px; }
+.customers-table td {
+  vertical-align: middle;
+  padding-top: 18px;
+  padding-bottom: 18px;
+}
+.customers-table .customer-name-cell {
+  min-width: 120px;
+}
+.customers-table .customer-tags-cell {
+  min-width: 360px;
+}
+.customers-table .customer-meta-cell,
+.customers-table .customer-number-cell,
+.customers-table .customer-state-cell,
+.customers-table .customer-channel-cell {
+  white-space: nowrap;
+}
+.customers-table .customer-actions-cell {
+  width: 120px;
+  text-align: right;
+  vertical-align: middle;
+}
+.customer-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.tag-chip {
+  cursor: pointer;
+}
+.tag-add-chip {
+  cursor: pointer;
+  min-width: 2.1rem;
+  padding-left: 0.8rem;
+  padding-right: 0.8rem;
+}
+.status-dropdown-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
 }
 
 /* Dark mode */
@@ -103,3 +160,8 @@ textarea { resize: vertical; min-height: 88px; }
 }
 .dark .status-pill-button:hover { box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
 .dark .orders-empty { color: #9ca3af; }
+
+@media (max-width: 1024px) {
+  .tab { padding-left: 16px; padding-right: 16px; }
+  .customers-table .customer-tags-cell { min-width: 280px; }
+}

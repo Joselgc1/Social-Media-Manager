@@ -833,22 +833,36 @@ async def get_railway_status(store_id: str):
         from app.stores.railway import get_service_info, get_latest_deployment, get_environments
 
         service = await get_service_info(store["railway_service_id"])
-        deployment = await get_latest_deployment(store["railway_service_id"])
-
-        # Get production environment ID
         environments = []
+        deployment = None
+        deployment_warning = None
+
         if store["railway_project_id"]:
             environments = await get_environments(store["railway_project_id"])
+        else:
+            deployment_warning = "No Railway project ID configured, so deployment status could not be resolved."
+
+        environment_id = ""
+        if environments:
+            prod_env = next((env for env in environments if (env.get("name") or "").lower() == "production"), None)
+            environment_id = (prod_env or environments[0]).get("id", "")
+
+        if environment_id:
+            try:
+                deployment = await get_latest_deployment(store["railway_service_id"], environment_id)
+            except Exception as e:
+                deployment_warning = str(e)
 
         return {
             "status": "linked",
             "service": service,
             "latest_deployment": deployment,
             "environments": environments,
+            "deployment_warning": deployment_warning,
         }
     except Exception as e:
         logger.warning(f"Railway status check failed for store {store_id}: {e}")
-        return {"status": "error", "message": "Could not check Railway status"}
+        return {"status": "error", "message": str(e)}
 
 
 @router.post("/{store_id}/deploy")

@@ -36,8 +36,19 @@ async def _graphql(query: str, variables: dict | None = None) -> dict:
             headers=_headers(),
             json={"query": query, "variables": variables or {}},
         )
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+
+        if resp.is_error:
+            error_msg = None
+            if isinstance(data, dict) and data.get("errors"):
+                error_msg = data["errors"][0].get("message", str(data["errors"]))
+            if not error_msg:
+                error_msg = resp.text
+            raise RuntimeError(f"Railway HTTP {resp.status_code}: {error_msg}")
+
         if "errors" in data:
             error_msg = data["errors"][0].get("message", str(data["errors"]))
             raise RuntimeError(f"Railway API error: {error_msg}")
@@ -133,8 +144,8 @@ async def redeploy_service(service_id: str, environment_id: str) -> str:
     return data.get("serviceInstanceRedeploy", "")
 
 
-async def get_latest_deployment(service_id: str) -> dict | None:
-    """Get the latest deployment for a service."""
+async def get_latest_deployment(service_id: str, environment_id: str) -> dict | None:
+    """Get the latest deployment for a service in a specific environment."""
     query = """
     query($input: DeploymentListInput!) {
         deployments(input: $input) {
@@ -149,7 +160,7 @@ async def get_latest_deployment(service_id: str) -> dict | None:
     }
     """
     data = await _graphql(query, {
-        "input": {"serviceId": service_id, "first": 1},
+        "input": {"serviceId": service_id, "environmentId": environment_id, "first": 1},
     })
     edges = data.get("deployments", {}).get("edges", [])
     return edges[0]["node"] if edges else None

@@ -975,6 +975,7 @@ async function loadRailwayStatus(storeId) {
             const svc = data.service || {};
             const dep = data.latest_deployment || {};
             const envs = data.environments || [];
+            const warning = data.deployment_warning || '';
             const depStatus = dep.status || 'unknown';
             const depBadge = depStatus === 'SUCCESS' ? 'badge-green' :
                              depStatus === 'FAILED' ? 'badge-red' : 'badge-yellow';
@@ -987,7 +988,8 @@ async function loadRailwayStatus(storeId) {
                     </div>
                     <div><span class="text-gray-500">Environments:</span> ${envs.map(e => `<span class="badge badge-blue mr-1">${esc(e.name)}</span>`).join('') || '—'}</div>
                     <div><span class="text-gray-500">Project ID:</span> <span class="font-mono text-xs">${esc(svc.projectId || '—')}</span></div>
-                </div>`;
+                </div>
+                ${warning ? `<p class="mt-3 text-sm text-yellow-600">${esc(warning)}</p>` : ''}`;
         }
     } catch (e) {
         container.innerHTML = `<p class="text-red-500">Could not load Railway status: ${esc(e.message)}</p>`;

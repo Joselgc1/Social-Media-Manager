@@ -411,7 +411,7 @@ function renderCustomers(customers) {
     return;
   }
 
-  html += `<table class="w-full orders-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
+  html += `<table class="w-full orders-table customers-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortCustomers('name')">Cliente${sortArrow('customers','name')}</th>
     <th>Contacto</th>
     <th>Tags</th>
@@ -424,21 +424,23 @@ function renderCustomers(customers) {
     const tags = (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) || [];
     const primaryName = getCustomerPrimaryName(c);
     const secondaryLabel = getCustomerSecondaryLabel(c);
-    const tagHtml = tags.map(t =>
-      `<span class="badge badge-blue" style="cursor:pointer" title="Click para eliminar" onclick="removeTag('${c.id}','${t}')">${t} ✕</span>`
-    ).join(' ') + ` <span class="badge badge-gray" style="cursor:pointer" onclick="promptAddTag('${c.id}')" title="Agregar tag">+</span>`;
+    const tagHtml = `<div class="customer-tags">${
+      tags.map(t =>
+        `<span class="badge badge-blue tag-chip" title="Click para eliminar" onclick="removeTag('${c.id}','${t}')">${t} ✕</span>`
+      ).join('')
+    }<span class="badge badge-gray tag-add-chip" onclick="promptAddTag('${c.id}')" title="Agregar tag">+</span></div>`;
     const currentState = c.conversation_state || 'active';
     const statusBadge = getCustomerStateBadgeClass(currentState);
     const statusLabel = CUSTOMER_STATE_LABELS[currentState] || currentState || 'Activo';
     const contactValue = getCustomerContactValue(c);
     html += `<tr class="border-t border-gray-100 dark:border-gray-700">
-      <td class="py-2">
+      <td class="customer-name-cell">
         <div class="font-medium text-gray-900 dark:text-gray-100">${escapeHtml(primaryName)}</div>
         ${secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(secondaryLabel)}</div>` : ''}
       </td>
-      <td>${escapeHtml(contactValue || '-')}</td>
-      <td>${tagHtml}</td>
-      <td>
+      <td class="customer-meta-cell">${escapeHtml(contactValue || '-')}</td>
+      <td class="customer-tags-cell">${tagHtml}</td>
+      <td class="customer-channel-cell">
         <div class="status-dropdown-wrap">
           <button type="button" class="badge ${getCustomerChannelBadgeClass(c.channel)} status-pill-button" onclick="event.stopPropagation(); toggleCustomerChannelDropdown('${c.id}')">
             ${escapeHtml(CUSTOMER_CHANNEL_LABELS[c.channel] || c.channel || 'Sin canal')}
@@ -451,9 +453,9 @@ function renderCustomers(customers) {
           </div>
         </div>
       </td>
-      <td>${c.total_orders || 0}</td>
-      <td>$${(c.total_spent || 0).toFixed(2)}</td>
-      <td>
+      <td class="customer-number-cell">${c.total_orders || 0}</td>
+      <td class="customer-number-cell">$${(c.total_spent || 0).toFixed(2)}</td>
+      <td class="customer-state-cell">
         <div class="status-dropdown-wrap">
           <button type="button" class="badge ${statusBadge} status-pill-button" onclick="event.stopPropagation(); toggleCustomerStateDropdown('${c.id}')">
             ${escapeHtml(statusLabel)}
@@ -466,7 +468,7 @@ function renderCustomers(customers) {
           </div>
         </div>
       </td>
-      <td class="order-actions-cell">
+      <td class="customer-actions-cell">
         <button class="btn btn-danger text-xs" onclick="deleteCustomer('${c.id}')">Eliminar</button>
       </td>
     </tr>`;

@@ -75,11 +75,15 @@ def _build_exchange_rate_block(accepted_exchange_rate: str | None) -> str:
     rate_text = (accepted_exchange_rate or "").strip()
     if not rate_text:
         return (
-            "No hay una tasa configurada en este momento. "
+            "No hay una tasa Binance del día configurada en este momento. "
             "Si el cliente pregunta por la tasa, explica que la tienda confirma "
-            "la tasa del día manualmente antes del pago y NO inventes un valor."
+            "la tasa Binance del día manualmente antes del pago y NO inventes un valor."
         )
-    return f"Tasa configurada actualmente para referencia del cliente: {rate_text}"
+    return (
+        "La tienda usa como referencia la tasa Binance del día. "
+        f"Valor configurado actualmente: {rate_text}. "
+        "Si el cliente pregunta por la tasa, responde con este valor de forma directa y no digas que luego la vas a confirmar."
+    )
 
 
 def _build_channel_context(channel: str) -> str:

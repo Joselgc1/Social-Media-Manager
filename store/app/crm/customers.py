@@ -3,6 +3,8 @@ Customer lookup, creation, and tag management.
 """
 
 import json
+import re
+import unicodedata
 from app import db
 
 
@@ -98,7 +100,7 @@ async def add_tags(customer_id: str, new_tags: list[str]):
         return
 
     existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
-    merged = list(set(existing + new_tags))
+    merged = normalize_tags(existing + (new_tags or []))
 
     await db.execute(
         "UPDATE customers SET tags = :tags WHERE id = :id",
@@ -116,7 +118,9 @@ async def remove_tag(customer_id: str, tag: str):
         return
 
     existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
-    filtered = [t for t in existing if t != tag]
+    normalized_target = _normalize_tag(tag)
+    filtered = [normalized for normalized in (_normalize_tag(t) for t in existing) if normalized and normalized != normalized_target]
+    filtered = _dedupe_preserve_order(filtered)
 
     await db.execute(
         "UPDATE customers SET tags = :tags WHERE id = :id",
@@ -201,3 +205,54 @@ async def delete_customer(customer_id: str) -> bool:
         {"id": customer_id},
     )
     return True
+
+
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    combined = []
+    combined.extend(tags or [])
+    normalized = [_normalize_tag(tag) for tag in combined]
+    normalized = [tag for tag in normalized if tag]
+    return _dedupe_preserve_order(normalized)
+
+
+def _dedupe_preserve_order(tags: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for tag in tags:
+        if tag in seen:
+            continue
+        seen.add(tag)
+        result.append(tag)
+    return result
+
+
+def _normalize_tag(tag: str | None) -> str:
+    raw = str(tag or "").strip()
+    if not raw:
+        return ""
+
+    if ":" not in raw:
+        return raw.lower()
+
+    prefix, value = raw.split(":", 1)
+    prefix = prefix.strip().lower()
+    value = value.strip()
+
+    if prefix == "size":
+        return f"{prefix}:{value.upper()}"
+
+    if prefix in {"payment", "city", "interested"}:
+        value = _slugify_tag_value(value)
+        return f"{prefix}:{value}" if value else ""
+
+    return f"{prefix}:{value.lower()}"
+
+
+def _slugify_tag_value(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.lower())
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_text = ascii_text.replace("-", "_")
+    ascii_text = re.sub(r"\s+", "_", ascii_text)
+    ascii_text = re.sub(r"[^a-z0-9_]+", "_", ascii_text)
+    ascii_text = re.sub(r"_+", "_", ascii_text).strip("_")
+    return ascii_text
