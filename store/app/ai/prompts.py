@@ -6,6 +6,7 @@ the live product catalog and payment details at runtime.
 
 import json
 from pathlib import Path
+from app.payment_methods import payment_method_information_block, payment_method_names_text
 
 # Resolve the prompts directory relative to the project root
 _PROMPT_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
@@ -34,34 +35,27 @@ def reload_template():
 
 def build_system_prompt(
     catalog_markdown: str,
-    store_name: str = "Tu Tienda VS",
+    store_name: str = "Zona Pink",
     channel: str = "whatsapp",
     customer: dict | None = None,
-    zelle_details: str = "",
-    binance_details: str = "",
-    zinli_details: str = "",
-    bolivares_details: str = "",
+    payment_methods: list[dict] | None = None,
+    accepted_exchange_rate: str | None = None,
 ) -> str:
     """
     Assemble the final system prompt by injecting the live product catalog,
     payment details, channel info, and customer context into the template.
     """
     template = _load_template()
-    payment_methods_block = _build_payment_methods_block(
-        zelle_details=zelle_details,
-        binance_details=binance_details,
-        zinli_details=zinli_details,
-        bolivares_details=bolivares_details,
-    )
+    payment_methods_block = payment_method_information_block(payment_methods)
+    payment_method_names = payment_method_names_text(payment_methods)
+    exchange_rate_block = _build_exchange_rate_block(accepted_exchange_rate)
 
     prompt = template.format(
         store_name=store_name,
         product_catalog=catalog_markdown,
-        zelle_details=zelle_details,
-        binance_details=binance_details,
-        zinli_details=zinli_details,
-        bolivares_details=bolivares_details,
         payment_methods_block=payment_methods_block,
+        payment_method_names_text=payment_method_names,
+        exchange_rate_block=exchange_rate_block,
     )
 
     # Append channel-specific instructions
@@ -77,33 +71,15 @@ def build_system_prompt(
     return prompt
 
 
-def _build_payment_methods_block(
-    zelle_details: str = "",
-    binance_details: str = "",
-    zinli_details: str = "",
-    bolivares_details: str = "",
-) -> str:
-    methods = []
-    if zelle_details.strip():
-        methods.append(f"- **Zelle**: {zelle_details.strip()}")
-    if binance_details.strip():
-        methods.append(f"- **Binance Pay**: {binance_details.strip()}")
-    if zinli_details.strip():
-        methods.append(f"- **Zinli**: {zinli_details.strip()}")
-    if bolivares_details.strip():
-        methods.append(
-            f"- **Bolívares (transferencia bancaria)**: {bolivares_details.strip()}\n"
-            "  - La tasa es Binance del día. El cliente debe confirmar la tasa actual."
+def _build_exchange_rate_block(accepted_exchange_rate: str | None) -> str:
+    rate_text = (accepted_exchange_rate or "").strip()
+    if not rate_text:
+        return (
+            "No hay una tasa configurada en este momento. "
+            "Si el cliente pregunta por la tasa, explica que la tienda confirma "
+            "la tasa del día manualmente antes del pago y NO inventes un valor."
         )
-
-    if methods:
-        return "\n".join(methods)
-
-    return (
-        "No hay métodos de pago configurados en este momento. "
-        "Si el cliente está listo para pagar, explica que la tienda confirmará "
-        "los datos de pago manualmente y NO inventes cuentas ni instrucciones."
-    )
+    return f"Tasa configurada actualmente para referencia del cliente: {rate_text}"
 
 
 def _build_channel_context(channel: str) -> str:
@@ -194,8 +170,8 @@ def format_catalog_as_markdown(products: list[dict]) -> str:
         return "No hay productos disponibles en este momento."
 
     lines = [
-        "| SKU | Producto | Categoría | Tallas disponibles | Precio (USD) | Disponibilidad |",
-        "|-----|----------|-----------|-------------------|--------------|----------------|",
+        "| Producto | Categoría | Tallas disponibles | Precio (USD) | Disponibilidad |",
+        "|----------|-----------|-------------------|--------------|----------------|",
     ]
 
     for p in products:
@@ -205,7 +181,6 @@ def format_catalog_as_markdown(products: list[dict]) -> str:
             in_stock = False
         availability = "Disponible" if in_stock else "Agotado"
         lines.append(
-            f"| {p.get('sku', '')} "
             f"| {p.get('product_name', '')} "
             f"| {p.get('category', '')} "
             f"| {p.get('sizes', '')} "

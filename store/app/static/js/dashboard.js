@@ -37,6 +37,22 @@ let _customersData = [];
 let _ordersData = [];
 let _broadcastsData = [];
 let _sort = { customers: {col: null, asc: true}, orders: {col: null, asc: true}, broadcasts: {col: null, asc: true} };
+const ORDER_PAYMENT_STATUS_LABELS = {
+  pending: 'Pendiente',
+  proof_received: 'Comprobante recibido',
+  confirmed: 'Confirmado',
+  failed: 'Fallido',
+  rejected: 'Rechazado',
+};
+const CUSTOMER_STATE_LABELS = {
+  active: 'Activo',
+  escalated: 'Escalado',
+  blocked: 'Bloqueado',
+};
+const CUSTOMER_CHANNEL_LABELS = {
+  whatsapp: 'WhatsApp',
+  instagram: 'Instagram',
+};
 
 function sortData(data, col, asc, getter) {
   return [...data].sort((a, b) => {
@@ -61,6 +77,15 @@ function sortArrow(table, col) {
   const s = _sort[table];
   if (s.col !== col) return ' ↕';
   return s.asc ? ' ↑' : ' ↓';
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 // -- Dark Mode --
@@ -98,6 +123,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   loadOverview();
   loadSettings();
+});
+
+document.addEventListener('click', () => {
+  closeOrderStatusDropdowns();
+  closeCustomerStateDropdowns();
+  closeCustomerChannelDropdowns();
 });
 
 // -- Tabs --
@@ -245,68 +276,283 @@ function setStatsRange(days) {
 
 // -- Customers --
 function customerSortGetter(c, col) {
-  if (col === 'name') return c.display_name || c.platform_id || '';
+  if (col === 'name') return getCustomerPrimaryName(c);
   if (col === 'channel') return c.channel || '';
   if (col === 'orders') return c.total_orders || 0;
   if (col === 'spent') return c.total_spent || 0;
   if (col === 'state') return c.conversation_state || 'active';
+  if (col === 'last_active') return c.last_active || '';
   return '';
 }
 
 function sortCustomers(col) {
-  toggleSort('customers', col, renderCustomers, customerSortGetter);
+  const s = _sort.customers;
+  if (s.col === col) s.asc = !s.asc;
+  else { s.col = col; s.asc = true; }
+  renderCustomers(getVisibleCustomers());
 }
 
 async function loadCustomers() {
-  const tag = document.getElementById('customer-search')?.value || '';
-  const url = tag ? API + '/customers?tag=' + encodeURIComponent(tag) : API + '/customers';
-
   try {
-    _customersData = await apiFetch(url).then(r => r.json());
-    if (!_customersData.length) {
-      document.getElementById('customers-list').textContent = 'No hay clientes';
-      return;
-    }
-    renderCustomers(_customersData);
+    _customersData = await apiFetch(API + '/customers?limit=200').then(r => r.json());
+    renderCustomers(getVisibleCustomers());
   } catch(e) {
     document.getElementById('customers-list').textContent = 'Error cargando clientes';
+    const countEl = document.getElementById('customers-count');
+    if (countEl) countEl.textContent = 'No se pudieron cargar los clientes';
   }
 }
 
+function getCustomerPrimaryName(customer) {
+  return customer.display_name || getCustomerContactValue(customer) || customer.platform_id || 'Sin nombre';
+}
+
+function getCustomerContactValue(customer) {
+  if (customer.channel === 'whatsapp') {
+    return customer.phone || customer.platform_id || '';
+  }
+  if (customer.instagram_handle) {
+    return customer.instagram_handle.startsWith('@') ? customer.instagram_handle : '@' + customer.instagram_handle;
+  }
+  return customer.platform_id || '';
+}
+
+function getCustomerSecondaryLabel(customer) {
+  const contact = getCustomerContactValue(customer);
+  const platformId = customer.platform_id || '';
+  if (customer.channel === 'whatsapp') {
+    return contact && contact !== getCustomerPrimaryName(customer) ? contact : '';
+  }
+  if (contact && platformId && contact !== platformId) {
+    return `${contact} · ID ${platformId}`;
+  }
+  return platformId && platformId !== getCustomerPrimaryName(customer) ? `ID ${platformId}` : '';
+}
+
+function toggleCustomersFilters() {
+  const panel = document.getElementById('customers-filters');
+  const btn = document.getElementById('customers-filter-toggle');
+  if (!panel || !btn) return;
+
+  const visible = panel.style.display !== 'none';
+  panel.style.display = visible ? 'none' : 'grid';
+  btn.innerHTML = visible ? 'Filtros &#x25BC;' : 'Filtros &#x25B2;';
+}
+
+function resetCustomerFilters() {
+  const fields = [
+    document.getElementById('customer-filter-search'),
+    document.getElementById('customer-filter-tag'),
+    document.getElementById('customer-filter-channel'),
+    document.getElementById('customer-filter-state'),
+  ];
+  fields.forEach(field => {
+    if (!field) return;
+    field.value = '';
+  });
+  applyCustomerFilters();
+}
+
+function applyCustomerFilters() {
+  closeCustomerStateDropdowns();
+  closeCustomerChannelDropdowns();
+  renderCustomers(getVisibleCustomers());
+}
+
+function getVisibleCustomers() {
+  const searchValue = (document.getElementById('customer-filter-search')?.value || '').trim().toLowerCase();
+  const tagValue = (document.getElementById('customer-filter-tag')?.value || '').trim().toLowerCase();
+  const channelValue = document.getElementById('customer-filter-channel')?.value || '';
+  const stateValue = document.getElementById('customer-filter-state')?.value || '';
+
+  let visibleCustomers = (_customersData || []).filter(customer => {
+    if (channelValue && (customer.channel || '') !== channelValue) return false;
+    if (stateValue && (customer.conversation_state || 'active') !== stateValue) return false;
+
+    const tags = (typeof customer.tags === 'string' ? JSON.parse(customer.tags) : customer.tags) || [];
+    if (tagValue && !tags.some(tag => String(tag).toLowerCase().includes(tagValue))) return false;
+
+    if (!searchValue) return true;
+
+    const searchBlob = [
+      customer.display_name || '',
+      customer.phone || '',
+      customer.instagram_handle || '',
+      customer.platform_id || '',
+      ...tags,
+    ].join(' ').toLowerCase();
+    return searchBlob.includes(searchValue);
+  });
+
+  const sortState = _sort.customers;
+  if (sortState.col) {
+    visibleCustomers = sortData(visibleCustomers, sortState.col, sortState.asc, customerSortGetter);
+  }
+  return visibleCustomers;
+}
+
 function renderCustomers(customers) {
-  const hasEscalated = customers.some(c => c.conversation_state === 'escalated');
+  const totalCustomers = _customersData.length;
+  const countEl = document.getElementById('customers-count');
+  if (countEl) {
+    countEl.textContent = totalCustomers
+      ? `${customers.length} de ${totalCustomers} cliente${totalCustomers === 1 ? '' : 's'}`
+      : 'No hay clientes';
+  }
+
+  const hasEscalated = _customersData.some(c => c.conversation_state === 'escalated');
   let html = '';
   if (hasEscalated) {
     html += '<div class="mb-3"><button class="btn btn-primary text-sm" onclick="resolveAllCustomers()">Resolver todas las escalaciones</button></div>';
   }
-  html += `<table class="w-full"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
+  if (!customers.length) {
+    html += '<div class="orders-empty">No hay clientes que coincidan con los filtros.</div>';
+    document.getElementById('customers-list').innerHTML = html;
+    return;
+  }
+
+  html += `<table class="w-full orders-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortCustomers('name')">Cliente${sortArrow('customers','name')}</th>
-    <th class="sortable" onclick="sortCustomers('channel')">Canal${sortArrow('customers','channel')}</th>
+    <th>Contacto</th>
     <th>Tags</th>
+    <th class="sortable" onclick="sortCustomers('channel')">Canal${sortArrow('customers','channel')}</th>
     <th class="sortable" onclick="sortCustomers('orders')">Pedidos${sortArrow('customers','orders')}</th>
     <th class="sortable" onclick="sortCustomers('spent')">Gastado${sortArrow('customers','spent')}</th>
     <th class="sortable" onclick="sortCustomers('state')">Estado${sortArrow('customers','state')}</th>
     <th></th></tr></thead><tbody>`;
   for (const c of customers) {
     const tags = (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) || [];
+    const primaryName = getCustomerPrimaryName(c);
+    const secondaryLabel = getCustomerSecondaryLabel(c);
     const tagHtml = tags.map(t =>
       `<span class="badge badge-blue" style="cursor:pointer" title="Click para eliminar" onclick="removeTag('${c.id}','${t}')">${t} ✕</span>`
     ).join(' ') + ` <span class="badge badge-gray" style="cursor:pointer" onclick="promptAddTag('${c.id}')" title="Agregar tag">+</span>`;
-    const resolveBtn = c.conversation_state === 'escalated'
-      ? `<button class="btn btn-secondary text-xs" onclick="resolveCustomer('${c.id}')">Resolver</button>`
-      : '';
+    const currentState = c.conversation_state || 'active';
+    const statusBadge = getCustomerStateBadgeClass(currentState);
+    const statusLabel = CUSTOMER_STATE_LABELS[currentState] || currentState || 'Activo';
+    const contactValue = getCustomerContactValue(c);
     html += `<tr class="border-t border-gray-100 dark:border-gray-700">
-      <td class="py-2">${c.display_name || c.platform_id}</td>
-      <td>${c.channel}</td>
+      <td class="py-2">
+        <div class="font-medium text-gray-900 dark:text-gray-100">${escapeHtml(primaryName)}</div>
+        ${secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(secondaryLabel)}</div>` : ''}
+      </td>
+      <td>${escapeHtml(contactValue || '-')}</td>
       <td>${tagHtml}</td>
+      <td>
+        <div class="status-dropdown-wrap">
+          <button type="button" class="badge ${getCustomerChannelBadgeClass(c.channel)} status-pill-button" onclick="event.stopPropagation(); toggleCustomerChannelDropdown('${c.id}')">
+            ${escapeHtml(CUSTOMER_CHANNEL_LABELS[c.channel] || c.channel || 'Sin canal')}
+          </button>
+          <div id="customer-channel-menu-${c.id}" class="status-dropdown hidden" onclick="event.stopPropagation()">
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-2">Cambiar canal</label>
+            <select class="w-full" onchange="changeCustomerChannel('${c.id}', this.value)" onblur="scheduleCloseCustomerChannelDropdown('${c.id}')">
+              ${renderCustomerChannelOptions(c.channel)}
+            </select>
+          </div>
+        </div>
+      </td>
       <td>${c.total_orders || 0}</td>
       <td>$${(c.total_spent || 0).toFixed(2)}</td>
-      <td><span class="badge ${c.conversation_state === 'escalated' ? 'badge-red' : 'badge-green'}">${c.conversation_state || 'active'}</span></td>
-      <td>${resolveBtn}</td>
+      <td>
+        <div class="status-dropdown-wrap">
+          <button type="button" class="badge ${statusBadge} status-pill-button" onclick="event.stopPropagation(); toggleCustomerStateDropdown('${c.id}')">
+            ${escapeHtml(statusLabel)}
+          </button>
+          <div id="customer-status-menu-${c.id}" class="status-dropdown hidden" onclick="event.stopPropagation()">
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-2">Cambiar estado</label>
+            <select class="w-full" onchange="changeCustomerState('${c.id}', this.value)" onblur="scheduleCloseCustomerStateDropdown('${c.id}')">
+              ${renderCustomerStateOptions(currentState)}
+            </select>
+          </div>
+        </div>
+      </td>
+      <td class="order-actions-cell">
+        <button class="btn btn-danger text-xs" onclick="deleteCustomer('${c.id}')">Eliminar</button>
+      </td>
     </tr>`;
   }
   html += '</tbody></table>';
   document.getElementById('customers-list').innerHTML = html;
+}
+
+function getCustomerStateBadgeClass(state) {
+  return {active:'badge-green', escalated:'badge-red', blocked:'badge-yellow'}[state || 'active'] || 'badge-gray';
+}
+
+function getCustomerChannelBadgeClass(channel) {
+  return {whatsapp:'badge-green', instagram:'badge-blue'}[channel] || 'badge-gray';
+}
+
+function renderCustomerStateOptions(current) {
+  const options = ['active', 'escalated', 'blocked'];
+  return options.map(state =>
+    `<option value="${state}" ${state === current ? 'selected' : ''}>${CUSTOMER_STATE_LABELS[state] || state}</option>`
+  ).join('');
+}
+
+function renderCustomerChannelOptions(current) {
+  const options = ['whatsapp', 'instagram'];
+  return options.map(channel =>
+    `<option value="${channel}" ${channel === current ? 'selected' : ''}>${CUSTOMER_CHANNEL_LABELS[channel] || channel}</option>`
+  ).join('');
+}
+
+function toggleCustomerStateDropdown(customerId) {
+  const menu = document.getElementById(`customer-status-menu-${customerId}`);
+  if (!menu) return;
+
+  const isHidden = menu.classList.contains('hidden');
+  closeCustomerStateDropdowns(customerId);
+  if (isHidden) {
+    menu.classList.remove('hidden');
+    const select = menu.querySelector('select');
+    window.setTimeout(() => select?.focus(), 0);
+  }
+}
+
+function closeCustomerStateDropdown(customerId) {
+  const menu = document.getElementById(`customer-status-menu-${customerId}`);
+  if (menu) menu.classList.add('hidden');
+}
+
+function closeCustomerStateDropdowns(exceptCustomerId = null) {
+  document.querySelectorAll('[id^="customer-status-menu-"]').forEach(menu => {
+    if (exceptCustomerId && menu.id === `customer-status-menu-${exceptCustomerId}`) return;
+    menu.classList.add('hidden');
+  });
+}
+
+function scheduleCloseCustomerStateDropdown(customerId) {
+  window.setTimeout(() => closeCustomerStateDropdown(customerId), 150);
+}
+
+function toggleCustomerChannelDropdown(customerId) {
+  const menu = document.getElementById(`customer-channel-menu-${customerId}`);
+  if (!menu) return;
+
+  const isHidden = menu.classList.contains('hidden');
+  closeCustomerChannelDropdowns(customerId);
+  if (isHidden) {
+    menu.classList.remove('hidden');
+    const select = menu.querySelector('select');
+    window.setTimeout(() => select?.focus(), 0);
+  }
+}
+
+function closeCustomerChannelDropdown(customerId) {
+  const menu = document.getElementById(`customer-channel-menu-${customerId}`);
+  if (menu) menu.classList.add('hidden');
+}
+
+function closeCustomerChannelDropdowns(exceptCustomerId = null) {
+  document.querySelectorAll('[id^="customer-channel-menu-"]').forEach(menu => {
+    if (exceptCustomerId && menu.id === `customer-channel-menu-${exceptCustomerId}`) return;
+    menu.classList.add('hidden');
+  });
+}
+
+function scheduleCloseCustomerChannelDropdown(customerId) {
+  window.setTimeout(() => closeCustomerChannelDropdown(customerId), 150);
 }
 
 async function removeTag(customerId, tag) {
@@ -341,6 +587,71 @@ async function resolveAllCustomers() {
   loadCustomers();
 }
 
+async function changeCustomerChannel(customerId, channel) {
+  closeCustomerChannelDropdown(customerId);
+
+  const customer = _customersData.find(item => item.id === customerId);
+  if (!customer || customer.channel === channel) return;
+
+  const previousChannel = customer.channel;
+  const resp = await apiFetch(API + '/customers/' + customerId, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel}),
+  });
+
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    toast(data.detail || 'Error actualizando canal', '#dc2626');
+    return;
+  }
+
+  const payload = await resp.json().catch(() => ({}));
+  Object.assign(customer, payload.customer || {channel});
+  renderCustomers(getVisibleCustomers());
+  toast('Canal actualizado');
+}
+
+async function changeCustomerState(customerId, conversationState) {
+  closeCustomerStateDropdown(customerId);
+
+  const customer = _customersData.find(item => item.id === customerId);
+  if (!customer || customer.conversation_state === conversationState) return;
+
+  const resp = await apiFetch(API + '/customers/' + customerId, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({conversation_state: conversationState}),
+  });
+
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    toast(data.detail || 'Error actualizando estado', '#dc2626');
+    return;
+  }
+
+  const payload = await resp.json().catch(() => ({}));
+  Object.assign(customer, payload.customer || {conversation_state: conversationState});
+  renderCustomers(getVisibleCustomers());
+  toast('Estado actualizado');
+}
+
+async function deleteCustomer(customerId) {
+  closeCustomerStateDropdowns();
+  if (!confirm('¿Eliminar este cliente? Sus conversaciones se borrarán y sus pedidos quedarán sin cliente asociado.')) return;
+
+  const resp = await apiFetch(API + '/customers/' + customerId, {method: 'DELETE'});
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    toast(data.detail || 'Error eliminando cliente', '#dc2626');
+    return;
+  }
+
+  _customersData = _customersData.filter(customer => customer.id !== customerId);
+  renderCustomers(getVisibleCustomers());
+  toast('Cliente eliminado');
+}
+
 // -- Orders --
 function orderSortGetter(o, col) {
   if (col === 'name') return o.display_name || o.platform_id || '';
@@ -352,47 +663,240 @@ function orderSortGetter(o, col) {
 }
 
 function sortOrders(col) {
-  toggleSort('orders', col, renderOrders, orderSortGetter);
+  const s = _sort.orders;
+  if (s.col === col) s.asc = !s.asc;
+  else { s.col = col; s.asc = true; }
+  renderOrders(getVisibleOrders());
 }
 
 async function loadOrders() {
   try {
     _ordersData = await apiFetch(API + '/orders').then(r => r.json());
-    if (!_ordersData.length) {
-      document.getElementById('orders-list').textContent = 'No hay pedidos';
-      return;
-    }
-    renderOrders(_ordersData);
+    populateOrderFilters(_ordersData);
+    renderOrders(getVisibleOrders());
   } catch(e) {
     document.getElementById('orders-list').textContent = 'Error cargando pedidos';
+    const countEl = document.getElementById('orders-count');
+    if (countEl) countEl.textContent = 'No se pudieron cargar los pedidos';
   }
 }
 
+function populateOrderFilters(orders) {
+  const paymentSelect = document.getElementById('order-filter-payment');
+  const statusSelect = document.getElementById('order-filter-status');
+  if (!paymentSelect || !statusSelect) return;
+
+  const previousPayment = paymentSelect.value;
+  const previousStatus = statusSelect.value;
+
+  const paymentMethods = [...new Set((orders || []).map(o => (o.payment_method || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  paymentSelect.innerHTML = `<option value="">Todos</option>${paymentMethods.map(method =>
+    `<option value="${escapeHtml(method)}">${escapeHtml(method)}</option>`
+  ).join('')}`;
+  paymentSelect.value = paymentMethods.includes(previousPayment) ? previousPayment : '';
+
+  const statuses = [...new Set((orders || []).map(o => o.payment_status || '').filter(Boolean))];
+  const orderedStatuses = Object.keys(ORDER_PAYMENT_STATUS_LABELS).filter(status => statuses.includes(status));
+  statusSelect.innerHTML = `<option value="">Todos</option>${orderedStatuses.map(status =>
+    `<option value="${status}">${ORDER_PAYMENT_STATUS_LABELS[status] || status}</option>`
+  ).join('')}`;
+  statusSelect.value = orderedStatuses.includes(previousStatus) ? previousStatus : '';
+}
+
+function resetOrderFilters() {
+  const search = document.getElementById('order-filter-search');
+  const payment = document.getElementById('order-filter-payment');
+  const status = document.getElementById('order-filter-status');
+  if (search) search.value = '';
+  if (payment) payment.value = '';
+  if (status) status.value = '';
+  applyOrderFilters();
+}
+
+function toggleOrdersFilters() {
+  const panel = document.getElementById('orders-filters');
+  const btn = document.getElementById('orders-filter-toggle');
+  if (!panel || !btn) return;
+
+  const visible = panel.style.display !== 'none';
+  panel.style.display = visible ? 'none' : 'grid';
+  btn.innerHTML = visible ? 'Filtros &#x25BC;' : 'Filtros &#x25B2;';
+}
+
+function applyOrderFilters() {
+  closeOrderStatusDropdowns();
+  renderOrders(getVisibleOrders());
+}
+
+function getVisibleOrders() {
+  const searchValue = (document.getElementById('order-filter-search')?.value || '').trim().toLowerCase();
+  const paymentValue = document.getElementById('order-filter-payment')?.value || '';
+  const statusValue = document.getElementById('order-filter-status')?.value || '';
+
+  let visibleOrders = (_ordersData || []).filter(order => {
+    if (paymentValue && (order.payment_method || '') !== paymentValue) return false;
+    if (statusValue && (order.payment_status || '') !== statusValue) return false;
+
+    if (!searchValue) return true;
+
+    const items = (typeof order.items === 'string' ? JSON.parse(order.items) : order.items) || [];
+    const searchBlob = [
+      order.display_name || '',
+      order.platform_id || '',
+      order.payment_method || '',
+      ...items.map(item => `${item.product_name || ''} ${item.sku || ''} ${item.size || ''}`),
+    ].join(' ').toLowerCase();
+
+    return searchBlob.includes(searchValue);
+  });
+
+  const sortState = _sort.orders;
+  if (sortState.col) {
+    visibleOrders = sortData(visibleOrders, sortState.col, sortState.asc, orderSortGetter);
+  }
+  return visibleOrders;
+}
+
 function renderOrders(orders) {
-  let html = `<table class="w-full"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
+  const totalOrders = _ordersData.length;
+  const countEl = document.getElementById('orders-count');
+  if (countEl) {
+    countEl.textContent = totalOrders
+      ? `${orders.length} de ${totalOrders} pedido${totalOrders === 1 ? '' : 's'}`
+      : 'No hay pedidos';
+  }
+
+  if (!orders.length) {
+    document.getElementById('orders-list').innerHTML = `<div class="orders-empty">No hay pedidos que coincidan con los filtros.</div>`;
+    return;
+  }
+
+  let html = `<table class="w-full orders-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortOrders('name')">Cliente${sortArrow('orders','name')}</th>
     <th>Items</th>
     <th class="sortable" onclick="sortOrders('total')">Total${sortArrow('orders','total')}</th>
     <th class="sortable" onclick="sortOrders('payment')">Pago${sortArrow('orders','payment')}</th>
-    <th class="sortable" onclick="sortOrders('status')">Estado${sortArrow('orders','status')}</th>
+    <th class="sortable" onclick="sortOrders('status')">Estado pago${sortArrow('orders','status')}</th>
     <th class="sortable" onclick="sortOrders('date')">Fecha${sortArrow('orders','date')}</th>
+    <th></th>
   </tr></thead><tbody>`;
   for (const o of orders) {
     const items = (typeof o.items === 'string' ? JSON.parse(o.items) : o.items) || [];
-    const itemSummary = items.map(i => `${i.product_name} (${i.size})`).join(', ');
-    const statusBadge = {pending:'badge-yellow', proof_received:'badge-blue', confirmed:'badge-green', rejected:'badge-red'}[o.payment_status] || 'badge-gray';
+    const itemSummary = items.map(i => {
+      const size = i.size ? ` (${i.size})` : '';
+      return `${i.product_name || i.sku || 'Producto'}${size}`;
+    }).join(', ');
+    const statusBadge = getOrderStatusBadgeClass(o.payment_status);
+    const statusLabel = ORDER_PAYMENT_STATUS_LABELS[o.payment_status] || o.payment_status || 'Sin estado';
     const date = new Date(o.created_at).toLocaleDateString();
     html += `<tr class="border-t border-gray-100 dark:border-gray-700">
-      <td class="py-2">${o.display_name || o.platform_id}</td>
-      <td class="truncate max-w-xs" title="${itemSummary}">${itemSummary}</td>
+      <td class="py-2">${escapeHtml(o.display_name || o.platform_id)}</td>
+      <td class="order-items-cell" title="${escapeHtml(itemSummary)}">${escapeHtml(itemSummary)}</td>
       <td>$${(o.total || 0).toFixed(2)}</td>
-      <td>${o.payment_method || '-'}</td>
-      <td><span class="badge ${statusBadge}">${o.payment_status}</span></td>
+      <td>${escapeHtml(o.payment_method || '-')}</td>
+      <td>
+        <div class="status-dropdown-wrap">
+          <button type="button" class="badge ${statusBadge} status-pill-button" onclick="event.stopPropagation(); toggleOrderStatusDropdown('${o.id}')">
+            ${escapeHtml(statusLabel)}
+          </button>
+          <div id="order-status-menu-${o.id}" class="status-dropdown hidden" onclick="event.stopPropagation()">
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-2">Cambiar estado</label>
+            <select id="order-payment-${o.id}" class="w-full" onchange="changeOrderStatus('${o.id}', this.value)" onblur="scheduleCloseOrderStatusDropdown('${o.id}')">
+              ${renderOrderPaymentOptions(o.payment_status)}
+            </select>
+          </div>
+        </div>
+      </td>
       <td>${date}</td>
+      <td class="order-actions-cell">
+        <button class="btn btn-danger text-xs" onclick="deleteOrder('${o.id}')">Eliminar</button>
+      </td>
     </tr>`;
   }
   html += '</tbody></table>';
   document.getElementById('orders-list').innerHTML = html;
+}
+
+function getOrderStatusBadgeClass(status) {
+  return {pending:'badge-yellow', proof_received:'badge-blue', confirmed:'badge-green', failed:'badge-red', rejected:'badge-red'}[status] || 'badge-gray';
+}
+
+function renderOrderPaymentOptions(current) {
+  const options = ['pending', 'proof_received', 'confirmed', 'failed', 'rejected'];
+  return options.map(status =>
+    `<option value="${status}" ${status === current ? 'selected' : ''}>${ORDER_PAYMENT_STATUS_LABELS[status] || status}</option>`
+  ).join('');
+}
+
+function toggleOrderStatusDropdown(orderId) {
+  const menu = document.getElementById(`order-status-menu-${orderId}`);
+  if (!menu) return;
+
+  const isHidden = menu.classList.contains('hidden');
+  closeOrderStatusDropdowns(orderId);
+  if (isHidden) {
+    menu.classList.remove('hidden');
+    const select = menu.querySelector('select');
+    window.setTimeout(() => select?.focus(), 0);
+  }
+}
+
+function closeOrderStatusDropdown(orderId) {
+  const menu = document.getElementById(`order-status-menu-${orderId}`);
+  if (menu) menu.classList.add('hidden');
+}
+
+function closeOrderStatusDropdowns(exceptOrderId = null) {
+  document.querySelectorAll('[id^="order-status-menu-"]').forEach(menu => {
+    if (exceptOrderId && menu.id === `order-status-menu-${exceptOrderId}`) return;
+    menu.classList.add('hidden');
+  });
+}
+
+function scheduleCloseOrderStatusDropdown(orderId) {
+  window.setTimeout(() => closeOrderStatusDropdown(orderId), 150);
+}
+
+async function changeOrderStatus(orderId, paymentStatus) {
+  closeOrderStatusDropdown(orderId);
+
+  const order = _ordersData.find(item => item.id === orderId);
+  if (!order || order.payment_status === paymentStatus) return;
+
+  const resp = await apiFetch(API + '/orders/' + orderId, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      payment_status: paymentStatus,
+    }),
+  });
+
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    toast(data.detail || 'Error actualizando pedido', '#dc2626');
+    return;
+  }
+
+  order.payment_status = paymentStatus;
+  renderOrders(getVisibleOrders());
+  toast('Estado actualizado');
+}
+
+async function deleteOrder(orderId) {
+  closeOrderStatusDropdowns();
+  if (!confirm('¿Eliminar este pedido? Esto también restaurará el stock del catálogo.')) return;
+
+  const resp = await apiFetch(API + '/orders/' + orderId, {method: 'DELETE'});
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    toast(data.detail || 'Error eliminando pedido', '#dc2626');
+    return;
+  }
+
+  toast('Pedido eliminado');
+  _ordersData = _ordersData.filter(order => order.id !== orderId);
+  populateOrderFilters(_ordersData);
+  renderOrders(getVisibleOrders());
 }
 
 // -- Broadcasts --
@@ -536,48 +1040,145 @@ async function generateCatalogPdf() {
   }
 }
 
-async function savePdfInterval() {
-  const hours = parseInt(document.getElementById('pdf-interval').value);
-  if (isNaN(hours) || hours < 1 || hours > 168) {
-    toast('Intervalo debe ser entre 1 y 168 horas', '#dc2626');
-    return;
-  }
-  await apiFetch(API + '/catalog_pdf_interval_hours', {
-    method: 'PUT', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({value: hours}),
+function renderPaymentMethods(paymentMethods) {
+  const list = document.getElementById('payment-methods-list');
+  if (!list) return;
+
+  list.innerHTML = (paymentMethods || []).map((method, index) => `
+    <div class="payment-method-card border border-gray-200 dark:border-gray-700 rounded-xl p-4" data-payment-id="${escapeHtml(method.id || '')}">
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <div class="text-sm font-semibold text-gray-700 dark:text-gray-200">
+          Método <span class="payment-method-number">${index + 1}</span>
+        </div>
+        <button type="button" class="btn btn-danger text-sm" onclick="removePaymentMethod(this)">Eliminar</button>
+      </div>
+      <div class="grid md:grid-cols-[minmax(220px,280px)_1fr] gap-4">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Nombre</label>
+          <input type="text" class="w-full payment-method-name" value="${escapeHtml(method.name || '')}" placeholder="Ej. Zelle, Pago móvil, Wise">
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Información</label>
+          <textarea rows="3" class="w-full payment-field payment-method-info" placeholder="Correo, número, instrucciones o cuenta">${escapeHtml(method.information || '')}</textarea>
+        </div>
+      </div>
+    </div>
+  `).join('');
+
+  updatePaymentMethodsState();
+}
+
+function updatePaymentMethodsState() {
+  const cards = Array.from(document.querySelectorAll('.payment-method-card'));
+  cards.forEach((card, index) => {
+    const number = card.querySelector('.payment-method-number');
+    if (number) number.textContent = String(index + 1);
   });
-  toast('Intervalo de PDF guardado');
-  await loadSettings();
+
+  const empty = document.getElementById('payment-methods-empty');
+  if (empty) {
+    empty.style.display = cards.length ? 'none' : 'block';
+  }
+}
+
+function addPaymentMethod(method = {}) {
+  const list = document.getElementById('payment-methods-list');
+  if (!list) return;
+
+  const nextIndex = list.querySelectorAll('.payment-method-card').length;
+  list.insertAdjacentHTML('beforeend', `
+    <div class="payment-method-card border border-gray-200 dark:border-gray-700 rounded-xl p-4" data-payment-id="${escapeHtml(method.id || '')}">
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <div class="text-sm font-semibold text-gray-700 dark:text-gray-200">
+          Método <span class="payment-method-number">${nextIndex + 1}</span>
+        </div>
+        <button type="button" class="btn btn-danger text-sm" onclick="removePaymentMethod(this)">Eliminar</button>
+      </div>
+      <div class="grid md:grid-cols-[minmax(220px,280px)_1fr] gap-4">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Nombre</label>
+          <input type="text" class="w-full payment-method-name" value="${escapeHtml(method.name || '')}" placeholder="Ej. Zelle, Pago móvil, Wise">
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Información</label>
+          <textarea rows="3" class="w-full payment-field payment-method-info" placeholder="Correo, número, instrucciones o cuenta">${escapeHtml(method.information || '')}</textarea>
+        </div>
+      </div>
+    </div>
+  `);
+
+  updatePaymentMethodsState();
+  list.lastElementChild?.querySelector('.payment-method-name')?.focus();
+}
+
+function removePaymentMethod(trigger) {
+  trigger.closest('.payment-method-card')?.remove();
+  updatePaymentMethodsState();
+}
+
+function collectPaymentMethods() {
+  return Array.from(document.querySelectorAll('.payment-method-card')).map(card => ({
+    id: card.dataset.paymentId || undefined,
+    name: card.querySelector('.payment-method-name')?.value?.trim() || '',
+    information: card.querySelector('.payment-method-info')?.value?.trim() || '',
+  }));
 }
 
 async function savePaymentSettings() {
-  const fields = [
-    ['payment_zelle_details', document.getElementById('payment-zelle').value],
-    ['payment_binance_details', document.getElementById('payment-binance').value],
-    ['payment_zinli_details', document.getElementById('payment-zinli').value],
-    ['payment_bolivares_details', document.getElementById('payment-bolivares').value],
-  ];
-
-  for (const [key, value] of fields) {
-    await apiFetch(API + '/' + key, {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({value}),
-    });
+  const paymentMethods = collectPaymentMethods();
+  const missing = paymentMethods.find(method => !method.name || !method.information);
+  if (missing) {
+    toast('Cada método necesita nombre e información', '#dc2626');
+    return;
   }
+
+  const seen = new Set();
+  for (const method of paymentMethods) {
+    const key = method.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    if (seen.has(key)) {
+      toast('Los nombres de métodos no pueden repetirse', '#dc2626');
+      return;
+    }
+    seen.add(key);
+  }
+
+  await apiFetch(API + '/payment-methods', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({payment_methods: paymentMethods}),
+  });
 
   toast('Métodos de pago guardados');
   await loadSettings();
 }
 
+async function saveExchangeRateSetting() {
+  const value = document.getElementById('set-exchange-rate')?.value?.trim() || '';
+  await apiFetch(API + '/accepted_exchange_rate', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value}),
+  });
+  toast('Tasa guardada');
+  await loadSettings();
+}
+
 // -- Settings --
 async function loadSettings() {
-  const settings = await apiFetch(API + '/').then(r => r.json());
-  document.getElementById('pdf-interval').value = settings.catalog_pdf_interval_hours || 24;
-  document.getElementById('payment-zelle').value = settings.payment_zelle_details || '';
-  document.getElementById('payment-binance').value = settings.payment_binance_details || '';
-  document.getElementById('payment-zinli').value = settings.payment_zinli_details || '';
-  document.getElementById('payment-bolivares').value = settings.payment_bolivares_details || '';
+  const [settings, paymentData] = await Promise.all([
+    apiFetch(API + '/').then(r => r.json()),
+    apiFetch(API + '/payment-methods').then(r => r.json()),
+  ]);
+  const pdfInterval = settings.catalog_pdf_interval_hours || 24;
+  const pdfIntervalDisplay = document.getElementById('pdf-interval-display');
+  if (pdfIntervalDisplay) {
+    pdfIntervalDisplay.textContent = `${pdfInterval} horas`;
+  }
+  const exchangeRateInput = document.getElementById('set-exchange-rate');
+  if (exchangeRateInput) {
+    exchangeRateInput.value = settings.accepted_exchange_rate || '';
+  }
+  renderPaymentMethods(paymentData.payment_methods || []);
   loadCatalogPdfStatus();
 
   // Hide LLM controls when managed from master

@@ -98,11 +98,41 @@
       <!-- Customers tab (hidden by default) -->
       <div id="tab-customers" class="tab-panel fade-in" style="display:none">
         <div class="card">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="font-semibold text-gray-900 dark:text-gray-100">Clientes recientes</h3>
-            <div class="flex gap-2">
-              <input id="customer-search" placeholder="Filtrar por tag..." onkeydown="if(event.key==='Enter')loadCustomers()">
-              <button class="btn btn-secondary" onclick="loadCustomers()">Buscar</button>
+          <div class="flex items-start justify-between gap-4 mb-4">
+            <div class="min-w-0">
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100">Clientes recientes</h3>
+              <p id="customers-count" class="text-sm text-gray-500 dark:text-gray-400 mt-1">Cargando...</p>
+            </div>
+            <button id="customers-filter-toggle" class="btn btn-secondary text-sm whitespace-nowrap" onclick="toggleCustomersFilters()">Filtros &#x25BC;</button>
+          </div>
+          <div id="customers-filters" class="grid sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-4" style="display:none">
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Buscar</label>
+              <input id="customer-filter-search" class="w-full" placeholder="Nombre, teléfono o usuario" oninput="applyCustomerFilters()">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Tag</label>
+              <input id="customer-filter-tag" class="w-full" placeholder="vip, new_lead..." oninput="applyCustomerFilters()">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Canal</label>
+              <select id="customer-filter-channel" class="w-full" onchange="applyCustomerFilters()">
+                <option value="">Todos</option>
+                <option value="whatsapp">WhatsApp</option>
+                <option value="instagram">Instagram</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Estado</label>
+              <select id="customer-filter-state" class="w-full" onchange="applyCustomerFilters()">
+                <option value="">Todos</option>
+                <option value="active">Activo</option>
+                <option value="escalated">Escalado</option>
+                <option value="blocked">Bloqueado</option>
+              </select>
+            </div>
+            <div class="flex items-end">
+              <button class="btn btn-secondary w-full" onclick="resetCustomerFilters()">Limpiar filtros</button>
             </div>
           </div>
           <div id="customers-list" class="text-sm dark:text-gray-300">Cargando...</div>
@@ -112,7 +142,34 @@
       <!-- Orders tab -->
       <div id="tab-orders" class="tab-panel fade-in" style="display:none">
         <div class="card">
-          <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Pedidos recientes</h3>
+          <div class="flex items-start justify-between gap-4 mb-4">
+            <div class="min-w-0">
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100">Pedidos recientes</h3>
+              <p id="orders-count" class="text-sm text-gray-500 dark:text-gray-400 mt-1">Cargando...</p>
+            </div>
+            <button id="orders-filter-toggle" class="btn btn-secondary text-sm whitespace-nowrap" onclick="toggleOrdersFilters()">Filtros &#x25BC;</button>
+          </div>
+          <div id="orders-filters" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4" style="display:none">
+              <div>
+                <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Buscar</label>
+                <input id="order-filter-search" class="w-full" placeholder="Cliente, producto o SKU" oninput="applyOrderFilters()">
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Método de pago</label>
+                <select id="order-filter-payment" class="w-full" onchange="applyOrderFilters()">
+                  <option value="">Todos</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Estado</label>
+                <select id="order-filter-status" class="w-full" onchange="applyOrderFilters()">
+                  <option value="">Todos</option>
+                </select>
+              </div>
+              <div class="flex items-end">
+                <button class="btn btn-secondary w-full" onclick="resetOrderFilters()">Limpiar filtros</button>
+              </div>
+          </div>
           <div id="orders-list" class="text-sm dark:text-gray-300">Cargando...</div>
         </div>
       </div>
@@ -165,35 +222,46 @@
             </div>
           </div>
           <div class="mt-3 space-y-2">
-            <label class="block text-sm text-gray-600 dark:text-gray-400">Auto-actualizar cada (horas)</label>
-            <div class="flex gap-2">
-              <input id="pdf-interval" type="number" min="1" max="168" value="24" class="w-32">
-              <button class="btn btn-secondary text-sm" onclick="savePdfInterval()">Guardar</button>
+            <div class="text-sm text-gray-600 dark:text-gray-400">
+              Auto-actualizar cada: <span id="pdf-interval-display" class="font-semibold text-gray-800 dark:text-gray-200">Cargando...</span>
+            </div>
+            <div class="text-xs text-gray-500 dark:text-gray-500">
+              La programación de trabajos se configura desde el panel master.
             </div>
           </div>
         </div>
-        <div class="card mb-4">
-          <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Métodos de pago</h3>
-          <div class="grid md:grid-cols-2 gap-4">
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Zelle</label>
-              <textarea id="payment-zelle" rows="3" placeholder="Nombre, correo o teléfono" class="w-full payment-field"></textarea>
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Binance Pay</label>
-              <textarea id="payment-binance" rows="3" placeholder="Pay ID o instrucciones" class="w-full payment-field"></textarea>
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Zinli</label>
-              <textarea id="payment-zinli" rows="3" placeholder="Correo, teléfono o instrucciones" class="w-full payment-field"></textarea>
-            </div>
-            <div>
-              <label class="block text-xs text-gray-500 mb-1">Bolívares</label>
-                <textarea id="payment-bolivares" rows="3" placeholder="Banco, cuenta, cédula y nota de tasa" class="w-full payment-field"></textarea>
+        <div class="grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-4 mb-4 items-start">
+          <div class="card h-full">
+            <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Tasa del día</h3>
+            <div class="space-y-3">
+              <div>
+                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tasa aceptada</label>
+                <input id="set-exchange-rate" class="w-full" placeholder="Ej. BCV del día, 128 Bs/USD, 130">
+              </div>
+              <p class="text-xs text-gray-500 dark:text-gray-500">
+                Eva usará este valor cuando pregunten “¿a qué tasa recibes?” o algo similar.
+              </p>
+              <button class="btn btn-primary w-full" onclick="saveExchangeRateSetting()">Guardar tasa</button>
             </div>
           </div>
-          <div class="mt-4">
-            <button class="btn btn-primary" onclick="savePaymentSettings()">Guardar métodos de pago</button>
+          <div class="card h-full">
+            <div class="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 class="font-semibold text-gray-900 dark:text-gray-100">Métodos de pago</h3>
+                <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                  El nombre es lo que verá el cliente. La información es lo que el bot enviará cuando elija ese método.
+                </p>
+              </div>
+              <button class="btn btn-secondary text-sm whitespace-nowrap" onclick="addPaymentMethod()">+ Agregar método</button>
+            </div>
+            <div id="payment-methods-empty" class="text-sm text-gray-600 dark:text-gray-400 mb-4" style="display:none">
+              No hay métodos configurados. Agrega los que quieras ofrecer en esta tienda.
+            </div>
+            <div id="payment-methods-list" class="space-y-4"></div>
+            <div class="mt-4 flex gap-2">
+              <button class="btn btn-secondary" onclick="addPaymentMethod()">Agregar método</button>
+              <button class="btn btn-primary" onclick="savePaymentSettings()">Guardar métodos de pago</button>
+            </div>
           </div>
         </div>
         <div id="llm-settings-section" class="grid md:grid-cols-2 gap-4">

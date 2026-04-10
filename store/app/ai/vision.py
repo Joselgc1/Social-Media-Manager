@@ -23,16 +23,20 @@ PAYMENT_ANALYSIS_PROMPT = """Analyze this payment screenshot. Extract the follow
 
 1. Payment method (Zelle, Binance, Zinli, bank transfer, or unknown)
 2. Amount (number and currency if visible)
-3. Sender name (if visible)
-4. Reference number or transaction ID (if visible)
-5. Date/time of transaction (if visible)
-6. Status (completed, pending, failed, or unclear)
+3. Recipient identifier (email, phone, pay ID, bank account, or destination shown)
+4. Recipient name (if visible)
+5. Sender name (if visible)
+6. Reference number or transaction ID (if visible)
+7. Date/time of transaction (if visible)
+8. Status (completed, pending, failed, or unclear)
 
 Respond in JSON format only, no additional text:
 {
   "payment_method": "zelle|binance|zinli|bank_transfer|unknown",
   "amount": "28.00",
   "currency": "USD|VES|USDT|unknown",
+  "recipient_identifier": "email/phone/pay id/account or null",
+  "recipient_name": "name or null",
   "sender_name": "name or null",
   "reference": "reference number or null",
   "date": "date string or null",

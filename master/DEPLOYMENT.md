@@ -364,7 +364,7 @@ Go to the master dashboard and click **"+ Add Store"**. Fill in the new store's 
 
 If the new store sells different products or has a different brand voice, you can override the system prompt without modifying code.
 
-Set the `SYSTEM_PROMPT_OVERRIDE` environment variable in Railway to the full text of the custom system prompt. The prompt should use the same `{store_name}`, `{product_catalog}`, `{zelle_details}`, `{binance_details}`, `{zinli_details}`, `{bolivares_details}` placeholders as the original `prompts/system_prompt.md`.
+Set the `SYSTEM_PROMPT_OVERRIDE` environment variable in Railway to the full text of the custom system prompt. The prompt should use the same `{store_name}`, `{product_catalog}`, `{payment_method_names_text}`, `{payment_methods_block}`, and `{exchange_rate_block}` placeholders as the original `prompts/system_prompt.md`.
 
 If you don't set this variable, the store uses the default prompt template from the file.
 
@@ -376,11 +376,19 @@ To take full control of which AI provider and model each store uses:
 2. Deploy the credential to Railway (see 5.7 below)
 3. Once deployed, the store's dashboard will hide all LLM provider/model controls, and the Telegram bot `/provider` command will be disabled
 
-Now you can manage the store's shared runtime settings from the master dashboard:
+Now you can manage the store's shared AI runtime settings from the master dashboard:
 
-- Open a store's detail view → **Runtime Settings** panel
-- Set the provider (OpenAI/Anthropic), model, temperature, max tokens, fallback, payment instructions, and catalog PDF interval
-- Click "Save Runtime Settings" — changes apply from the store DB and show up in the store dashboard after refresh
+- Open a store's detail view → **AI Settings** panel
+- Set the provider (OpenAI/Anthropic), model, temperature, max tokens, and fallback behavior
+- Click "Save AI Settings" — changes apply from the store DB and show up in the store dashboard after refresh
+
+You can also manage all scheduler timings from the master dashboard:
+
+- Open the same store detail view → **Scheduled Jobs** panel
+- Set the catalog refresh interval, broadcast checker interval, catalog PDF refresh interval, and the UTC time for token reminders plus daily analytics
+- Click "Save Scheduled Jobs" — the store applies the new timings automatically within about a minute
+
+Payment methods are no longer master-managed. Configure them in the store dashboard only.
 
 The **LLM Usage (Today)** panel shows the store's API call count and estimated cost. The overview tab shows **Platform LLM Costs** aggregated across all stores.
 
@@ -475,13 +483,13 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 [ ] Store without LLM_MANAGED_EXTERNALLY -> LLM controls work as normal
 ```
 
-### 6.2b Runtime Settings from Master
+### 6.2b AI Settings from Master
 
 ```text
-[ ] Master store detail shows "Runtime Settings" panel
+[ ] Master store detail shows "AI Settings" panel
 [ ] Changing provider updates model dropdown to matching models
-[ ] "Save Runtime Settings" writes to the store DB (verify via the store dashboard /admin/settings/)
-[ ] Payment details edited in master appear in the store dashboard after refresh
+[ ] "Save AI Settings" writes to the store DB (verify via the store dashboard /admin/settings/)
+[ ] Master store detail does not expose payment-method editing
 [ ] "LLM Usage (Today)" panel shows call counts and costs
 [ ] Overview tab shows "Platform LLM Costs" table with per-store costs and total
 [ ] Costs aggregate endpoint returns correct totals across all stores
@@ -573,8 +581,8 @@ Store Stats:
   GET    /api/stores/{id}/stats                 -> Live stats from store's DB
 
 Runtime Settings:
-  GET    /api/stores/{id}/settings              -> Read shared runtime settings from the store DB
-  PUT    /api/stores/{id}/settings              -> Write shared runtime settings to the store DB
+  GET    /api/stores/{id}/settings              -> Read shared AI runtime settings from the store DB
+  PUT    /api/stores/{id}/settings              -> Write shared AI runtime settings to the store DB
   GET    /api/stores/{id}/llm-usage?days=N      -> Token usage + costs (default: today)
   GET    /api/stores/llm-costs/aggregate?days=N -> Platform-wide costs (default: today)
 
@@ -645,4 +653,3 @@ Store A (1 deployment)                   Store B (1 deployment)
 - **"Railway API error" on deploy**: Check that `RAILWAY_API_TOKEN` is valid and has access to the store's Railway project. Regenerate the token at railway.app > Account Settings > Tokens if needed.
 - **Deploy succeeds but store doesn't restart**: Railway redeploys are asynchronous. Check the Railway Deployment section in the store detail for the latest deployment status. If it shows "FAILED", check Railway logs for build errors.
 - **Test seed stores show "Stats unavailable"**: This is expected. Seeded stores use the master DB URL as a placeholder, and the master DB doesn't have store tables (customers, conversations, etc.). CRUD, credentials, and audit logging still work correctly for testing.
-

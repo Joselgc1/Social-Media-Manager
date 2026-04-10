@@ -8,6 +8,11 @@ import time
 import databases
 from app.config import get_config
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
+from app.payment_methods import (
+    LEGACY_PAYMENT_SETTING_KEYS,
+    PAYMENT_METHODS_SETTING_KEY,
+    build_payment_methods_from_legacy,
+)
 
 _db: databases.Database | None = None
 
@@ -59,6 +64,7 @@ async def ensure_default_settings():
     rows = [
         {"key": key, "val": json.dumps(value)}
         for key, value in RUNTIME_SETTING_DEFAULTS.items()
+        if key != PAYMENT_METHODS_SETTING_KEY
     ]
     query = (
         "INSERT INTO settings (key, value) VALUES (:key, :val) "
@@ -67,7 +73,40 @@ async def ensure_default_settings():
     async with get_db().transaction():
         for row in rows:
             await get_db().execute(query=query, values=row)
+
+    await _ensure_payment_methods_setting()
     invalidate_settings_cache()
+
+
+async def _ensure_payment_methods_setting():
+    row = await fetch_one(
+        "SELECT value FROM settings WHERE key = :key",
+        {"key": PAYMENT_METHODS_SETTING_KEY},
+    )
+    if row:
+        return
+
+    legacy_rows = await fetch_all(
+        "SELECT key, value FROM settings WHERE key = ANY(:keys)",
+        {"keys": list(LEGACY_PAYMENT_SETTING_KEYS)},
+    )
+    legacy_settings = {
+        legacy_row["key"]: _decode_setting_value(legacy_row["value"])
+        for legacy_row in legacy_rows
+    }
+    payment_methods = build_payment_methods_from_legacy(legacy_settings)
+
+    await execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES (:key, :val)
+        ON CONFLICT (key) DO NOTHING
+        """,
+        {
+            "key": PAYMENT_METHODS_SETTING_KEY,
+            "val": json.dumps(payment_methods, ensure_ascii=False),
+        },
+    )
 
 
 def _decode_setting_value(value):

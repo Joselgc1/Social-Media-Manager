@@ -17,7 +17,10 @@ from app.channels.instagram_sender import setup_ice_breakers, subscribe_page_to_
 from app.config import get_config
 from app.admin.auth import require_admin
 from app.admin.telegram_bot import setup_telegram_webhook
+from app.crm import conversations, orders
+from app.crm import customers as customer_crm
 from app.crm.customers import add_tags, remove_tag
+from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
 from app.runtime_settings import STORE_EDITABLE_SETTING_KEYS, LLM_MANAGED_KEYS
 
 logger = logging.getLogger(__name__)
@@ -36,12 +39,34 @@ class SettingUpdate(BaseModel):
     value: str | float | bool | int
 
 
+class PaymentMethodItem(BaseModel):
+    id: str | None = None
+    name: str
+    information: str
+
+
+class PaymentMethodsUpdate(BaseModel):
+    payment_methods: list[PaymentMethodItem]
+
+
+class OrderUpdate(BaseModel):
+    payment_status: str | None = None
+    shipping_status: str | None = None
+    tracking_number: str | None = None
+
+
+class CustomerUpdate(BaseModel):
+    channel: str | None = None
+    conversation_state: str | None = None
+
+
+VALID_CUSTOMER_CHANNELS = {"whatsapp", "instagram"}
+VALID_CUSTOMER_STATES = {"active", "escalated", "blocked"}
+
+
 def _validate_setting_value(key: str, value, current_settings: dict):
     if key not in STORE_EDITABLE_SETTING_KEYS:
         raise HTTPException(status_code=400, detail=f"Setting '{key}' is not editable.")
-
-    if key in ("payment_zelle_details", "payment_binance_details", "payment_zinli_details", "payment_bolivares_details"):
-        return str(value).strip()
 
     if key in ("llm_provider", "fallback_provider"):
         if value not in VALID_PROVIDERS:
@@ -130,10 +155,46 @@ async def get_all_settings():
     return settings
 
 
+@router.get("/payment-methods")
+async def get_payment_methods():
+    settings = dict(await db.get_settings())
+    raw_methods = settings.get(PAYMENT_METHODS_SETTING_KEY, [])
+    try:
+        payment_methods = normalize_payment_methods(raw_methods)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=f"Stored payment methods are invalid: {e}")
+    return {"payment_methods": payment_methods}
+
+
 @router.get("/providers")
 async def list_available_providers():
     """Return available providers and their models (for the admin dropdown)."""
     return AVAILABLE_MODELS
+
+
+@router.put("/payment-methods")
+async def update_payment_methods(body: PaymentMethodsUpdate):
+    try:
+        payment_methods = normalize_payment_methods(
+            [item.model_dump() for item in body.payment_methods]
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await db.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES (:key, :val)
+        ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()
+        """,
+        {
+            "key": PAYMENT_METHODS_SETTING_KEY,
+            "val": json.dumps(payment_methods, ensure_ascii=False),
+        },
+    )
+    db.invalidate_settings_cache()
+    logger.info("Payment methods updated.")
+    return {"status": "updated", "payment_methods": payment_methods}
 
 
 @router.put("/{key}")
@@ -370,12 +431,13 @@ async def conversation_stats(days: int = 1):
 
 
 @router.get("/customers")
-async def list_customers(tag: str | None = None, limit: int = 50):
+async def list_customers(tag: str | None = None, limit: int = 200):
     """Return recent customers, optionally filtered by tag."""
+    limit = max(1, min(limit, 500))
     if tag:
         rows = await db.fetch_all(
             """
-            SELECT id, channel, platform_id, display_name, tags,
+            SELECT id, channel, platform_id, display_name, phone, instagram_handle, tags,
                    total_orders, total_spent, conversation_state, last_active
             FROM customers
             WHERE tags::text LIKE :pattern
@@ -387,7 +449,7 @@ async def list_customers(tag: str | None = None, limit: int = 50):
     else:
         rows = await db.fetch_all(
             """
-            SELECT id, channel, platform_id, display_name, tags,
+            SELECT id, channel, platform_id, display_name, phone, instagram_handle, tags,
                    total_orders, total_spent, conversation_state, last_active
             FROM customers
             ORDER BY last_active DESC NULLS LAST
@@ -408,6 +470,7 @@ async def resolve_customer(customer_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Customer not found or not escalated")
 
+    await conversations.clear_history(str(row["id"]))
     await db.execute(
         "UPDATE customers SET conversation_state = 'active' WHERE id = :id",
         {"id": row["id"]},
@@ -426,6 +489,10 @@ async def resolve_all_customers():
     if count == 0:
         return {"status": "ok", "resolved": 0}
 
+    rows = await db.fetch_all(
+        "SELECT id FROM customers WHERE conversation_state = 'escalated'"
+    )
+    await conversations.clear_history_for_customers([str(row["id"]) for row in rows])
     await db.execute(
         "UPDATE customers SET conversation_state = 'active' WHERE conversation_state = 'escalated'"
     )
@@ -495,6 +562,115 @@ async def list_orders(limit: int = 50):
         {"limit": limit},
     )
     return [dict(r) for r in rows]
+
+
+@router.put("/customers/{customer_id}")
+async def update_customer(customer_id: str, body: CustomerUpdate):
+    row = await db.fetch_one(
+        """
+        SELECT id, channel, platform_id, conversation_state
+        FROM customers
+        WHERE id::text = :cid
+        """,
+        {"cid": customer_id},
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    updates: dict[str, str] = {}
+
+    if body.channel is not None:
+        channel = body.channel.strip().lower()
+        if channel not in VALID_CUSTOMER_CHANNELS:
+            raise HTTPException(status_code=400, detail="Invalid channel")
+        if channel != row["channel"]:
+            conflict = await db.fetch_one(
+                """
+                SELECT id
+                FROM customers
+                WHERE channel = :channel
+                  AND platform_id = :platform_id
+                  AND id <> :id
+                LIMIT 1
+                """,
+                {
+                    "channel": channel,
+                    "platform_id": row["platform_id"],
+                    "id": row["id"],
+                },
+            )
+            if conflict:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Another customer already exists with that channel and platform ID.",
+                )
+            updates["channel"] = channel
+
+    if body.conversation_state is not None:
+        state = body.conversation_state.strip().lower()
+        if state not in VALID_CUSTOMER_STATES:
+            raise HTTPException(status_code=400, detail="Invalid conversation state")
+        updates["conversation_state"] = state
+
+    if not updates:
+        existing = await db.fetch_one("SELECT * FROM customers WHERE id::text = :cid", {"cid": customer_id})
+        return {"status": "unchanged", "customer": dict(existing) if existing else None}
+
+    if updates.get("conversation_state") == "active" and row["conversation_state"] != "active":
+        await conversations.clear_history(str(row["id"]))
+
+    updated = await customer_crm.update_customer(
+        customer_id=str(row["id"]),
+        channel=updates.get("channel"),
+        conversation_state=updates.get("conversation_state"),
+    )
+    return {"status": "updated", "customer": updated}
+
+
+@router.delete("/customers/{customer_id}")
+async def delete_customer(customer_id: str):
+    deleted = await customer_crm.delete_customer(customer_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return {"status": "deleted", "customer_id": customer_id}
+
+
+@router.put("/orders/{order_id}")
+async def update_order(order_id: str, body: OrderUpdate):
+    existing = await orders.get_order(order_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    updated_payment = None
+    updated_shipping = None
+
+    try:
+        if body.payment_status is not None:
+            updated_payment = await orders.update_order_payment_status(order_id, body.payment_status)
+        if body.shipping_status is not None or body.tracking_number is not None:
+            updated_shipping = await orders.update_order_shipping(
+                order_id,
+                shipping_status=body.shipping_status,
+                tracking_number=body.tracking_number,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    updated = await orders.get_order(order_id)
+    return {
+        "status": "updated",
+        "order": updated,
+        "payment": updated_payment,
+        "shipping": updated_shipping,
+    }
+
+
+@router.delete("/orders/{order_id}")
+async def delete_order(order_id: str):
+    result = await orders.delete_order(order_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return result
 
 
 @router.post("/telegram/setup-webhook")

@@ -105,7 +105,7 @@ def _render_category(pdf: "FPDF", category: str, products: list[dict]):
     pdf.set_fill_color(*_PINK_LIGHT)
     pdf.set_text_color(*_GRAY)
     pdf.set_font("Helvetica", "B", 7)
-    _row(pdf, "SKU", "Producto", "Tallas", "Precio", "Stock", fill=True)
+    _row(pdf, "Producto", "Tallas", "Precio", fill=True)
 
     pdf.set_text_color(*_DARK)
 
@@ -116,14 +116,12 @@ def _render_category(pdf: "FPDF", category: str, products: list[dict]):
             pdf.set_fill_color(*_WHITE)
 
         in_stock = _parse_stock(p.get("stock", 0)) > 0
-        stock_label = str(_parse_stock(p.get("stock", 0))) if in_stock else "Agotado"
 
         try:
             price_str = f"${float(p.get('price_usd', 0)):.2f}"
         except (ValueError, TypeError):
             price_str = f"${p.get('price_usd', 0)}"
 
-        sku   = str(p.get("sku", ""))[:10]
         name  = str(p.get("product_name", ""))[:42]
         sizes = str(p.get("sizes", ""))[:22]
 
@@ -132,21 +130,20 @@ def _render_category(pdf: "FPDF", category: str, products: list[dict]):
         if not in_stock:
             pdf.set_text_color(*_GRAY)
 
-        _row(pdf, sku, name, sizes, price_str, stock_label, fill=True)
+        _row(pdf, name, sizes, price_str, fill=True)
 
         pdf.set_text_color(*_DARK)
 
     pdf.ln(5)
 
 
-def _row(pdf: "FPDF", sku: str, name: str, sizes: str, price: str, stock: str, fill: bool = False):
+def _row(pdf: "FPDF", name: str, sizes: str, price: str, fill: bool = False):
     """Render a single table row."""
     h = 6
-    pdf.cell(16,  h, sku,   fill=fill, border=0)
-    pdf.cell(74,  h, name,  fill=fill, border=0)
-    pdf.cell(38,  h, sizes, fill=fill, border=0)
+    pdf.cell(112, h, name,  fill=fill, border=0)
+    pdf.cell(58,  h, sizes, fill=fill, border=0)
     pdf.cell(28,  h, price, fill=fill, border=0, align="R")
-    pdf.cell(30,  h, stock, fill=fill, border=0, align="C", ln=True)
+    pdf.ln()
 
 
 def _render_footer_note(pdf: "FPDF"):
@@ -156,7 +153,7 @@ def _render_footer_note(pdf: "FPDF"):
     pdf.set_text_color(*_GRAY)
     generated = datetime.now().strftime("%d/%m/%Y %H:%M")
     pdf.cell(0, 5,
-             f"Actualizado: {generated}  |  Precios incluyen delivery nacional  "
+             f"Actualizado: {generated}  |  Envíos por MRW o Zoom con cobro a destino  "
              f"|  Consulta disponibilidad antes de confirmar",
              align="C")
 

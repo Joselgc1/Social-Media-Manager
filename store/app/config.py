@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     telegram_admin_chat_id: str = ""
 
     # --- App config ---
-    store_name: str = "Tu Tienda VS"
+    store_name: str = "Zona Pink"
     owner_name: str = "Admin"
     app_base_url: str = "http://localhost:8000"
     debug: bool = False

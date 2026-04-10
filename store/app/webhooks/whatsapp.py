@@ -4,6 +4,7 @@ Receives incoming messages from the WhatsApp Cloud API,
 normalizes them, and routes them through the AI engine.
 """
 
+import time
 import hashlib
 import hmac
 import logging
@@ -11,17 +12,39 @@ from fastapi import APIRouter, Request, Response, HTTPException
 
 from app.config import get_config
 from app.ai.engine import generate_response
-from app.channels.whatsapp_sender import send_text, send_interactive_buttons, send_document, mark_as_read
+from app.channels.whatsapp_sender import send_text, send_image, send_interactive_buttons, send_document, mark_as_read
 from app.admin.notify import notify_owner
+from app.webhooks.inbound_buffer import enqueue_inbound_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_PROCESSED_MESSAGE_IDS: dict[str, float] = {}
+_PROCESSED_MESSAGE_TTL_SECONDS = 1800
 
 
 def _mask_sender(sender: str) -> str:
     if len(sender) <= 4:
         return sender
     return f"{sender[:2]}***{sender[-2:]}"
+
+
+def _is_duplicate_message(message_id: str) -> bool:
+    if not message_id:
+        return False
+
+    now = time.time()
+    expired = [
+        mid for mid, seen_at in _PROCESSED_MESSAGE_IDS.items()
+        if (now - seen_at) > _PROCESSED_MESSAGE_TTL_SECONDS
+    ]
+    for mid in expired:
+        _PROCESSED_MESSAGE_IDS.pop(mid, None)
+
+    if message_id in _PROCESSED_MESSAGE_IDS:
+        return True
+
+    _PROCESSED_MESSAGE_IDS[message_id] = now
+    return False
 
 
 async def _safe_send_apology(sender: str):
@@ -110,6 +133,10 @@ async def _process_message(message: dict, value: dict):
     msg_id = message.get("id", "")
     msg_type = message.get("type", "")
 
+    if _is_duplicate_message(msg_id):
+        logger.info(f"Ignoring duplicate WhatsApp message {msg_id} from {_mask_sender(sender)}")
+        return
+
     # Extract the display name from contacts if available
     contacts = value.get("contacts", [])
     display_name = contacts[0].get("profile", {}).get("name") if contacts else None
@@ -156,6 +183,20 @@ async def _process_message(message: dict, value: dict):
     except Exception:
         pass  # Non-critical
 
+    await enqueue_inbound_message(
+        channel="whatsapp",
+        sender_id=sender,
+        text=text,
+        media_url=media_url,
+        customer_profile={
+            "display_name": display_name,
+            "phone": sender,
+        },
+        processor=_deliver_ai_response,
+    )
+
+
+async def _deliver_ai_response(sender: str, text: str, media_url: str | None, customer_profile: dict):
     # Route through the AI engine
     try:
         result = await generate_response(
@@ -163,6 +204,7 @@ async def _process_message(message: dict, value: dict):
             sender_id=sender,
             message_text=text,
             media_url=media_url,
+            customer_profile=customer_profile,
         )
     except Exception as e:
         logger.exception(f"Error generating WhatsApp response for {_mask_sender(sender)}: {e}")
@@ -172,27 +214,38 @@ async def _process_message(message: dict, value: dict):
     if result.get("paused"):
         return
     if result.get("escalated") and not (
-        result.get("text") or result.get("interactive") or result.get("catalog_pdf")
+        result.get("text") or result.get("interactive") or result.get("catalog_pdf") or result.get("product_image")
     ):
         return
 
     try:
         if result.get("catalog_pdf") and result["catalog_pdf"].get("type") == "catalog_pdf":
             pdf_url = f"{get_config().app_base_url}/static/catalog/catalog.pdf"
+            follow_up = (result.get("text") or result["catalog_pdf"].get("caption") or "").strip()
             await send_document(
                 to=sender,
                 document_url=pdf_url,
                 filename="Catalogo VS.pdf",
-                caption=result["catalog_pdf"].get("caption", ""),
+                caption="",
             )
-            if result.get("text"):
-                await send_text(to=sender, text=result["text"])
+            if follow_up:
+                await send_text(to=sender, text=follow_up)
         elif result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
             await send_interactive_buttons(
                 to=sender,
                 body_text=result["interactive"]["body_text"],
                 buttons=result["interactive"]["buttons"],
             )
+        elif result.get("product_image") and result["product_image"].get("type") == "product_image":
+            caption = result["product_image"].get("caption", "")
+            await send_image(
+                to=sender,
+                image_url=result["product_image"]["image_url"],
+                caption=caption,
+            )
+            follow_up = (result.get("text") or "").strip()
+            if follow_up and follow_up != caption.strip():
+                await send_text(to=sender, text=follow_up)
         elif result.get("text"):
             await send_text(to=sender, text=result["text"])
     except Exception as e:

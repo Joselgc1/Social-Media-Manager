@@ -75,11 +75,13 @@ class RuntimeSettingsUpdate(BaseModel):
     auto_fallback: bool | None = None
     max_conversation_history: int | None = None
     ai_enabled: bool | None = None
+    catalog_refresh_minutes: int | None = None
+    broadcast_check_interval_minutes: int | None = None
     catalog_pdf_interval_hours: int | None = None
-    payment_zelle_details: str | None = None
-    payment_binance_details: str | None = None
-    payment_zinli_details: str | None = None
-    payment_bolivares_details: str | None = None
+    token_reminder_hour: int | None = None
+    token_reminder_minute: int | None = None
+    daily_analytics_hour: int | None = None
+    daily_analytics_minute: int | None = None
 
 
 class LLMSettingsUpdate(RuntimeSettingsUpdate):

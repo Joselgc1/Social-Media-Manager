@@ -349,14 +349,13 @@ function renderStoreDetail(store, stats, creds) {
             </div>
         </div>
 
-        <!-- Payment Settings -->
-        <div class="card mb-6" id="payment-settings-panel">
+        <div class="card mb-4" id="scheduler-settings-panel">
             <div class="flex items-center justify-between mb-3">
-                <h3 class="font-bold text-lg">Store Payment Details</h3>
+                <h3 class="font-bold text-lg">Scheduled Jobs</h3>
                 <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
             </div>
-            <div id="payment-settings-content">
-                <p class="text-gray-500">Loading payment details...</p>
+            <div id="scheduler-settings-content">
+                <p class="text-gray-500">Loading scheduler settings...</p>
             </div>
         </div>
 
@@ -674,8 +673,8 @@ async function confirmDeleteCredential(storeId, key) {
 // ── Runtime Settings & Usage ───────────────────────────────
 async function loadRuntimeSettings(storeId) {
     const aiContainer = document.getElementById('ai-settings-content');
-    const paymentContainer = document.getElementById('payment-settings-content');
-    if (!aiContainer && !paymentContainer) return;
+    const schedulerContainer = document.getElementById('scheduler-settings-content');
+    if (!aiContainer && !schedulerContainer) return;
 
     try {
         const data = await api(`/api/stores/${storeId}/settings`);
@@ -747,36 +746,45 @@ async function loadRuntimeSettings(storeId) {
                         <span class="text-sm">Auto Fallback</span>
                     </label>
                 </div>
-                <div>
-                    <label class="block text-xs text-gray-500 mb-1">Catalog PDF Interval (hours)</label>
-                    <input id="catalog-pdf-interval" type="number" step="1" min="1" max="168" value="${s.catalog_pdf_interval_hours ?? 24}" class="w-full">
-                </div>
                 <button onclick="saveAiSettings('${storeId}')" class="btn btn-primary w-full">Save AI Settings</button>
             </div>`;
         }
 
-        if (paymentContainer) {
-            paymentContainer.innerHTML = `
-            <div class="space-y-3">
-                <div class="grid grid-cols-2 gap-3">
+        if (schedulerContainer) {
+            schedulerContainer.innerHTML = `
+            <div class="space-y-4">
+                <p class="text-sm text-gray-500">All scheduler times are stored per store and applied by the store app within about one minute. Daily jobs run in UTC.</p>
+                <div class="grid md:grid-cols-3 gap-3">
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">Zelle</label>
-                        <textarea id="payment-zelle" rows="3" placeholder="Name, email or phone" class="w-full">${esc(s.payment_zelle_details || '')}</textarea>
+                        <label class="block text-xs text-gray-500 mb-1">Catalog Refresh (minutes)</label>
+                        <input id="sched-catalog-refresh" type="number" step="1" min="1" max="1440" value="${s.catalog_refresh_minutes ?? 15}" class="w-full">
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">Binance Pay</label>
-                        <textarea id="payment-binance" rows="3" placeholder="Pay ID or instructions" class="w-full">${esc(s.payment_binance_details || '')}</textarea>
+                        <label class="block text-xs text-gray-500 mb-1">Broadcast Check (minutes)</label>
+                        <input id="sched-broadcast-check" type="number" step="1" min="1" max="60" value="${s.broadcast_check_interval_minutes ?? 1}" class="w-full">
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">Zinli</label>
-                        <textarea id="payment-zinli" rows="3" placeholder="Email, phone or instructions" class="w-full">${esc(s.payment_zinli_details || '')}</textarea>
-                    </div>
-                    <div>
-                        <label class="block text-xs text-gray-500 mb-1">Bolívares</label>
-                        <textarea id="payment-bolivares" rows="3" placeholder="Bank, account, ID and rate note" class="w-full">${esc(s.payment_bolivares_details || '')}</textarea>
+                        <label class="block text-xs text-gray-500 mb-1">Catalog PDF Refresh (hours)</label>
+                        <input id="sched-catalog-pdf" type="number" step="1" min="1" max="168" value="${s.catalog_pdf_interval_hours ?? 24}" class="w-full">
                     </div>
                 </div>
-                <button onclick="savePaymentSettings('${storeId}')" class="btn btn-primary w-full">Save Payment Details</button>
+                <div class="grid md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Token Reminder (UTC)</label>
+                        <div class="grid grid-cols-2 gap-3">
+                            <input id="sched-token-hour" type="number" step="1" min="0" max="23" value="${s.token_reminder_hour ?? 3}" class="w-full" placeholder="Hour">
+                            <input id="sched-token-minute" type="number" step="1" min="0" max="59" value="${s.token_reminder_minute ?? 0}" class="w-full" placeholder="Minute">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Daily Analytics (UTC)</label>
+                        <div class="grid grid-cols-2 gap-3">
+                            <input id="sched-analytics-hour" type="number" step="1" min="0" max="23" value="${s.daily_analytics_hour ?? 1}" class="w-full" placeholder="Hour">
+                            <input id="sched-analytics-minute" type="number" step="1" min="0" max="59" value="${s.daily_analytics_minute ?? 0}" class="w-full" placeholder="Minute">
+                        </div>
+                    </div>
+                </div>
+                <button onclick="saveSchedulerSettings('${storeId}')" class="btn btn-primary w-full">Save Scheduled Jobs</button>
             </div>`;
         }
 
@@ -786,8 +794,8 @@ async function loadRuntimeSettings(storeId) {
         if (aiContainer) {
             aiContainer.innerHTML = `<p class="text-red-500">Could not load AI settings: ${esc(e.message)}</p>`;
         }
-        if (paymentContainer) {
-            paymentContainer.innerHTML = `<p class="text-red-500">Could not load payment details: ${esc(e.message)}</p>`;
+        if (schedulerContainer) {
+            schedulerContainer.innerHTML = `<p class="text-red-500">Could not load scheduler settings: ${esc(e.message)}</p>`;
         }
     }
 }
@@ -818,7 +826,6 @@ async function saveAiSettings(storeId) {
         fallback_model: document.getElementById('llm-fb-model').value,
         auto_fallback: document.getElementById('llm-auto-fallback').checked,
         max_conversation_history: parseInt(document.getElementById('llm-max-history').value),
-        catalog_pdf_interval_hours: parseInt(document.getElementById('catalog-pdf-interval').value),
     };
 
     if (isNaN(payload.llm_temperature) || payload.llm_temperature < 0 || payload.llm_temperature > 1) {
@@ -830,10 +837,6 @@ async function saveAiSettings(storeId) {
     if (isNaN(payload.max_conversation_history) || payload.max_conversation_history < 5 || payload.max_conversation_history > 50) {
         toast('Conversation history must be 5 - 50', 'error'); return;
     }
-    if (isNaN(payload.catalog_pdf_interval_hours) || payload.catalog_pdf_interval_hours < 1 || payload.catalog_pdf_interval_hours > 168) {
-        toast('Catalog PDF interval must be 1 - 168 hours', 'error'); return;
-    }
-
     try {
         await apiPut(`/api/stores/${storeId}/settings`, payload);
         toast('AI settings saved!');
@@ -843,20 +846,37 @@ async function saveAiSettings(storeId) {
     }
 }
 
-async function savePaymentSettings(storeId) {
-    const payload = {
-        payment_zelle_details: document.getElementById('payment-zelle').value.trim(),
-        payment_binance_details: document.getElementById('payment-binance').value.trim(),
-        payment_zinli_details: document.getElementById('payment-zinli').value.trim(),
-        payment_bolivares_details: document.getElementById('payment-bolivares').value.trim(),
-    };
+function parseScheduleValue(id, label, min, max) {
+    const value = parseInt(document.getElementById(id).value);
+    if (isNaN(value) || value < min || value > max) {
+        throw new Error(`${label} must be ${min} - ${max}`);
+    }
+    return value;
+}
+
+async function saveSchedulerSettings(storeId) {
+    let payload;
+    try {
+        payload = {
+            catalog_refresh_minutes: parseScheduleValue('sched-catalog-refresh', 'Catalog refresh', 1, 1440),
+            broadcast_check_interval_minutes: parseScheduleValue('sched-broadcast-check', 'Broadcast check interval', 1, 60),
+            catalog_pdf_interval_hours: parseScheduleValue('sched-catalog-pdf', 'Catalog PDF interval', 1, 168),
+            token_reminder_hour: parseScheduleValue('sched-token-hour', 'Token reminder hour', 0, 23),
+            token_reminder_minute: parseScheduleValue('sched-token-minute', 'Token reminder minute', 0, 59),
+            daily_analytics_hour: parseScheduleValue('sched-analytics-hour', 'Daily analytics hour', 0, 23),
+            daily_analytics_minute: parseScheduleValue('sched-analytics-minute', 'Daily analytics minute', 0, 59),
+        };
+    } catch (e) {
+        toast(e.message, 'error');
+        return;
+    }
 
     try {
         await apiPut(`/api/stores/${storeId}/settings`, payload);
-        toast('Payment details saved!');
+        toast('Scheduled jobs saved!');
         await loadStoreDetail();
     } catch (e) {
-        toast('Error saving payment details: ' + e.message, 'error');
+        toast('Error saving scheduled jobs: ' + e.message, 'error');
     }
 }
 

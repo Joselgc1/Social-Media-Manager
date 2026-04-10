@@ -8,7 +8,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- ============================================================
 -- Customers
 -- ============================================================
-CREATE TABLE customers (
+CREATE TABLE IF NOT EXISTS customers (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     channel               TEXT NOT NULL,               -- "instagram" or "whatsapp"
     platform_id           TEXT NOT NULL,               -- IG-scoped ID or WhatsApp phone number
@@ -30,13 +30,13 @@ CREATE TABLE customers (
     UNIQUE(channel, platform_id)
 );
 
-CREATE INDEX idx_customers_tags ON customers USING gin(tags);
-CREATE INDEX idx_customers_last_active ON customers(last_active DESC);
+CREATE INDEX IF NOT EXISTS idx_customers_tags ON customers USING gin(tags);
+CREATE INDEX IF NOT EXISTS idx_customers_last_active ON customers(last_active DESC);
 
 -- ============================================================
 -- Conversations (message history)
 -- ============================================================
-CREATE TABLE conversations (
+CREATE TABLE IF NOT EXISTS conversations (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id     UUID REFERENCES customers(id) ON DELETE CASCADE,
     role            TEXT NOT NULL,               -- "user" or "assistant"
@@ -47,18 +47,18 @@ CREATE TABLE conversations (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_conv_customer ON conversations(customer_id, created_at DESC);
-CREATE INDEX idx_conv_created ON conversations(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conv_customer ON conversations(customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations(created_at DESC);
 
 -- ============================================================
 -- Orders
 -- ============================================================
-CREATE TABLE orders (
+CREATE TABLE IF NOT EXISTS orders (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id      UUID REFERENCES customers(id) ON DELETE SET NULL,
     items            JSONB NOT NULL,              -- [{"name": "...", "sku": "...", "size": "M", "qty": 1, "price": 28}]
     total            NUMERIC(10,2) NOT NULL,
-    payment_method   TEXT,                        -- "zelle", "binance", "zinli", "bolivares"
+    payment_method   TEXT,                        -- Store-defined payment method name
     payment_status   TEXT DEFAULT 'pending',      -- "pending", "proof_received", "confirmed", "failed"
     payment_proof    TEXT,                        -- URL to payment screenshot
     customer_totals_applied BOOLEAN NOT NULL DEFAULT FALSE,
@@ -71,14 +71,14 @@ CREATE TABLE orders (
     updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_orders_customer ON orders(customer_id, created_at DESC);
-CREATE INDEX idx_orders_created ON orders(created_at DESC);
-CREATE INDEX idx_orders_status ON orders(payment_status, shipping_status);
+CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(payment_status, shipping_status);
 
 -- ============================================================
 -- Broadcasts
 -- ============================================================
-CREATE TABLE broadcasts (
+CREATE TABLE IF NOT EXISTS broadcasts (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            TEXT NOT NULL,
     template_name   TEXT NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE broadcasts (
 -- ============================================================
 -- Settings (key-value store for admin config)
 -- ============================================================
-CREATE TABLE settings (
+CREATE TABLE IF NOT EXISTS settings (
     key        TEXT PRIMARY KEY,
     value      JSONB NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -113,15 +113,18 @@ INSERT INTO settings (key, value) VALUES
     ('catalog_pdf_interval_hours', '24'),
     ('max_conversation_history',   '20'),
     ('escalation_telegram_enabled','true'),
-    ('payment_zelle_details',      '""'),
-    ('payment_binance_details',    '""'),
-    ('payment_zinli_details',      '""'),
-    ('payment_bolivares_details',  '""');
+    ('broadcast_check_interval_minutes', '1'),
+    ('token_reminder_hour',        '3'),
+    ('token_reminder_minute',      '0'),
+    ('daily_analytics_hour',       '1'),
+    ('daily_analytics_minute',     '0'),
+    ('accepted_exchange_rate',     '""'),
+    ('payment_methods',            '[]');
 
 -- ============================================================
 -- Usage tracking (for cost monitoring)
 -- ============================================================
-CREATE TABLE usage_log (
+CREATE TABLE IF NOT EXISTS usage_log (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     provider        TEXT NOT NULL,
     model           TEXT NOT NULL,
@@ -135,12 +138,12 @@ CREATE TABLE usage_log (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_usage_created ON usage_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_log(created_at DESC);
 
 -- ============================================================
 -- Daily analytics aggregates (computed by a scheduled job)
 -- ============================================================
-CREATE TABLE daily_analytics (
+CREATE TABLE IF NOT EXISTS daily_analytics (
     date                DATE NOT NULL,
     channel             TEXT NOT NULL,           -- "whatsapp", "instagram", "all"
     provider            TEXT NOT NULL,           -- "openai", "anthropic", "all"
@@ -160,12 +163,12 @@ CREATE TABLE daily_analytics (
     PRIMARY KEY (date, channel, provider)
 );
 
-CREATE INDEX idx_daily_analytics_date ON daily_analytics(date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_analytics_date ON daily_analytics(date DESC);
 
 -- ============================================================
 -- Product popularity tracking
 -- ============================================================
-CREATE TABLE product_analytics (
+CREATE TABLE IF NOT EXISTS product_analytics (
     date         DATE NOT NULL,
     sku          TEXT NOT NULL,
     product_name TEXT,
@@ -175,4 +178,4 @@ CREATE TABLE product_analytics (
     PRIMARY KEY (date, sku)
 );
 
-CREATE INDEX idx_product_analytics_date ON product_analytics(date DESC);
+CREATE INDEX IF NOT EXISTS idx_product_analytics_date ON product_analytics(date DESC);

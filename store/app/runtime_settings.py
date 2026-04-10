@@ -4,6 +4,8 @@ Runtime settings stored in the store database.
 These values are editable from dashboards and can change without redeploying.
 """
 
+from app.payment_methods import PAYMENT_METHODS_SETTING_KEY
+
 RUNTIME_SETTING_DEFAULTS = {
     "llm_provider": "openai",
     "llm_model": "gpt-5.4-nano",
@@ -15,12 +17,15 @@ RUNTIME_SETTING_DEFAULTS = {
     "max_conversation_history": 20,
     "ai_enabled": True,
     "catalog_refresh_minutes": 15,
+    "broadcast_check_interval_minutes": 1,
     "catalog_pdf_interval_hours": 24,
+    "token_reminder_hour": 3,
+    "token_reminder_minute": 0,
+    "daily_analytics_hour": 1,
+    "daily_analytics_minute": 0,
     "escalation_telegram_enabled": True,
-    "payment_zelle_details": "",
-    "payment_binance_details": "",
-    "payment_zinli_details": "",
-    "payment_bolivares_details": "",
+    "accepted_exchange_rate": "",
+    PAYMENT_METHODS_SETTING_KEY: [],
 }
 
 
@@ -34,24 +39,32 @@ SYNCABLE_RUNTIME_SETTING_KEYS = {
     "auto_fallback",
     "max_conversation_history",
     "ai_enabled",
+    "catalog_refresh_minutes",
+    "broadcast_check_interval_minutes",
     "catalog_pdf_interval_hours",
-    "payment_zelle_details",
-    "payment_binance_details",
-    "payment_zinli_details",
-    "payment_bolivares_details",
+    "token_reminder_hour",
+    "token_reminder_minute",
+    "daily_analytics_hour",
+    "daily_analytics_minute",
 }
 
 
-STORE_EDITABLE_SETTING_KEYS = set(RUNTIME_SETTING_DEFAULTS)
+MASTER_ONLY_SETTING_KEYS = {
+    "catalog_refresh_minutes",
+    "broadcast_check_interval_minutes",
+    "catalog_pdf_interval_hours",
+    "token_reminder_hour",
+    "token_reminder_minute",
+    "daily_analytics_hour",
+    "daily_analytics_minute",
+}
 
-PAYMENT_SETTING_KEYS = (
-    "payment_zelle_details",
-    "payment_binance_details",
-    "payment_zinli_details",
-    "payment_bolivares_details",
+
+STORE_EDITABLE_SETTING_KEYS = (
+    set(RUNTIME_SETTING_DEFAULTS)
+    - {PAYMENT_METHODS_SETTING_KEY}
+    - MASTER_ONLY_SETTING_KEYS
 )
-
-
 LLM_MANAGED_KEYS = {
     "llm_provider",
     "llm_model",

@@ -173,11 +173,14 @@ async def seed_test_data():
                 ('auto_fallback',     'true'),
                 ('max_conversation_history', '20'),
                 ('ai_enabled',        'true'),
+                ('catalog_refresh_minutes', '15'),
+                ('broadcast_check_interval_minutes', '1'),
                 ('catalog_pdf_interval_hours', '24'),
-                ('payment_zelle_details', '""'),
-                ('payment_binance_details', '""'),
-                ('payment_zinli_details', '""'),
-                ('payment_bolivares_details', '""')
+                ('token_reminder_hour', '3'),
+                ('token_reminder_minute', '0'),
+                ('daily_analytics_hour', '1'),
+                ('daily_analytics_minute', '0'),
+                ('payment_methods',   '[]')
             ON CONFLICT (key) DO NOTHING
         """)
 

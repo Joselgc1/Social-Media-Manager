@@ -31,7 +31,7 @@ from app.analytics import get_conversion_funnel, get_response_time_stats, get_po
 from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
 from app.crm.customers import set_conversation_state, add_tags, remove_tag
-from app.crm import orders
+from app.crm import conversations, orders
 from app.broadcast.sender import execute_broadcast, preview_broadcast, list_broadcasts
 
 logger = logging.getLogger(__name__)
@@ -337,16 +337,17 @@ async def _cmd_resolve(args: str) -> str:
         return "\n".join(lines)
 
     if arg == "all":
-        result = await db.fetch_one(
-            "SELECT COUNT(*) as cnt FROM customers WHERE conversation_state = 'escalated'"
+        rows = await db.fetch_all(
+            "SELECT id FROM customers WHERE conversation_state = 'escalated'"
         )
-        count = result["cnt"] if result else 0
+        count = len(rows)
         if count == 0:
             return "✅ No hay clientes escalados."
+        await conversations.clear_history_for_customers([str(row["id"]) for row in rows])
         await db.execute(
             "UPDATE customers SET conversation_state = 'active' WHERE conversation_state = 'escalated'"
         )
-        return f"✅ {count} cliente(s) resueltos. El bot volverá a atenderles."
+        return f"✅ {count} cliente(s) resueltos. El bot volverá a atenderles con un chat nuevo."
 
     row = await db.fetch_one(
         "SELECT id, display_name FROM customers WHERE id::text LIKE :prefix AND conversation_state = 'escalated'",
@@ -356,9 +357,10 @@ async def _cmd_resolve(args: str) -> str:
     if not row:
         return f"No se encontró cliente escalado con ID que empiece con '{arg}'"
 
+    await conversations.clear_history(str(row["id"]))
     await set_conversation_state(str(row["id"]), "active")
     name = row["display_name"] or str(row["id"])[:8]
-    return f"✅ Escalación resuelta para *{name}*. El bot volverá a atenderle."
+    return f"✅ Escalación resuelta para *{name}*. El bot volverá a atenderle con un chat nuevo."
 
 
 async def _cmd_switch_provider(args: str) -> str:

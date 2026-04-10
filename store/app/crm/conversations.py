@@ -93,3 +93,25 @@ async def get_recent_summary(customer_id: str, limit: int = 5) -> str:
         lines.append(f"[{prefix}]: {row['content']}")
 
     return "\n".join(lines) if lines else "(Sin mensajes previos)"
+
+
+async def clear_history(customer_id: str):
+    """Delete all stored conversation messages for a customer."""
+    await db.execute(
+        "DELETE FROM conversations WHERE customer_id = :cid",
+        {"cid": customer_id},
+    )
+
+
+async def clear_history_for_customers(customer_ids: list[str]):
+    """Delete all stored conversation messages for a list of customers."""
+    unique_ids = [cid for cid in dict.fromkeys(customer_ids) if cid]
+    if not unique_ids:
+        return
+
+    async with db.get_db().transaction():
+        for customer_id in unique_ids:
+            await db.execute(
+                "DELETE FROM conversations WHERE customer_id = :cid",
+                {"cid": customer_id},
+            )

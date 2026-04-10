@@ -14,19 +14,13 @@ SYNCABLE_RUNTIME_SETTING_KEYS = {
     "auto_fallback",
     "max_conversation_history",
     "ai_enabled",
+    "catalog_refresh_minutes",
+    "broadcast_check_interval_minutes",
     "catalog_pdf_interval_hours",
-    "payment_zelle_details",
-    "payment_binance_details",
-    "payment_zinli_details",
-    "payment_bolivares_details",
-}
-
-
-PAYMENT_SETTING_KEYS = {
-    "payment_zelle_details",
-    "payment_binance_details",
-    "payment_zinli_details",
-    "payment_bolivares_details",
+    "token_reminder_hour",
+    "token_reminder_minute",
+    "daily_analytics_hour",
+    "daily_analytics_minute",
 }
 
 
@@ -40,9 +34,11 @@ DEFAULT_RUNTIME_SETTINGS = {
     "auto_fallback": True,
     "max_conversation_history": 20,
     "ai_enabled": True,
+    "catalog_refresh_minutes": 15,
+    "broadcast_check_interval_minutes": 1,
     "catalog_pdf_interval_hours": 24,
-    "payment_zelle_details": "",
-    "payment_binance_details": "",
-    "payment_zinli_details": "",
-    "payment_bolivares_details": "",
+    "token_reminder_hour": 3,
+    "token_reminder_minute": 0,
+    "daily_analytics_hour": 1,
+    "daily_analytics_minute": 0,
 }

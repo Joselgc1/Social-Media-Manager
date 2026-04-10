@@ -20,10 +20,12 @@ from app.analytics import build_daily_aggregate
 from app.catalog.sheets import refresh_catalog, get_cached_catalog
 from app.catalog.pdf_generator import generate_catalog_pdf
 from app.broadcast.sender import execute_broadcast
+from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
+_scheduler_schedule_signature: tuple[tuple[str, int], ...] | None = None
 
 
 def get_scheduler() -> AsyncIOScheduler:
@@ -40,7 +42,7 @@ def start_scheduler():
     """
     scheduler = get_scheduler()
 
-    # Job 1: Refresh product catalog every 15 minutes
+    # Job 1: Refresh product catalog. Interval is synced from DB settings.
     scheduler.add_job(
         _refresh_catalog_job,
         trigger=IntervalTrigger(minutes=15),
@@ -49,7 +51,7 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # Job 2: Check for scheduled broadcasts every minute
+    # Job 2: Check for scheduled broadcasts. Interval is synced from DB settings.
     scheduler.add_job(
         _check_scheduled_broadcasts,
         trigger=IntervalTrigger(minutes=1),
@@ -58,35 +60,45 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # Job 3: Refresh long-lived access tokens (runs daily at 3 AM)
+    # Job 3: Refresh long-lived access token reminders. Time is synced from DB settings.
     scheduler.add_job(
         _token_refresh_reminder,
-        trigger=CronTrigger(hour=3, minute=0),
+        trigger=CronTrigger(hour=3, minute=0, timezone=timezone.utc),
         id="token_reminder",
         name="Check if access tokens need refresh",
         replace_existing=True,
     )
 
-    # Job 4: Build daily analytics aggregates (runs at 1 AM for yesterday's data)
+    # Job 4: Build daily analytics aggregates. Time is synced from DB settings.
     scheduler.add_job(
         _build_daily_analytics,
-        trigger=CronTrigger(hour=1, minute=0),
+        trigger=CronTrigger(hour=1, minute=0, timezone=timezone.utc),
         id="daily_analytics",
         name="Aggregate daily analytics",
         replace_existing=True,
     )
 
-    # Job 5: Refresh catalog PDF (interval configurable via catalog_pdf_interval_hours setting)
+    # Job 5: Refresh catalog PDF. Interval is synced from DB settings.
     scheduler.add_job(
         _refresh_catalog_pdf,
-        trigger=IntervalTrigger(hours=24),  # Default; reschedules itself based on DB setting
+        trigger=IntervalTrigger(hours=24),
         id="catalog_pdf_refresh",
         name="Refresh catalog PDF",
         replace_existing=True,
     )
 
+    # Internal job: keep APScheduler triggers aligned with DB-backed settings.
+    scheduler.add_job(
+        _sync_scheduler_config,
+        trigger=IntervalTrigger(minutes=1),
+        id="scheduler_config_sync",
+        name="Sync scheduler timings from DB settings",
+        replace_existing=True,
+    )
+
     scheduler.start()
-    logger.info("Background scheduler started with 4 jobs.")
+    asyncio.create_task(_sync_scheduler_config())
+    logger.info("Background scheduler started with 6 jobs.")
 
 
 def stop_scheduler():
@@ -194,19 +206,8 @@ async def _build_daily_analytics():
 async def _refresh_catalog_pdf():
     """
     Regenerate the catalog PDF from the latest catalog data.
-    Respects the catalog_pdf_interval_hours setting and reschedules itself.
     """
     try:
-        # Check if the interval changed and reschedule if needed
-        settings = await db.get_settings()
-        interval_hours = int(settings.get("catalog_pdf_interval_hours", 24))
-
-        scheduler = get_scheduler()
-        scheduler.reschedule_job(
-            "catalog_pdf_refresh",
-            trigger=IntervalTrigger(hours=interval_hours),
-        )
-
         catalog = get_cached_catalog()
         if catalog:
             generate_catalog_pdf(catalog)
@@ -215,3 +216,84 @@ async def _refresh_catalog_pdf():
             logger.warning("Scheduled PDF refresh skipped: catalog is empty.")
     except Exception as e:
         logger.error(f"Scheduled catalog PDF refresh failed: {e}")
+
+
+def _bounded_int(settings: dict, key: str, *, minimum: int, maximum: int) -> int:
+    default = int(RUNTIME_SETTING_DEFAULTS[key])
+    try:
+        value = int(settings.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def _scheduler_config_from_settings(settings: dict) -> dict[str, int]:
+    return {
+        "catalog_refresh_minutes": _bounded_int(
+            settings, "catalog_refresh_minutes", minimum=1, maximum=1440
+        ),
+        "broadcast_check_interval_minutes": _bounded_int(
+            settings, "broadcast_check_interval_minutes", minimum=1, maximum=60
+        ),
+        "catalog_pdf_interval_hours": _bounded_int(
+            settings, "catalog_pdf_interval_hours", minimum=1, maximum=168
+        ),
+        "token_reminder_hour": _bounded_int(
+            settings, "token_reminder_hour", minimum=0, maximum=23
+        ),
+        "token_reminder_minute": _bounded_int(
+            settings, "token_reminder_minute", minimum=0, maximum=59
+        ),
+        "daily_analytics_hour": _bounded_int(
+            settings, "daily_analytics_hour", minimum=0, maximum=23
+        ),
+        "daily_analytics_minute": _bounded_int(
+            settings, "daily_analytics_minute", minimum=0, maximum=59
+        ),
+    }
+
+
+async def _sync_scheduler_config():
+    global _scheduler_schedule_signature
+
+    try:
+        settings = await db.get_settings()
+        config = _scheduler_config_from_settings(settings)
+        signature = tuple(sorted(config.items()))
+
+        if signature == _scheduler_schedule_signature:
+            return
+
+        scheduler = get_scheduler()
+        scheduler.reschedule_job(
+            "catalog_refresh",
+            trigger=IntervalTrigger(minutes=config["catalog_refresh_minutes"]),
+        )
+        scheduler.reschedule_job(
+            "broadcast_checker",
+            trigger=IntervalTrigger(minutes=config["broadcast_check_interval_minutes"]),
+        )
+        scheduler.reschedule_job(
+            "token_reminder",
+            trigger=CronTrigger(
+                hour=config["token_reminder_hour"],
+                minute=config["token_reminder_minute"],
+                timezone=timezone.utc,
+            ),
+        )
+        scheduler.reschedule_job(
+            "daily_analytics",
+            trigger=CronTrigger(
+                hour=config["daily_analytics_hour"],
+                minute=config["daily_analytics_minute"],
+                timezone=timezone.utc,
+            ),
+        )
+        scheduler.reschedule_job(
+            "catalog_pdf_refresh",
+            trigger=IntervalTrigger(hours=config["catalog_pdf_interval_hours"]),
+        )
+        _scheduler_schedule_signature = signature
+        logger.info(f"Scheduler timings synced from settings: {config}")
+    except Exception as e:
+        logger.error(f"Scheduler config sync failed: {e}")

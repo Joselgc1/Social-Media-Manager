@@ -35,7 +35,7 @@ Python 3.12. Tests use pytest + pytest-asyncio (see `tests/`). Linting uses ruff
 
 - `http://localhost:9000/test/ui` — Browser-based test UI with quick checks, seed data, API tester
 - `http://localhost:9000/login` — Master dashboard login page. Successful login sets the `master_session` HTTP-only cookie and redirects to `/dashboard`.
-- `http://localhost:9000/dashboard` — Master dashboard (store overview with platform costs, per-store API key management, shared runtime settings, usage/costs with time-range toggles, grouped credentials, Railway deploy, audit log).
+- `http://localhost:9000/dashboard` — Master dashboard (store overview with platform costs, per-store API key management, shared AI runtime settings, usage/costs with time-range toggles, grouped credentials, Railway deploy, audit log).
 - `http://localhost:9000/test/seed` — Create 3 sample stores with fake credentials (localhost only)
 - `http://localhost:9000/test/db-check` — Verify master DB connectivity (localhost only)
 - `http://localhost:9000/test/crypto?value=hello` — Test encryption round-trip (localhost only)
@@ -144,10 +144,10 @@ When adding new models, update BOTH files:
 - `store/app/catalog/pdf_generator.py` — Generates a branded PDF product catalog from the Google Sheets data using fpdf2
 - `store/app/admin/` — Settings API, web dashboard with dark mode (HTML served from `dashboard.py`, CSS in `store/app/static/css/dashboard.css`, JS in `store/app/static/js/dashboard.js`), Telegram bot (`telegram_bot.py` with 22 commands), notification helpers (`notify.py`), analytics API
 - `store/app/analytics.py` — Tracks response times, fallback usage, conversion funnels, product popularity
-- `store/app/db.py` — Async DB wrapper using `databases` library with a 60-second settings cache
+- `store/app/db.py` — Async DB wrapper using `databases` library with version-aware settings cache invalidation
 - `store/app/test_endpoint.py` — `/test/ui` chat UI + `/test/chat` API for local testing without Meta APIs
 
-**Background scheduler** (`store/app/broadcast/scheduler.py`): 5 APScheduler jobs — catalog refresh, broadcast execution, daily analytics aggregation (1 AM), token usage reminders, catalog PDF auto-refresh.
+**Background scheduler** (`store/app/broadcast/scheduler.py`): 5 business jobs — catalog refresh, broadcast execution, daily analytics aggregation, token usage reminders, catalog PDF auto-refresh — plus an internal sync job that keeps APScheduler timings aligned with DB settings from `master/`.
 
 **Database:** Supabase PostgreSQL. Fresh installs use the consolidated schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor). Tables: customers, conversations, orders, broadcasts, settings, usage_log, daily_analytics, product_analytics.
 
@@ -192,8 +192,11 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 
 - The AI system prompt is in `store/prompts/system_prompt.md` (Spanish-language, sales-focused). The Python code in `store/app/ai/prompts.py` injects dynamic context (catalog, customer history, order status) into it.
 - With <200 products, the entire catalog is stuffed into the system prompt — no RAG or vector database needed.
-- Dashboard-managed runtime settings (provider, model, temperature, fallback, ai_enabled, catalog_pdf_interval_hours, and per-store payment instructions) are stored in the store DB `settings` table. The store app uses version-aware cache invalidation, and `master/` reads/writes the same rows through `GET/PUT /api/stores/{id}/settings`, so both dashboards stay in sync after refresh or save.
+- Dashboard-managed AI runtime settings (provider, model, temperature, fallback, ai_enabled) are stored in the store DB `settings` table. Scheduler settings (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`) live there too. The store app uses version-aware cache invalidation, and `master/` reads/writes those rows through `GET/PUT /api/stores/{id}/settings`, so AI settings stay in sync after refresh or save and scheduler timings are applied automatically by the store within about a minute.
+- Store payment methods are persisted separately in the same `settings` table under `payment_methods`. They are edited only from the store dashboard via `GET/PUT /admin/settings/payment-methods`, not from `master/`.
+- The store-only `accepted_exchange_rate` setting also lives in the store `settings` table and is edited only from the store dashboard. Eva uses it to answer rate questions like `¿a qué tasa recibes?`.
 - Tool calls are provider-agnostic: defined once in `store/app/ai/functions.py`, converted per-provider. Adding a new tool means adding it there and handling it in `store/app/ai/engine.py`. Current tools: `check_inventory`, `tag_customer`, `create_order`, `update_payment_status`, `escalate_to_human`, `send_interactive_buttons`, `send_catalog_pdf`.
+- Rapid inbound messages are buffered briefly in `store/app/webhooks/inbound_buffer.py` and merged into a single AI turn per customer/channel. This reduces double replies when the customer sends two messages back-to-back.
 - **Tool call loop** (`store/app/ai/engine.py`): `MAX_TOOL_ROUNDS = 6`. The loop processes **one tool call per iteration** — if the LLM returns multiple tool calls in one response, only the first is executed and the while loop re-evaluates afterward. This prevents stale history from being passed to subsequent `continue_after_tool` calls. On the final round (`rounds == MAX_TOOL_ROUNDS`), tools are withheld (`tools=None`) so the model is forced to produce a text response instead of another tool call. If `send_interactive_buttons` was called and the model returned no text, the `body_text` of the interactive payload is used as the reply.
 - **Inventory privacy:** `_tool_check_inventory` returns `in_stock` (boolean) only — never the raw `stock` count. This prevents the LLM from revealing exact inventory levels to customers. System prompt rule 13 also explicitly prohibits outputting raw JSON, tool results, or technical metadata.
 - WhatsApp supports interactive buttons; Instagram uses quick replies. The engine returns an `interactive` dict that the channel sender interprets.
@@ -201,13 +204,13 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - Customer shipping addresses are saved on the customer record after order creation (`last_shipping_address`, `last_shipping_city`, `last_shipping_method`). The AI offers to reuse the saved address for returning customers.
 - OpenAI newer models require `max_completion_tokens` instead of `max_tokens` (changed in `openai_provider.py`).
 - Dashboard dark mode uses Tailwind CDN with `darkMode: 'class'` config. The `tailwind.config` must be set after the CDN `<script>` loads (not before, or `tailwind` is undefined). Custom component dark styles (`.dark .card`, etc.) live in `store/app/static/css/dashboard.css`. The `dark` class is toggled on `<html>` via `toggleDarkMode()` in `store/app/static/js/dashboard.js`.
-- Dashboard settings tab exposes all configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, fallback provider/model/auto-enable, catalog PDF interval, payment instructions, and AI pause. These map to `PUT /admin/settings/{key}` calls.
+- Store dashboard settings tab exposes the locally configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, fallback provider/model/auto-enable, dynamic payment methods, and AI pause. Most settings map to `PUT /admin/settings/{key}` calls; payment methods use `GET/PUT /admin/settings/payment-methods`. Scheduler timings are master-only.
 - Broadcast execution wraps the send loop in try/except — if it crashes after setting status to `'sending'`, it auto-sets status to `'failed'`. A `POST /{id}/reset` endpoint resets stuck broadcasts back to `'draft'`. The dashboard shows a "Resetear" button for broadcasts in `sending` or `failed` status.
 - The `databases` library returns record objects that support `[]` bracket access but not `.get()`. Use `record["key"]` with a conditional fallback, not `record.get("key", default)`.
 - JSONB queries with the `databases` library must use `CAST(:param AS jsonb)` instead of `:param::jsonb` because the `::` cast syntax conflicts with SQLAlchemy's `:param` bind parameter syntax.
 - **Multi-store: separate deployments, not multi-tenant.** Each store is a full independent deployment of this app with its own `.env` and database. The master service is a separate FastAPI app (not a router on the store app). This gives true data isolation and means a bug in one store doesn't affect others.
-- **System prompt override:** If the `SYSTEM_PROMPT_OVERRIDE` env var is set, `store/app/ai/prompts.py` uses its value instead of reading `store/prompts/system_prompt.md`. The override must use the same `{store_name}`, `{product_catalog}`, etc. placeholders.
-- **Centralized runtime settings:** `master/` reads/writes shared runtime settings directly in each store DB via `GET/PUT /api/stores/{id}/settings`. That includes AI config, operational settings like `catalog_pdf_interval_hours`, and per-store payment instructions. When `LLM_MANAGED_EXTERNALLY=true` is set on a store, the store dashboard hides LLM-only controls and rejects writes to those keys (403), but payment and other non-LLM runtime settings remain editable locally.
+- **System prompt override:** If the `SYSTEM_PROMPT_OVERRIDE` env var is set, `store/app/ai/prompts.py` uses its value instead of reading `store/prompts/system_prompt.md`. The override must use the same placeholders as the default template, including `{payment_method_names_text}`, `{payment_methods_block}`, and `{exchange_rate_block}`.
+- **Centralized runtime settings:** `master/` reads/writes shared AI settings and scheduler timings directly in each store DB via `GET/PUT /api/stores/{id}/settings`. That includes AI config plus the store's APScheduler timings, but not payment methods. When `LLM_MANAGED_EXTERNALLY=true` is set on a store, the store dashboard hides LLM-only controls and rejects writes to those keys (403), but payment methods and other non-LLM store settings remain editable locally.
 - **Deployment shape:** Keep the store service single-instance/single-worker in this phase because broadcasts and scheduled jobs run in-process.
 
 ## API endpoints
@@ -218,18 +221,22 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 Webhooks:       GET/POST /webhooks/whatsapp, /webhooks/instagram, POST /webhooks/telegram
 Health:         GET /, GET /health
 Settings:       GET /admin/settings/, GET /admin/settings/providers, PUT /admin/settings/{key}
+                GET /admin/settings/payment-methods, PUT /admin/settings/payment-methods
                 POST /admin/settings/switch-provider, GET /admin/settings/usage-summary
                 GET /admin/settings/stats/conversations, POST /admin/settings/telegram/setup-webhook
                 POST /admin/settings/instagram/setup-ice-breakers, POST /admin/settings/instagram/subscribe-page
                 POST /admin/settings/catalog/generate-pdf, GET /admin/settings/catalog/pdf-status
                 GET /admin/settings/catalog/download-pdf
-Customers:      GET /admin/settings/customers, GET /admin/settings/orders
+Customers:      GET /admin/settings/customers, PUT /admin/settings/customers/{id}
+                DELETE /admin/settings/customers/{id}
                 POST /admin/settings/customers/{id}/resolve, POST /admin/settings/customers/resolve-all
                 GET /admin/settings/customers/{id}/tags, POST /admin/settings/customers/{id}/tags
                 DELETE /admin/settings/customers/{id}/tags/{tag}
+Orders:         GET /admin/settings/orders, PUT /admin/settings/orders/{id}
+                DELETE /admin/settings/orders/{id}
 Dashboard:      GET /admin/login, POST /admin/login, POST /admin/logout, GET /admin/dashboard
 Broadcasts:     POST /admin/broadcasts/create, /preview, GET /list, POST /{id}/send, POST /{id}/reset
-Analytics:      GET /admin/analytics/conversion, /response-times, /popular-products, /ab-test, /daily
+Analytics:      GET /admin/analytics/conversion, /response-times, /popular-products, /daily
                 POST /admin/analytics/build-daily
 Testing:        GET /test/ui, POST /test/chat, GET /test/catalog
 ```
@@ -262,8 +269,8 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 ## Business context
 
 - Venezuelan resale business: ~$5k/month revenue, 6-60 messages/day
-- Accepted payments: Zelle, Binance, Zinli, Bolívares (tasa Binance)
-- Shipping: MRW or Zoom (Venezuelan couriers), delivery included in prices
+- Accepted payments: store-defined; the owner can add/remove methods in the dashboard
+- Shipping: MRW or Zoom (Venezuelan couriers), always `cobro a destino`
 - Product catalog managed in Google Sheets so the store owner can update from his phone
 - Target hosting budget: $50-150/month total (Railway $5-10, LLM APIs ~$0.15-0.30/day)
 

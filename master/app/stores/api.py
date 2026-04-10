@@ -8,7 +8,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db
 from app.auth import require_auth
@@ -20,6 +20,14 @@ from app.stores.runtime_settings import DEFAULT_RUNTIME_SETTINGS, SYNCABLE_RUNTI
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stores", tags=["stores"], dependencies=[Depends(require_auth)])
+
+BLOCKED_PAYMENT_SETTING_KEYS = {
+    "payment_methods",
+    "payment_zelle_details",
+    "payment_binance_details",
+    "payment_zinli_details",
+    "payment_bolivares_details",
+}
 
 # Serialize cross-DB stats queries so we do not burst past Supabase Session pooler limits
 # when the dashboard loads many stores in parallel (and store apps already hold pool slots).
@@ -324,6 +332,32 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
             raise HTTPException(status_code=400, detail="Catalog PDF interval must be between 1 and 168 hours")
         normalized["catalog_pdf_interval_hours"] = hours
 
+    if "catalog_refresh_minutes" in normalized:
+        minutes = int(normalized["catalog_refresh_minutes"])
+        if not (1 <= minutes <= 1440):
+            raise HTTPException(status_code=400, detail="Catalog refresh must be between 1 and 1440 minutes")
+        normalized["catalog_refresh_minutes"] = minutes
+
+    if "broadcast_check_interval_minutes" in normalized:
+        minutes = int(normalized["broadcast_check_interval_minutes"])
+        if not (1 <= minutes <= 60):
+            raise HTTPException(status_code=400, detail="Broadcast check interval must be between 1 and 60 minutes")
+        normalized["broadcast_check_interval_minutes"] = minutes
+
+    for key in ("token_reminder_hour", "daily_analytics_hour"):
+        if key in normalized:
+            hour = int(normalized[key])
+            if not (0 <= hour <= 23):
+                raise HTTPException(status_code=400, detail=f"{key} must be between 0 and 23")
+            normalized[key] = hour
+
+    for key in ("token_reminder_minute", "daily_analytics_minute"):
+        if key in normalized:
+            minute = int(normalized[key])
+            if not (0 <= minute <= 59):
+                raise HTTPException(status_code=400, detail=f"{key} must be between 0 and 59")
+            normalized[key] = minute
+
     provider = normalized.get("llm_provider", current_settings.get("llm_provider", "openai"))
     if provider not in AVAILABLE_MODELS:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
@@ -358,15 +392,6 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
     for key in ("auto_fallback", "ai_enabled"):
         if key in normalized:
             normalized[key] = bool(normalized[key])
-
-    for key in (
-        "payment_zelle_details",
-        "payment_binance_details",
-        "payment_zinli_details",
-        "payment_bolivares_details",
-    ):
-        if key in normalized:
-            normalized[key] = str(normalized[key]).strip()
 
     return normalized
 
@@ -444,8 +469,17 @@ async def get_store_settings(store_id: str):
 
 
 @router.put("/{store_id}/settings")
-async def update_store_settings(store_id: str, update: RuntimeSettingsUpdate):
+async def update_store_settings(store_id: str, update: RuntimeSettingsUpdate, request: Request):
     """Write dashboard-managed runtime settings to a store database."""
+    raw_fields = await request.json()
+    if isinstance(raw_fields, dict):
+        blocked = set(raw_fields) & BLOCKED_PAYMENT_SETTING_KEYS
+        if blocked:
+            raise HTTPException(
+                status_code=403,
+                detail="Payment methods are managed only from the store dashboard.",
+            )
+
     fields = {k: v for k, v in update.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")

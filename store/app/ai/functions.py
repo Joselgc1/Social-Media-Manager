@@ -47,7 +47,7 @@ TOOLS = [
                         "'interested:pajamas', 'interested:underwear', 'interested:sets', "
                         "'size:S' through 'size:XL', "
                         "'city:caracas', 'city:maracaibo', etc., "
-                        "'payment:zelle', 'payment:binance', 'payment:zinli', 'payment:bolivares', "
+                        "'payment:<payment_method_name>', "
                         "'repeat_buyer', 'vip', 'new_lead'"
                     ),
                 },
@@ -61,7 +61,9 @@ TOOLS = [
             "Create a new order when the customer CONFIRMS they want to purchase. "
             "Only call this AFTER you have collected and confirmed ALL of these: "
             "the specific product(s), size(s), quantity, shipping method, "
-            "full shipping address, and payment method."
+            "full shipping address, and payment method. "
+            "Do NOT call this from a payment-proof message or screenshot. "
+            "The order must already exist before payment is validated."
         ),
         "parameters": {
             "type": "object",
@@ -83,8 +85,7 @@ TOOLS = [
                 },
                 "payment_method": {
                     "type": "string",
-                    "enum": ["zelle", "binance", "zinli", "bolivares"],
-                    "description": "The customer's chosen payment method",
+                    "description": "The customer's chosen payment method name, exactly as configured by the store",
                 },
                 "shipping_city": {
                     "type": "string",
@@ -106,8 +107,9 @@ TOOLS = [
     {
         "name": "update_payment_status",
         "description": (
-            "Call when the customer sends a payment screenshot or confirms payment. "
-            "Marks the most recent pending order as 'proof_received'."
+            "Call when the customer sends a payment screenshot for an EXISTING order. "
+            "Use this only after the order was already created and only when the proof "
+            "matches the expected amount and destination details."
         ),
         "parameters": {
             "type": "object",
@@ -161,6 +163,28 @@ TOOLS = [
                 },
             },
             "required": ["caption"],
+        },
+    },
+    {
+        "name": "send_product_image",
+        "description": (
+            "Send the image of a specific product to the customer when they ask to see it. "
+            "Use this only for a specific product, not for the whole catalog. "
+            "Works on WhatsApp and Instagram only if the matched product has a usable image."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_query": {
+                    "type": "string",
+                    "description": "Specific product name, SKU, or clear keyword for the product image to send",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional short caption for the image",
+                },
+            },
+            "required": ["product_query"],
         },
     },
     {

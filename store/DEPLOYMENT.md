@@ -2,6 +2,13 @@
 
 Everything you need to go from a fresh laptop to a fully operational AI chatbot handling real customer messages on WhatsApp and Instagram, with broadcast campaigns, an admin dashboard, payment screenshot recognition, and analytics.
 
+Important business behavior baked into the current system:
+
+- shipping is offered through `MRW` or `Zoom` with `cobro a destino`
+- payment methods are store-defined and managed only from the store dashboard
+- the owner can update a store-only daily exchange-rate field used for `¿a qué tasa recibes?`
+- the customer PDF catalog hides internal SKU and stock columns
+
 The guide has 10 parts:
 
 - Parts 1 through 4: Set up external services.
@@ -38,9 +45,9 @@ Run the migrations. Go to the SQL Editor in Supabase's dashboard:
 
 1. Paste the entire contents of `store/migrations/001_schema.sql` and click **Run**.
 
-This creates all tables and seeds the runtime settings used by both the store dashboard and `master/`.
+This creates all tables and seeds the runtime settings used by the store dashboard and the master control plane.
 
-Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults plus `ai_enabled`, `catalog_pdf_interval_hours`, and the four `payment_*` rows.
+Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), an empty `payment_methods` row, and an empty `accepted_exchange_rate` row.
 
 ### 1.2 OpenAI API Key
 
@@ -74,6 +81,14 @@ Now create the product catalog spreadsheet. Open Google Sheets, create a new she
 ```text
 SKU | Product name | Category | Description | Sizes | Price USD | Stock | Active | Image URL
 ```
+
+If you want the bot to be able to send product photos, use the `Image URL` column. Supported formats:
+
+- a plain public image URL
+- a Google Drive share link for a publicly accessible image
+- a Google Sheets formula like `=IMAGE("https://...")`
+
+If the customer asks to see a specific product and that row has a usable image, the bot can send it directly in chat.
 
 Add a few test products:
 
@@ -172,7 +187,7 @@ GOOGLE_SHEETS_CREDENTIALS_B64=eyJ0eXBlIjoi...
 PRODUCT_SHEET_ID=1abc2def3ghi...
 TELEGRAM_BOT_TOKEN=123456789:ABC...
 TELEGRAM_ADMIN_CHAT_ID=987654321
-STORE_NAME=Tu Tienda VS
+STORE_NAME="Zona Pink"
 OWNER_NAME=Carlos
 APP_BASE_URL=https://your-app.railway.app
 DEBUG=true
@@ -187,7 +202,7 @@ cd store && uvicorn app.main:app --reload --port 8000
 You should see:
 
 ```text
-[INFO] Starting Tu Tienda VS chatbot...
+[INFO] Starting Zona Pink chatbot...
 [INFO] Database connected.
 [INFO] LLM providers initialized (OpenAI + Anthropic).
 [INFO] Catalog refreshed: 4 active products loaded.
@@ -281,7 +296,7 @@ Before you go live, open the store dashboard login at:
 https://vs-chatbot-production.up.railway.app/admin/login
 ```
 
-After logging in, go to **Configuración** and fill in the payment instructions for every enabled payment method. These are runtime settings stored in the store DB, not `.env` variables, and they are shared with `master/` if you manage the store centrally.
+After logging in, go to **Configuración** and add the payment methods you want this store to offer. Each method needs a **Nombre** and **Información**. These are stored in the store DB, not in `.env`, and the bot will list only the configured method names during checkout.
 
 ### 5.3 Switch WhatsApp Webhook to Railway
 
@@ -406,7 +421,7 @@ Open `https://your-app.railway.app/admin/login` in any browser, sign in, and you
 - **Clientes:** Sortable customer table, inline tag management (add/remove), resolve escalations individually or all at once
 - **Pedidos:** Sortable order table with status badges
 - **Broadcasts:** Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset failed broadcasts
-- **Configuracion:** Switch LLM provider/model, adjust temperature/max tokens/conversation history, configure fallback, payment instructions, and catalog PDF generation/download/auto-refresh interval
+- **Configuracion:** Switch LLM provider/model, adjust temperature/max tokens/conversation history, configure fallback, manage store-only payment methods, and generate/download the catalog PDF. Scheduled-job timings are shown read-only here and are managed from `master/`.
 
 All tables in Clientes, Pedidos, and Broadcasts are sortable by clicking column headers. Click once for ascending, again for descending.
 
@@ -416,9 +431,9 @@ Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto
 
 **Custom AI persona:** Set `SYSTEM_PROMPT_OVERRIDE` to replace the default `store/prompts/system_prompt.md` template for a specific store deployment. Must use the same `{store_name}`, `{product_catalog}`, etc. placeholders.
 
-**Shared runtime settings:** Dashboard-managed settings live in the store DB `settings` table. Payment instructions, AI config, `ai_enabled`, and `catalog_pdf_interval_hours` all apply immediately without redeploy. If you manage the store from `master/`, the master dashboard reads and writes those same rows, so both dashboards stay in sync after refresh.
+**Shared runtime settings:** Dashboard-managed AI settings live in the store DB `settings` table. AI config and `ai_enabled` apply immediately without redeploy. If you manage the store from `master/`, the master dashboard also controls the scheduler timings (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), and the store app applies those changes automatically within about a minute. Payment methods are store-only and are edited only from the store dashboard.
 
-**Centralized LLM control:** Set `LLM_MANAGED_EXTERNALLY=true` to lock the store's LLM provider/model/temperature controls. When enabled, the store dashboard hides LLM-only settings, the settings API rejects LLM changes (403), and the Telegram `/provider` command is disabled. Payment settings and other non-LLM runtime settings remain editable locally.
+**Centralized LLM control:** Set `LLM_MANAGED_EXTERNALLY=true` to lock the store's LLM provider/model/temperature controls. When enabled, the store dashboard hides LLM-only settings, the settings API rejects LLM changes (403), and the Telegram `/provider` command is disabled. Payment methods and other non-LLM store settings remain editable locally.
 
 ---
 
@@ -481,7 +496,7 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 [ ] Open /admin/login -> successful login sets cookie and redirects to /admin/dashboard
 [ ] Subsequent visits to /admin/dashboard -> works via cookie (no password in URL)
 [ ] Toggle dark mode -> UI switches, persists on refresh
-[ ] Configuracion tab -> All settings visible (provider, temp, max tokens, history, fallback, payment details, PDF interval)
+[ ] Configuracion tab -> AI settings and payment methods visible; PDF auto-refresh shown read-only
 [ ] Send /start to Telegram bot -> 18-command menu appears
 [ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
 [ ] GET /test/ui with DEBUG=true -> test page loads
@@ -615,11 +630,15 @@ Settings (require ADMIN_PASSWORD via Bearer header or session cookie):
 
 Customers (require admin auth):
   GET  /admin/settings/customers
+  PUT  /admin/settings/customers/{id}
+  DELETE /admin/settings/customers/{id}
   POST /admin/settings/customers/{id}/resolve
   POST /admin/settings/customers/resolve-all
   GET  /admin/settings/customers/{id}/tags
   POST /admin/settings/customers/{id}/tags
   DELETE /admin/settings/customers/{id}/tags/{tag}
+  PUT  /admin/settings/orders/{id}
+  DELETE /admin/settings/orders/{id}
 
 Catalog PDF (require admin auth):
   POST /admin/settings/catalog/generate-pdf
@@ -646,7 +665,6 @@ Analytics (require admin auth):
   GET  /admin/analytics/conversion
   GET  /admin/analytics/response-times
   GET  /admin/analytics/popular-products
-  GET  /admin/analytics/ab-test
   GET  /admin/analytics/daily
   POST /admin/analytics/build-daily
 

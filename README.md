@@ -1,8 +1,10 @@
 # VS Chatbot - AI Sales Assistant
 
-AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, per-store payment instructions, sortable dashboard tables, and a dark mode admin dashboard.
+AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, dynamic store-defined payment methods, a store-managed daily exchange-rate setting, sortable dashboard tables, and a dark mode admin dashboard.
 
-Dashboard-managed runtime settings live in each store's `settings` table. That includes AI configuration, `ai_enabled`, `catalog_pdf_interval_hours`, and the four payment instruction fields. When a store is connected to `master/`, both dashboards read and write those same rows, so changes stay in sync after refresh.
+The sales flow is tuned for Venezuelan operations: shipments are offered through `MRW` or `Zoom` with `cobro a destino`, owners can update the daily accepted exchange rate from the store dashboard, and the customer-facing catalog PDF does not expose internal SKU or stock columns.
+
+Dashboard-managed runtime settings live in each store's `settings` table. That includes shared AI configuration plus master-managed scheduler timings such as `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, and the daily cron times. Store payment methods are persisted separately in the same table under `payment_methods` and are managed only from the store dashboard. When a store is connected to `master/`, both dashboards read and write the shared AI rows, and the master dashboard manages the scheduler rows.
 
 **Multi-store support:** A Master Control Plane (`master/`) lets you manage multiple independent store deployments from a single dashboard — each with its own database, API keys, WhatsApp number, and Telegram bot. See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the multi-store setup guide.
 
@@ -86,7 +88,11 @@ Store DB settings (source of truth for runtime settings)
 | GET    | `/admin/settings/catalog/pdf-status`              | Check PDF status                                |
 | GET    | `/admin/settings/catalog/download-pdf`            | Download catalog PDF                            |
 | GET    | `/admin/settings/orders`                          | List recent orders                              |
-| GET    | `/admin/settings/customers`                       | List customers (optional `?tag=` filter)        |
+| PUT    | `/admin/settings/orders/{id}`                     | Update order payment/shipping state             |
+| DELETE | `/admin/settings/orders/{id}`                     | Delete order                                    |
+| GET    | `/admin/settings/customers`                       | List customers                                  |
+| PUT    | `/admin/settings/customers/{id}`                  | Update customer state or channel                |
+| DELETE | `/admin/settings/customers/{id}`                  | Delete customer                                 |
 | POST   | `/admin/settings/customers/{id}/resolve`          | Resolve escalated customer                      |
 | POST   | `/admin/settings/customers/resolve-all`           | Resolve all escalated customers                 |
 | GET    | `/admin/settings/customers/{id}/tags`             | Get customer tags                               |
@@ -178,10 +184,10 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 Open `/admin/login` in a browser, sign in with `ADMIN_PASSWORD`, and the app will set an HTTP-only session cookie before redirecting to `/admin/dashboard`. Five tabs:
 
 - **Resumen**: Stats cards, per-channel breakdown, LLM usage by provider, AI on/off toggle
-- **Clientes**: Sortable customer table, tag management (add/remove per customer), resolve escalations individually or all at once
+- **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once
 - **Pedidos**: Sortable order table with status badges
 - **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset stuck broadcasts
-- **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, fallback settings, payment instructions, catalog PDF generation/download, and auto-refresh interval
+- **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, fallback settings, daily exchange rate, dynamic payment methods, and catalog PDF generation/download
 
 Dark mode toggle in the header (persists via localStorage, auto-detects OS preference).
 
@@ -191,10 +197,17 @@ These values are stored in the store database and can be changed without redeplo
 
 - `llm_provider`, `llm_model`, `llm_temperature`, `llm_max_tokens`
 - `fallback_provider`, `fallback_model`, `auto_fallback`
-- `max_conversation_history`, `ai_enabled`, `catalog_pdf_interval_hours`
-- `payment_zelle_details`, `payment_binance_details`, `payment_zinli_details`, `payment_bolivares_details`
+- `max_conversation_history`, `ai_enabled`
+- `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`
+- `token_reminder_hour`, `token_reminder_minute`, `daily_analytics_hour`, `daily_analytics_minute`
 
-If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API/Telegram commands stop allowing LLM-setting writes locally, but the payment settings and other non-LLM runtime settings remain editable.
+Store-only payment methods are persisted separately under `payment_methods` in the same `settings` table. They are edited only from the store dashboard through `GET/PUT /admin/settings/payment-methods`, and the bot uses the configured method names plus their stored instructions at checkout. Scheduler timings are edited only from the master dashboard.
+
+The store-only `accepted_exchange_rate` setting is also stored in the same `settings` table. It is edited only from the store dashboard and is used when customers ask things like `¿a qué tasa recibes?`.
+
+The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information.
+
+If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API/Telegram commands stop allowing LLM-setting writes locally, but payment methods and other non-LLM store settings remain editable in the store dashboard.
 
 ## Security
 
@@ -210,6 +223,7 @@ If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API
 - **Error sanitization:** Unhandled exceptions return a generic 500 in production; full errors only shown in debug mode.
 - **Production startup validation:** In `store/`, production boot now fails fast if `ADMIN_PASSWORD`, the WhatsApp credentials, or all LLM keys are missing. Instagram and Telegram remain optional, but if either integration is enabled it must be fully configured.
 - **Log redaction:** Normal webhook logging uses masked sender IDs and avoids logging raw customer message text or tool arguments at `INFO`.
+- **Inbound debounce:** Rapid consecutive inbound messages from the same customer are buffered briefly and grouped into a single AI turn, so the bot does not answer twice when the user is still typing follow-up context.
 
 ## Multi-store Architecture
 
@@ -221,7 +235,7 @@ A **Master Control Plane** (`master/`) sits on top:
 Master Control Plane (1 deployment, port 9000)
   ├── Master Supabase DB (store registry, encrypted credentials, audit log)
   ├── Dashboard: monitor all stores, manage runtime settings, view costs, deploy changes
-  ├── Runtime settings: set provider/model/fallback/payment instructions per store
+  ├── Runtime settings: set provider/model/fallback per store
   ├── Railway API integration: push env vars + trigger redeploys
   └── Health checker: pings each store every 5 minutes
 
@@ -240,7 +254,7 @@ Store A (port 8000)          Store B (port 8001)          Store C ...
 Open `http://localhost:9000/login`, sign in with `MASTER_SECRET_KEY`, and the app will set an HTTP-only session cookie before redirecting to `/dashboard`. Three tabs:
 
 - **Stores**: Overview cards with live stats, health status dots, platform-wide LLM cost summary with time-range toggles (Today/7d/30d)
-- **Store Detail**: Drill into one store — stats, dedicated API Keys panel (OpenAI/Anthropic with active/configured/not-set status), shared runtime settings (AI config, payment instructions, AI toggle, catalog PDF interval), LLM usage & costs with time-range toggles, grouped environment variables (Channels, Infrastructure, Customization), Railway deployment status, and "Deploy to Railway"
+- **Store Detail**: Drill into one store — stats, dedicated API Keys panel (OpenAI/Anthropic with active/configured/not-set status), shared AI settings, a separate Scheduled Jobs panel, LLM usage & costs with time-range toggles, grouped environment variables (Channels, Infrastructure, Customization), Railway deployment status, and "Deploy to Railway"
 - **Audit Log**: Full history of all actions (store created, credential updated, runtime settings changed, deploy triggered)
 
 Runtime settings apply immediately from the store database. Credentials and deploy-time env vars remain master-managed and may still require a redeploy.

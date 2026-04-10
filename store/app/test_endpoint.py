@@ -88,6 +88,7 @@ async def test_chat(body: TestMessage):
         "reply": result.get("text"),
         "interactive": result.get("interactive"),
         "catalog_pdf": result.get("catalog_pdf"),
+        "product_image": result.get("product_image"),
         "escalated": result.get("escalated", False),
         "paused": result.get("paused", False),
         "customer_id": str(result.get("customer_id", "")),

@@ -26,10 +26,12 @@ from fastapi import APIRouter, Request, Response, HTTPException
 from app.config import get_config
 from app.ai.engine import generate_response
 from app.channels.instagram_sender import (
+    send_image,
     send_text,
     send_text_with_quick_replies,
 )
 from app.admin.notify import notify_owner
+from app.webhooks.inbound_buffer import enqueue_inbound_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -132,6 +134,11 @@ async def _process_event(event: dict):
     """
     sender_id = event.get("sender", {}).get("id", "")
     recipient_id = event.get("recipient", {}).get("id", "")
+    sender = event.get("sender", {}) or {}
+    sender_profile = {
+        "display_name": (sender.get("name") or sender.get("username") or "").strip() or None,
+        "instagram_handle": (sender.get("username") or "").strip().lstrip("@") or None,
+    }
 
     # Skip echo messages (messages we sent, echoed back to us)
     if event.get("message", {}).get("is_echo"):
@@ -152,23 +159,23 @@ async def _process_event(event: dict):
 
     # ── Regular messages ─────────────────────────────────────
     if "message" in event:
-        await _process_message(sender_id, event["message"])
+        await _process_message(sender_id, event["message"], sender_profile)
         return
 
     # ── Postbacks (Ice Breaker taps, button clicks) ──────────
     if "postback" in event:
-        await _process_postback(sender_id, event["postback"])
+        await _process_postback(sender_id, event["postback"], sender_profile)
         return
 
     # ── Referrals (ad clicks, link clicks that open DM) ──────
     if "referral" in event:
-        await _process_referral(sender_id, event["referral"])
+        await _process_referral(sender_id, event["referral"], sender_profile)
         return
 
     logger.debug(f"Instagram: unhandled event type from {sender_id}")
 
 
-async def _process_message(sender_id: str, message: dict):
+async def _process_message(sender_id: str, message: dict, sender_profile: dict | None = None):
     """Process a regular text or media message."""
     text = ""
     media_url = None
@@ -215,10 +222,10 @@ async def _process_message(sender_id: str, message: dict):
         return
 
     logger.info(f"Instagram DM received from {_mask_sender(sender_id)}")
-    await _route_to_ai(sender_id, text, media_url)
+    await _route_to_ai(sender_id, text, media_url, sender_profile)
 
 
-async def _process_postback(sender_id: str, postback: dict):
+async def _process_postback(sender_id: str, postback: dict, sender_profile: dict | None = None):
     """
     Process a postback event (Ice Breaker tap or button click).
     Convert the payload into a natural language message for the AI.
@@ -236,10 +243,10 @@ async def _process_postback(sender_id: str, postback: dict):
         text = f"[Postback: {payload}]"
 
     logger.info(f"Instagram postback from {_mask_sender(sender_id)}")
-    await _route_to_ai(sender_id, text)
+    await _route_to_ai(sender_id, text, sender_profile=sender_profile)
 
 
-async def _process_referral(sender_id: str, referral: dict):
+async def _process_referral(sender_id: str, referral: dict, sender_profile: dict | None = None):
     """
     Process a referral event (customer came from an ad or link).
     Send a warm welcome that acknowledges where they came from.
@@ -256,12 +263,33 @@ async def _process_referral(sender_id: str, referral: dict):
         text = "Hola, quiero más información."
 
     logger.info(f"Instagram referral from {_mask_sender(sender_id)}: source={source}")
-    await _route_to_ai(sender_id, text)
+    await _route_to_ai(sender_id, text, sender_profile=sender_profile)
 
 
 # ── AI routing ───────────────────────────────────────────────
 
-async def _route_to_ai(sender_id: str, text: str, media_url: str | None = None):
+async def _route_to_ai(
+    sender_id: str,
+    text: str,
+    media_url: str | None = None,
+    sender_profile: dict | None = None,
+):
+    await enqueue_inbound_message(
+        channel="instagram",
+        sender_id=sender_id,
+        text=text,
+        media_url=media_url,
+        customer_profile=sender_profile or {},
+        processor=_deliver_ai_response,
+    )
+
+
+async def _deliver_ai_response(
+    sender_id: str,
+    text: str,
+    media_url: str | None = None,
+    sender_profile: dict | None = None,
+):
     """
     Route the normalized message through the AI engine
     and send the response back via Instagram DM.
@@ -272,6 +300,7 @@ async def _route_to_ai(sender_id: str, text: str, media_url: str | None = None):
             sender_id=sender_id,
             message_text=text,
             media_url=media_url,
+            customer_profile=sender_profile or {},
         )
     except Exception as e:
         logger.exception(f"Error generating Instagram response for {_mask_sender(sender_id)}: {e}")
@@ -281,7 +310,7 @@ async def _route_to_ai(sender_id: str, text: str, media_url: str | None = None):
     if result.get("paused"):
         return
     if result.get("escalated") and not (
-        result.get("text") or result.get("interactive") or result.get("catalog_pdf")
+        result.get("text") or result.get("interactive") or result.get("catalog_pdf") or result.get("product_image")
     ):
         return
 
@@ -296,6 +325,19 @@ async def _route_to_ai(sender_id: str, text: str, media_url: str | None = None):
                 text=result["interactive"]["body_text"],
                 quick_replies=quick_replies,
             )
+        elif result.get("product_image") and result["product_image"].get("type") == "product_image":
+            await send_image(
+                to=sender_id,
+                image_url=result["product_image"]["image_url"],
+            )
+            follow_up = (result.get("text") or result["product_image"].get("caption") or "").strip()
+            if follow_up:
+                if len(follow_up.encode("utf-8")) > 950:
+                    chunks = _split_message(follow_up, max_bytes=950)
+                    for chunk in chunks:
+                        await send_text(to=sender_id, text=chunk)
+                else:
+                    await send_text(to=sender_id, text=follow_up)
         elif result.get("text"):
             reply = result["text"]
             if len(reply.encode("utf-8")) > 950:

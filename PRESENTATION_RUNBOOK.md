@@ -24,7 +24,7 @@ The most convincing demo is this:
 1. Show the store login and dashboard
 2. Show the AI replying to a fake customer from the test chat UI
 3. Show that customer and order data appear in the store dashboard
-4. Show payment settings being changed
+4. Show store-only payment methods and the daily exchange rate being changed
 5. Show the same store from `master/`
 6. Change a shared setting in one dashboard and show it reflected in the other
 7. Optionally show AI pause/resume and catalog PDF generation
@@ -146,10 +146,8 @@ After that, verify the `settings` table contains at least:
 - `max_conversation_history`
 - `ai_enabled`
 - `catalog_pdf_interval_hours`
-- `payment_zelle_details`
-- `payment_binance_details`
-- `payment_zinli_details`
-- `payment_bolivares_details`
+- `payment_methods`
+- `accepted_exchange_rate`
 
 ### 4.2. Master database
 
@@ -333,7 +331,7 @@ If the catalog is empty:
 
 ---
 
-## 10. Configure Payment Settings Before the Demo
+## 10. Configure Store Payment Methods Before the Demo
 
 You want the AI to answer payment questions with real-looking store data.
 
@@ -341,21 +339,17 @@ You want the AI to answer payment questions with real-looking store data.
 
 In the store dashboard, go to the configuration/settings section.
 
-Fill at least one or two payment methods:
+Create at least one or two payment methods with obvious demo values, for example:
 
-- Zelle
-- Binance Pay
-- Zinli
-- Bolívares
+- `Zelle` -> `Zelle a demo@correo.com, titular Carlos Demo`
+- `Pago Móvil` -> `Pago Móvil Banco Demo, teléfono 0412..., cédula V-...`
+- `Binance Pay` -> `Binance Pay ID: 123456789`
 
-Use obvious demo values, for example:
+Save the payment methods.
 
-- Zelle: `Zelle a demo@correo.com, titular Carlos Demo`
-- Binance Pay: `Binance Pay ID: 123456789`
-- Zinli: `Zinli a correo demo@correo.com`
-- Bolívares: `Transferencia a Banco Demo, cuenta 0102..., titular Carlos Demo`
+Optional but recommended:
 
-Save the payment settings.
+- set `Tasa del día` to something realistic like `BCV del día: 128 Bs/USD`
 
 ### 10.2. Verify they persist
 
@@ -363,9 +357,10 @@ Refresh the page.
 
 Expected result:
 
-- The payment fields still contain the values you saved
+- The payment methods still contain the values you saved
+- The daily exchange-rate value also persists if you set one
 
-This matters because later the AI should mention these values in the conversation.
+This matters because later the AI should mention these methods and can answer `¿a qué tasa recibes?` using the configured value.
 
 ---
 
@@ -400,12 +395,12 @@ Expected result:
 
 ### 11.3. Use a real product from the catalog
 
-Go to `http://localhost:8000/test/catalog`, copy a real product name or SKU, then continue the chat.
+Go to `http://localhost:8000/test/catalog`, copy a real product name, then continue the chat.
 
 Send something like:
 
 ```text
-Me interesa el SKU ABC123. Qué tallas tienen y cuánto cuesta?
+Me interesa la pijama satén azul. Qué tallas tienen y cuánto cuesta?
 ```
 
 Expected result:
@@ -429,10 +424,10 @@ Expected result:
 
 Now give all information needed in one message.
 
-Use a real SKU from the catalog and send something like:
+Use a real product name from the catalog and send something like:
 
 ```text
-Quiero comprar 1 unidad del SKU ABC123 en talla M. Pago por Zelle. Envío a Caracas. Dirección: Avenida Principal, edificio Demo, piso 2. Método de envío: motorizado.
+Quiero comprar 1 pijama satén azul en talla M. Pago por Zelle. Envío por MRW. Dirección: Avenida Principal, edificio Demo, piso 2, Caracas.
 ```
 
 Expected result:
@@ -628,34 +623,36 @@ You need to prove that store and master are looking at the same runtime settings
 
 From the store dashboard:
 
-1. Change `payment_zelle_details`
-2. Change `catalog_pdf_interval_hours`
+1. Change `accepted_exchange_rate`
+2. Change a shared AI setting like `llm_temperature`
 3. Save
 
 Then go to the same store in the master dashboard and refresh the detail view.
 
 Expected result:
 
-- The same values appear in master
+- The shared AI setting appears updated in master
+- The exchange-rate value remains store-only in the store dashboard
 
 ### 16.2. Master -> Store sync
 
 From the master dashboard:
 
-1. Change `payment_binance_details`
-2. Toggle `ai_enabled`
+1. Toggle `ai_enabled`
+2. Change another shared AI setting such as `llm_max_tokens`
 3. Save runtime settings
 
 Then reload the store dashboard settings page.
 
 Expected result:
 
-- The changed values appear in the store dashboard
+- The changed shared AI values appear in the store dashboard
 - If you changed `ai_enabled`, the store dashboard should reflect the new AI state
+- Payment methods and exchange rate remain store-managed in the store dashboard
 
-### 16.3. Prove payment settings affect the AI immediately
+### 16.3. Prove store-only payment settings affect the AI immediately
 
-After changing payment details from master, go back to the store test chat and ask:
+After changing payment methods from the store dashboard, go back to the store test chat and ask:
 
 ```text
 Cuáles son los métodos de pago?
@@ -663,7 +660,8 @@ Cuáles son los métodos de pago?
 
 Expected result:
 
-- The answer reflects the latest payment details
+- The answer reflects the latest payment methods
+- If you also changed `Tasa del día`, asking `¿a qué tasa recibes?` should use the new value
 - You do not need a redeploy
 
 This is probably the strongest “multi-store control plane” proof in the whole demo.
@@ -799,7 +797,7 @@ Have a short but clear conversation:
 1. Ask for products
 2. Ask for price
 3. Ask for payment methods
-4. Create an order with a real SKU
+4. Create an order with a real product name
 5. Simulate sending payment proof
 
 ### 20.4. Show store dashboard data
@@ -828,11 +826,11 @@ Show:
 
 1. Store stats
 2. Runtime settings
-3. Payment settings
+3. Scheduled jobs and environment variables
 
 ### 20.7. Prove settings sync
 
-Change a payment setting in master.
+Change a shared AI setting in master.
 
 Then go back to the store dashboard and refresh.
 
@@ -842,7 +840,7 @@ Show:
 
 If you want an even stronger close:
 
-Ask the AI again for payment methods and show that it uses the updated value.
+Ask the AI again something affected by that runtime setting and show that it reflects the change.
 
 ### 20.8. Ending
 
@@ -850,7 +848,7 @@ Summarize:
 
 1. The AI can talk to customers
 2. The store owner has operational control
-3. The master dashboard can manage the same store settings centrally
+3. The master dashboard can manage shared AI/store runtime settings centrally
 4. No redeploy is needed for runtime setting changes
 
 ---
@@ -893,7 +891,7 @@ Check:
 
 1. The catalog is loaded at `/test/catalog`
 2. Payment settings are filled
-3. The message uses a real SKU/product from the catalog
+3. The message uses a real product from the catalog
 4. AI is not paused
 
 ### 21.5. If the store does not appear healthy in master
@@ -924,7 +922,7 @@ Do these tonight, not tomorrow:
 - Verify `/test/catalog` returns products
 - Verify one full conversation works in `/test/ui`
 - Verify one order appears in the dashboard
-- Verify payment settings can be saved
+- Verify payment methods and exchange rate can be saved
 - Verify a real store record exists in master
 - Verify store -> master sync
 - Verify master -> store sync

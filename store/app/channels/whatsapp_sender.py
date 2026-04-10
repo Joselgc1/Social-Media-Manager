@@ -1,9 +1,10 @@
 """
 WhatsApp Cloud API sender.
-Handles sending text messages, interactive buttons, and template messages.
+Handles sending text messages, images, interactive buttons, and template messages.
 """
 
 import logging
+import re
 import httpx
 from app.config import get_config
 
@@ -12,16 +13,46 @@ logger = logging.getLogger(__name__)
 GRAPH_API = "https://graph.facebook.com/v21.0"
 
 
+def _normalize_whatsapp_text(text: str) -> str:
+    """
+    WhatsApp supports *bold*, not Markdown-style **bold**.
+    Convert the most common Markdown bold pattern so messages render cleanly.
+    """
+    normalized = text or ""
+    normalized = re.sub(r"\*\*(.+?)\*\*", r"*\1*", normalized, flags=re.DOTALL)
+    return normalized.strip()
+
+
 async def send_text(to: str, text: str):
     """Send a plain text message to a WhatsApp number."""
     config = get_config()
     url = f"{GRAPH_API}/{config.whatsapp_phone_number_id}/messages"
+    body_text = _normalize_whatsapp_text(text)
 
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {"body": text},
+        "text": {"body": body_text},
+    }
+
+    await _send(url, payload, config.whatsapp_access_token)
+
+
+async def send_image(to: str, image_url: str, caption: str = ""):
+    """Send an image to a WhatsApp number via a public URL."""
+    config = get_config()
+    url = f"{GRAPH_API}/{config.whatsapp_phone_number_id}/messages"
+
+    image_payload: dict = {"link": image_url}
+    if caption:
+        image_payload["caption"] = _normalize_whatsapp_text(caption)
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": image_payload,
     }
 
     await _send(url, payload, config.whatsapp_access_token)
@@ -52,7 +83,7 @@ async def send_interactive_buttons(to: str, body_text: str, buttons: list[str]):
         "type": "interactive",
         "interactive": {
             "type": "button",
-            "body": {"text": body_text},
+            "body": {"text": _normalize_whatsapp_text(body_text)},
             "action": {"buttons": button_objects},
         },
     }
@@ -99,7 +130,7 @@ async def send_document(to: str, document_url: str, filename: str = "catalogo.pd
 
     doc: dict = {"link": document_url, "filename": filename}
     if caption:
-        doc["caption"] = caption
+        doc["caption"] = _normalize_whatsapp_text(caption)
 
     payload = {
         "messaging_product": "whatsapp",
