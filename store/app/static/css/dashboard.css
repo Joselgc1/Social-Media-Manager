@@ -91,16 +91,22 @@ textarea { resize: vertical; min-height: 88px; }
   padding-bottom: 18px;
 }
 .customers-table .customer-name-cell {
-  min-width: 120px;
+  min-width: 230px;
 }
 .customers-table .customer-tags-cell {
-  min-width: 360px;
+  min-width: 260px;
+  max-width: 340px;
 }
 .customers-table .customer-meta-cell,
 .customers-table .customer-number-cell,
 .customers-table .customer-state-cell,
 .customers-table .customer-channel-cell {
   white-space: nowrap;
+}
+.customers-table .customer-channel-cell,
+.customers-table .customer-number-cell,
+.customers-table .customer-state-cell {
+  text-align: center;
 }
 .customers-table .customer-actions-cell {
   width: 120px;
@@ -126,6 +132,7 @@ textarea { resize: vertical; min-height: 88px; }
   position: relative;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
 }
 
 /* Dark mode */
@@ -163,5 +170,6 @@ textarea { resize: vertical; min-height: 88px; }
 
 @media (max-width: 1024px) {
   .tab { padding-left: 16px; padding-right: 16px; }
-  .customers-table .customer-tags-cell { min-width: 280px; }
+  .customers-table .customer-name-cell { min-width: 190px; }
+  .customers-table .customer-tags-cell { min-width: 220px; max-width: 280px; }
 }

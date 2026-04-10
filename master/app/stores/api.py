@@ -888,6 +888,8 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
         raise HTTPException(status_code=404, detail="Store not found")
     if not store["railway_service_id"]:
         raise HTTPException(status_code=400, detail="No Railway service ID configured for this store")
+    if not store["railway_project_id"]:
+        raise HTTPException(status_code=400, detail="No Railway project ID configured for this store")
 
     # Get environment ID — use provided one, or find production env
     if not environment_id and store["railway_project_id"]:
@@ -920,15 +922,24 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
             raise HTTPException(status_code=500, detail=f"Failed to decrypt credential: {row['key']}")
 
     # Push to Railway
-    from app.stores.railway import upsert_variables, redeploy_service
+    from app.stores.railway import upsert_variables, redeploy_service, get_latest_deployment
 
     try:
-        await upsert_variables(store["railway_service_id"], environment_id, variables)
-        deployment_id = await redeploy_service(store["railway_service_id"], environment_id)
+        await upsert_variables(
+            store["railway_project_id"],
+            store["railway_service_id"],
+            environment_id,
+            variables,
+            skip_deploys=True,
+        )
+        latest_deployment = await get_latest_deployment(store["railway_service_id"], environment_id)
+        if not latest_deployment or not latest_deployment.get("id"):
+            raise RuntimeError("Could not determine the latest Railway deployment to redeploy.")
+        deployment_id = await redeploy_service(latest_deployment["id"])
     except Exception as e:
         logger.error(f"Railway deploy failed for store {store_id}: {e}")
         await _audit("deploy_failed", store_id, f"Railway deploy failed: {e}")
-        raise HTTPException(status_code=502, detail="Railway deployment failed")
+        raise HTTPException(status_code=502, detail=str(e))
 
     await _audit(
         "deploy_credentials",

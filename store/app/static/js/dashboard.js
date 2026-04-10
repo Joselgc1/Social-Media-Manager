@@ -413,7 +413,6 @@ function renderCustomers(customers) {
 
   html += `<table class="w-full orders-table customers-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortCustomers('name')">Cliente${sortArrow('customers','name')}</th>
-    <th>Contacto</th>
     <th>Tags</th>
     <th class="sortable" onclick="sortCustomers('channel')">Canal${sortArrow('customers','channel')}</th>
     <th class="sortable" onclick="sortCustomers('orders')">Pedidos${sortArrow('customers','orders')}</th>
@@ -424,6 +423,7 @@ function renderCustomers(customers) {
     const tags = (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) || [];
     const primaryName = getCustomerPrimaryName(c);
     const secondaryLabel = getCustomerSecondaryLabel(c);
+    const tertiaryLabel = getCustomerContactValue(c);
     const tagHtml = `<div class="customer-tags">${
       tags.map(t =>
         `<span class="badge badge-blue tag-chip" title="Click para eliminar" onclick="removeTag('${c.id}','${t}')">${t} ✕</span>`
@@ -437,8 +437,8 @@ function renderCustomers(customers) {
       <td class="customer-name-cell">
         <div class="font-medium text-gray-900 dark:text-gray-100">${escapeHtml(primaryName)}</div>
         ${secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(secondaryLabel)}</div>` : ''}
+        ${tertiaryLabel && tertiaryLabel !== secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(tertiaryLabel)}</div>` : ''}
       </td>
-      <td class="customer-meta-cell">${escapeHtml(contactValue || '-')}</td>
       <td class="customer-tags-cell">${tagHtml}</td>
       <td class="customer-channel-cell">
         <div class="status-dropdown-wrap">

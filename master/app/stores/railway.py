@@ -86,9 +86,11 @@ async def get_variables(service_id: str, environment_id: str) -> dict:
 
 
 async def upsert_variables(
+    project_id: str,
     service_id: str,
     environment_id: str,
     variables: dict[str, str],
+    skip_deploys: bool = True,
 ) -> bool:
     """
     Set environment variables on a Railway service.
@@ -101,9 +103,11 @@ async def upsert_variables(
     """
     await _graphql(query, {
         "input": {
+            "projectId": project_id,
             "serviceId": service_id,
             "environmentId": environment_id,
             "variables": variables,
+            "skipDeploys": skip_deploys,
         },
     })
     logger.info(f"Upserted {len(variables)} variables on service {service_id}")
@@ -129,26 +133,27 @@ async def get_environments(project_id: str) -> list[dict]:
     return [edge["node"] for edge in edges]
 
 
-async def redeploy_service(service_id: str, environment_id: str) -> str:
-    """Trigger a redeploy of a Railway service. Returns the new deployment ID."""
+async def redeploy_service(deployment_id: str) -> str:
+    """Trigger a redeploy of an existing deployment. Returns the new deployment ID when available."""
     query = """
-    mutation($serviceId: String!, $environmentId: String!) {
-        serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+    mutation($id: String!) {
+        deploymentRedeploy(id: $id) {
+            id
+        }
     }
     """
-    data = await _graphql(query, {
-        "serviceId": service_id,
-        "environmentId": environment_id,
-    })
-    logger.info(f"Triggered redeploy for service {service_id}")
-    return data.get("serviceInstanceRedeploy", "")
+    data = await _graphql(query, {"id": deployment_id})
+    result = data.get("deploymentRedeploy") or {}
+    new_id = result.get("id", "") if isinstance(result, dict) else ""
+    logger.info(f"Triggered redeploy for deployment {deployment_id}")
+    return new_id or deployment_id
 
 
 async def get_latest_deployment(service_id: str, environment_id: str) -> dict | None:
     """Get the latest deployment for a service in a specific environment."""
     query = """
-    query($input: DeploymentListInput!) {
-        deployments(input: $input) {
+    query($first: Int, $input: DeploymentListInput!) {
+        deployments(first: $first, input: $input) {
             edges {
                 node {
                     id
@@ -160,7 +165,8 @@ async def get_latest_deployment(service_id: str, environment_id: str) -> dict | 
     }
     """
     data = await _graphql(query, {
-        "input": {"serviceId": service_id, "environmentId": environment_id, "first": 1},
+        "first": 1,
+        "input": {"serviceId": service_id, "environmentId": environment_id},
     })
     edges = data.get("deployments", {}).get("edges", [])
     return edges[0]["node"] if edges else None
