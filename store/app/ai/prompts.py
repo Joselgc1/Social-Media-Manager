@@ -137,6 +137,8 @@ def _build_customer_context(customer: dict | None) -> str:
     if city:
         parts.append(f"Ciudad: {city}")
 
+    parts.append("Importante: no asumas el método de pago por tags o compras anteriores; debes preguntarlo en la compra actual si el cliente aún no lo dijo.")
+
     last_addr = customer.get("last_shipping_address")
     if last_addr:
         parts.append(f"Última dirección de envío: {last_addr}")

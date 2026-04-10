@@ -20,12 +20,12 @@
     <div class="max-w-6xl mx-auto px-4 py-8">
 
     <!-- Header -->
-    <div class="flex items-center justify-between mb-8">
-        <div>
+    <div class="master-header flex items-center justify-between mb-8">
+        <div class="master-header-copy">
             <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Master Control Plane</h1>
             <p class="text-gray-500 dark:text-gray-400 text-sm mt-1" id="master-health-status">Loading...</p>
         </div>
-        <div class="flex gap-2 items-center">
+        <div class="master-header-actions flex gap-2 items-center">
             <span id="master-stores-badge" class="badge badge-green">...</span>
             <span id="master-active-badge" class="badge badge-blue">...</span>
             <button onclick="loadStores()" class="btn btn-secondary" title="Actualizar datos">&#x21bb;</button>
@@ -35,7 +35,7 @@
     </div>
 
     <!-- Tabs -->
-    <div class="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700">
+    <div class="tab-bar flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700">
         <div class="tab active" data-tab="overview" onclick="switchTab('overview')">Stores</div>
         <div class="tab" data-tab="detail" onclick="if(selectedStoreId) switchTab('detail')">Store Detail</div>
         <div class="tab" data-tab="audit" onclick="switchTab('audit')">Audit Log</div>
@@ -58,7 +58,7 @@
             </div>
         </div>
 
-        <div class="flex items-center justify-between mb-4">
+        <div class="overview-toolbar flex items-center justify-between mb-4">
             <h2 class="text-lg font-bold">All Stores</h2>
             <button onclick="showAddStoreModal()" class="btn btn-primary">+ Add Store</button>
         </div>

@@ -10,6 +10,12 @@ let selectedStoreId = null;
 let currentTab = 'overview';
 let costDays = 1;
 let usageDays = 1;
+const MOBILE_BREAKPOINT = 768;
+let lastMobileViewport = window.innerWidth < MOBILE_BREAKPOINT;
+
+function isMobileViewport() {
+    return window.innerWidth < MOBILE_BREAKPOINT;
+}
 
 // ── Dark mode ───────────────────────────────────────────────
 function initDarkMode() {
@@ -85,6 +91,20 @@ function switchTab(tab) {
     if (tab === 'overview') loadStores();
     if (tab === 'audit') loadAuditLog();
 }
+
+window.addEventListener('resize', () => {
+    const mobile = isMobileViewport();
+    if (mobile === lastMobileViewport) return;
+    lastMobileViewport = mobile;
+
+    if (currentTab === 'overview' && stores.length) {
+        renderStoreCards();
+    } else if (currentTab === 'detail' && selectedStoreId) {
+        loadStoreDetail();
+    } else if (currentTab === 'audit') {
+        loadAuditLog();
+    }
+});
 
 // ── Stores Overview ─────────────────────────────────────────
 async function loadStores() {
@@ -285,13 +305,13 @@ async function loadStoreDetail() {
 function renderStoreDetail(store, stats, creds) {
     const container = document.getElementById('store-detail-content');
     container.innerHTML = `
-        <div class="flex items-center justify-between mb-6">
-            <div>
+        <div class="store-detail-toolbar flex items-center justify-between mb-6">
+            <div class="store-detail-copy">
                 <button onclick="switchTab('overview')" class="btn btn-secondary mb-2">&larr; Back</button>
                 <h2 class="text-2xl font-bold">${esc(store.name)}</h2>
                 <p class="text-gray-500 dark:text-gray-400">Owner: ${esc(store.owner_name || '—')} &bull; ${esc(store.owner_contact || '—')}</p>
             </div>
-            <div class="flex gap-2">
+            <div class="store-detail-actions flex gap-2">
                 ${store.app_url ? `<a href="${esc(store.app_url)}/admin/dashboard" target="_blank" class="btn btn-primary">Open Store Dashboard &rarr;</a>` : ''}
                 <button onclick="showEditStoreModal('${store.id}')" class="btn btn-secondary">Edit</button>
                 <button onclick="confirmDeleteStore('${store.id}', '${esc(store.name)}')" class="btn btn-danger">Delete</button>
@@ -387,7 +407,7 @@ function renderStoreDetail(store, stats, creds) {
         <!-- Store Info -->
         <div class="card">
             <h3 class="font-bold text-lg mb-3">Store Info</h3>
-            <div class="grid grid-cols-2 gap-3 text-sm">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
                 <div><span class="text-gray-500">App URL:</span> <span class="font-mono">${esc(store.app_url || '—')}</span></div>
                 <div><span class="text-gray-500">DB URL:</span> <span class="font-mono">${esc(store.db_url_masked || '—')}</span></div>
                 <div><span class="text-gray-500">Railway Service:</span> <span class="font-mono">${esc(store.railway_service_id || '—')}</span></div>
@@ -981,7 +1001,7 @@ async function loadRailwayStatus(storeId) {
                              depStatus === 'FAILED' ? 'badge-red' : 'badge-yellow';
 
             container.innerHTML = `
-                <div class="grid grid-cols-2 gap-3 text-sm">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
                     <div><span class="text-gray-500">Service:</span> <span class="font-semibold">${esc(svc.name || svc.id || '—')}</span></div>
                     <div><span class="text-gray-500">Last Deploy:</span> <span class="badge ${depBadge}">${esc(depStatus)}</span>
                         ${dep.createdAt ? `<span class="text-gray-400 ml-2">${new Date(dep.createdAt).toLocaleString()}</span>` : ''}
@@ -1042,6 +1062,24 @@ async function loadAuditLog() {
             container.innerHTML = '<p class="text-gray-500">No entries match the current filters.</p>';
             return;
         }
+        if (isMobileViewport()) {
+            container.innerHTML = `
+                <div class="mobile-card-list">
+                    ${logs.map(l => {
+                        const [label, cls] = _ACTION_LABELS[l.action] || [l.action, 'badge-blue'];
+                        return `
+                            <div class="card mobile-data-card">
+                                <div class="mobile-card-header">
+                                    <span class="badge ${cls}">${esc(label)}</span>
+                                    <span class="text-xs text-gray-500 dark:text-gray-400">${new Date(l.created_at).toLocaleString()}</span>
+                                </div>
+                                <div class="text-sm font-semibold text-gray-900 dark:text-gray-100">${esc(l.store_name || '—')}</div>
+                                <div class="text-sm text-gray-500 dark:text-gray-400 mt-2">${esc(l.detail || '')}</div>
+                            </div>`;
+                    }).join('')}
+                </div>`;
+            return;
+        }
         container.innerHTML = `
             <table class="w-full text-sm">
                 <thead>
@@ -1074,7 +1112,7 @@ function toggleAuditFilters() {
     const panel = document.getElementById('audit-filters');
     const btn = document.getElementById('audit-filter-toggle');
     const visible = panel.style.display !== 'none';
-    panel.style.display = visible ? 'none' : 'flex';
+    panel.style.display = visible ? 'none' : (isMobileViewport() ? 'grid' : 'flex');
     btn.innerHTML = visible ? 'Filters &#x25BC;' : 'Filters &#x25B2;';
 }
 

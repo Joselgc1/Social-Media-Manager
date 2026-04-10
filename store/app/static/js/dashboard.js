@@ -37,6 +37,8 @@ let _customersData = [];
 let _ordersData = [];
 let _broadcastsData = [];
 let _sort = { customers: {col: null, asc: true}, orders: {col: null, asc: true}, broadcasts: {col: null, asc: true} };
+const MOBILE_BREAKPOINT = 768;
+let _lastMobileViewport = window.innerWidth < MOBILE_BREAKPOINT;
 const ORDER_PAYMENT_STATUS_LABELS = {
   pending: 'Pendiente',
   proof_received: 'Comprobante recibido',
@@ -77,6 +79,10 @@ function sortArrow(table, col) {
   const s = _sort[table];
   if (s.col !== col) return ' ↕';
   return s.asc ? ' ↑' : ' ↓';
+}
+
+function isMobileViewport() {
+  return window.innerWidth < MOBILE_BREAKPOINT;
 }
 
 function escapeHtml(value) {
@@ -131,6 +137,13 @@ document.addEventListener('click', () => {
   closeCustomerChannelDropdowns();
 });
 
+window.addEventListener('resize', () => {
+  const mobile = isMobileViewport();
+  if (mobile === _lastMobileViewport) return;
+  _lastMobileViewport = mobile;
+  rerenderResponsiveSections();
+});
+
 // -- Tabs --
 function switchTab(name, el) {
   document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
@@ -139,6 +152,18 @@ function switchTab(name, el) {
   el.classList.add('active');
   currentTab = name;
   switchTabByName(name);
+}
+
+function rerenderResponsiveSections() {
+  if (document.getElementById('tab-customers')?.style.display !== 'none' && _customersData.length) {
+    renderCustomers(getVisibleCustomers());
+  }
+  if (document.getElementById('tab-orders')?.style.display !== 'none' && _ordersData.length) {
+    renderOrders(getVisibleOrders());
+  }
+  if (document.getElementById('tab-broadcasts')?.style.display !== 'none' && _broadcastsData.length) {
+    renderBroadcasts(_broadcastsData);
+  }
 }
 
 // -- Refresh --
@@ -407,6 +432,82 @@ function renderCustomers(customers) {
   }
   if (!customers.length) {
     html += '<div class="orders-empty">No hay clientes que coincidan con los filtros.</div>';
+    document.getElementById('customers-list').innerHTML = html;
+    return;
+  }
+
+  if (isMobileViewport()) {
+    html += `<div class="mobile-card-list">`;
+    for (const c of customers) {
+      const tags = (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) || [];
+      const primaryName = getCustomerPrimaryName(c);
+      const secondaryLabel = getCustomerSecondaryLabel(c);
+      const tertiaryLabel = getCustomerContactValue(c);
+      const currentState = c.conversation_state || 'active';
+      const statusBadge = getCustomerStateBadgeClass(currentState);
+      const statusLabel = CUSTOMER_STATE_LABELS[currentState] || currentState || 'Activo';
+      const channelLabel = CUSTOMER_CHANNEL_LABELS[c.channel] || c.channel || 'Sin canal';
+      const tagHtml = `<div class="customer-tags">${
+        tags.map(t =>
+          `<span class="badge badge-blue tag-chip" title="Click para eliminar" onclick="removeTag('${c.id}','${t}')">${t} ✕</span>`
+        ).join('')
+      }<span class="badge badge-gray tag-add-chip" onclick="promptAddTag('${c.id}')" title="Agregar tag">+</span></div>`;
+
+      html += `
+        <div class="card mobile-data-card">
+          <div class="mobile-card-header">
+            <div>
+              <div class="font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(primaryName)}</div>
+              ${secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(secondaryLabel)}</div>` : ''}
+              ${tertiaryLabel && tertiaryLabel !== secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(tertiaryLabel)}</div>` : ''}
+            </div>
+            <button class="btn btn-danger text-xs" onclick="deleteCustomer('${c.id}')">Eliminar</button>
+          </div>
+          <div class="mobile-card-metrics">
+            <div class="mobile-card-metric">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Canal</span>
+              <div class="status-dropdown-wrap mt-1">
+                <button type="button" class="badge ${getCustomerChannelBadgeClass(c.channel)} status-pill-button" onclick="event.stopPropagation(); toggleCustomerChannelDropdown('${c.id}')">
+                  ${escapeHtml(channelLabel)}
+                </button>
+                <div id="customer-channel-menu-${c.id}" class="status-dropdown hidden" onclick="event.stopPropagation()">
+                  <label class="block text-xs text-gray-500 dark:text-gray-400 mb-2">Cambiar canal</label>
+                  <select class="w-full" onchange="changeCustomerChannel('${c.id}', this.value)" onblur="scheduleCloseCustomerChannelDropdown('${c.id}')">
+                    ${renderCustomerChannelOptions(c.channel)}
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="mobile-card-metric">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Pedidos</span>
+              <div class="font-semibold mt-1">${c.total_orders || 0}</div>
+            </div>
+            <div class="mobile-card-metric">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Gastado</span>
+              <div class="font-semibold mt-1">$${(c.total_spent || 0).toFixed(2)}</div>
+            </div>
+            <div class="mobile-card-metric">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Estado</span>
+              <div class="status-dropdown-wrap mt-1">
+                <button type="button" class="badge ${statusBadge} status-pill-button" onclick="event.stopPropagation(); toggleCustomerStateDropdown('${c.id}')">
+                  ${escapeHtml(statusLabel)}
+                </button>
+                <div id="customer-status-menu-${c.id}" class="status-dropdown hidden" onclick="event.stopPropagation()">
+                  <label class="block text-xs text-gray-500 dark:text-gray-400 mb-2">Cambiar estado</label>
+                  <select class="w-full" onchange="changeCustomerState('${c.id}', this.value)" onblur="scheduleCloseCustomerStateDropdown('${c.id}')">
+                    ${renderCustomerStateOptions(currentState)}
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4">
+            <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Tags</div>
+            ${tagHtml}
+          </div>
+        </div>`;
+    }
+    html += `</div>`;
     document.getElementById('customers-list').innerHTML = html;
     return;
   }
@@ -773,6 +874,58 @@ function renderOrders(orders) {
     return;
   }
 
+  if (isMobileViewport()) {
+    let html = `<div class="mobile-card-list">`;
+    for (const o of orders) {
+      const items = (typeof o.items === 'string' ? JSON.parse(o.items) : o.items) || [];
+      const itemSummary = items.map(i => {
+        const size = i.size ? ` (${i.size})` : '';
+        return `${i.product_name || i.sku || 'Producto'}${size}`;
+      }).join(', ');
+      const statusBadge = getOrderStatusBadgeClass(o.payment_status);
+      const statusLabel = ORDER_PAYMENT_STATUS_LABELS[o.payment_status] || o.payment_status || 'Sin estado';
+      const date = new Date(o.created_at).toLocaleDateString();
+      html += `
+        <div class="card mobile-data-card">
+          <div class="mobile-card-header">
+            <div>
+              <div class="font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(o.display_name || o.platform_id)}</div>
+              <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${date}</div>
+            </div>
+            <button class="btn btn-danger text-xs" onclick="deleteOrder('${o.id}')">Eliminar</button>
+          </div>
+          <div class="text-sm text-gray-700 dark:text-gray-300 mt-3">${escapeHtml(itemSummary)}</div>
+          <div class="mobile-card-metrics mt-4">
+            <div class="mobile-card-metric">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Total</span>
+              <div class="font-semibold mt-1">$${(o.total || 0).toFixed(2)}</div>
+            </div>
+            <div class="mobile-card-metric">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Pago</span>
+              <div class="font-semibold mt-1">${escapeHtml(o.payment_method || '-')}</div>
+            </div>
+          </div>
+          <div class="mt-4">
+            <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Estado de pago</div>
+            <div class="status-dropdown-wrap">
+              <button type="button" class="badge ${statusBadge} status-pill-button" onclick="event.stopPropagation(); toggleOrderStatusDropdown('${o.id}')">
+                ${escapeHtml(statusLabel)}
+              </button>
+              <div id="order-status-menu-${o.id}" class="status-dropdown hidden" onclick="event.stopPropagation()">
+                <label class="block text-xs text-gray-500 dark:text-gray-400 mb-2">Cambiar estado</label>
+                <select id="order-payment-${o.id}" class="w-full" onchange="changeOrderStatus('${o.id}', this.value)" onblur="scheduleCloseOrderStatusDropdown('${o.id}')">
+                  ${renderOrderPaymentOptions(o.payment_status)}
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>`;
+    }
+    html += `</div>`;
+    document.getElementById('orders-list').innerHTML = html;
+    return;
+  }
+
   let html = `<table class="w-full orders-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortOrders('name')">Cliente${sortArrow('orders','name')}</th>
     <th>Items</th>
@@ -928,6 +1081,32 @@ async function loadBroadcasts() {
 }
 
 function renderBroadcasts(data) {
+  if (isMobileViewport()) {
+    const html = `<div class="mobile-card-list">${data.map(b => {
+      const statusBadge = {draft:'badge-gray', scheduled:'badge-yellow', sending:'badge-blue', sent:'badge-green', partial:'badge-yellow', failed:'badge-red'}[b.status] || 'badge-gray';
+      const tags = JSON.parse(b.target_tags || '[]').join(', ');
+      let actionHtml = '';
+      if (b.status === 'draft') actionHtml = `<button class="btn btn-primary text-xs" onclick="sendBroadcast('${b.id}')">Enviar</button>`;
+      else if (b.status === 'sending' || b.status === 'failed') actionHtml = `<button class="btn btn-danger text-xs" onclick="resetBroadcast('${b.id}')">Resetear</button>`;
+      return `
+        <div class="card mobile-data-card">
+          <div class="mobile-card-header">
+            <div>
+              <div class="font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(b.name)}</div>
+              <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(b.template_name || '')}</div>
+            </div>
+            <span class="badge ${statusBadge}">${escapeHtml(b.status)}</span>
+          </div>
+          <div class="mt-3 text-sm text-gray-700 dark:text-gray-300">
+            <div><span class="text-gray-500 dark:text-gray-400">Tags:</span> ${escapeHtml(tags || '—')}</div>
+            <div class="mt-1"><span class="text-gray-500 dark:text-gray-400">Enviados:</span> ${b.recipients || 0}</div>
+          </div>
+          ${actionHtml ? `<div class="mt-4">${actionHtml}</div>` : ''}
+        </div>`;
+    }).join('')}</div>`;
+    document.getElementById('broadcasts-list').innerHTML = html;
+    return;
+  }
   let html = `<table class="w-full"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
     <th class="pb-2 sortable" onclick="sortBroadcasts('name')">Nombre${sortArrow('broadcasts','name')}</th>
     <th class="sortable" onclick="sortBroadcasts('template')">Plantilla${sortArrow('broadcasts','template')}</th>

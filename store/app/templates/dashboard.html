@@ -20,12 +20,12 @@
   <div class="max-w-6xl mx-auto px-4 py-8">
 
     <!-- Header -->
-    <div class="flex items-center justify-between mb-8">
-      <div>
+    <div class="dashboard-header flex items-center justify-between mb-8">
+      <div class="dashboard-header-copy">
         <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">__STORE_NAME__ Chatbot Admin</h1>
         <p class="text-gray-500 dark:text-gray-400 text-sm mt-1" id="health-status">Cargando...</p>
       </div>
-      <div class="flex gap-2 items-center">
+      <div class="dashboard-header-actions flex gap-2 items-center">
         <button id="ai-toggle" class="btn text-sm font-semibold" onclick="toggleAi()" title="Activar/Pausar AI">...</button>
         <span id="provider-badge" class="badge badge-blue">...</span>
         <span id="catalog-badge" class="badge badge-gray">...</span>
@@ -36,7 +36,7 @@
     </div>
 
     <!-- Tabs -->
-    <div class="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700">
+    <div class="tab-bar flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700">
       <div class="tab active" onclick="switchTab('overview', this)">Resumen</div>
       <div class="tab" onclick="switchTab('customers', this)">Clientes</div>
       <div class="tab" onclick="switchTab('orders', this)">Pedidos</div>
@@ -230,7 +230,7 @@
             </div>
           </div>
         </div>
-        <div class="grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-4 mb-4 items-start">
+        <div class="settings-mobile-stack grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-4 mb-4 items-start">
           <div class="card h-full">
             <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Tasa del día</h3>
             <div class="space-y-3">

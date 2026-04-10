@@ -173,3 +173,78 @@ textarea { resize: vertical; min-height: 88px; }
   .customers-table .customer-name-cell { min-width: 190px; }
   .customers-table .customer-tags-cell { min-width: 220px; max-width: 280px; }
 }
+
+@media (max-width: 767px) {
+  .dashboard-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .dashboard-header-copy {
+    width: 100%;
+  }
+  .dashboard-header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .dashboard-header-actions .btn,
+  .dashboard-header-actions .badge {
+    min-height: 40px;
+  }
+  .tab-bar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .tab-bar::-webkit-scrollbar {
+    display: none;
+  }
+  .tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .mobile-card-list {
+    display: grid;
+    gap: 12px;
+  }
+  .mobile-data-card {
+    padding: 18px;
+  }
+  .mobile-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .mobile-card-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .mobile-card-metric {
+    min-width: 0;
+  }
+  .settings-mobile-stack {
+    grid-template-columns: 1fr !important;
+  }
+  #tab-settings .card .flex.items-center.justify-between,
+  #tab-settings .card .flex.items-start.justify-between {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  #tab-settings .card .flex.gap-2 {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  #tab-settings .card .flex.gap-2 .btn,
+  #tab-settings .card .flex.gap-2 a.btn {
+    flex: 1 1 100%;
+    text-align: center;
+  }
+}
