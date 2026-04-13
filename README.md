@@ -205,7 +205,7 @@ Store-only payment methods are persisted separately under `payment_methods` in t
 
 The store-only `accepted_exchange_rate` setting is also stored in the same `settings` table. It is edited only from the store dashboard and is used when customers ask things like `¿a qué tasa recibes?`.
 
-The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information.
+The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information. The Google Sheets catalog can be modeled as one row per size variant with `SKU`, `Parent SKU`, and a singular `Size` column; see [store/DEPLOYMENT.md](store/DEPLOYMENT.md) for the exact sheet format.
 
 If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API/Telegram commands stop allowing LLM-setting writes locally, but payment methods and other non-LLM store settings remain editable in the store dashboard.
 
