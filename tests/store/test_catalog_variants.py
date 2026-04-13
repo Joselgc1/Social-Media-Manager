@@ -1,4 +1,5 @@
 from app.ai.prompts import format_catalog_as_markdown
+from app.catalog.pdf_generator import _build_public_catalog_rows
 from app.catalog.sheets import get_product_sizes, group_catalog_products
 from app.crm.orders import _normalize_order_items
 
@@ -111,3 +112,41 @@ def test_normalize_order_items_resolves_parent_sku_to_variant(monkeypatch):
     assert items[0]["sku"] == "SET-001-M"
     assert items[0]["size"] == "M"
     assert items[0]["unit_price"] == 35.0
+
+
+def test_catalog_pdf_rows_strip_stock_and_variant_fields():
+    rows = _build_public_catalog_rows([
+        {
+            "sku": "SET-001-S",
+            "parent_sku": "SET-001",
+            "product_name": "Set completo rojo",
+            "category": "Sets",
+            "description": "Set de ropa interior rojo",
+            "size": "S",
+            "sizes": "S",
+            "price_usd": 35,
+            "stock": 4,
+            "image_url": "https://example.com/red.jpg",
+        },
+        {
+            "sku": "SET-001-M",
+            "parent_sku": "SET-001",
+            "product_name": "Set completo rojo",
+            "category": "Sets",
+            "description": "Set de ropa interior rojo",
+            "size": "M",
+            "sizes": "M",
+            "price_usd": 35,
+            "stock": 7,
+            "image_url": "https://example.com/red.jpg",
+        },
+    ])
+
+    assert rows == [{
+        "product_name": "Set completo rojo",
+        "category": "Sets",
+        "sizes": "S,M",
+        "price_usd": 35,
+        "description": "Set de ropa interior rojo",
+        "image_url": "https://example.com/red.jpg",
+    }]

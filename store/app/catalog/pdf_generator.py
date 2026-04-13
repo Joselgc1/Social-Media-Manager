@@ -52,7 +52,7 @@ def generate_catalog_pdf(catalog: list[dict]) -> Path:
 
     _render_header(pdf)
 
-    grouped_catalog = group_catalog_products(catalog)
+    grouped_catalog = _build_public_catalog_rows(catalog)
 
     # Group products by category, sorted alphabetically
     categories: dict[str, list[dict]] = {}
@@ -118,8 +118,6 @@ def _render_category(pdf: "FPDF", category: str, products: list[dict]):
         else:
             pdf.set_fill_color(*_WHITE)
 
-        in_stock = _parse_stock(p.get("stock", 0)) > 0
-
         try:
             price_str = f"${float(p.get('price_usd', 0)):.2f}"
         except (ValueError, TypeError):
@@ -129,9 +127,6 @@ def _render_category(pdf: "FPDF", category: str, products: list[dict]):
         sizes = str(p.get("sizes", ""))[:22]
 
         pdf.set_font("Helvetica", "", 7)
-
-        if not in_stock:
-            pdf.set_text_color(*_GRAY)
 
         _row(pdf, name, sizes, price_str, fill=True)
 
@@ -160,12 +155,24 @@ def _render_footer_note(pdf: "FPDF"):
              f"|  Consulta disponibilidad antes de confirmar",
              align="C")
 
+def _build_public_catalog_rows(catalog: list[dict]) -> list[dict]:
+    """
+    Return customer-facing catalog rows for the PDF.
 
-def _parse_stock(value) -> int:
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return 0
+    Stock and variant internals are intentionally excluded so the generated PDF
+    only receives fields that are safe to show to customers.
+    """
+    public_rows: list[dict] = []
+    for product in group_catalog_products(catalog):
+        public_rows.append({
+            "product_name": product.get("product_name", ""),
+            "category": product.get("category", ""),
+            "sizes": product.get("sizes", ""),
+            "price_usd": product.get("price_usd", 0),
+            "description": product.get("description", ""),
+            "image_url": product.get("image_url", ""),
+        })
+    return public_rows
 
 
 class _CatalogPDF(FPDF):
