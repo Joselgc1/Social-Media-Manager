@@ -323,7 +323,7 @@ function renderStoreDetail(store, stats, creds) {
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
             <div class="card text-center">
                 <div class="stat-number">${stats.today_conversations ?? 0}</div>
-                <div class="text-sm text-gray-500">Today's Chats</div>
+                <div class="text-sm text-gray-500">Today's Messages</div>
             </div>
             <div class="card text-center">
                 <div class="stat-number">${stats.today_orders ?? 0}</div>

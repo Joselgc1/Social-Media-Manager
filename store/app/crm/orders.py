@@ -175,6 +175,105 @@ async def get_order(order_id: str) -> dict | None:
     return order
 
 
+async def get_order_detail(order_id: str) -> dict | None:
+    row = await db.fetch_one(
+        """
+        SELECT o.id, o.customer_id, o.items, o.total, o.payment_method, o.payment_status,
+               o.payment_proof, o.customer_totals_applied, o.shipping_method, o.shipping_city,
+               o.shipping_address, o.shipping_status, o.tracking_number, o.created_at, o.updated_at,
+               c.id AS customer_record_id, c.channel, c.platform_id, c.display_name, c.phone,
+               c.instagram_handle, c.tags, c.total_orders, c.total_spent, c.first_contact,
+               c.last_active, c.notes, c.conversation_state, c.last_shipping_address,
+               c.last_shipping_city, c.last_shipping_method
+        FROM orders o
+        LEFT JOIN customers c ON o.customer_id = c.id
+        WHERE o.id = :oid
+        """,
+        {"oid": order_id},
+    )
+    if not row:
+        return None
+
+    detail = dict(row)
+    detail["id"] = str(detail["id"])
+    detail["customer_id"] = str(detail["customer_id"]) if detail.get("customer_id") else None
+    detail["items"] = _load_items(detail.get("items"))
+    detail["total"] = float(detail.get("total") or 0)
+    detail["customer_totals_applied"] = bool(detail.get("customer_totals_applied"))
+
+    customer = None
+    if detail.get("customer_record_id"):
+        raw_tags = detail.get("tags")
+        if isinstance(raw_tags, str):
+            raw_tags = json.loads(raw_tags or "[]")
+
+        customer = {
+            "id": str(detail["customer_record_id"]),
+            "channel": detail.get("channel"),
+            "platform_id": detail.get("platform_id"),
+            "display_name": detail.get("display_name"),
+            "phone": detail.get("phone"),
+            "instagram_handle": detail.get("instagram_handle"),
+            "tags": raw_tags or [],
+            "total_orders": int(detail.get("total_orders") or 0),
+            "total_spent": float(detail.get("total_spent") or 0),
+            "first_contact": detail.get("first_contact"),
+            "last_active": detail.get("last_active"),
+            "notes": detail.get("notes"),
+            "conversation_state": detail.get("conversation_state"),
+            "last_shipping_address": detail.get("last_shipping_address"),
+            "last_shipping_city": detail.get("last_shipping_city"),
+            "last_shipping_method": detail.get("last_shipping_method"),
+        }
+
+    recent_orders: list[dict] = []
+    if customer:
+        rows = await db.fetch_all(
+            """
+            SELECT id, total, payment_status, shipping_status, created_at
+            FROM orders
+            WHERE customer_id = :cid
+            ORDER BY created_at DESC
+            LIMIT 5
+            """,
+            {"cid": customer["id"]},
+        )
+        recent_orders = []
+        for recent in rows:
+            recent_dict = dict(recent)
+            recent_orders.append({
+                "id": str(recent_dict["id"]),
+                "total": float(recent_dict.get("total") or 0),
+                "payment_status": recent_dict.get("payment_status"),
+                "shipping_status": recent_dict.get("shipping_status"),
+                "created_at": recent_dict.get("created_at"),
+            })
+
+    for key in (
+        "customer_record_id",
+        "channel",
+        "platform_id",
+        "display_name",
+        "phone",
+        "instagram_handle",
+        "tags",
+        "total_orders",
+        "total_spent",
+        "first_contact",
+        "last_active",
+        "notes",
+        "conversation_state",
+        "last_shipping_address",
+        "last_shipping_city",
+        "last_shipping_method",
+    ):
+        detail.pop(key, None)
+
+    detail["customer"] = customer
+    detail["recent_customer_orders"] = recent_orders
+    return detail
+
+
 async def get_latest_open_order(customer_id: str) -> dict | None:
     row = await db.fetch_one(
         """

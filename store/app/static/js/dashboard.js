@@ -55,6 +55,7 @@ const CUSTOMER_CHANNEL_LABELS = {
   whatsapp: 'WhatsApp',
   instagram: 'Instagram',
 };
+const DELETE_ICON_SRC = '/static/icons/delete.svg';
 
 function sortData(data, col, asc, getter) {
   return [...data].sort((a, b) => {
@@ -92,6 +93,10 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function renderDeleteIcon(label) {
+  return `<img src="${DELETE_ICON_SRC}" alt="" class="btn-icon-image"><span class="sr-only">${escapeHtml(label)}</span>`;
 }
 
 // -- Dark Mode --
@@ -461,7 +466,7 @@ function renderCustomers(customers) {
               ${secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(secondaryLabel)}</div>` : ''}
               ${tertiaryLabel && tertiaryLabel !== secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(tertiaryLabel)}</div>` : ''}
             </div>
-            <button class="btn btn-danger text-xs" onclick="deleteCustomer('${c.id}')">Eliminar</button>
+            <button class="btn btn-danger btn-icon text-xs" onclick="deleteCustomer('${c.id}')" title="Eliminar cliente" aria-label="Eliminar cliente">${renderDeleteIcon('Eliminar cliente')}</button>
           </div>
           <div class="mobile-card-metrics">
             <div class="mobile-card-metric">
@@ -570,7 +575,7 @@ function renderCustomers(customers) {
         </div>
       </td>
       <td class="customer-actions-cell">
-        <button class="btn btn-danger text-xs" onclick="deleteCustomer('${c.id}')">Eliminar</button>
+        <button class="btn btn-danger btn-icon text-xs" onclick="deleteCustomer('${c.id}')" title="Eliminar cliente" aria-label="Eliminar cliente">${renderDeleteIcon('Eliminar cliente')}</button>
       </td>
     </tr>`;
   }
@@ -886,13 +891,16 @@ function renderOrders(orders) {
       const statusLabel = ORDER_PAYMENT_STATUS_LABELS[o.payment_status] || o.payment_status || 'Sin estado';
       const date = new Date(o.created_at).toLocaleDateString();
       html += `
-        <div class="card mobile-data-card">
+        <div class="card mobile-data-card order-clickable-card" onclick="openOrderDetail('${o.id}')">
           <div class="mobile-card-header">
             <div>
               <div class="font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(o.display_name || o.platform_id)}</div>
               <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${date}</div>
             </div>
-            <button class="btn btn-danger text-xs" onclick="deleteOrder('${o.id}')">Eliminar</button>
+            <div class="flex gap-2">
+              <button class="btn btn-secondary text-xs" onclick="event.stopPropagation(); openOrderDetail('${o.id}')">Ver</button>
+              <button class="btn btn-danger btn-icon text-xs" onclick="event.stopPropagation(); deleteOrder('${o.id}')" title="Eliminar pedido" aria-label="Eliminar pedido">${renderDeleteIcon('Eliminar pedido')}</button>
+            </div>
           </div>
           <div class="text-sm text-gray-700 dark:text-gray-300 mt-3">${escapeHtml(itemSummary)}</div>
           <div class="mobile-card-metrics mt-4">
@@ -944,8 +952,8 @@ function renderOrders(orders) {
     const statusBadge = getOrderStatusBadgeClass(o.payment_status);
     const statusLabel = ORDER_PAYMENT_STATUS_LABELS[o.payment_status] || o.payment_status || 'Sin estado';
     const date = new Date(o.created_at).toLocaleDateString();
-    html += `<tr class="border-t border-gray-100 dark:border-gray-700">
-      <td class="py-2">${escapeHtml(o.display_name || o.platform_id)}</td>
+    html += `<tr class="border-t border-gray-100 dark:border-gray-700 order-clickable-row" onclick="openOrderDetail('${o.id}')">
+      <td class="py-2"><span class="font-medium text-gray-900 dark:text-gray-100">${escapeHtml(o.display_name || o.platform_id)}</span></td>
       <td class="order-items-cell" title="${escapeHtml(itemSummary)}">${escapeHtml(itemSummary)}</td>
       <td>$${(o.total || 0).toFixed(2)}</td>
       <td>${escapeHtml(o.payment_method || '-')}</td>
@@ -964,12 +972,19 @@ function renderOrders(orders) {
       </td>
       <td>${date}</td>
       <td class="order-actions-cell">
-        <button class="btn btn-danger text-xs" onclick="deleteOrder('${o.id}')">Eliminar</button>
+        <div class="flex gap-2 justify-end">
+          <button class="btn btn-secondary text-xs" onclick="event.stopPropagation(); openOrderDetail('${o.id}')">Ver</button>
+          <button class="btn btn-danger btn-icon text-xs" onclick="event.stopPropagation(); deleteOrder('${o.id}')" title="Eliminar pedido" aria-label="Eliminar pedido">${renderDeleteIcon('Eliminar pedido')}</button>
+        </div>
       </td>
     </tr>`;
   }
   html += '</tbody></table>';
   document.getElementById('orders-list').innerHTML = html;
+}
+
+function openOrderDetail(orderId) {
+  window.location.href = `/admin/orders/${encodeURIComponent(orderId)}`;
 }
 
 function getOrderStatusBadgeClass(status) {
@@ -1231,7 +1246,7 @@ function renderPaymentMethods(paymentMethods) {
         <div class="text-sm font-semibold text-gray-700 dark:text-gray-200">
           Método <span class="payment-method-number">${index + 1}</span>
         </div>
-        <button type="button" class="btn btn-danger text-sm" onclick="removePaymentMethod(this)">Eliminar</button>
+        <button type="button" class="btn btn-danger btn-icon text-sm" onclick="removePaymentMethod(this)" title="Eliminar método" aria-label="Eliminar método">${renderDeleteIcon('Eliminar método')}</button>
       </div>
       <div class="grid md:grid-cols-[minmax(220px,280px)_1fr] gap-4">
         <div>
@@ -1273,7 +1288,7 @@ function addPaymentMethod(method = {}) {
         <div class="text-sm font-semibold text-gray-700 dark:text-gray-200">
           Método <span class="payment-method-number">${nextIndex + 1}</span>
         </div>
-        <button type="button" class="btn btn-danger text-sm" onclick="removePaymentMethod(this)">Eliminar</button>
+        <button type="button" class="btn btn-danger btn-icon text-sm" onclick="removePaymentMethod(this)" title="Eliminar método" aria-label="Eliminar método">${renderDeleteIcon('Eliminar método')}</button>
       </div>
       <div class="grid md:grid-cols-[minmax(220px,280px)_1fr] gap-4">
         <div>

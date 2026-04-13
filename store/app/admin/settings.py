@@ -572,6 +572,14 @@ async def list_orders(limit: int = 50):
     return [dict(r) for r in rows]
 
 
+@router.get("/orders/{order_id}")
+async def get_order_detail(order_id: str):
+    detail = await orders.get_order_detail(order_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return detail
+
+
 @router.put("/customers/{customer_id}")
 async def update_customer(customer_id: str, body: CustomerUpdate):
     row = await db.fetch_one(

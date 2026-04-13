@@ -6,6 +6,7 @@ the live product catalog and payment details at runtime.
 
 import json
 from pathlib import Path
+from app.customer_identity import extract_safe_first_name
 from app.payment_methods import payment_method_information_block, payment_method_names_text
 
 # Resolve the prompts directory relative to the project root
@@ -38,6 +39,7 @@ def build_system_prompt(
     store_name: str = "Zona Pink",
     channel: str = "whatsapp",
     customer: dict | None = None,
+    open_order: dict | None = None,
     payment_methods: list[dict] | None = None,
     accepted_exchange_rate: str | None = None,
 ) -> str:
@@ -64,7 +66,7 @@ def build_system_prompt(
         prompt += f"\n\n# Canal actual\n\n{channel_note}"
 
     # Append customer context if we have history on them
-    customer_note = _build_customer_context(customer)
+    customer_note = _build_customer_context(customer, open_order=open_order)
     if customer_note:
         prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
 
@@ -107,7 +109,7 @@ def _build_channel_context(channel: str) -> str:
     return ""
 
 
-def _build_customer_context(customer: dict | None) -> str:
+def _build_customer_context(customer: dict | None, open_order: dict | None = None) -> str:
     """
     Build a brief context summary about the customer for the AI.
     Helps the AI personalize its responses without loading full history.
@@ -118,8 +120,14 @@ def _build_customer_context(customer: dict | None) -> str:
     parts = []
 
     name = customer.get("display_name")
-    if name:
-        parts.append(f"Nombre: {name}")
+    safe_first_name = extract_safe_first_name(name)
+    if safe_first_name:
+        parts.append(f"Nombre confirmado para saludar: {safe_first_name}")
+    elif name:
+        parts.append(
+            "Nombre del perfil no confiable para saludar: no uses ese nombre "
+            "a menos que la cliente lo confirme claramente en el chat."
+        )
 
     tags = customer.get("tags") or []
     if isinstance(tags, str):
@@ -153,6 +161,29 @@ def _build_customer_context(customer: dict | None) -> str:
     if total_orders > 0:
         parts.append(f"Pedidos anteriores: {total_orders}")
         parts.append(f"Total gastado: ${customer.get('total_spent', 0):.2f}")
+
+    if open_order:
+        open_items = open_order.get("items") or []
+        if isinstance(open_items, str):
+            open_items = json.loads(open_items or "[]")
+
+        items_summary = ", ".join(
+            f"{item.get('product_name', 'Producto')} x{item.get('quantity', 1)}"
+            for item in open_items[:3]
+        )
+        parts.append(
+            "Pedido pendiente abierto: "
+            f"estado de pago {open_order.get('payment_status', 'pending')}, "
+            f"método de pago {open_order.get('payment_method') or 'sin definir'}, "
+            f"total ${float(open_order.get('total') or 0):.2f}."
+        )
+        if items_summary:
+            parts.append(f"Resumen pedido pendiente: {items_summary}")
+        parts.append(
+            "Importante: este pedido pendiente NO es motivo para escalar. "
+            "Si la cliente quiere retomarlo, ayúdala con ese pago. "
+            "Si quiere comprar algo nuevo, maneja el nuevo flujo con claridad en el chat sin escalar."
+        )
 
     if "vip" in tags:
         parts.append("⭐ Cliente VIP - trato especial")

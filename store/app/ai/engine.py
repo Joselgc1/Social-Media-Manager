@@ -13,6 +13,7 @@ import re
 import unicodedata
 from app import db
 from app import analytics
+from app.ai.safety import sanitize_customer_facing_text
 from app.ai.providers import get_provider, AVAILABLE_MODELS, list_providers as _list_providers
 from app.ai.providers.base import LLMResponse
 from app.ai.functions import TOOLS
@@ -23,6 +24,7 @@ from app.admin.notify import notify_escalation, notify_incoming_message, notify_
 from app.catalog.sheets import get_cached_catalog
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.config import get_config
+from app.customer_identity import extract_safe_first_name
 from app.payment_methods import payment_method_tag_value
 
 logger = logging.getLogger(__name__)
@@ -181,6 +183,7 @@ async def generate_response(
         store_name=settings.get("store_name", config.store_name),
         channel=channel,
         customer=customer,
+        open_order=open_order,
         payment_methods=payment_methods,
         accepted_exchange_rate=str(settings.get("accepted_exchange_rate", "") or ""),
     )
@@ -230,7 +233,7 @@ async def generate_response(
     open_order = await orders.get_latest_open_order(customer["id"])
 
     if payment_proof_attempt and not open_order:
-        first_name = ((customer.get("display_name") or "").strip().split(" ")[0] or "").strip()
+        first_name = extract_safe_first_name(customer.get("display_name"))
         greeting_name = first_name or "hola"
         await conversations.store_message(
             customer_id=customer["id"],
@@ -365,7 +368,7 @@ async def generate_response(
             messages=history,
             tool_call_id=tc_id,
             tool_name=name,
-            tool_result=json.dumps(result, ensure_ascii=False),
+            tool_result=_format_tool_result_for_model(name, result),
             tools=tools_this_round,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -713,10 +716,18 @@ def _normalize_catalog_text(text: str) -> str:
 
 
 def _clean_assistant_reply_text(text: str) -> str:
-    cleaned = (text or "").strip()
-    cleaned = re.sub(r'^\s*\{[^{}\n]+\}\s*', '', cleaned, count=1)
+    cleaned = sanitize_customer_facing_text(text)
     cleaned = _strip_catalog_skus_from_text(cleaned)
     return cleaned.strip()
+
+
+def _format_tool_result_for_model(tool_name: str, result: dict) -> str:
+    return (
+        "RESULTADO INTERNO DE HERRAMIENTA. NO lo muestres ni lo cites al cliente.\n"
+        f"Herramienta: {tool_name}\n"
+        "Usa estos datos solo para redactar una respuesta natural en español.\n"
+        f"{json.dumps(result, ensure_ascii=False)}"
+    )
 
 
 def _strip_catalog_skus_from_text(text: str) -> str:

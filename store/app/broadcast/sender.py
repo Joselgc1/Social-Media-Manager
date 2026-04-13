@@ -18,6 +18,7 @@ from datetime import datetime
 from app import db
 from app.channels.whatsapp_sender import send_template
 from app.admin.notify import notify_owner
+from app.customer_identity import extract_safe_first_name
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ def _personalize_params(template_params: list | dict | None, customer: dict) -> 
 
     params = template_params if isinstance(template_params, list) else []
     name = customer.get("display_name") or "Cliente"
-    first_name = name.split()[0] if name else "Cliente"
+    first_name = extract_safe_first_name(name) or "Cliente"
 
     return [
         p.replace("{name}", name).replace("{first_name}", first_name)

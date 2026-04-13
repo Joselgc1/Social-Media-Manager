@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pedido | __STORE_NAME__ Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class' }</script>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <script>
+    if (localStorage.getItem('darkMode') === 'true' ||
+        (localStorage.getItem('darkMode') === null && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    }
+    window.ORDER_DETAIL_ID = __ORDER_ID__;
+  </script>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors duration-200">
+  <div class="max-w-6xl mx-auto px-4 py-8">
+    <div class="detail-page-header flex items-start justify-between gap-4 mb-8">
+      <div class="min-w-0">
+        <div class="text-sm text-gray-500 dark:text-gray-400 mb-2">
+          <a href="/admin/dashboard" class="detail-back-link">← Volver al dashboard</a>
+        </div>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Detalle del pedido</h1>
+        <p id="order-detail-subtitle" class="text-sm text-gray-500 dark:text-gray-400 mt-1">Cargando...</p>
+      </div>
+      <div class="detail-page-actions flex gap-2 items-center">
+        <button class="btn btn-secondary" onclick="loadOrderDetail()">Actualizar</button>
+        <button class="btn btn-danger btn-icon" onclick="deleteCurrentOrder()" title="Eliminar pedido" aria-label="Eliminar pedido">
+          <img src="/static/icons/delete.svg" alt="" class="btn-icon-image">
+          <span class="sr-only">Eliminar pedido</span>
+        </button>
+        <button id="order-dark-toggle" class="btn btn-secondary" onclick="toggleDarkMode()">🌙</button>
+      </div>
+    </div>
+
+    <div id="order-detail-loading" class="card text-sm text-gray-500 dark:text-gray-400">Cargando pedido...</div>
+
+    <div id="order-detail-content" style="display:none">
+      <div class="detail-stat-grid mb-4">
+        <div class="card">
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Total</div>
+          <div id="order-total-stat" class="detail-stat-value text-emerald-600 dark:text-emerald-400">-</div>
+        </div>
+        <div class="card">
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Pago</div>
+          <div id="order-payment-stat" class="detail-stat-value text-indigo-600 dark:text-indigo-400">-</div>
+        </div>
+        <div class="card">
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Envío</div>
+          <div id="order-shipping-stat" class="detail-stat-value text-amber-600 dark:text-amber-400">-</div>
+        </div>
+        <div class="card">
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Canal</div>
+          <div id="order-channel-stat" class="detail-stat-value text-sky-600 dark:text-sky-400">-</div>
+        </div>
+      </div>
+
+      <div class="detail-columns">
+        <div class="detail-column">
+          <section class="card">
+            <div class="mb-4">
+              <h2 class="font-semibold text-gray-900 dark:text-gray-100">Resumen del pedido</h2>
+              <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Datos generales y estados actuales.</p>
+            </div>
+            <div id="order-summary-grid" class="detail-info-grid"></div>
+          </section>
+
+          <section class="card detail-card-fill">
+            <h2 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Items</h2>
+            <div id="order-items-table"></div>
+          </section>
+        </div>
+
+        <div class="detail-column">
+          <section class="card">
+            <div class="mb-4">
+              <h2 class="font-semibold text-gray-900 dark:text-gray-100">Cliente</h2>
+            </div>
+            <div id="customer-detail-grid" class="detail-info-grid"></div>
+            <div id="customer-tags-wrap" class="mt-4" style="display:none">
+              <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">Tags</div>
+              <div id="customer-tags-list" class="customer-tags"></div>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Pago y envío</h2>
+            <div id="payment-shipping-grid" class="detail-info-grid"></div>
+          </section>
+        </div>
+      </div>
+
+      <div class="detail-bottom-stack">
+        <section class="card">
+          <h2 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Actualizaciones</h2>
+          <div class="detail-form-grid">
+            <div>
+              <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Estado de pago</label>
+              <select id="detail-payment-status" class="w-full"></select>
+            </div>
+            <div>
+              <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Estado de envío</label>
+              <select id="detail-shipping-status" class="w-full"></select>
+            </div>
+            <div class="detail-form-span">
+              <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tracking</label>
+              <input id="detail-tracking-number" class="w-full" placeholder="Guía / tracking">
+            </div>
+          </div>
+          <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary" onclick="saveOrderUpdates()">Guardar cambios</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Pedidos recientes del cliente</h2>
+          <div id="recent-customer-orders" class="text-sm text-gray-600 dark:text-gray-400">Cargando...</div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" style="display:none"></div>
+  <script src="/static/js/order_detail.js"></script>
+</body>
+</html>

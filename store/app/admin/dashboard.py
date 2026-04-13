@@ -101,3 +101,23 @@ async def dashboard(request: Request):
         return _render_template("dashboard.html", replacements)
 
     return _redirect_to_login()
+
+
+@router.get("/orders/{order_id}", response_class=HTMLResponse)
+async def order_detail_page(request: Request, order_id: str):
+    """Serve the order detail page."""
+    config = get_config()
+    replacements = {
+        "__STORE_NAME__": config.store_name,
+        "__ORDER_ID__": json.dumps(order_id),
+    }
+
+    if not config.admin_password:
+        if config.debug:
+            return _render_template("order_detail.html", replacements)
+        raise HTTPException(status_code=403, detail="ADMIN_PASSWORD must be set.")
+
+    if is_admin_cookie_valid(request):
+        return _render_template("order_detail.html", replacements)
+
+    return _redirect_to_login()
