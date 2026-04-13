@@ -175,6 +175,8 @@ async def generate_response(
     # Append the new message
     history.append({"role": "user", "content": message_text})
 
+    open_order = await orders.get_latest_open_order(customer["id"])
+
     # ── 4. Build system prompt with live catalog ─────────────
     catalog = get_cached_catalog()
     catalog_md = format_catalog_as_markdown(catalog)
@@ -229,8 +231,6 @@ async def generate_response(
             message_text = f"{message_text}\n\n[Análisis de imagen: {summary}]"
             # Update the last message in history
             history[-1] = {"role": "user", "content": message_text}
-
-    open_order = await orders.get_latest_open_order(customer["id"])
 
     if payment_proof_attempt and not open_order:
         first_name = extract_safe_first_name(customer.get("display_name"))
