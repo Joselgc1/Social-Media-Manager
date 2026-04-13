@@ -21,6 +21,7 @@ _catalog_ts: float = 0
 _refresh_interval: int = 900  # 15 minutes in seconds
 _IMAGE_FORMULA_RE = re.compile(r'=\s*IMAGE\s*\(\s*"([^"]+)"', re.IGNORECASE)
 _HYPERLINK_FORMULA_RE = re.compile(r'=\s*HYPERLINK\s*\(\s*"([^"]+)"', re.IGNORECASE)
+_SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]
 
 
 def _get_gspread_client() -> gspread.Client:
@@ -47,8 +48,10 @@ def refresh_catalog():
         client = _get_gspread_client()
         sheet = client.open_by_key(config.product_sheet_id).sheet1
 
-        # Expected columns: SKU, Product name, Category, Description,
-        #                    Sizes, Price USD, Stock, Active, Image URL
+        # Expected columns (legacy): SKU, Product name, Category, Description,
+        #                            Sizes, Price USD, Stock, Active, Image URL
+        # Expected columns (variant-aware): SKU, Parent SKU, Product name, Category,
+        #                                   Description, Size, Price USD, Stock, Active, Image URL
         records = sheet.get_all_records()
         try:
             formula_records = sheet.get_all_records(value_render_option="FORMULA")
@@ -70,13 +73,17 @@ def refresh_catalog():
                 else None
             )
             image_url = normalize_sheet_image_url(raw_image_value or row.get("Image URL", ""))
+            size_value = str(row.get("Size", "")).strip().upper()
+            sizes_value = str(row.get("Sizes", "")).strip()
 
             products.append({
                 "sku": str(row.get("SKU", "")).strip(),
+                "parent_sku": str(row.get("Parent SKU", "")).strip(),
                 "product_name": str(row.get("Product name", "")).strip(),
                 "category": str(row.get("Category", "")).strip(),
                 "description": str(row.get("Description", "")).strip(),
-                "sizes": str(row.get("Sizes", "")).strip(),
+                "size": size_value,
+                "sizes": size_value or sizes_value,
                 "price_usd": float(row.get("Price USD", 0)),
                 "stock": int(row.get("Stock", 0)),
                 "image_url": image_url,
@@ -134,6 +141,94 @@ def normalize_sheet_image_url(value: str) -> str:
     return raw
 
 
+def get_product_sizes(product: dict) -> list[str]:
+    """Return normalized sizes for a catalog row in either schema."""
+    explicit_size = str(product.get("size", "")).strip().upper()
+    if explicit_size:
+        return [explicit_size]
+
+    raw_sizes = str(product.get("sizes", "")).strip()
+    if not raw_sizes:
+        return []
+
+    sizes = [size.strip().upper() for size in raw_sizes.split(",") if size.strip()]
+    return _dedupe_sizes(sizes)
+
+
+def group_catalog_products(products: list[dict]) -> list[dict]:
+    """
+    Group variant rows into customer-facing products.
+
+    Each grouped product contains:
+    - sizes: comma-separated available sizes
+    - variants: size-specific entries
+    - size_skus: mapping of size -> exact sellable SKU
+    """
+    grouped: dict[str, dict] = {}
+
+    for product in products or []:
+        key = _catalog_group_key(product)
+        sizes = get_product_sizes(product)
+        product_stock = _safe_int(product.get("stock", 0))
+        product_sku = str(product.get("sku", "")).strip()
+        parent_sku = str(product.get("parent_sku", "")).strip() or product_sku
+
+        entry = grouped.setdefault(key, {
+            "sku": parent_sku or product_sku,
+            "parent_sku": parent_sku or product_sku,
+            "product_name": str(product.get("product_name", "")).strip(),
+            "category": str(product.get("category", "")).strip(),
+            "description": str(product.get("description", "")).strip(),
+            "price_usd": float(product.get("price_usd", 0) or 0),
+            "stock": 0,
+            "image_url": str(product.get("image_url", "")).strip(),
+            "variants": [],
+            "size_skus": {},
+            "_size_set": set(),
+        })
+
+        entry["stock"] += max(product_stock, 0)
+        if not entry.get("image_url") and product.get("image_url"):
+            entry["image_url"] = str(product.get("image_url", "")).strip()
+
+        if sizes:
+            entry["_size_set"].update(sizes)
+
+        variant = {
+            "sku": product_sku,
+            "parent_sku": parent_sku,
+            "size": sizes[0] if len(sizes) == 1 else "",
+            "sizes": sizes,
+            "price_usd": float(product.get("price_usd", 0) or 0),
+            "stock": product_stock,
+            "in_stock": product_stock > 0,
+            "image_url": str(product.get("image_url", "")).strip(),
+        }
+        entry["variants"].append(variant)
+
+        if product_sku:
+            for size in sizes:
+                entry["size_skus"].setdefault(size, product_sku)
+
+    result = []
+    for entry in grouped.values():
+        size_list = sorted(entry.pop("_size_set"), key=_size_sort_key)
+        entry["sizes"] = ",".join(size_list)
+        entry["variants"] = sorted(
+            entry["variants"],
+            key=lambda variant: _size_sort_key(variant.get("size") or ""),
+        )
+        result.append(entry)
+
+    return sorted(
+        result,
+        key=lambda item: (
+            str(item.get("category", "")).lower(),
+            str(item.get("product_name", "")).lower(),
+        ),
+    )
+
+
 def _normalize_google_drive_url(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower()
@@ -146,6 +241,47 @@ def _normalize_google_drive_url(url: str) -> str:
         return url
 
     return f"https://drive.google.com/uc?export=view&id={file_id}"
+
+
+def _catalog_group_key(product: dict) -> str:
+    parent_sku = str(product.get("parent_sku", "")).strip()
+    sku = str(product.get("sku", "")).strip()
+    if parent_sku:
+        return parent_sku.lower()
+    if sku:
+        base_sku = re.sub(r"[-_](xxs|xs|s|m|l|xl|xxl|xxxl)$", "", sku, flags=re.IGNORECASE)
+        return base_sku.lower()
+    return "|".join([
+        str(product.get("product_name", "")).strip().lower(),
+        str(product.get("category", "")).strip().lower(),
+    ])
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _size_sort_key(size: str) -> tuple[int, str]:
+    normalized = str(size or "").strip().upper()
+    try:
+        return (_SIZE_ORDER.index(normalized), normalized)
+    except ValueError:
+        return (len(_SIZE_ORDER), normalized)
+
+
+def _dedupe_sizes(sizes: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for size in sizes:
+        normalized = str(size or "").strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 def _extract_google_drive_file_id(parsed) -> str | None:

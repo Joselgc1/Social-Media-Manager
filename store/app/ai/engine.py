@@ -21,7 +21,7 @@ from app.ai.prompts import build_system_prompt, format_catalog_as_markdown
 from app.ai.vision import analyze_payment_screenshot
 from app.crm import customers, conversations, orders
 from app.admin.notify import notify_escalation, notify_incoming_message, notify_new_order
-from app.catalog.sheets import get_cached_catalog
+from app.catalog.sheets import get_cached_catalog, get_product_sizes, group_catalog_products
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.config import get_config
 from app.customer_identity import extract_safe_first_name
@@ -624,17 +624,29 @@ async def _tool_check_inventory(args: dict) -> dict:
         product_query=args.get("product_query", ""),
         size_filter=args.get("size"),
     )
+    grouped_matches = group_catalog_products(matches)
 
     result_products = []
-    for product in matches:
+    for product in grouped_matches:
         result_products.append({
             "sku": product.get("sku"),
+            "parent_sku": product.get("parent_sku"),
             "product_name": product.get("product_name"),
             "category": product.get("category"),
             "sizes": product.get("sizes"),
             "price_usd": product.get("price_usd"),
             "in_stock": int(product.get("stock", 0)) > 0,
             "has_image": bool(product.get("image_url")),
+            "size_skus": product.get("size_skus", {}),
+            "variants": [
+                {
+                    "sku": variant.get("sku"),
+                    "size": variant.get("size"),
+                    "price_usd": variant.get("price_usd"),
+                    "in_stock": bool(variant.get("in_stock")),
+                }
+                for variant in product.get("variants", [])
+            ],
         })
 
     if not result_products:
@@ -689,9 +701,11 @@ def _find_catalog_matches(product_query: str, size_filter: str | None = None) ->
     for product in get_cached_catalog():
         searchable = " ".join([
             str(product.get("sku", "")),
+            str(product.get("parent_sku", "")),
             str(product.get("product_name", "")),
             str(product.get("category", "")),
             str(product.get("description", "")),
+            str(product.get("size", "")),
         ])
         searchable = _normalize_catalog_text(searchable)
 
@@ -700,7 +714,7 @@ def _find_catalog_matches(product_query: str, size_filter: str | None = None) ->
                 continue
 
         if size_filter:
-            available_sizes = [s.strip().upper() for s in str(product.get("sizes", "")).split(",")]
+            available_sizes = get_product_sizes(product)
             if size_filter.upper() not in available_sizes:
                 continue
 
@@ -738,6 +752,11 @@ def _strip_catalog_skus_from_text(text: str) -> str:
         for product in catalog
         if str(product.get("sku", "")).strip()
     }
+    sku_values.update(
+        str(product.get("parent_sku", "")).strip()
+        for product in catalog
+        if str(product.get("parent_sku", "")).strip()
+    )
 
     for sku in sorted(sku_values, key=len, reverse=True):
         pattern = re.compile(rf"(?i)(?:\(?\b{re.escape(sku)}\b\)?)")

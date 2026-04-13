@@ -22,7 +22,7 @@ TOOLS = [
                 "size": {
                     "type": "string",
                     "description": "Specific size to check, if the customer mentioned one",
-                    "enum": ["XS", "S", "M", "L", "XL"],
+                    "enum": ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"],
                 },
             },
             "required": ["product_query"],

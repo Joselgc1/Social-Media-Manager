@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fpdf import FPDF
+from app.catalog.sheets import group_catalog_products
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,11 @@ def generate_catalog_pdf(catalog: list[dict]) -> Path:
 
     _render_header(pdf)
 
+    grouped_catalog = group_catalog_products(catalog)
+
     # Group products by category, sorted alphabetically
     categories: dict[str, list[dict]] = {}
-    for p in catalog:
+    for p in grouped_catalog:
         cat = p.get("category") or "Otros"
         categories.setdefault(cat, []).append(p)
 
@@ -66,10 +69,10 @@ def generate_catalog_pdf(catalog: list[dict]) -> Path:
 
     META_PATH.write_text(json.dumps({
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "product_count": len(catalog),
+        "product_count": len(grouped_catalog),
     }, indent=2))
 
-    logger.info(f"Catalog PDF generated: {len(catalog)} products → {PDF_PATH}")
+    logger.info(f"Catalog PDF generated: {len(grouped_catalog)} products → {PDF_PATH}")
     return PDF_PATH
 
 

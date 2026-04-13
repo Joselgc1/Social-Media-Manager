@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 from typing import Any
 
 from app import db
-from app.catalog.sheets import deduct_stock, restore_stock
+from app.catalog.sheets import deduct_stock, get_cached_catalog, get_product_sizes, restore_stock
 from app.crm import customers
 
 logger = logging.getLogger(__name__)
@@ -22,12 +24,19 @@ VALID_SHIPPING_STATUSES = {"pending", "shipped", "delivered"}
 def _normalize_order_items(items: list[dict]) -> list[dict]:
     normalized_items: list[dict] = []
     for item in items:
+        requested_size = str(item.get("size", "")).strip().upper()
+        variant = _resolve_catalog_variant(
+            sku=str(item.get("sku", "")).strip(),
+            product_name=str(item.get("product_name", "")).strip(),
+            size=requested_size,
+        )
+
         normalized_items.append({
-            "product_name": str(item.get("product_name", "")).strip(),
-            "sku": str(item.get("sku", "")).strip(),
-            "size": str(item.get("size", "")).strip().upper(),
+            "product_name": str((variant or {}).get("product_name") or item.get("product_name", "")).strip(),
+            "sku": str((variant or {}).get("sku") or item.get("sku", "")).strip(),
+            "size": requested_size or _first_catalog_size(variant),
             "quantity": max(int(item.get("quantity", 1) or 1), 1),
-            "unit_price": round(float(item.get("unit_price", 0) or 0), 2),
+            "unit_price": round(float((variant or {}).get("price_usd") or item.get("unit_price", 0) or 0), 2),
         })
     return normalized_items
 
@@ -36,6 +45,69 @@ def _load_items(raw_items: Any) -> list[dict]:
     if isinstance(raw_items, str):
         return json.loads(raw_items)
     return list(raw_items or [])
+
+
+def _resolve_catalog_variant(sku: str, product_name: str, size: str) -> dict | None:
+    normalized_sku = (sku or "").strip()
+    normalized_name = _normalize_catalog_text(product_name)
+    normalized_size = (size or "").strip().upper()
+
+    catalog = get_cached_catalog() or []
+
+    if normalized_sku:
+        direct_match = next(
+            (
+                product for product in catalog
+                if str(product.get("sku", "")).strip() == normalized_sku
+                and _catalog_variant_matches_size(product, normalized_size)
+            ),
+            None,
+        )
+        if direct_match:
+            return direct_match
+
+        parent_match = next(
+            (
+                product for product in catalog
+                if str(product.get("parent_sku", "")).strip() == normalized_sku
+                and _catalog_variant_matches_size(product, normalized_size)
+            ),
+            None,
+        )
+        if parent_match:
+            return parent_match
+
+    if normalized_name:
+        name_matches = [
+            product
+            for product in catalog
+            if _normalize_catalog_text(product.get("product_name", "")) == normalized_name
+            and _catalog_variant_matches_size(product, normalized_size)
+        ]
+        if len(name_matches) == 1:
+            return name_matches[0]
+        if name_matches:
+            return name_matches[0]
+
+    return None
+
+
+def _catalog_variant_matches_size(product: dict, size: str) -> bool:
+    sizes = get_product_sizes(product)
+    if not size:
+        return True
+    return size in sizes if sizes else str(product.get("size", "")).strip().upper() == size
+
+
+def _first_catalog_size(product: dict | None) -> str:
+    sizes = get_product_sizes(product or {})
+    return sizes[0] if sizes else ""
+
+
+def _normalize_catalog_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(text or "").lower())
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", ascii_text).strip()
 
 
 async def create_order(

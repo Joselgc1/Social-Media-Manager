@@ -79,8 +79,18 @@ Go to [console.cloud.google.com](https://console.cloud.google.com). Create a new
 Now create the product catalog spreadsheet. Open Google Sheets, create a new sheet, and set up these **exact column headers in row 1**:
 
 ```text
-SKU | Product name | Category | Description | Sizes | Price USD | Stock | Active | Image URL
+SKU | Parent SKU | Product name | Category | Description | Size | Price USD | Stock | Active | Image URL
 ```
+
+Use **one row per size variant**. That means every sellable `product + size` combination gets its own row and its own unique `SKU`.
+
+Rules:
+
+- `SKU` must be unique for each row, for example `SET-001-S` and `SET-001-M`
+- `Parent SKU` must be shared by all size variants of the same product, for example `SET-001`
+- `Size` must contain a single size only, such as `S`, `M`, `L`, `XL`, or `XXL`
+- `Stock` must be the stock for that exact size row only
+- Use the same `Product name`, `Category`, `Description`, and `Image URL` across rows that belong to the same product unless you intentionally want them to differ
 
 If you want the bot to be able to send product photos, use the `Image URL` column. Supported formats:
 
@@ -93,10 +103,17 @@ If the customer asks to see a specific product and that row has a usable image, 
 Add a few test products:
 
 ```text
-PJ-001 | Pijama rayas rosa | Pajamas | Pijama de algodón con rayas rosas | S,M,L | 28.00 | 5 | Yes |
-UN-001 | Conjunto encaje negro | Underwear | Conjunto de encaje negro Victoria's Secret | S,M | 22.00 | 3 | Yes |
-PJ-002 | Pijama satén azul | Pajamas | Pijama de satén azul marino | M,L,XL | 32.00 | 2 | Yes |
-SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | S,M,L | 35.00 | 4 | Yes |
+PJ-001-S | PJ-001 | Pijama rayas rosa | Pajamas | Pijama de algodón con rayas rosas | S | 28.00 | 5 | Yes |
+PJ-001-M | PJ-001 | Pijama rayas rosa | Pajamas | Pijama de algodón con rayas rosas | M | 28.00 | 8 | Yes |
+PJ-001-L | PJ-001 | Pijama rayas rosa | Pajamas | Pijama de algodón con rayas rosas | L | 28.00 | 3 | Yes |
+UN-001-S | UN-001 | Conjunto encaje negro | Underwear | Conjunto de encaje negro Victoria's Secret | S | 22.00 | 2 | Yes |
+UN-001-M | UN-001 | Conjunto encaje negro | Underwear | Conjunto de encaje negro Victoria's Secret | M | 22.00 | 1 | Yes |
+PJ-002-M | PJ-002 | Pijama satén azul | Pajamas | Pijama de satén azul marino | M | 32.00 | 2 | Yes |
+PJ-002-L | PJ-002 | Pijama satén azul | Pajamas | Pijama de satén azul marino | L | 32.00 | 2 | Yes |
+PJ-002-XL | PJ-002 | Pijama satén azul | Pajamas | Pijama de satén azul marino | XL | 32.00 | 1 | Yes |
+SET-001-S | SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | S | 35.00 | 4 | Yes |
+SET-001-M | SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | M | 35.00 | 7 | Yes |
+SET-001-L | SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | L | 35.00 | 2 | Yes |
 ```
 
 Share the sheet with the service account email (looks like `vs-chatbot-reader@your-project.iam.gserviceaccount.com`). Give it **Viewer** access.

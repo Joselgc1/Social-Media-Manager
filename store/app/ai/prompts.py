@@ -6,6 +6,7 @@ the live product catalog and payment details at runtime.
 
 import json
 from pathlib import Path
+from app.catalog.sheets import group_catalog_products
 from app.customer_identity import extract_safe_first_name
 from app.payment_methods import payment_method_information_block, payment_method_names_text
 
@@ -211,7 +212,9 @@ def format_catalog_as_markdown(products: list[dict]) -> str:
         "|----------|-----------|-------------------|--------------|----------------|",
     ]
 
-    for p in products:
+    grouped_products = group_catalog_products(products)
+
+    for p in grouped_products:
         try:
             in_stock = float(p.get("stock", 0) or 0) > 0
         except (TypeError, ValueError):
