@@ -141,6 +141,24 @@ def _validate_setting_value(key: str, value, current_settings: dict):
             )
         return minutes
 
+    if key == "order_discount_percent":
+        percent = float(value)
+        if not (0.0 <= percent <= 100.0):
+            raise HTTPException(
+                status_code=400,
+                detail="Discount percent must be between 0 and 100.",
+            )
+        return round(percent, 2)
+
+    if key == "order_discount_threshold_usd":
+        threshold = float(value)
+        if not (0.0 <= threshold <= 100000.0):
+            raise HTTPException(
+                status_code=400,
+                detail="Discount threshold must be between 0 and 100000 USD.",
+            )
+        return round(threshold, 2)
+
     return value
 
 

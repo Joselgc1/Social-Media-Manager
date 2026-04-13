@@ -1359,6 +1359,38 @@ async function saveExchangeRateSetting() {
   await loadSettings();
 }
 
+async function saveDiscountSettings() {
+  const percentInput = document.getElementById('set-order-discount-percent');
+  const thresholdInput = document.getElementById('set-order-discount-threshold');
+  const percent = Number(percentInput?.value ?? 0);
+  const threshold = Number(thresholdInput?.value ?? 0);
+
+  if (Number.isNaN(percent) || percent < 0 || percent > 100) {
+    toast('El porcentaje debe estar entre 0 y 100', '#dc2626');
+    return;
+  }
+  if (Number.isNaN(threshold) || threshold < 0) {
+    toast('El monto mínimo debe ser 0 o mayor', '#dc2626');
+    return;
+  }
+
+  await Promise.all([
+    apiFetch(API + '/order_discount_percent', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: percent}),
+    }),
+    apiFetch(API + '/order_discount_threshold_usd', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: threshold}),
+    }),
+  ]);
+
+  toast('Descuento guardado');
+  await loadSettings();
+}
+
 // -- Settings --
 async function loadSettings() {
   const [settings, paymentData] = await Promise.all([
@@ -1373,6 +1405,14 @@ async function loadSettings() {
   const exchangeRateInput = document.getElementById('set-exchange-rate');
   if (exchangeRateInput) {
     exchangeRateInput.value = settings.accepted_exchange_rate || '';
+  }
+  const discountPercentInput = document.getElementById('set-order-discount-percent');
+  if (discountPercentInput) {
+    discountPercentInput.value = settings.order_discount_percent ?? 10;
+  }
+  const discountThresholdInput = document.getElementById('set-order-discount-threshold');
+  if (discountThresholdInput) {
+    discountThresholdInput.value = settings.order_discount_threshold_usd ?? 350;
   }
   renderPaymentMethods(paymentData.payment_methods || []);
   loadCatalogPdfStatus();

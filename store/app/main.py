@@ -21,7 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import get_config
 from app import db
 from app.ai.providers import init_providers, list_providers
-from app.catalog.sheets import refresh_catalog, get_cached_catalog
+from app.catalog.sheets import count_grouped_catalog_products, refresh_catalog, get_cached_catalog
 from app.broadcast.scheduler import start_scheduler, stop_scheduler, get_scheduler
 from app.webhooks.whatsapp import router as whatsapp_router
 from app.webhooks.instagram import router as instagram_router
@@ -260,6 +260,6 @@ async def health():
         "active_provider": settings.get("llm_provider"),
         "active_model": settings.get("llm_model"),
         "auto_fallback": settings.get("auto_fallback"),
-        "catalog_products": len(catalog),
+        "catalog_products": count_grouped_catalog_products(catalog),
         "pending_broadcasts": pending_broadcasts["cnt"] if pending_broadcasts else 0,
     }

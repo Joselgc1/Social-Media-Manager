@@ -1,7 +1,7 @@
 from app.ai.prompts import format_catalog_as_markdown
 from app.catalog.pdf_generator import _build_public_catalog_rows
-from app.catalog.sheets import get_product_sizes, group_catalog_products
-from app.crm.orders import _normalize_order_items
+from app.catalog.sheets import count_grouped_catalog_products, get_product_sizes, group_catalog_products
+from app.crm.orders import _calculate_order_amounts, _hydrate_order_pricing, _normalize_order_items
 
 
 def test_group_catalog_products_merges_variant_rows():
@@ -38,6 +38,49 @@ def test_group_catalog_products_merges_variant_rows():
     assert grouped[0]["stock"] == 11
     assert grouped[0]["size_skus"]["S"] == "SET-001-S"
     assert grouped[0]["size_skus"]["M"] == "SET-001-M"
+
+
+def test_count_grouped_catalog_products_counts_parent_skus_not_variants():
+    count = count_grouped_catalog_products([
+        {
+            "sku": "SET-001-S",
+            "parent_sku": "SET-001",
+            "product_name": "Set completo rojo",
+            "category": "Sets",
+            "description": "Set de ropa interior rojo",
+            "size": "S",
+            "sizes": "S",
+            "price_usd": 35,
+            "stock": 4,
+            "image_url": "",
+        },
+        {
+            "sku": "SET-001-M",
+            "parent_sku": "SET-001",
+            "product_name": "Set completo rojo",
+            "category": "Sets",
+            "description": "Set de ropa interior rojo",
+            "size": "M",
+            "sizes": "M",
+            "price_usd": 35,
+            "stock": 7,
+            "image_url": "",
+        },
+        {
+            "sku": "PJ-001-S",
+            "parent_sku": "PJ-001",
+            "product_name": "Pijama rayas rosa",
+            "category": "Pajamas",
+            "description": "Pijama de algodón",
+            "size": "S",
+            "sizes": "S",
+            "price_usd": 28,
+            "stock": 5,
+            "image_url": "",
+        },
+    ])
+
+    assert count == 2
 
 
 def test_get_product_sizes_supports_legacy_and_variant_rows():
@@ -150,3 +193,55 @@ def test_catalog_pdf_rows_strip_stock_and_variant_fields():
         "description": "Set de ropa interior rojo",
         "image_url": "https://example.com/red.jpg",
     }]
+
+
+def test_order_discount_applies_only_above_350():
+    pricing = _calculate_order_amounts([
+        {"unit_price": 100, "quantity": 2},
+        {"unit_price": 80, "quantity": 2},
+    ])
+
+    assert pricing["subtotal"] == 360.0
+    assert pricing["discount_applied"] is True
+    assert pricing["discount_amount"] == 36.0
+    assert pricing["total"] == 324.0
+
+    exact_threshold = _calculate_order_amounts([
+        {"unit_price": 175, "quantity": 2},
+    ])
+
+    assert exact_threshold["subtotal"] == 350.0
+    assert exact_threshold["discount_applied"] is False
+    assert exact_threshold["discount_amount"] == 0.0
+    assert exact_threshold["total"] == 350.0
+
+
+def test_order_discount_uses_custom_settings():
+    pricing = _calculate_order_amounts(
+        [{"unit_price": 120, "quantity": 4}],
+        settings={
+            "order_discount_percent": 15,
+            "order_discount_threshold_usd": 400,
+        },
+    )
+
+    assert pricing["subtotal"] == 480.0
+    assert pricing["discount_applied"] is True
+    assert pricing["discount_percent"] == 15.0
+    assert pricing["discount_threshold_usd"] == 400.0
+    assert pricing["discount_amount"] == 72.0
+    assert pricing["total"] == 408.0
+
+
+def test_hydrate_order_pricing_derives_discount_from_items_and_total():
+    order = _hydrate_order_pricing({
+        "items": [
+            {"product_name": "Set completo rojo", "quantity": 4, "unit_price": 120},
+        ],
+        "total": 408,
+    })
+
+    assert order["subtotal"] == 480.0
+    assert order["discount_applied"] is True
+    assert order["discount_amount"] == 72.0
+    assert order["discount_percent"] == 15.0

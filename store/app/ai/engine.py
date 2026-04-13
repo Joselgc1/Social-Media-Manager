@@ -188,6 +188,8 @@ async def generate_response(
         open_order=open_order,
         payment_methods=payment_methods,
         accepted_exchange_rate=str(settings.get("accepted_exchange_rate", "") or ""),
+        order_discount_percent=settings.get("order_discount_percent"),
+        order_discount_threshold_usd=settings.get("order_discount_threshold_usd"),
     )
 
     # ── 5. Call the LLM ──────────────────────────────────────

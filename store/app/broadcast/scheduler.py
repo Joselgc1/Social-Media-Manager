@@ -17,7 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app import db
 from app.admin.notify import notify_owner
 from app.analytics import build_daily_aggregate
-from app.catalog.sheets import refresh_catalog, get_cached_catalog
+from app.catalog.sheets import count_grouped_catalog_products, refresh_catalog, get_cached_catalog
 from app.catalog.pdf_generator import generate_catalog_pdf
 from app.broadcast.sender import execute_broadcast
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
@@ -211,7 +211,10 @@ async def _refresh_catalog_pdf():
         catalog = get_cached_catalog()
         if catalog:
             generate_catalog_pdf(catalog)
-            logger.info(f"Scheduled catalog PDF refresh completed ({len(catalog)} products).")
+            logger.info(
+                "Scheduled catalog PDF refresh completed (%s grouped products).",
+                count_grouped_catalog_products(catalog),
+            )
         else:
             logger.warning("Scheduled PDF refresh skipped: catalog is empty.")
     except Exception as e:

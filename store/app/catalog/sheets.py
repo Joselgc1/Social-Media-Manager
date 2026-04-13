@@ -91,7 +91,11 @@ def refresh_catalog():
 
         _catalog_cache = products
         _catalog_ts = time.time()
-        logger.info(f"Catalog refreshed: {len(products)} active products loaded.")
+        logger.info(
+            "Catalog refreshed: %s active variants loaded across %s grouped products.",
+            len(products),
+            count_grouped_catalog_products(products),
+        )
 
     except Exception as e:
         logger.error(f"Failed to refresh catalog from Google Sheets: {e}")
@@ -110,6 +114,11 @@ def get_cached_catalog() -> list[dict]:
         refresh_catalog()
 
     return _catalog_cache
+
+
+def count_grouped_catalog_products(products: list[dict] | None = None) -> int:
+    """Return the customer-facing product count grouped by Parent SKU / product."""
+    return len(group_catalog_products(products if products is not None else get_cached_catalog()))
 
 
 def set_refresh_interval(seconds: int):

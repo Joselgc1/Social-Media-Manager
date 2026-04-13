@@ -66,6 +66,8 @@ TOOLS = [
             "and the other checkout information is already complete, create the order immediately BEFORE "
             "sending the payment details. "
             "The new order should remain pending until a payment screenshot is validated. "
+            "If the order qualifies for the store's configured automatic discount, the backend applies it automatically. "
+            "Do NOT modify item unit prices to simulate that discount. "
             "Do NOT call this from a payment-proof message or screenshot. "
             "The order must already exist before payment is validated."
         ),

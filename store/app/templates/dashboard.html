@@ -231,17 +231,36 @@
           </div>
         </div>
         <div class="settings-mobile-stack grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-4 mb-4 items-start">
-          <div class="card h-full">
-            <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Tasa del día</h3>
-            <div class="space-y-3">
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tasa aceptada</label>
-                <input id="set-exchange-rate" class="w-full" placeholder="Ej. BCV del día, 128 Bs/USD, 130">
+          <div class="space-y-4">
+            <div class="card h-full">
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Tasa del día</h3>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tasa aceptada</label>
+                  <input id="set-exchange-rate" class="w-full" placeholder="Ej. BCV del día, 128 Bs/USD, 130">
+                </div>
+                <p class="text-xs text-gray-500 dark:text-gray-500">
+                  Eva usará este valor cuando pregunten “¿a qué tasa recibes?” o algo similar.
+                </p>
+                <button class="btn btn-primary w-full" onclick="saveExchangeRateSetting()">Guardar tasa</button>
               </div>
-              <p class="text-xs text-gray-500 dark:text-gray-500">
-                Eva usará este valor cuando pregunten “¿a qué tasa recibes?” o algo similar.
-              </p>
-              <button class="btn btn-primary w-full" onclick="saveExchangeRateSetting()">Guardar tasa</button>
+            </div>
+            <div class="card h-full">
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Descuento automático</h3>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Porcentaje de descuento</label>
+                  <input id="set-order-discount-percent" type="number" step="0.01" min="0" max="100" class="w-full" placeholder="10">
+                </div>
+                <div>
+                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Subtotal mínimo en USD</label>
+                  <input id="set-order-discount-threshold" type="number" step="0.01" min="0" class="w-full" placeholder="350">
+                </div>
+                <p class="text-xs text-gray-500 dark:text-gray-500">
+                  Si el subtotal de productos supera este monto, Eva y el sistema aplican el descuento automáticamente. Usa 0% para desactivarlo.
+                </p>
+                <button class="btn btn-primary w-full" onclick="saveDiscountSettings()">Guardar descuento</button>
+              </div>
             </div>
           </div>
           <div class="card h-full">

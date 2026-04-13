@@ -25,6 +25,8 @@ RUNTIME_SETTING_DEFAULTS = {
     "daily_analytics_minute": 0,
     "escalation_telegram_enabled": True,
     "accepted_exchange_rate": "",
+    "order_discount_percent": 10.0,
+    "order_discount_threshold_usd": 350.0,
     PAYMENT_METHODS_SETTING_KEY: [],
 }
 

@@ -13,12 +13,15 @@ from typing import Any
 from app import db
 from app.catalog.sheets import deduct_stock, get_cached_catalog, get_product_sizes, restore_stock
 from app.crm import customers
+from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
 PAID_STATUSES = {"proof_received", "confirmed"}
 VALID_PAYMENT_STATUSES = {"pending", "proof_received", "confirmed", "failed", "rejected"}
 VALID_SHIPPING_STATUSES = {"pending", "shipped", "delivered"}
+ORDER_DISCOUNT_THRESHOLD = float(RUNTIME_SETTING_DEFAULTS["order_discount_threshold_usd"])
+ORDER_DISCOUNT_RATE = float(RUNTIME_SETTING_DEFAULTS["order_discount_percent"]) / 100.0
 
 
 def _normalize_order_items(items: list[dict]) -> list[dict]:
@@ -45,6 +48,78 @@ def _load_items(raw_items: Any) -> list[dict]:
     if isinstance(raw_items, str):
         return json.loads(raw_items)
     return list(raw_items or [])
+
+
+def _coerce_non_negative_float(value, default: float) -> float:
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_order_discount_config(settings: dict | None = None) -> dict:
+    source = settings or {}
+    threshold = _coerce_non_negative_float(
+        source.get("order_discount_threshold_usd"),
+        ORDER_DISCOUNT_THRESHOLD,
+    )
+    percent = _coerce_non_negative_float(
+        source.get("order_discount_percent"),
+        ORDER_DISCOUNT_RATE * 100.0,
+    )
+    return {
+        "threshold_usd": round(threshold, 2),
+        "percent": round(percent, 2),
+        "rate": round(percent / 100.0, 4),
+    }
+
+
+def _calculate_order_amounts(items: list[dict], settings: dict | None = None) -> dict:
+    subtotal = round(sum(float(item.get("unit_price", 0)) * int(item.get("quantity", 0)) for item in items), 2)
+    discount_config = _resolve_order_discount_config(settings)
+    discount_applied = (
+        discount_config["percent"] > 0
+        and discount_config["threshold_usd"] > 0
+        and subtotal > discount_config["threshold_usd"]
+    )
+    discount_amount = round(subtotal * discount_config["rate"], 2) if discount_applied else 0.0
+    total = round(subtotal - discount_amount, 2)
+    return {
+        "subtotal": subtotal,
+        "discount_applied": discount_applied,
+        "discount_rate": discount_config["rate"] if discount_applied else 0.0,
+        "discount_percent": discount_config["percent"] if discount_applied else 0.0,
+        "discount_threshold_usd": discount_config["threshold_usd"],
+        "discount_amount": discount_amount,
+        "total": total,
+    }
+
+
+def _hydrate_order_pricing(order: dict) -> dict:
+    """
+    Attach pricing breakdown fields to an order using its stored items and total.
+
+    This keeps order detail backward-compatible for existing rows even when
+    discount metadata was not persisted separately.
+    """
+    items = _load_items(order.get("items"))
+    subtotal = round(
+        sum(float(item.get("unit_price", 0)) * int(item.get("quantity", 0)) for item in items),
+        2,
+    )
+    total = round(float(order.get("total") or 0), 2)
+    discount_amount = round(max(subtotal - total, 0.0), 2)
+    discount_applied = discount_amount > 0
+    discount_percent = round((discount_amount / subtotal) * 100, 2) if discount_applied and subtotal > 0 else 0.0
+    discount_rate = round(discount_percent / 100.0, 4) if discount_applied else 0.0
+
+    order["items"] = items
+    order["subtotal"] = subtotal
+    order["discount_applied"] = discount_applied
+    order["discount_amount"] = discount_amount
+    order["discount_percent"] = discount_percent
+    order["discount_rate"] = discount_rate
+    return order
 
 
 def _resolve_catalog_variant(sku: str, product_name: str, size: str) -> dict | None:
@@ -123,8 +198,10 @@ async def create_order(
     Reuses a matching recent open order to avoid duplicate orders from repeated tool calls
     or webhook retries.
     """
+    settings = await db.get_settings()
     normalized_items = _normalize_order_items(items)
-    total = round(sum(item["unit_price"] * item["quantity"] for item in normalized_items), 2)
+    pricing = _calculate_order_amounts(normalized_items, settings=settings)
+    total = pricing["total"]
     items_json = json.dumps(normalized_items, ensure_ascii=False, sort_keys=True)
 
     created_new = False
@@ -164,6 +241,12 @@ async def create_order(
                 "order_id": str(existing["id"]),
                 "items": normalized_items,
                 "total": float(existing["total"]),
+                "subtotal": pricing["subtotal"],
+                "discount_applied": pricing["discount_applied"],
+                "discount_rate": pricing["discount_rate"],
+                "discount_percent": pricing["discount_percent"],
+                "discount_threshold_usd": pricing["discount_threshold_usd"],
+                "discount_amount": pricing["discount_amount"],
                 "payment_method": payment_method,
                 "shipping_city": shipping_city,
                 "status": existing["payment_status"],
@@ -198,6 +281,12 @@ async def create_order(
         "order_id": str(order_id),
         "items": normalized_items,
         "total": total,
+        "subtotal": pricing["subtotal"],
+        "discount_applied": pricing["discount_applied"],
+        "discount_rate": pricing["discount_rate"],
+        "discount_percent": pricing["discount_percent"],
+        "discount_threshold_usd": pricing["discount_threshold_usd"],
+        "discount_amount": pricing["discount_amount"],
         "payment_method": payment_method,
         "shipping_city": shipping_city,
         "status": "pending",
@@ -241,10 +330,9 @@ async def get_order(order_id: str) -> dict | None:
     order = dict(row)
     order["id"] = str(order["id"])
     order["customer_id"] = str(order["customer_id"]) if order.get("customer_id") else None
-    order["items"] = _load_items(order.get("items"))
     order["total"] = float(order.get("total") or 0)
     order["customer_totals_applied"] = bool(order.get("customer_totals_applied"))
-    return order
+    return _hydrate_order_pricing(order)
 
 
 async def get_order_detail(order_id: str) -> dict | None:
@@ -269,9 +357,9 @@ async def get_order_detail(order_id: str) -> dict | None:
     detail = dict(row)
     detail["id"] = str(detail["id"])
     detail["customer_id"] = str(detail["customer_id"]) if detail.get("customer_id") else None
-    detail["items"] = _load_items(detail.get("items"))
     detail["total"] = float(detail.get("total") or 0)
     detail["customer_totals_applied"] = bool(detail.get("customer_totals_applied"))
+    detail = _hydrate_order_pricing(detail)
 
     customer = None
     if detail.get("customer_record_id"):

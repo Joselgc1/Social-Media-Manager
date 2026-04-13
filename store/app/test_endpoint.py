@@ -42,7 +42,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.ai.engine import generate_response
-from app.catalog.sheets import get_cached_catalog
+from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog
 from app.config import get_config
 from app.crm.conversations import get_history
 from app.crm.customers import get_or_create_customer
@@ -141,7 +141,11 @@ async def test_reset(sender: str = "test_user_1", channel: str = "whatsapp"):
 async def test_catalog():
     """View the currently cached product catalog."""
     catalog = get_cached_catalog()
-    return {"products": catalog, "count": len(catalog)}
+    return {
+        "products": catalog,
+        "count": count_grouped_catalog_products(catalog),
+        "variant_count": len(catalog),
+    }
 
 
 @router.get("/ui", response_class=HTMLResponse)

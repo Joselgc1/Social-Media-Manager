@@ -104,7 +104,7 @@ function getShippingBadgeClass(status) {
   }[status] || 'badge-gray';
 }
 
-function renderItems(items, total) {
+function renderItems(items, total, pricing = {}) {
   if (!items.length) {
     document.getElementById('order-items-table').innerHTML = '<div class="orders-empty">Este pedido no tiene items.</div>';
     return;
@@ -129,6 +129,22 @@ function renderItems(items, total) {
       <td class="py-3">${escapeHtml(item.quantity || 0)}</td>
       <td class="py-3">${money(item.unit_price || 0)}</td>
       <td class="py-3 font-medium">${money(subtotal)}</td>
+    </tr>`;
+  }
+
+  const subtotal = Number(pricing.subtotal ?? items.reduce((acc, item) => acc + (Number(item.quantity || 0) * Number(item.unit_price || 0)), 0));
+  const discountApplied = Boolean(pricing.discount_applied);
+  const discountAmount = Number(pricing.discount_amount || 0);
+  const discountPercent = Number(pricing.discount_percent || 0);
+
+  if (discountApplied) {
+    html += `<tr class="border-t border-gray-200 dark:border-gray-600">
+      <td class="py-3 font-semibold text-gray-900 dark:text-gray-100" colspan="4">Subtotal</td>
+      <td class="py-3 font-semibold text-gray-900 dark:text-gray-100">${money(subtotal)}</td>
+    </tr>`;
+    html += `<tr class="border-t border-gray-100 dark:border-gray-700">
+      <td class="py-3 font-semibold text-emerald-700 dark:text-emerald-400" colspan="4">Descuento (${escapeHtml(discountPercent % 1 === 0 ? String(discountPercent.toFixed(0)) : String(discountPercent.toFixed(2)).replace(/0+$/, '').replace(/\.$/, ''))}%)</td>
+      <td class="py-3 font-semibold text-emerald-700 dark:text-emerald-400">-${money(discountAmount).replace('$', '$')}</td>
     </tr>`;
   }
 
@@ -238,7 +254,12 @@ function renderOrder(order) {
     { label: 'Totales cliente aplicados', value: order.customer_totals_applied ? 'Sí' : 'No' },
   ]);
 
-  renderItems(order.items || [], order.total || 0);
+  renderItems(order.items || [], order.total || 0, {
+    subtotal: order.subtotal,
+    discount_applied: order.discount_applied,
+    discount_amount: order.discount_amount,
+    discount_percent: order.discount_percent,
+  });
   renderCustomer(customer);
   renderInfoGrid('payment-shipping-grid', [
     { label: 'Método de envío', value: order.shipping_method || '—' },

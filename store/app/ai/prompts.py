@@ -9,6 +9,7 @@ from pathlib import Path
 from app.catalog.sheets import group_catalog_products
 from app.customer_identity import extract_safe_first_name
 from app.payment_methods import payment_method_information_block, payment_method_names_text
+from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 # Resolve the prompts directory relative to the project root
 _PROMPT_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
@@ -43,6 +44,8 @@ def build_system_prompt(
     open_order: dict | None = None,
     payment_methods: list[dict] | None = None,
     accepted_exchange_rate: str | None = None,
+    order_discount_percent: float | int | str | None = None,
+    order_discount_threshold_usd: float | int | str | None = None,
 ) -> str:
     """
     Assemble the final system prompt by injecting the live product catalog,
@@ -52,6 +55,10 @@ def build_system_prompt(
     payment_methods_block = payment_method_information_block(payment_methods)
     payment_method_names = payment_method_names_text(payment_methods)
     exchange_rate_block = _build_exchange_rate_block(accepted_exchange_rate)
+    order_discount_block = _build_order_discount_block(
+        order_discount_percent=order_discount_percent,
+        order_discount_threshold_usd=order_discount_threshold_usd,
+    )
 
     prompt = template.format(
         store_name=store_name,
@@ -59,6 +66,7 @@ def build_system_prompt(
         payment_methods_block=payment_methods_block,
         payment_method_names_text=payment_method_names,
         exchange_rate_block=exchange_rate_block,
+        order_discount_block=order_discount_block,
     )
 
     # Append channel-specific instructions
@@ -86,6 +94,41 @@ def _build_exchange_rate_block(accepted_exchange_rate: str | None) -> str:
         "La tienda usa como referencia la tasa Binance del día. "
         f"Valor configurado actualmente: {rate_text}. "
         "Si el cliente pregunta por la tasa, responde con este valor de forma directa y no digas que luego la vas a confirmar."
+    )
+
+
+def _build_order_discount_block(
+    order_discount_percent: float | int | str | None,
+    order_discount_threshold_usd: float | int | str | None,
+) -> str:
+    default_percent = float(RUNTIME_SETTING_DEFAULTS["order_discount_percent"])
+    default_threshold = float(RUNTIME_SETTING_DEFAULTS["order_discount_threshold_usd"])
+
+    try:
+        percent = float(order_discount_percent if order_discount_percent is not None else default_percent)
+    except (TypeError, ValueError):
+        percent = default_percent
+    try:
+        threshold = float(
+            order_discount_threshold_usd
+            if order_discount_threshold_usd is not None
+            else default_threshold
+        )
+    except (TypeError, ValueError):
+        threshold = default_threshold
+
+    if percent <= 0 or threshold <= 0:
+        return (
+            "No hay descuento automático configurado en este momento. "
+            "No prometas descuentos salvo que la tienda lo confirme manualmente."
+        )
+
+    percent_text = f"{percent:.2f}".rstrip("0").rstrip(".")
+    threshold_text = f"{threshold:.2f}".rstrip("0").rstrip(".")
+    return (
+        f"Si el subtotal de productos de un pedido es MAYOR a ${threshold_text}, "
+        f"aplica un descuento automático de {percent_text}% sobre ese subtotal. "
+        "Shipping se cobra aparte. No inventes precios unitarios rebajados: menciona el descuento solo sobre el total cuando corresponda."
     )
 
 

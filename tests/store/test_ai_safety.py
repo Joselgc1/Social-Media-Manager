@@ -1,5 +1,5 @@
 from app.ai.engine import _clean_assistant_reply_text
-from app.ai.prompts import _build_customer_context
+from app.ai.prompts import _build_customer_context, build_system_prompt
 from app.ai.safety import SAFE_FALLBACK_REPLY, sanitize_customer_facing_text
 from app.broadcast.sender import _personalize_params
 from app.customer_identity import extract_safe_first_name
@@ -68,3 +68,17 @@ def test_broadcast_first_name_uses_safe_extraction():
     params = _personalize_params(["Hola {first_name}"], {"display_name": "TODO POR MIS HIJOS"})
 
     assert params == ["Hola Cliente"]
+
+
+def test_system_prompt_includes_configured_discount_rule(monkeypatch):
+    monkeypatch.setenv("DEBUG", "true")
+    prompt = build_system_prompt(
+        catalog_markdown="| Producto | Categoría | Tallas disponibles | Precio (USD) | Disponibilidad |\n|---|---|---|---|---|",
+        payment_methods=[],
+        accepted_exchange_rate="",
+        order_discount_percent=15,
+        order_discount_threshold_usd=500,
+    )
+
+    assert "15%" in prompt
+    assert "$500" in prompt
