@@ -250,6 +250,7 @@ AVAILABLE_MODELS = {
     "openai": ["gpt-5.4-nano", "gpt-5.4-mini"],
     "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-6"],
 }
+VALID_ORCHESTRATION_MODES = {"legacy", "shadow", "multi_agent"}
 
 
 def _decode_setting_value(value):
@@ -325,6 +326,15 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
         if not (5 <= history <= 50):
             raise HTTPException(status_code=400, detail="Conversation history must be between 5 and 50")
         normalized["max_conversation_history"] = history
+
+    if "ai_orchestration_mode" in normalized:
+        mode = str(normalized["ai_orchestration_mode"] or "").strip().lower()
+        if mode not in VALID_ORCHESTRATION_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid orchestration mode '{normalized['ai_orchestration_mode']}'",
+            )
+        normalized["ai_orchestration_mode"] = mode
 
     if "catalog_pdf_interval_hours" in normalized:
         hours = int(normalized["catalog_pdf_interval_hours"])
@@ -437,6 +447,7 @@ async def get_store_stats(store_id: str):
                 "llm_provider": settings.get("llm_provider", "unknown"),
                 "llm_model": settings.get("llm_model", "unknown"),
                 "ai_enabled": settings.get("ai_enabled", True),
+                "ai_orchestration_mode": settings.get("ai_orchestration_mode", "legacy"),
             }
         except Exception as e:
             logger.warning(f"Could not fetch stats for store {store_id}: {e}")
@@ -518,9 +529,9 @@ async def get_llm_settings(store_id: str):
 
 
 @router.put("/{store_id}/llm-settings")
-async def update_llm_settings(store_id: str, update: LLMSettingsUpdate):
+async def update_llm_settings(store_id: str, update: LLMSettingsUpdate, request: Request):
     """Backward-compatible LLM settings write backed by shared runtime settings."""
-    return await update_store_settings(store_id, update)
+    return await update_store_settings(store_id, update, request)
 
 
 @router.get("/{store_id}/llm-usage")

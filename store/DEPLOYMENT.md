@@ -9,15 +9,16 @@ Important business behavior baked into the current system:
 - the owner can update a store-only daily exchange-rate field used for `¿a qué tasa recibes?`
 - the customer PDF catalog hides internal SKU and stock columns
 
-The guide has 10 parts:
+The guide has 11 parts:
 
 - Parts 1 through 4: Set up external services.
 - Part 5: Deploys the code.
 - Part 6: Connects the webhooks (WhatsApp, Instagram, Telegram).
 - Part 7: Sets up broadcasts and the admin dashboard.
 - Part 8: Activates analytics.
-- Part 9: The full testing checklist.
-- Part 10: A quick reference of all endpoints and commands.
+- Part 9: Multi-agent rollout and rollback.
+- Part 10: The full testing checklist.
+- Part 11: A quick reference of all endpoints and commands.
 
 **Estimated total time:** 3–5 hours for the core system (same day), plus 1–4 weeks for Instagram (waiting on Meta App Review).
 
@@ -47,7 +48,7 @@ Run the migrations. Go to the SQL Editor in Supabase's dashboard:
 
 This creates all tables and seeds the runtime settings used by the store dashboard and the master control plane.
 
-Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), an empty `payment_methods` row, and an empty `accepted_exchange_rate` row.
+Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, `ai_orchestration_mode=legacy`, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), an empty `payment_methods` row, and an empty `accepted_exchange_rate` row. Existing databases should also run `002_conversation_sessions.sql` and `003_ai_run_observability.sql` in order.
 
 ### 1.2 OpenAI API Key
 
@@ -208,6 +209,7 @@ STORE_NAME="Zona Pink"
 OWNER_NAME=Carlos
 APP_BASE_URL=https://your-app.railway.app
 DEBUG=true
+AI_ORCHESTRATION_MODE=legacy
 ```
 
 ### 2.3 Test Locally
@@ -313,7 +315,7 @@ Before you go live, open the store dashboard login at:
 https://vs-chatbot-production.up.railway.app/admin/login
 ```
 
-After logging in, go to **Configuración** and add the payment methods you want this store to offer. Each method needs a **Nombre** and **Información**. These are stored in the store DB, not in `.env`, and the bot will list only the configured method names during checkout.
+After logging in, go to **Configuración** and add the payment methods you want this store to offer. Each method needs a **Nombre** and **Información**. These are stored in the store DB, not in `.env`, and the bot will list only the configured method names during checkout. Keep `ai_orchestration_mode` on `legacy` until you complete the rollout checklist in Part 9.
 
 ### 5.3 Switch WhatsApp Webhook to Railway
 
@@ -438,7 +440,7 @@ Open `https://your-app.railway.app/admin/login` in any browser, sign in, and you
 - **Clientes:** Sortable customer table, inline tag management (add/remove), resolve escalations individually or all at once
 - **Pedidos:** Sortable order table with status badges
 - **Broadcasts:** Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset failed broadcasts
-- **Configuracion:** Switch LLM provider/model, adjust temperature/max tokens/conversation history, configure fallback, manage store-only payment methods, and generate/download the catalog PDF. Scheduled-job timings are shown read-only here and are managed from `master/`.
+- **Configuracion:** Switch LLM provider/model, adjust temperature/max tokens/conversation history, choose orchestration mode, configure fallback, manage store-only payment methods, and generate/download the catalog PDF. Scheduled-job timings are shown read-only here and are managed from `master/`.
 
 All tables in Clientes, Pedidos, and Broadcasts are sortable by clicking column headers. Click once for ascending, again for descending.
 
@@ -448,7 +450,7 @@ Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto
 
 **Custom AI persona:** Set `SYSTEM_PROMPT_OVERRIDE` to replace the default `store/prompts/system_prompt.md` template for a specific store deployment. Must use the same `{store_name}`, `{product_catalog}`, etc. placeholders.
 
-**Shared runtime settings:** Dashboard-managed AI settings live in the store DB `settings` table. AI config and `ai_enabled` apply immediately without redeploy. If you manage the store from `master/`, the master dashboard also controls the scheduler timings (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), and the store app applies those changes automatically within about a minute. Payment methods are store-only and are edited only from the store dashboard.
+**Shared runtime settings:** Dashboard-managed AI settings live in the store DB `settings` table. AI config, `ai_enabled`, and `ai_orchestration_mode` apply immediately without redeploy. If you manage the store from `master/`, the master dashboard also controls the scheduler timings (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), and the store app applies those changes automatically within about a minute. Payment methods are store-only and are edited only from the store dashboard.
 
 **Centralized LLM control:** Set `LLM_MANAGED_EXTERNALLY=true` to lock the store's LLM provider/model/temperature controls. When enabled, the store dashboard hides LLM-only settings, the settings API rejects LLM changes (403), and the Telegram `/provider` command is disabled. Payment methods and other non-LLM store settings remain editable locally.
 
@@ -495,25 +497,63 @@ curl -X POST "https://your-app.railway.app/admin/analytics/build-daily?target_da
 
 ### 8.4 Payment Screenshot Recognition
 
-Works automatically. When a customer sends an image, the system downloads it, runs it through the LLM's vision capability, extracts payment details (method, amount, reference, status), and injects the analysis into the conversation. No setup needed.
+Works automatically. When a customer sends an image, the system downloads it, runs it through the LLM's vision capability, extracts payment details (method, amount, reference, status), then deterministically verifies open order, amount, method, recipient, and completed status before changing payment state. The LLM does not decide whether to mark a payment as paid. No setup needed.
+
+### 8.5 AI Run Observability
+
+`usage_log` keeps token and cost tracking. `ai_run_logs` records safe routing metadata for rollout monitoring: orchestration mode, selected agent, route intent/source/confidence, provider/model, token counts, response time, tool names, tool rounds, and handoff/fallback/escalation/shadow/legacy fallback flags.
+
+Do not add payment credentials, raw image contents, full addresses, customer message text, tool arguments, or raw tool results to this table.
 
 ---
 
-## Part 9: Complete Testing Checklist
+## Part 9: Multi-Agent Rollout and Rollback
+
+The default mode is `legacy`. Keep it that way until you are ready to evaluate the new specialist agents.
+
+Modes:
+
+- `legacy`: existing single-agent behavior and rollback mode.
+- `shadow`: legacy serves customer responses while specialist routing is logged for evaluation.
+- `multi_agent`: deterministic guards and the router select `sales`, `checkout`, `support`, or legacy fallback.
+
+Precedence is: valid `ai_orchestration_mode` row in the store DB, then valid `AI_ORCHESTRATION_MODE` env default, then hard-coded `legacy`.
+
+Rollout checklist:
+
+1. Deploy with `AI_ORCHESTRATION_MODE=legacy` and confirm the store DB setting is `legacy`.
+2. Run `python3 -m pytest tests/store/test_ai_transcript_regressions.py -q` locally.
+3. Switch one low-risk store to `shadow` from the store dashboard or master dashboard.
+4. Inspect app logs and `ai_run_logs` for unexpected route decisions or legacy fallbacks.
+5. Switch to `multi_agent` only after shadow routing is acceptable.
+6. Roll back by setting `ai_orchestration_mode=legacy` from either dashboard.
+
+Agent and tool locations:
+
+- Agent definitions and allowlists: `store/app/ai/agents/`
+- Tool schemas: `store/app/ai/tools/definitions.py`
+- Tool handlers: `store/app/ai/tools/`
+- Tool dispatch: `store/app/ai/tools/executor.py`
+- Prompt fragments: `store/prompts/shared/` and `store/prompts/agents/`
+- Deterministic payment verification: `store/app/ai/payment/verifier.py`
+
+---
+
+## Part 10: Complete Testing Checklist
 
 ### 9.1 Infrastructure
 
 ```text
 [ ] GET /health -> status=healthy, scheduler=running, both providers, catalog > 0
 [ ] GET /admin/settings/ without auth -> 401 (when ADMIN_PASSWORD is set)
-[ ] GET /admin/settings/ with Bearer header -> Settings including llm_max_tokens
+[ ] GET /admin/settings/ with Bearer header -> Settings including llm_max_tokens and ai_orchestration_mode
 [ ] POST /admin/settings/switch-provider?provider=anthropic with auth -> switches cleanly
 [ ] GET /admin/settings/usage-summary with auth -> JSON response
 [ ] GET /admin/settings/stats/conversations with auth -> channel breakdown
 [ ] Open /admin/login -> successful login sets cookie and redirects to /admin/dashboard
 [ ] Subsequent visits to /admin/dashboard -> works via cookie (no password in URL)
 [ ] Toggle dark mode -> UI switches, persists on refresh
-[ ] Configuracion tab -> AI settings and payment methods visible; PDF auto-refresh shown read-only
+[ ] Configuracion tab -> AI settings, orchestration mode, and payment methods visible; PDF auto-refresh shown read-only
 [ ] Send /start to Telegram bot -> 18-command menu appears
 [ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
 [ ] GET /test/ui with DEBUG=true -> test page loads
@@ -537,6 +577,9 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 [ ] Set product Stock=0 in Sheets, ask for it -> "Out of stock" + alternatives
 [ ] "Tienen zapatos?" -> Politely declines, only sells underwear/pajamas
 [ ] Payment flow -> Interactive buttons appear for payment method choice
+[ ] Set ai_orchestration_mode=shadow -> Legacy response is served and route metadata is logged
+[ ] Set ai_orchestration_mode=multi_agent -> Sales, checkout, and support routes respond correctly
+[ ] Set ai_orchestration_mode=legacy -> Immediate rollback to legacy behavior
 ```
 
 ### 9.3 Instagram Conversations (After App Review)
@@ -594,6 +637,7 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 [ ] /conversion -> Funnel with rates (after at least one purchase flow)
 [ ] /performance -> avg/p50/p95 per provider (after some messages)
 [ ] /products -> Popularity ranking (after inventory checks)
+[ ] ai_run_logs -> Contains route metadata without message text, addresses, payment credentials, or raw tool arguments
 ```
 
 ### 9.7 Resilience
@@ -620,7 +664,7 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 
 ---
 
-## Part 10: Quick Reference
+## Part 11: Quick Reference
 
 ### All Endpoints
 
@@ -735,7 +779,9 @@ Testing (DEBUG=true only — disabled in production):
 - **Broadcast stuck in "sending"**  
   The send crashed mid-execution. Use the "Resetear" button in the dashboard or `POST /admin/broadcasts/{id}/reset` to return it to draft. Crash recovery now auto-sets failed broadcasts to "failed" status.
 - **Payment screenshots not recognized**  
-  Check active model supports vision (GPT-4o-mini and Claude Haiku 4.5 do). Check logs for errors.
+  Check active model supports vision (GPT-4o-mini and Claude Haiku 4.5 do). Check logs for extraction and deterministic verification errors.
+- **Multi-agent rollout behaves unexpectedly**
+  Set `ai_orchestration_mode=legacy` in the store settings table from the store or master dashboard. Then inspect `ai_run_logs` and rerun `tests/store/test_ai_transcript_regressions.py` locally before enabling `shadow` or `multi_agent` again.
 - **Daily analytics empty**  
   Runs at 1 AM for yesterday. Manually trigger: `POST /admin/analytics/build-daily`.
 - **Scheduler not running**  

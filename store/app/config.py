@@ -3,9 +3,10 @@ Application configuration loaded from environment variables.
 All secrets live in .env (never committed to git).
 """
 
-from pydantic_settings import BaseSettings
-from pydantic import field_validator
 from functools import lru_cache
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -43,6 +44,9 @@ class Settings(BaseSettings):
     system_prompt_override: str = ""  # If set, replaces prompts/system_prompt.md content
     llm_managed_externally: bool = False  # If True, LLM provider/model controls are hidden from store dashboard and managed from master
 
+    # --- AI orchestration ---
+    ai_orchestration_mode: str = "legacy"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @field_validator("store_name", "owner_name", mode="before")
@@ -55,8 +59,14 @@ class Settings(BaseSettings):
             return text[1:-1].strip()
         return text
 
+    @field_validator("ai_orchestration_mode", mode="before")
+    @classmethod
+    def _safe_orchestration_mode(cls, value):
+        mode = str(value or "legacy").strip().lower()
+        return mode if mode in {"legacy", "shadow", "multi_agent"} else "legacy"
 
-@lru_cache()
+
+@lru_cache
 def get_config() -> Settings:
     """Cached settings instance. Call this anywhere you need config."""
     return Settings()

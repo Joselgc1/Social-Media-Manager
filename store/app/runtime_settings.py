@@ -16,6 +16,7 @@ RUNTIME_SETTING_DEFAULTS = {
     "auto_fallback": True,
     "max_conversation_history": 20,
     "ai_enabled": True,
+    "ai_orchestration_mode": "legacy",
     "catalog_refresh_minutes": 15,
     "broadcast_check_interval_minutes": 1,
     "catalog_pdf_interval_hours": 24,
@@ -41,6 +42,7 @@ SYNCABLE_RUNTIME_SETTING_KEYS = {
     "auto_fallback",
     "max_conversation_history",
     "ai_enabled",
+    "ai_orchestration_mode",
     "catalog_refresh_minutes",
     "broadcast_check_interval_minutes",
     "catalog_pdf_interval_hours",
@@ -75,4 +77,5 @@ LLM_MANAGED_KEYS = {
     "fallback_provider",
     "fallback_model",
     "auto_fallback",
+    "ai_orchestration_mode",
 }

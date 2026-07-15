@@ -20,8 +20,9 @@
 
 - [ ] New routers registered in appropriate `main.py`
 - [ ] Rate limiting applied to new endpoints
-- [ ] Tool definitions are provider-agnostic JSON Schema in `functions.py`
-- [ ] Tool handlers follow `_tool_*` pattern in `engine.py`
+- [ ] Tool definitions are provider-agnostic JSON Schema in `tools/definitions.py`
+- [ ] Tool handlers live under `store/app/ai/tools/` and dispatch through `tools/executor.py`
+- [ ] Tool allowlists in `store/app/ai/agents/` grant only intended permissions
 - [ ] One tool call processed per engine iteration (not multiple)
 
 ## Consistency

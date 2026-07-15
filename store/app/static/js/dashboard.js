@@ -1435,6 +1435,7 @@ async function loadSettings() {
     document.getElementById('set-fb-provider').value = settings.fallback_provider || 'anthropic';
     document.getElementById('set-max-tokens').value = settings.llm_max_tokens || 500;
     document.getElementById('set-max-history').value = settings.max_conversation_history || 20;
+    document.getElementById('set-orchestration-mode').value = settings.ai_orchestration_mode || 'legacy';
 
     populateModels('set-model', settings.llm_provider || 'openai', settings.llm_model);
     populateModels('set-fb-model', settings.fallback_provider || 'anthropic', settings.fallback_model);
@@ -1468,6 +1469,7 @@ async function saveProviderSettings() {
   const temp = parseFloat(document.getElementById('set-temp').value);
   const maxTokens = parseInt(document.getElementById('set-max-tokens').value);
   const maxHistory = parseInt(document.getElementById('set-max-history').value);
+  const orchestrationMode = document.getElementById('set-orchestration-mode').value;
 
   if (isNaN(maxTokens) || maxTokens < 100 || maxTokens > 2000) {
     toast('Max tokens debe ser entre 100 y 2000', '#dc2626'); return;
@@ -1488,6 +1490,10 @@ async function saveProviderSettings() {
   await apiFetch(API + '/max_conversation_history', {
     method: 'PUT', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({value: maxHistory}),
+  });
+  await apiFetch(API + '/ai_orchestration_mode', {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: orchestrationMode}),
   });
 
   toast('Configuracion guardada');

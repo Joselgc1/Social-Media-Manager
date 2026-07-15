@@ -33,13 +33,19 @@ def _normalize_order_items(items: list[dict]) -> list[dict]:
             product_name=str(item.get("product_name", "")).strip(),
             size=requested_size,
         )
+        if not variant:
+            raise ValueError("Product or size was not found in the current catalog.")
+        quantity = max(int(item.get("quantity", 1) or 1), 1)
+        available_stock = _catalog_stock(variant)
+        if available_stock is not None and quantity > available_stock:
+            raise ValueError("Requested quantity is not available in the current catalog.")
 
         normalized_items.append({
-            "product_name": str((variant or {}).get("product_name") or item.get("product_name", "")).strip(),
-            "sku": str((variant or {}).get("sku") or item.get("sku", "")).strip(),
+            "product_name": str(variant.get("product_name") or "").strip(),
+            "sku": str(variant.get("sku") or "").strip(),
             "size": requested_size or _first_catalog_size(variant),
-            "quantity": max(int(item.get("quantity", 1) or 1), 1),
-            "unit_price": round(float((variant or {}).get("price_usd") or item.get("unit_price", 0) or 0), 2),
+            "quantity": quantity,
+            "unit_price": round(float(variant.get("price_usd") or 0), 2),
         })
     return normalized_items
 
@@ -177,6 +183,13 @@ def _catalog_variant_matches_size(product: dict, size: str) -> bool:
 def _first_catalog_size(product: dict | None) -> str:
     sizes = get_product_sizes(product or {})
     return sizes[0] if sizes else ""
+
+
+def _catalog_stock(product: dict) -> int | None:
+    try:
+        return int(float(product.get("stock")))
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_catalog_text(text: str) -> str:
@@ -445,6 +458,24 @@ async def get_latest_open_order(customer_id: str) -> dict | None:
         LIMIT 1
         """,
         {"cid": customer_id},
+    )
+    if not row:
+        return None
+    return await get_order(str(row["id"]))
+
+
+async def get_customer_open_order_by_id(customer_id: str, order_id: str) -> dict | None:
+    """Return an open order only when it belongs to the current customer."""
+    row = await db.fetch_one(
+        """
+        SELECT id
+        FROM orders
+        WHERE id = :oid
+          AND customer_id = :cid
+          AND payment_status IN ('pending', 'proof_received')
+        LIMIT 1
+        """,
+        {"oid": order_id, "cid": customer_id},
     )
     if not row:
         return None

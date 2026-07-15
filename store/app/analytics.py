@@ -7,6 +7,7 @@ and per-provider performance comparison.
 import json
 import logging
 from datetime import date, timedelta
+
 from app import db
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,72 @@ async def log_response(
         )
     except Exception as e:
         logger.error(f"Failed to log response: {e}")
+
+
+async def log_ai_run(
+    *,
+    customer_id: str,
+    channel: str,
+    orchestration_mode: str,
+    selected_agent: str,
+    route_intent: str | None = None,
+    route_source: str | None = None,
+    route_confidence: float | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    usage: dict | None = None,
+    response_time_ms: int | None = None,
+    tool_names: list[str] | tuple[str, ...] | None = None,
+    tool_rounds: int = 0,
+    handoff_occurred: bool = False,
+    fallback_occurred: bool = False,
+    escalation_occurred: bool = False,
+    shadow_evaluation: bool = False,
+    legacy_fallback: bool = False,
+) -> None:
+    """Log non-sensitive AI orchestration metadata for evaluation and rollout."""
+    safe_tool_names = [str(name)[:80] for name in (tool_names or []) if name]
+    token_usage = usage or {}
+    try:
+        await db.execute(
+            """
+            INSERT INTO ai_run_logs
+                (customer_id, channel, orchestration_mode, selected_agent,
+                 route_intent, route_source, route_confidence, provider, model,
+                 input_tokens, output_tokens, response_time_ms, tool_names, tool_rounds,
+                 handoff_occurred, fallback_occurred, escalation_occurred,
+                 shadow_evaluation, legacy_fallback)
+            VALUES
+                (:customer_id, :channel, :orchestration_mode, :selected_agent,
+                 :route_intent, :route_source, :route_confidence, :provider, :model,
+                 :input_tokens, :output_tokens, :response_time_ms, CAST(:tool_names AS jsonb), :tool_rounds,
+                 :handoff_occurred, :fallback_occurred, :escalation_occurred,
+                 :shadow_evaluation, :legacy_fallback)
+            """,
+            {
+                "customer_id": customer_id,
+                "channel": channel,
+                "orchestration_mode": orchestration_mode,
+                "selected_agent": selected_agent,
+                "route_intent": route_intent,
+                "route_source": route_source,
+                "route_confidence": route_confidence,
+                "provider": provider,
+                "model": model,
+                "input_tokens": int(token_usage.get("input_tokens", 0) or 0),
+                "output_tokens": int(token_usage.get("output_tokens", 0) or 0),
+                "response_time_ms": response_time_ms,
+                "tool_names": json.dumps(safe_tool_names),
+                "tool_rounds": int(tool_rounds or 0),
+                "handoff_occurred": handoff_occurred,
+                "fallback_occurred": fallback_occurred,
+                "escalation_occurred": escalation_occurred,
+                "shadow_evaluation": shadow_evaluation,
+                "legacy_fallback": legacy_fallback,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to log AI run metadata: {e}")
 
 
 # ── Conversion analytics ─────────────────────────────────────

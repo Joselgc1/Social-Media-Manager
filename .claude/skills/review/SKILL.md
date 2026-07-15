@@ -39,8 +39,10 @@ Review every changed file against this project-specific checklist. For each issu
 
 - New routers must be registered in the appropriate `main.py` (`store/app/main.py` or `master/app/main.py`)
 - New endpoints should have rate limiting via the existing `slowapi` limiter
-- Tool definitions in `store/app/ai/functions.py` must be provider-agnostic JSON Schema
-- Tool handlers in `store/app/ai/engine.py` follow the `_tool_*` naming pattern
+- Tool definitions in `store/app/ai/tools/definitions.py` must be provider-agnostic JSON Schema
+- Tool handlers belong under `store/app/ai/tools/` and are dispatched from `store/app/ai/tools/executor.py`
+- New tools must be granted only to the intended agents in `store/app/ai/agents/`
+- AI run observability must not log customer message text, full addresses, payment credentials, raw image contents, tool arguments, or raw tool results
 
 ### Consistency
 

@@ -309,6 +309,15 @@
                 <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Historial de conversacion (5 - 50 mensajes)</label>
                 <input id="set-max-history" type="number" step="1" min="5" max="50" class="w-full">
               </div>
+              <div>
+                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Modo de orquestacion AI</label>
+                <select id="set-orchestration-mode" class="w-full">
+                  <option value="legacy">Legacy</option>
+                  <option value="shadow">Shadow</option>
+                  <option value="multi_agent">Multi-agent</option>
+                </select>
+                <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">Usa legacy para rollback seguro. Shadow evalua sin efectos de especialistas.</p>
+              </div>
               <button class="btn btn-primary w-full" onclick="saveProviderSettings()">Guardar cambios</button>
             </div>
           </div>

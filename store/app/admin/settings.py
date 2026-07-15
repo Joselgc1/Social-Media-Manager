@@ -33,6 +33,7 @@ VALID_MODELS_FLAT = {
     for models in AVAILABLE_MODELS.values()
     for model in models
 }
+VALID_ORCHESTRATION_MODES = {"legacy", "shadow", "multi_agent"}
 
 
 class SettingUpdate(BaseModel):
@@ -119,6 +120,15 @@ def _validate_setting_value(key: str, value, current_settings: dict):
                 detail="Conversation history must be between 5 and 50.",
             )
         return history
+
+    if key == "ai_orchestration_mode":
+        mode = str(value or "").strip().lower()
+        if mode not in VALID_ORCHESTRATION_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid orchestration mode '{value}'. Choose from: {sorted(VALID_ORCHESTRATION_MODES)}",
+            )
+        return mode
 
     if key == "catalog_pdf_interval_hours":
         hours = int(value)

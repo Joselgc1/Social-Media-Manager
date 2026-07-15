@@ -4,7 +4,7 @@ AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan 
 
 The sales flow is tuned for Venezuelan operations: shipments are offered through `MRW` or `Zoom` with `cobro a destino`, owners can update the daily accepted exchange rate from the store dashboard, and the customer-facing catalog PDF does not expose internal SKU or stock columns.
 
-Dashboard-managed runtime settings live in each store's `settings` table. That includes shared AI configuration plus master-managed scheduler timings such as `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, and the daily cron times. Store payment methods are persisted separately in the same table under `payment_methods` and are managed only from the store dashboard. When a store is connected to `master/`, both dashboards read and write the shared AI rows, and the master dashboard manages the scheduler rows.
+Dashboard-managed runtime settings live in each store's `settings` table. That includes shared AI configuration, `ai_orchestration_mode`, and master-managed scheduler timings such as `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, and the daily cron times. Store payment methods are persisted separately in the same table under `payment_methods` and are managed only from the store dashboard. When a store is connected to `master/`, both dashboards read and write the shared AI rows, and the master dashboard manages the scheduler rows.
 
 **Multi-store support:** A Master Control Plane (`master/`) lets you manage multiple independent store deployments from a single dashboard — each with its own database, API keys, WhatsApp number, and Telegram bot. See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the multi-store setup guide.
 
@@ -41,9 +41,13 @@ ngrok http 8000
 Customer (WhatsApp or Instagram DM)
     -> Webhook (FastAPI)
         -> Normalize message (text, buttons, images, ice breakers, postbacks)
-        -> Conversation Router
-            -> LLM Engine (OpenAI or Anthropic, admin-selectable)
-                -> Tool Calls (inventory, tags, orders, escalation)
+        -> Inbound buffer and deterministic guards
+        -> AI Engine
+            -> Orchestration resolver (legacy, shadow, multi_agent)
+            -> Deterministic route guards, then ambiguity-only LLM router
+            -> Selected agent prompt (legacy, sales, checkout, support)
+            -> Direct SDK provider call (OpenAI or Anthropic)
+            -> Tool executor with per-agent allowlists
             -> Response
         -> Send reply via Meta API
             -> WhatsApp: text, interactive buttons, templates
@@ -187,7 +191,7 @@ Open `/admin/login` in a browser, sign in with `ADMIN_PASSWORD`, and the app wil
 - **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once
 - **Pedidos**: Sortable order table with status badges
 - **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset stuck broadcasts
-- **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, fallback settings, daily exchange rate, dynamic payment methods, and catalog PDF generation/download
+- **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, orchestration mode, fallback settings, daily exchange rate, dynamic payment methods, and catalog PDF generation/download
 
 Dark mode toggle in the header (persists via localStorage, auto-detects OS preference).
 
@@ -197,7 +201,7 @@ These values are stored in the store database and can be changed without redeplo
 
 - `llm_provider`, `llm_model`, `llm_temperature`, `llm_max_tokens`
 - `fallback_provider`, `fallback_model`, `auto_fallback`
-- `max_conversation_history`, `ai_enabled`
+- `max_conversation_history`, `ai_enabled`, `ai_orchestration_mode`
 - `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`
 - `token_reminder_hour`, `token_reminder_minute`, `daily_analytics_hour`, `daily_analytics_minute`
 
@@ -208,6 +212,42 @@ The store-only `accepted_exchange_rate` setting is also stored in the same `sett
 The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information. The Google Sheets catalog can be modeled as one row per size variant with `SKU`, `Parent SKU`, and a singular `Size` column; see [store/DEPLOYMENT.md](store/DEPLOYMENT.md) for the exact sheet format.
 
 If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API/Telegram commands stop allowing LLM-setting writes locally, but payment methods and other non-LLM store settings remain editable in the store dashboard.
+
+## Multi-Agent Rollout
+
+The store supports three orchestration modes:
+
+- `legacy`: existing single-agent behavior. This is the default and rollback mode.
+- `shadow`: legacy serves customer responses while specialist routing is logged for evaluation. Specialist side-effect tools do not run.
+- `multi_agent`: deterministic guards and the router select `sales`, `checkout`, `support`, or legacy fallback. Payment proofs are handled deterministically before agent execution.
+
+Mode precedence is: valid `ai_orchestration_mode` row in the store DB, then valid `AI_ORCHESTRATION_MODE` env default, then hard-coded `legacy`. Invalid values are ignored safely.
+
+Recommended rollout:
+
+1. Keep stores on `legacy` after deployment and run the transcript regression suite locally.
+2. Move one low-risk store to `shadow` from the store or master dashboard and inspect logs plus `ai_run_logs` for route accuracy.
+3. Move to `multi_agent` only after route quality is acceptable.
+4. Roll back immediately by setting `ai_orchestration_mode=legacy` from either dashboard.
+
+Routing precedence is fixed: global AI pause and escalated customers suppress replies, hostile messages escalate before LLMs, payment-proof images go through deterministic verification, active checkout sessions remain sticky, clear purchase/support/sales keywords route deterministically, and the LLM router runs only for ambiguous messages.
+
+Agent responsibilities:
+
+- `legacy`: existing broad sales assistant and rollback path.
+- `sales`: greetings, product discovery, catalog, photos, availability, recommendations, and checkout handoff.
+- `checkout`: checkout draft collection, backend-validated finalization, cancellation, and saved-address reuse.
+- `support`: read-only customer/order status support and escalation.
+
+Tool permissions are enforced in `store/app/ai/runner.py` from agent definitions in `store/app/ai/agents/`. Tool schemas live in `store/app/ai/tools/definitions.py`; handlers live under `store/app/ai/tools/`; dispatch is in `store/app/ai/tools/executor.py`. Adding a tool requires schema, handler, allowlist membership, and tests proving unauthorized agents cannot call it.
+
+Prompts are composed from `store/prompts/shared/` plus `store/prompts/agents/{legacy,sales,checkout,support}.md`. The ambiguity router prompt is `store/prompts/agents/router.md`.
+
+Payment verification boundary: payment screenshots are analyzed by vision, then `store/app/ai/payment/verifier.py` deterministically checks open order, amount, method, recipient, and completed status. LLMs cannot create orders from proofs or mark payment state directly.
+
+Observability: `usage_log` remains token/cost-oriented. `ai_run_logs` stores non-sensitive routing and agent metadata: mode, selected agent, route intent/source/confidence, provider/model, token usage, response time, tool names, tool rounds, handoff/fallback/escalation flags, shadow flag, and legacy fallback flag. It does not store payment credentials, image contents, full addresses, message text, tool arguments, or raw tool results.
+
+Transcript regression tests live in `tests/store/test_ai_transcript_regressions.py` and cover complete customer journeys without external services.
 
 ## Security
 
@@ -235,7 +275,7 @@ A **Master Control Plane** (`master/`) sits on top:
 Master Control Plane (1 deployment, port 9000)
   ├── Master Supabase DB (store registry, encrypted credentials, audit log)
   ├── Dashboard: monitor all stores, manage runtime settings, view costs, deploy changes
-  ├── Runtime settings: set provider/model/fallback per store
+  ├── Runtime settings: set provider/model/fallback/orchestration per store
   ├── Railway API integration: push env vars + trigger redeploys
   └── Health checker: pings each store every 5 minutes
 
@@ -254,7 +294,7 @@ Store A (port 8000)          Store B (port 8001)          Store C ...
 Open `http://localhost:9000/login`, sign in with `MASTER_SECRET_KEY`, and the app will set an HTTP-only session cookie before redirecting to `/dashboard`. Three tabs:
 
 - **Stores**: Overview cards with live stats, health status dots, platform-wide LLM cost summary with time-range toggles (Today/7d/30d)
-- **Store Detail**: Drill into one store — stats, dedicated API Keys panel (OpenAI/Anthropic with active/configured/not-set status), shared AI settings, a separate Scheduled Jobs panel, LLM usage & costs with time-range toggles, grouped environment variables (Channels, Infrastructure, Customization), Railway deployment status, and "Deploy to Railway"
+- **Store Detail**: Drill into one store — stats, dedicated API Keys panel (OpenAI/Anthropic with active/configured/not-set status), shared AI settings including orchestration mode, a separate Scheduled Jobs panel, LLM usage & costs with time-range toggles, grouped environment variables (Channels, Infrastructure, Customization), Railway deployment status, and "Deploy to Railway"
 - **Audit Log**: Full history of all actions (store created, credential updated, runtime settings changed, deploy triggered)
 
 Runtime settings apply immediately from the store database. Credentials and deploy-time env vars remain master-managed and may still require a redeploy.
@@ -282,5 +322,6 @@ See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the full setup guide.
 | Variable                 | Purpose                                                                                              |
 | :----------------------- | :--------------------------------------------------------------------------------------------------  |
 | `ADMIN_PASSWORD`         | **Required in production.** Protects dashboard and all admin API endpoints                           |
+| `AI_ORCHESTRATION_MODE`  | Optional env default for rollout mode. DB runtime setting takes precedence. Defaults to `legacy`      |
 | `SYSTEM_PROMPT_OVERRIDE` | If set, replaces `prompts/system_prompt.md` content for this store                                   |
 | `LLM_MANAGED_EXTERNALLY` | If `true`, locks LLM controls in store dashboard/API/Telegram so those keys are managed from master  |

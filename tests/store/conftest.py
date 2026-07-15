@@ -5,10 +5,11 @@ Provides mock database, mock config, and FastAPI test client
 so tests run without real external services.
 """
 
-import pytest
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import os
+import pytest
+
 os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
 os.environ.setdefault("GOOGLE_SHEETS_CREDENTIALS_B64", "e30=")  # base64 "{}"
 os.environ.setdefault("PRODUCT_SHEET_ID", "test-sheet-id")
@@ -66,6 +67,7 @@ def mock_config():
     config.admin_password = "test-password"
     config.system_prompt_override = ""
     config.llm_managed_externally = False
+    config.ai_orchestration_mode = "legacy"
     config.meta_app_secret = ""
     config.whatsapp_access_token = ""
     config.whatsapp_phone_number_id = ""
@@ -78,7 +80,7 @@ def mock_config():
 @pytest.fixture
 async def client(mock_db, mock_config):
     """FastAPI test client with mocked dependencies."""
-    from httpx import AsyncClient, ASGITransport
+    from httpx import ASGITransport, AsyncClient
 
     with patch("app.db.database", mock_db), \
          patch("app.config.get_config", return_value=mock_config):

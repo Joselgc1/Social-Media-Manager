@@ -271,6 +271,7 @@ function renderStoreCards() {
                         AI ${stats.ai_enabled === 'true' || stats.ai_enabled === true ? 'ON' : 'OFF'}
                     </span>
                     <span class="badge badge-blue">${esc(stats.llm_provider || '?')}/${esc(stats.llm_model || '?')}</span>
+                    <span class="badge badge-gray">${esc(stats.ai_orchestration_mode || 'legacy')}</span>
                 </div>`}
             </div>`;
     }).join('');
@@ -337,7 +338,7 @@ function renderStoreDetail(store, stats, creds) {
                 <span id="ai-status-badge" class="badge ${stats.ai_enabled === 'true' || stats.ai_enabled === true ? 'badge-green' : 'badge-red'} text-base cursor-pointer" onclick="toggleStoreAi('${store.id}')" title="Click to toggle AI on/off">
                     AI ${stats.ai_enabled === 'true' || stats.ai_enabled === true ? 'ON' : 'OFF'}
                 </span>
-                <div class="text-sm text-gray-500 mt-1">${esc(stats.llm_provider || '?')} / ${esc(stats.llm_model || '?')}</div>
+                <div class="text-sm text-gray-500 mt-1">${esc(stats.llm_provider || '?')} / ${esc(stats.llm_model || '?')} / ${esc(stats.ai_orchestration_mode || 'legacy')}</div>
             </div>
         </div>`}
 
@@ -717,6 +718,7 @@ async function loadRuntimeSettings(storeId) {
         const fbModelOptions = (models[fbProvider] || []).map(m =>
             `<option value="${m}" ${(s.fallback_model || '') === m ? 'selected' : ''}>${m}</option>`
         ).join('');
+        const orchestrationMode = s.ai_orchestration_mode || 'legacy';
 
         if (aiContainer) {
             aiContainer.innerHTML = `
@@ -765,6 +767,15 @@ async function loadRuntimeSettings(storeId) {
                         <input id="llm-auto-fallback" type="checkbox" ${s.auto_fallback ? 'checked' : ''}>
                         <span class="text-sm">Auto Fallback</span>
                     </label>
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">AI Orchestration Mode</label>
+                    <select id="ai-orchestration-mode" class="w-full">
+                        <option value="legacy" ${orchestrationMode === 'legacy' ? 'selected' : ''}>legacy</option>
+                        <option value="shadow" ${orchestrationMode === 'shadow' ? 'selected' : ''}>shadow</option>
+                        <option value="multi_agent" ${orchestrationMode === 'multi_agent' ? 'selected' : ''}>multi_agent</option>
+                    </select>
+                    <p class="text-xs text-gray-500 mt-1">Roll out in order: legacy, shadow, then multi_agent. Legacy is the rollback path.</p>
                 </div>
                 <button onclick="saveAiSettings('${storeId}')" class="btn btn-primary w-full">Save AI Settings</button>
             </div>`;
@@ -846,6 +857,7 @@ async function saveAiSettings(storeId) {
         fallback_model: document.getElementById('llm-fb-model').value,
         auto_fallback: document.getElementById('llm-auto-fallback').checked,
         max_conversation_history: parseInt(document.getElementById('llm-max-history').value),
+        ai_orchestration_mode: document.getElementById('ai-orchestration-mode').value,
     };
 
     if (isNaN(payload.llm_temperature) || payload.llm_temperature < 0 || payload.llm_temperature > 1) {

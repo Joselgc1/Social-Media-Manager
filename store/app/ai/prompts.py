@@ -1,23 +1,111 @@
 """
-System prompt builder.
-Loads the template from prompts/system_prompt.md and injects
-the live product catalog and payment details at runtime.
+Composable system prompt builder.
 """
 
+from __future__ import annotations
+
 import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
 from app.catalog.sheets import group_catalog_products
 from app.customer_identity import extract_safe_first_name
 from app.payment_methods import payment_method_information_block, payment_method_names_text
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
-# Resolve the prompts directory relative to the project root
 _PROMPT_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 _template: str | None = None
+_prompt_file_cache: dict[Path, str] = {}
+
+LEGACY_PROMPT_NAME = "legacy"
+PROMPT_SHARED_FRAGMENTS = {
+    "persona": "shared/persona.md",
+    "safety_rules": "shared/safety_rules.md",
+    "communication_style": "shared/communication_style.md",
+    "channel_rules": "shared/channel_rules.md",
+}
+LEGACY_SHARED_FRAGMENTS = PROMPT_SHARED_FRAGMENTS
+KNOWN_AGENT_PROMPTS = {"legacy", "sales", "checkout", "support"}
+DYNAMIC_TEMPLATE_PLACEHOLDERS = (
+    "store_name",
+    "product_catalog",
+    "payment_methods_block",
+    "payment_method_names_text",
+    "exchange_rate_block",
+    "order_discount_block",
+)
+
+
+class PromptLoadError(RuntimeError):
+    """Raised when a prompt file cannot be loaded."""
+
+
+class PromptRenderError(RuntimeError):
+    """Raised when a prompt template cannot be rendered."""
+
+
+@dataclass(frozen=True)
+class PromptContext:
+    """Dynamic values used to render an agent prompt."""
+
+    catalog_markdown: str
+    store_name: str = "Zona Pink"
+    channel: str = "whatsapp"
+    customer: dict[str, Any] | None = None
+    open_order: dict[str, Any] | None = None
+    payment_methods: list[dict[str, Any]] | None = None
+    accepted_exchange_rate: str | None = None
+    order_discount_percent: float | int | str | None = None
+    order_discount_threshold_usd: float | int | str | None = None
+    workflow_state: dict[str, Any] | str | None = None
+
+
+def load_prompt_file(relative_path: str, *, use_cache: bool = True) -> str:
+    """Load a prompt file relative to the prompt directory."""
+    path = (_PROMPT_DIR / relative_path).resolve()
+    try:
+        path.relative_to(_PROMPT_DIR.resolve())
+    except ValueError as exc:
+        raise PromptLoadError(f"Prompt path escapes prompt directory: {relative_path}") from exc
+
+    if use_cache and path in _prompt_file_cache:
+        return _prompt_file_cache[path]
+
+    if not path.exists():
+        raise PromptLoadError(f"Prompt file not found: {path}")
+    if not path.is_file():
+        raise PromptLoadError(f"Prompt path is not a file: {path}")
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PromptLoadError(f"Could not read prompt file {path}: {exc}") from exc
+
+    if use_cache:
+        _prompt_file_cache[path] = text
+    return text
+
+
+def compose_agent_template(prompt_name: str, *, use_cache: bool = True) -> str:
+    """Compose an agent template from shared prompt fragments."""
+    if prompt_name not in KNOWN_AGENT_PROMPTS:
+        raise PromptLoadError(f"Unknown prompt template: {prompt_name}")
+
+    fragments = {
+        key: load_prompt_file(relative_path, use_cache=use_cache).strip()
+        for key, relative_path in PROMPT_SHARED_FRAGMENTS.items()
+    }
+    values = {
+        **fragments,
+        **{key: "{" + key + "}" for key in DYNAMIC_TEMPLATE_PLACEHOLDERS},
+    }
+    template = load_prompt_file(f"agents/{prompt_name}.md", use_cache=use_cache)
+    return _render_template(template, values, template_name=f"agents/{prompt_name}.md")
 
 
 def _load_template() -> str:
-    """Load and cache the system prompt template. Uses SYSTEM_PROMPT_OVERRIDE if set."""
+    """Load and cache the legacy prompt template. Uses SYSTEM_PROMPT_OVERRIDE if set."""
     global _template
     if _template is None:
         from app.config import get_config
@@ -25,15 +113,62 @@ def _load_template() -> str:
         if config.system_prompt_override:
             _template = config.system_prompt_override
         else:
-            path = _PROMPT_DIR / "system_prompt.md"
-            _template = path.read_text(encoding="utf-8")
+            _template = compose_agent_template(LEGACY_PROMPT_NAME)
     return _template
 
 
-def reload_template():
-    """Force reload from disk (useful during development)."""
-    global _template
+def reload_template() -> None:
+    """Force reload from disk or environment override on the next build."""
+    global _template, _prompt_file_cache
     _template = None
+    _prompt_file_cache = {}
+
+
+def build_legacy_prompt(context: PromptContext) -> str:
+    """Build the currently active legacy-agent prompt."""
+    template = _load_template()
+    values = _build_template_values(context)
+    prompt = _render_template(template, values, template_name=LEGACY_PROMPT_NAME)
+
+    channel_note = _build_channel_context(context.channel)
+    if channel_note:
+        prompt += f"\n\n# Canal actual\n\n{channel_note}"
+
+    customer_note = _build_customer_context(context.customer, open_order=context.open_order)
+    if customer_note:
+        prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
+
+    workflow_note = _build_workflow_context(context.workflow_state)
+    if workflow_note:
+        prompt += f"\n\n# Estado del flujo\n\n{workflow_note}"
+
+    return prompt
+
+
+def build_agent_prompt(prompt_name: str, context: PromptContext) -> str:
+    """Build a prompt for a registered agent prompt name."""
+    if prompt_name == LEGACY_PROMPT_NAME:
+        return build_legacy_prompt(context)
+    if prompt_name not in KNOWN_AGENT_PROMPTS:
+        raise PromptLoadError(f"Unknown prompt template: {prompt_name}")
+
+    template = compose_agent_template(prompt_name)
+    values = _build_template_values(context)
+    prompt = _render_template(template, values, template_name=prompt_name)
+
+    channel_note = _build_channel_context(context.channel)
+    if channel_note:
+        prompt += f"\n\n# Canal actual\n\n{channel_note}"
+
+    customer_note = _build_customer_context(context.customer, open_order=context.open_order)
+    if customer_note:
+        prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
+
+    workflow_note = _build_workflow_context(context.workflow_state)
+    if workflow_note:
+        prompt += f"\n\n# Estado del flujo\n\n{workflow_note}"
+
+    return prompt
 
 
 def build_system_prompt(
@@ -46,40 +181,55 @@ def build_system_prompt(
     accepted_exchange_rate: str | None = None,
     order_discount_percent: float | int | str | None = None,
     order_discount_threshold_usd: float | int | str | None = None,
+    workflow_state: dict[str, Any] | str | None = None,
 ) -> str:
     """
     Assemble the final system prompt by injecting the live product catalog,
     payment details, channel info, and customer context into the template.
     """
-    template = _load_template()
-    payment_methods_block = payment_method_information_block(payment_methods)
-    payment_method_names = payment_method_names_text(payment_methods)
-    exchange_rate_block = _build_exchange_rate_block(accepted_exchange_rate)
+    return build_legacy_prompt(
+        PromptContext(
+            catalog_markdown=catalog_markdown,
+            store_name=store_name,
+            channel=channel,
+            customer=customer,
+            open_order=open_order,
+            payment_methods=payment_methods,
+            accepted_exchange_rate=accepted_exchange_rate,
+            order_discount_percent=order_discount_percent,
+            order_discount_threshold_usd=order_discount_threshold_usd,
+            workflow_state=workflow_state,
+        )
+    )
+
+
+def _build_template_values(context: PromptContext) -> dict[str, Any]:
+    payment_methods_block = payment_method_information_block(context.payment_methods)
+    payment_method_names = payment_method_names_text(context.payment_methods)
+    exchange_rate_block = _build_exchange_rate_block(context.accepted_exchange_rate)
     order_discount_block = _build_order_discount_block(
-        order_discount_percent=order_discount_percent,
-        order_discount_threshold_usd=order_discount_threshold_usd,
+        order_discount_percent=context.order_discount_percent,
+        order_discount_threshold_usd=context.order_discount_threshold_usd,
     )
 
-    prompt = template.format(
-        store_name=store_name,
-        product_catalog=catalog_markdown,
-        payment_methods_block=payment_methods_block,
-        payment_method_names_text=payment_method_names,
-        exchange_rate_block=exchange_rate_block,
-        order_discount_block=order_discount_block,
-    )
+    return {
+        "store_name": context.store_name,
+        "product_catalog": context.catalog_markdown,
+        "payment_methods_block": payment_methods_block,
+        "payment_method_names_text": payment_method_names,
+        "exchange_rate_block": exchange_rate_block,
+        "order_discount_block": order_discount_block,
+    }
 
-    # Append channel-specific instructions
-    channel_note = _build_channel_context(channel)
-    if channel_note:
-        prompt += f"\n\n# Canal actual\n\n{channel_note}"
 
-    # Append customer context if we have history on them
-    customer_note = _build_customer_context(customer, open_order=open_order)
-    if customer_note:
-        prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
-
-    return prompt
+def _render_template(template: str, values: dict[str, Any], *, template_name: str) -> str:
+    try:
+        return template.format(**values)
+    except KeyError as exc:
+        missing = exc.args[0]
+        raise PromptRenderError(f"Missing template value '{missing}' while rendering {template_name}") from exc
+    except (IndexError, ValueError) as exc:
+        raise PromptRenderError(f"Invalid template placeholders while rendering {template_name}: {exc}") from exc
 
 
 def _build_exchange_rate_block(accepted_exchange_rate: str | None) -> str:
@@ -237,6 +387,15 @@ def _build_customer_context(customer: dict | None, open_order: dict | None = Non
         parts.append("Cliente nuevo - primera conversación")
 
     return "\n".join(parts) if parts else ""
+
+
+def _build_workflow_context(workflow_state: dict[str, Any] | str | None) -> str:
+    """Render optional future workflow state without affecting the legacy default."""
+    if not workflow_state:
+        return ""
+    if isinstance(workflow_state, str):
+        return workflow_state.strip()
+    return json.dumps(workflow_state, ensure_ascii=False, sort_keys=True)
 
 
 def format_catalog_as_markdown(products: list[dict]) -> str:

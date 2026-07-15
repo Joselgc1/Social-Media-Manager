@@ -4,7 +4,7 @@ How to deploy and manage multiple stores from a single Master Control Plane. Eac
 
 This guide has 7 parts. Part 1 sets up the master service infrastructure. Part 2 covers local testing. Part 3 deploys the master service. Part 4 shows how to add your first store. Part 5 covers adding subsequent stores and Railway credential deployment. Part 6 is the testing checklist. Part 7 is a quick reference.
 
-**Prerequisites:** You should already be familiar with deploying a single store. See the main `DEPLOYMENT.md` in the project root for the per-store deployment process (database, API keys, webhooks, etc.).
+**Prerequisites:** You should already be familiar with deploying a single store. See `store/DEPLOYMENT.md` for the per-store deployment process (database, API keys, webhooks, rollout mode, etc.).
 
 ---
 
@@ -317,9 +317,9 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 ### 5.1 Set up external services for the new store
 
-Follow **Parts 1.1 through 1.6** of the main `DEPLOYMENT.md` (in the project root), but for the new store's accounts:
+Follow **Parts 1.1 through 1.6** of `store/DEPLOYMENT.md`, but for the new store's accounts:
 
-1. **New Supabase project** (e.g., "store-maria"). Run all 4 migrations (`001` through `004`).
+1. **New Supabase project** (e.g., "store-maria"). Run store migrations in order: `001_schema.sql`, `002_conversation_sessions.sql`, and `003_ai_run_observability.sql` if the database was not created from a consolidated schema that already includes them.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
 4. **Same Meta Developer App** (or a new one): Add their WhatsApp phone number and generate an access token.
@@ -330,7 +330,7 @@ Follow **Parts 1.1 through 1.6** of the main `DEPLOYMENT.md` (in the project roo
 - **Option A:** Same repo, new Railway service. In Railway, add a new service to the store's Railway project, deploy from the same GitHub repo, but with different environment variables.
 - **Option B:** Fork the repo. Create a separate GitHub repo for the new store and deploy from there.
 
-Either way, set the root directory to `/` (the store app, not master), and add all environment variables for the new store. Key variables to customize:
+Either way, set the Railway root directory to `store/`, and add all environment variables for the new store. Key variables to customize:
 
 ```ini
 DATABASE_URL=postgresql://...          # NEW Supabase project
@@ -344,13 +344,14 @@ STORE_NAME=Tienda de Maria             # Customized per store
 OWNER_NAME=Maria
 ADMIN_PASSWORD=marias-secret-password  # Protects the store dashboard
 APP_BASE_URL=https://store-maria.railway.app
+AI_ORCHESTRATION_MODE=legacy            # Optional env default; DB setting wins
 ```
 
-Optionally, set `SYSTEM_PROMPT_OVERRIDE` to customize the AI persona for this store. If not set, it uses the default `prompts/system_prompt.md` file.
+Optionally, set `SYSTEM_PROMPT_OVERRIDE` to customize the legacy AI persona for this store. If not set, it uses the default `store/prompts/system_prompt.md` file.
 
 ### 5.3 Connect webhooks for the new store
 
-Follow **Parts 4 and 6** of the main `DEPLOYMENT.md`, using the new store's Railway URL:
+Follow **Parts 4 and 6** of `store/DEPLOYMENT.md`, using the new store's Railway URL:
 
 1. **WhatsApp webhook:** `https://store-maria.railway.app/webhooks/whatsapp`
 2. **Telegram webhook:** `POST https://store-maria.railway.app/admin/settings/telegram/setup-webhook`
@@ -364,7 +365,7 @@ Go to the master dashboard and click **"+ Add Store"**. Fill in the new store's 
 
 If the new store sells different products or has a different brand voice, you can override the system prompt without modifying code.
 
-Set the `SYSTEM_PROMPT_OVERRIDE` environment variable in Railway to the full text of the custom system prompt. The prompt should use the same `{store_name}`, `{product_catalog}`, `{payment_method_names_text}`, `{payment_methods_block}`, and `{exchange_rate_block}` placeholders as the original `prompts/system_prompt.md`.
+Set the `SYSTEM_PROMPT_OVERRIDE` environment variable in Railway to the full text of the custom legacy system prompt. The prompt should use the same `{store_name}`, `{product_catalog}`, `{payment_method_names_text}`, `{payment_methods_block}`, `{exchange_rate_block}`, and `{order_discount_block}` placeholders as the original `store/prompts/system_prompt.md`. Multi-agent prompt fragments live in `store/prompts/shared/` and `store/prompts/agents/` and are changed in code, not from the master dashboard.
 
 If you don't set this variable, the store uses the default prompt template from the file.
 
@@ -379,7 +380,7 @@ To take full control of which AI provider and model each store uses:
 Now you can manage the store's shared AI runtime settings from the master dashboard:
 
 - Open a store's detail view → **AI Settings** panel
-- Set the provider (OpenAI/Anthropic), model, temperature, max tokens, and fallback behavior
+- Set the provider (OpenAI/Anthropic), model, temperature, max tokens, orchestration mode, and fallback behavior
 - Click "Save AI Settings" — changes apply from the store DB and show up in the store dashboard after refresh
 
 You can also manage all scheduler timings from the master dashboard:
@@ -389,6 +390,14 @@ You can also manage all scheduler timings from the master dashboard:
 - Click "Save Scheduled Jobs" — the store applies the new timings automatically within about a minute
 
 Payment methods are no longer master-managed. Configure them in the store dashboard only.
+
+Use orchestration mode as a per-store rollout control:
+
+- `legacy`: default and rollback mode.
+- `shadow`: legacy serves responses while route decisions are logged in the store's `ai_run_logs` table.
+- `multi_agent`: specialist agents serve supported routes with deterministic payment verification and legacy fallback.
+
+Roll out one store at a time. Move from `legacy` to `shadow`, inspect logs and `ai_run_logs`, then move to `multi_agent` only after route quality is acceptable. Roll back immediately by setting `ai_orchestration_mode=legacy` from the master dashboard.
 
 The **LLM Usage (Today)** panel shows the store's API call count and estimated cost. The overview tab shows **Platform LLM Costs** aggregated across all stores.
 
@@ -488,6 +497,7 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 ```text
 [ ] Master store detail shows "AI Settings" panel
 [ ] Changing provider updates model dropdown to matching models
+[ ] Changing orchestration mode writes ai_orchestration_mode to the store DB
 [ ] "Save AI Settings" writes to the store DB (verify via the store dashboard /admin/settings/)
 [ ] Master store detail does not expose payment-method editing
 [ ] "LLM Usage (Today)" panel shows call counts and costs
@@ -581,8 +591,8 @@ Store Stats:
   GET    /api/stores/{id}/stats                 -> Live stats from store's DB
 
 Runtime Settings:
-  GET    /api/stores/{id}/settings              -> Read shared AI runtime settings from the store DB
-  PUT    /api/stores/{id}/settings              -> Write shared AI runtime settings to the store DB
+  GET    /api/stores/{id}/settings              -> Read shared AI runtime settings from the store DB, including ai_orchestration_mode
+  PUT    /api/stores/{id}/settings              -> Write shared AI runtime settings to the store DB, including ai_orchestration_mode
   GET    /api/stores/{id}/llm-usage?days=N      -> Token usage + costs (default: today)
   GET    /api/stores/llm-costs/aggregate?days=N -> Platform-wide costs (default: today)
 
@@ -608,7 +618,7 @@ Testing (localhost only — returns 404 in production):
 Master Control Plane (1 deployment)
   ├── Master Supabase DB (stores registry, encrypted credentials, audit log)
   ├── Dashboard: monitor all stores, manage AI settings, view costs, deploy changes
-  ├── LLM control: set provider/model per store, track platform-wide costs
+  ├── LLM control: set provider/model/orchestration per store, track platform-wide costs
   └── Health checker: pings each store every 5 minutes
 
 Store A (1 deployment)                   Store B (1 deployment)
