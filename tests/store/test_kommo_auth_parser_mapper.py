@@ -176,6 +176,54 @@ def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
     assert talk.channel == "instagram"
 
 
+def test_account_message_wrapper_normalization_from_real_kommo_payload():
+    event = normalize_kommo_webhook({
+        "account[id]": "1",
+        "account[subdomain]": "acme",
+        "message[add][0][id]": "m-real",
+        "message[add][0][chat_id]": "chat-real",
+        "message[add][0][talk_id]": "talk-real",
+        "message[add][0][contact_id]": "42",
+        "message[add][0][entity_id]": "100",
+        "message[add][0][entity_type]": "lead",
+        "message[add][0][text]": "Hola desde Kommo",
+        "message[add][0][message_type]": "text",
+        "message[add][0][origin]": "whatsapp",
+        "message[add][0][type]": "incoming",
+        "message[add][0][author][type]": "external",
+    })[0]
+
+    assert event.event_type == "incoming_message"
+    assert event.message_id == "m-real"
+    assert event.chat_id == "chat-real"
+    assert event.talk_id == "talk-real"
+    assert event.contact_id == "42"
+    assert event.lead_id == "100"
+    assert event.channel == "whatsapp"
+    assert event.author_type == "external"
+
+
+def test_direct_json_account_message_normalization():
+    event = normalize_kommo_webhook({
+        "account": {"id": "1", "subdomain": "acme"},
+        "message": {
+            "id": "m-json",
+            "chat_id": "chat-json",
+            "contact_id": "43",
+            "lead_id": "101",
+            "text": "Hola JSON",
+            "origin": "instagram",
+            "type": "incoming",
+            "author": {"type": "external"},
+        },
+    })[0]
+
+    assert event.event_type == "incoming_message"
+    assert event.message_id == "m-json"
+    assert event.lead_id == "101"
+    assert event.channel == "instagram"
+
+
 def test_missing_optional_and_unknown_events_are_safe():
     event = normalize_kommo_webhook({"add[0][id]": "m1"})[0]
     assert event.text is None

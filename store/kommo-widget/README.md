@@ -26,8 +26,9 @@ Installation sequence:
 11. Open Salesbot.
 12. Add a Widget step.
 13. Select Social Media Manager AI from the installed widget list.
+14. Enter the same `https://YOUR-STORE-DOMAIN/webhooks/kommo/salesbot` URL in the Salesbot block's `Salesbot callback URL` field.
 
-The widget uses `installation=true`, has both `settings` and `salesbot_designer` locations, and requires the top-level `backend_url` setting. The Salesbot block can override the callback URL with its own `webhook_url`, but if that field is empty it uses the installed widget `backend_url`.
+The widget uses `installation=true`, has both `settings` and `salesbot_designer` locations, requires the top-level `backend_url` setting, and also requires the Salesbot block `webhook_url`. If the Salesbot source shows `"params": {}` for the widget block, the block URL was not saved and Kommo will not call the backend.
 
 The Salesbot source uses `widget_request` followed by `goto` question step `1`. The backend resumes the flow by calling Kommo's continuation URL.
 

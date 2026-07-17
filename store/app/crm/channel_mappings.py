@@ -93,7 +93,7 @@ async def upsert_mapping(
                 updated_at = NOW()
             WHERE id = :id
             """,
-            values | {"id": row["id"]},
+            _mapping_update_values(values, row["id"]),
         )
         mapping = await db.fetch_one("SELECT * FROM customer_channel_mappings WHERE id = :id", {"id": row["id"]})
         return dict(mapping)
@@ -128,7 +128,7 @@ async def upsert_mapping(
                 updated_at = NOW()
             WHERE id = :id
             """,
-            values | {"id": row["id"]},
+            _mapping_update_values(values, row["id"]),
         )
         mapping = await db.fetch_one("SELECT * FROM customer_channel_mappings WHERE id = :id", {"id": row["id"]})
         return dict(mapping)
@@ -247,6 +247,18 @@ async def _find_mapping_for_upsert(values: dict[str, Any]) -> dict | None:
 
 def _local_platform_id(job: dict[str, Any]) -> str:
     return str(job.get("chat_id") or job.get("contact_id") or job.get("lead_id") or "kommo_unknown")
+
+
+def _mapping_update_values(values: dict[str, Any], mapping_id: str) -> dict[str, Any]:
+    return {
+        "id": mapping_id,
+        "customer_id": values["customer_id"],
+        "external_contact_id": values.get("external_contact_id"),
+        "external_lead_id": values.get("external_lead_id"),
+        "external_chat_id": values.get("external_chat_id"),
+        "external_talk_id": values.get("external_talk_id"),
+        "external_origin": values.get("external_origin"),
+    }
 
 
 def _json(value):

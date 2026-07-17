@@ -46,13 +46,22 @@ const validResult = widget.callbacks.onSave({{
   active: 'y',
   fields: {{ backend_url: 'https://store.example/webhooks/kommo/salesbot' }}
 }});
-const flow = JSON.parse(widget.callbacks.onSalesbotDesignerSave('kommo_ai_request', {{}}));
+    let missingBlockUrlError = null;
+    try {{
+      widget.callbacks.onSalesbotDesignerSave('kommo_ai_request', {{}});
+    }} catch (error) {{
+      missingBlockUrlError = error.message;
+    }}
+    const flow = JSON.parse(widget.callbacks.onSalesbotDesignerSave('kommo_ai_request', {{
+      webhook_url: 'https://store.example/webhooks/kommo/salesbot'
+    }}));
 console.log(JSON.stringify({{
   invalidResults,
   validResult,
   status,
   settings,
-  flow
+   missingBlockUrlError,
+   flow
 }}));
 """
     result = subprocess.run(["node", "-e", probe], check=True, capture_output=True, text=True)
@@ -62,7 +71,7 @@ console.log(JSON.stringify({{
 def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     manifest = _source_manifest()
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.0"
+    assert manifest["widget"]["version"] == "1.2.1"
     assert "settings" in manifest["locations"]
     assert "salesbot_designer" in manifest["locations"]
     assert manifest["settings"]["backend_url"] == {
@@ -72,6 +81,7 @@ def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     }
     assert manifest["salesbot_designer"]["logo"] == "/widgets/__WIDGET_CODE__/images/logo_small.png"
     assert manifest["salesbot_designer"]["kommo_ai_request"]["settings"]["webhook_url"]["default_value"] == ""
+    assert manifest["salesbot_designer"]["kommo_ai_request"]["settings"]["webhook_url"]["required"] is True
 
 
 def test_all_manifest_localization_keys_exist_in_both_locales():
@@ -138,9 +148,11 @@ def test_widget_script_rejects_invalid_backend_urls_and_accepts_valid_https_url(
 
 def test_salesbot_script_uses_widget_request_goto_step_one_and_success_fail_exits():
     result = _run_widget_script_probe()
+    assert "Salesbot callback URL" in result["missingBlockUrlError"]
     flow = result["flow"]
     first_question = flow[0]["question"]
     assert first_question[0]["handler"] == "widget_request"
+    assert first_question[0]["params"]["url"] == "https://store.example/webhooks/kommo/salesbot"
     assert first_question[1] == {"handler": "goto", "params": {"type": "question", "step": 1}}
     exits = [item for item in flow[1]["question"] if item["handler"] == "exits"]
     condition_result = flow[1]["question"][0]["params"]["result"]

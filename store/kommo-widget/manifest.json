@@ -3,7 +3,7 @@
     "name": "widget.name",
     "description": "widget.description",
     "short_description": "widget.short_description",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "interface_version": 2,
     "init_once": true,
     "locale": ["en", "es"],
@@ -37,7 +37,8 @@
           "name": "salesbot.webhook_url",
           "default_value": "",
           "type": "url",
-          "manual": true
+          "manual": true,
+          "required": true
         }
       }
     }

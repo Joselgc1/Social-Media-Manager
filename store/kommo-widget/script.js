@@ -86,24 +86,14 @@ define(['jquery'], function ($) {
       },
 
       onSalesbotDesignerSave: function (_handlerCode, params) {
-        const blockUrl =
-          params && params.webhook_url
-            ? normalizeBackendUrl(params.webhook_url)
-            : null;
-
-        const globalSettings = self.get_settings
-          ? self.get_settings()
-          : {};
-
-        const savedUrl = normalizeBackendUrl(
-          globalSettings && globalSettings.backend_url
+        const blockParams = params && params.params ? params.params : params;
+        const webhookUrl = normalizeBackendUrl(
+          blockParams && blockParams.webhook_url
         );
-
-        const webhookUrl = blockUrl || savedUrl;
 
         if (!webhookUrl) {
           throw new Error(
-            'A valid HTTPS Social Media Manager Salesbot callback URL is required.'
+            'Enter the HTTPS Social Media Manager Salesbot callback URL in this Salesbot block.'
           );
         }
 

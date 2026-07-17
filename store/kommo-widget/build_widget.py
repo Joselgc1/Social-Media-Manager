@@ -128,8 +128,14 @@ def _validate_manifest(manifest: dict, widget_code: str) -> None:
         raise WidgetBuildError(f"salesbot_designer.logo must be {expected_logo}")
     handler = salesbot.get("kommo_ai_request") or {}
     webhook = (handler.get("settings") or {}).get("webhook_url") or {}
-    if webhook.get("name") != "salesbot.webhook_url" or webhook.get("default_value") != "" or webhook.get("type") != "url" or webhook.get("manual") is not True:
-        raise WidgetBuildError("salesbot webhook_url must be a manual URL setting")
+    if (
+        webhook.get("name") != "salesbot.webhook_url"
+        or webhook.get("default_value") != ""
+        or webhook.get("type") != "url"
+        or webhook.get("manual") is not True
+        or webhook.get("required") is not True
+    ):
+        raise WidgetBuildError("salesbot webhook_url must be a required manual URL setting")
 
 
 def _validate_i18n_files(manifest: dict) -> None:

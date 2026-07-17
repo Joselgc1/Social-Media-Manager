@@ -854,7 +854,7 @@ Testing (DEBUG=true only — disabled in production):
 - **Kommo Salesbot callbacks return 401**
   Verify `KOMMO_INTEGRATION_SECRET`, `KOMMO_INTEGRATION_ID`, `KOMMO_SUBDOMAIN`, and the widget request JWT. Confirm the Salesbot widget URL points to `/webhooks/kommo/salesbot`.
 - **Kommo jobs stuck in `waiting_for_salesbot`**
-  Verify the uploaded widget is present in the Salesbot, the widget URL is reachable over HTTPS, and the Salesbot ID matches `KOMMO_SALESBOT_ID`.
+  The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. If this repeats, verify the uploaded widget is present in the Salesbot, the widget URL is reachable over HTTPS, and the Salesbot ID matches `KOMMO_SALESBOT_ID`.
 - **Kommo image payment screenshots are ignored**
   Direct media downloads are intentionally limited to trusted Meta/Instagram/Kommo hosts over HTTPS, with redirects disabled and a 5 MB size limit. Some Kommo media payloads may need manual production validation.
 - **WhatsApp "not registered"**  

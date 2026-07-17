@@ -192,6 +192,7 @@ async def test_stale_job_recovery_runs_all_updates(monkeypatch):
     assert mock_db.execute.await_count == 4
     assert result["failed_waiting"] == 1
     assert result["marked_delivery_unknown"] == 1
+    assert "COALESCE(salesbot_launched_at, updated_at, created_at)" in mock_db.execute.await_args_list[0].args[0]
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,10 @@ def normalize_kommo_webhook(payload: dict[str, Any]) -> list[NormalizedKommoEven
     for item in _as_list(data.get("add")):
         events.append(_message_event(item, "incoming_message"))
 
+    for item in _message_items(data.get("message")):
+        event_type = "outgoing_message" if _is_outgoing_message(item) else "incoming_message"
+        events.append(_message_event(item, event_type))
+
     for item in _as_list((data.get("outgoing_message") or {}).get("add")):
         events.append(_message_event(item, "outgoing_message"))
 
@@ -60,8 +64,8 @@ def origin_to_channel(origin: str | None) -> str | None:
 
 
 def _message_event(item: dict[str, Any], event_type: str) -> NormalizedKommoEvent:
-    author = item.get("author") or {}
-    attachment = item.get("attachment") or {}
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else {}
     origin = _string_or_none(item.get("origin"))
     media_url = None
     if attachment.get("type") in {"picture", "image"}:
@@ -72,9 +76,7 @@ def _message_event(item: dict[str, Any], event_type: str) -> NormalizedKommoEven
         chat_id=_string_or_none(item.get("chat_id")),
         talk_id=_string_or_none(item.get("talk_id")),
         contact_id=_string_or_none(item.get("contact_id")),
-        lead_id=_string_or_none(item.get("entity_id") or item.get("element_id"))
-        if (item.get("entity_type") or item.get("element_type")) in {"lead", "2", 2}
-        else None,
+        lead_id=_lead_id(item),
         entity_id=_string_or_none(item.get("entity_id") or item.get("element_id")),
         entity_type=_string_or_none(item.get("entity_type") or item.get("element_type")),
         text=_string_or_none(item.get("text")),
@@ -86,6 +88,34 @@ def _message_event(item: dict[str, Any], event_type: str) -> NormalizedKommoEven
         created_at=_timestamp(item.get("created_at")),
         media_url=media_url,
     )
+
+
+def _message_items(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return []
+    items = []
+    for key in ("add", "update"):
+        items.extend(item for item in _as_list(value.get(key)) if isinstance(item, dict))
+    if items:
+        return items
+    message_keys = {"id", "chat_id", "talk_id", "contact_id", "lead_id", "entity_id", "element_id", "text"}
+    return [value] if message_keys & set(value.keys()) else []
+
+
+def _lead_id(item: dict[str, Any]) -> str | None:
+    direct_lead_id = _string_or_none(item.get("lead_id"))
+    if direct_lead_id:
+        return direct_lead_id
+    if (item.get("entity_type") or item.get("element_type")) in {"lead", "2", 2}:
+        return _string_or_none(item.get("entity_id") or item.get("element_id"))
+    return None
+
+
+def _is_outgoing_message(item: dict[str, Any]) -> bool:
+    direction = str(item.get("type") or item.get("direction") or "").strip().lower()
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    author_type = str(author.get("type") or "").strip().lower()
+    return direction == "outgoing" or author_type == "internal"
 
 
 def _lead_update_event(item: dict[str, Any]) -> NormalizedKommoEvent:

@@ -312,7 +312,7 @@ Jobs marked `delivery_unknown` mean the backend started a Salesbot continuation 
 
 - `401` on Salesbot callback: verify JWT secret, subdomain, Integration ID, and expiration.
 - `return_url` rejected: ensure it is `https://{KOMMO_SUBDOMAIN}.kommo.com/...` with no userinfo or custom port.
-- Jobs stuck in `waiting_for_salesbot`: verify Salesbot widget URL and webhook reachability.
+- Jobs stuck in `waiting_for_salesbot`: the backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. Verify Salesbot widget URL and webhook reachability if this repeats.
 - Jobs in `delivery_unknown`: manually inspect the Kommo conversation before retrying or sending a replacement reply.
 - Jobs failed after AI Mode initialization: verify field and enum IDs.
 - No automatic reply: check global `ai_enabled`, local customer state, Kommo `AI Mode`, and job diagnostics.

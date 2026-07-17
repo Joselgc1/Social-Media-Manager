@@ -36,19 +36,32 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
     if not validate_webhook_secret(webhook_secret, config.kommo_webhook_secret):
         raise HTTPException(status_code=404, detail="Not found")
 
-    form = await request.form()
-    payload = {key: value for key, value in form.items() if isinstance(value, str)}
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+    else:
+        form = await request.form()
+        payload = {key: value for key, value in form.items() if isinstance(value, str)}
     events = normalize_kommo_webhook(payload)
+    logger.info(
+        "Kommo webhook normalized %s event(s) from top-level keys: %s",
+        len(events),
+        sorted(map(str, payload.keys()))[:8],
+    )
 
     launched_processing_task = False
     for event in events:
+        logger.info("Kommo event received: %s", _event_log_context(event))
         if event.event_type == "incoming_message":
             if event.author_type and event.author_type != "external":
+                logger.info("Kommo incoming message ignored because author is not external: %s", _event_log_context(event))
                 continue
             if event.channel not in {"whatsapp", "instagram"}:
                 logger.info("Kommo incoming message ignored for unsupported origin: %s", event.origin or "unknown")
                 continue
             result = await record_incoming_event(event)
+            logger.info("Kommo incoming message persisted result: %s", _safe_job_result(result))
             if result.get("status") in {"created", "merged"} and not launched_processing_task:
                 asyncio.create_task(schedule_due_job_processing())
                 launched_processing_task = True
@@ -59,7 +72,7 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
             continue
 
         if event.event_type == "outgoing_message":
-            logger.debug("Kommo outgoing message event recorded for diagnostics only.")
+            logger.info("Kommo outgoing message event ignored for auto-reply: %s", _event_log_context(event))
 
     return Response(content="OK", status_code=200)
 
@@ -92,3 +105,28 @@ async def _sync_lead_ai_mode(lead_id: str, enum_id: int) -> None:
         await set_conversation_state(str(mapping["customer_id"]), "active")
     elif enum_id in {config.kommo_ai_human_enum_id, config.kommo_ai_paused_enum_id}:
         await set_conversation_state(str(mapping["customer_id"]), "escalated")
+
+
+def _event_log_context(event) -> dict:
+    return {
+        "type": event.event_type,
+        "channel": event.channel,
+        "origin": event.origin,
+        "author_type": event.author_type,
+        "has_text": bool(event.text),
+        "has_media": bool(event.media_url),
+        "message_id": event.message_id,
+        "lead_id": event.lead_id,
+        "contact_id": event.contact_id,
+        "chat_id": event.chat_id,
+        "talk_id": event.talk_id,
+    }
+
+
+def _safe_job_result(result: dict) -> dict:
+    return {
+        "status": result.get("status"),
+        "job_id": result.get("job_id"),
+        "discarded_job_id": result.get("discarded_job_id"),
+        "reason": result.get("reason"),
+    }

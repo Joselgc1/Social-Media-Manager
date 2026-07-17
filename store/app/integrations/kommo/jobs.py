@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 MAX_JOB_ATTEMPTS = 3
 STALE_PROCESSING_MINUTES = 5
-STALE_WAITING_MINUTES = 30
+STALE_WAITING_MINUTES = 3
 _TERMINAL_STATUSES = {"sent", "discarded", "failed", "delivery_unknown"}
 _ACTIVE_SALESBOT_STATUSES = {"prepared", "waiting_for_salesbot", "ready", "processing", "continuing"}
 _TRANSIENT_CONTINUATION_STATUSES = {429, 500, 502, 503, 504}
@@ -128,7 +128,11 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
 
 async def schedule_due_job_processing(delay_seconds: float | None = None) -> None:
     await asyncio.sleep(delay_seconds if delay_seconds is not None else MESSAGE_DEBOUNCE_SECONDS + 0.2)
-    await process_pending_jobs(limit=5)
+    try:
+        processed = await process_pending_jobs(limit=5)
+        logger.info("Kommo pending job processor completed: processed=%s", processed)
+    except Exception as e:
+        logger.exception("Kommo pending job processor failed: %s", sanitize_job_error(e))
 
 
 async def process_pending_jobs(limit: int = 10) -> int:
@@ -138,8 +142,12 @@ async def process_pending_jobs(limit: int = 10) -> int:
     for _ in range(limit):
         job = await _claim_due_pending_job()
         if not job:
+            if processed == 0:
+                await _log_pending_claim_diagnostics()
             break
-        await _launch_salesbot_for_job(dict(job))
+        job_dict = dict(job)
+        logger.info("Kommo pending job claimed: %s", _job_log_context(job_dict))
+        await _launch_salesbot_for_job(job_dict)
         processed += 1
     return processed
 
@@ -152,7 +160,9 @@ async def process_ready_jobs(limit: int = 5) -> int:
         job = await _claim_ready_job()
         if not job:
             break
-        await _process_ready_job(dict(job))
+        job_dict = dict(job)
+        logger.info("Kommo ready job claimed: %s", _job_log_context(job_dict))
+        await _process_ready_job(job_dict)
         processed += 1
     return processed
 
@@ -160,6 +170,7 @@ async def process_ready_jobs(limit: int = 5) -> int:
 async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, claims: dict | None = None) -> dict:
     values = _callback_values(data, return_url, claims or {})
     if not (values.get("lead_id") or values.get("contact_id")):
+        logger.info("Kommo Salesbot callback ignored: missing_entity_id")
         return {"status": "ignored", "reason": "missing_entity_id"}
 
     job = await db.fetch_one(
@@ -190,11 +201,18 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         values,
     )
     if job:
+        logger.info("Kommo Salesbot callback matched waiting job: %s", _job_log_context(dict(job)))
         return {"status": "ready", "job_id": str(job["id"])}
 
     latest = await _find_latest_job_for_callback(data)
     if latest and latest["status"] in _TERMINAL_STATUSES | _ACTIVE_SALESBOT_STATUSES:
+        logger.info("Kommo Salesbot callback ignored as duplicate for job: %s", _job_log_context(dict(latest)))
         return {"status": "duplicate", "job_id": str(latest["id"])}
+    logger.info(
+        "Kommo Salesbot callback ignored: no_waiting_job lead_id=%s contact_id=%s",
+        data.lead_id,
+        data.contact_id,
+    )
     return {"status": "ignored", "reason": "no_waiting_job"}
 
 
@@ -207,7 +225,7 @@ async def recover_stale_jobs() -> dict:
             updated_at = NOW(),
             completed_at = NOW()
         WHERE status = 'waiting_for_salesbot'
-          AND salesbot_launched_at < NOW() - (:minutes * INTERVAL '1 minute')
+          AND COALESCE(salesbot_launched_at, updated_at, created_at) < NOW() - (:minutes * INTERVAL '1 minute')
         """,
         {"minutes": STALE_WAITING_MINUTES},
     )
@@ -250,6 +268,14 @@ async def recover_stale_jobs() -> dict:
         """,
         {"minutes": STALE_PROCESSING_MINUTES, "max_attempts": MAX_JOB_ATTEMPTS},
     )
+    if any(_affected_rows(value) for value in (failed_waiting, reset_processing, marked_delivery_unknown, marked_failed)):
+        logger.info(
+            "Kommo stale job recovery completed: failed_waiting=%s reset_processing=%s marked_delivery_unknown=%s marked_failed=%s",
+            failed_waiting,
+            reset_processing,
+            marked_delivery_unknown,
+            marked_failed,
+        )
     return {
         "failed_waiting": failed_waiting,
         "reset_processing": reset_processing,
@@ -327,6 +353,42 @@ async def _claim_due_pending_job():
     )
 
 
+async def _log_pending_claim_diagnostics() -> None:
+    pending = await db.fetch_one(
+        """
+        SELECT id, correlation_id, status, channel, origin, lead_id, contact_id, chat_id, talk_id,
+               combined_message, media_url, buffer_expires_at,
+               GREATEST(EXTRACT(EPOCH FROM (buffer_expires_at - NOW())), 0) AS seconds_until_due
+        FROM kommo_message_jobs
+        WHERE status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT 1
+        """
+    )
+    if not pending:
+        return
+
+    blockers = await db.fetch_all(
+        """
+        SELECT id, status, channel, origin, lead_id, contact_id, chat_id, talk_id,
+               combined_message, media_url, return_url, attempt_count, buffer_expires_at,
+               salesbot_launched_at, processing_started_at, created_at, updated_at, last_error
+        FROM kommo_message_jobs
+        WHERE correlation_id = :correlation_id
+          AND status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')
+          AND id <> :id
+        ORDER BY updated_at DESC
+        LIMIT 3
+        """,
+        {"correlation_id": pending["correlation_id"], "id": pending["id"]},
+    )
+    logger.info(
+        "Kommo pending claim skipped: pending=%s blockers=%s",
+        _job_log_context(dict(pending)),
+        [_job_log_context(dict(blocker)) | {"last_error": sanitize_job_error(blocker["last_error"]) if blocker["last_error"] else None} for blocker in blockers],
+    )
+
+
 async def _claim_ready_job():
     return await db.fetch_one(
         """
@@ -351,6 +413,7 @@ async def _claim_ready_job():
 
 async def _launch_salesbot_for_job(job: dict) -> None:
     try:
+        logger.info("Kommo Salesbot launch preparing job: %s", _job_log_context(job))
         settings = await db.get_settings()
         client = KommoClient.from_config()
         lead = await client.get_lead(job["lead_id"]) if job.get("lead_id") else None
@@ -372,6 +435,11 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             job_status=job.get("status"),
         )
         if not decision.allowed:
+            logger.info(
+                "Kommo job suppressed before Salesbot launch: job_id=%s reason=%s",
+                job["id"],
+                decision.reason,
+            )
             await _store_user_message_if_suppressed(customer, job)
             await _mark_job(job["id"], "discarded" if not decision.needs_ai_mode_initialization else "failed", decision.reason)
             return
@@ -379,6 +447,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
         entity_id = job.get("lead_id") or job.get("contact_id")
         entity_type = "leads" if job.get("lead_id") else "contacts"
         if not entity_id:
+            logger.warning("Kommo job failed before Salesbot launch: job_id=%s reason=missing_entity_id", job["id"])
             await _mark_job(job["id"], "failed", "missing_entity_id")
             return
         await client.run_salesbot(entity_id, entity_type)
@@ -393,7 +462,9 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             """,
             {"id": job["id"]},
         )
+        logger.info("Kommo job waiting for Salesbot callback: job_id=%s", job["id"])
     except Exception as e:
+        logger.exception("Kommo Salesbot launch failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         await _mark_job(job["id"], "failed", sanitize_job_error(e))
 
 
@@ -402,6 +473,7 @@ async def _process_ready_job(job: dict) -> None:
     client = KommoClient.from_config()
     continuation_started = False
     try:
+        logger.info("Kommo ready job processing started: %s", _job_log_context(job))
         settings = await db.get_settings()
         lead = await client.get_lead(job["lead_id"]) if job.get("lead_id") else None
         ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else config.kommo_ai_active_enum_id
@@ -418,6 +490,7 @@ async def _process_ready_job(job: dict) -> None:
             config=config,
         )
         if not before.allowed:
+            logger.info("Kommo ready job suppressed before AI response: job_id=%s reason=%s", job["id"], before.reason)
             await _store_user_message_if_suppressed(customer, job)
             await _continue_and_discard_job(client, job, before.reason)
             return
@@ -465,11 +538,17 @@ async def _process_ready_job(job: dict) -> None:
                 config=config,
             )
             if not after.allowed:
+                logger.info("Kommo ready job suppressed after AI response: job_id=%s reason=%s", job["id"], after.reason)
                 await _continue_and_discard_job(client, job, after.reason)
                 return
 
         mapped = map_ai_response_to_salesbot(result)
         if mapped.discarded:
+            logger.info(
+                "Kommo ready job produced no deliverable reply: job_id=%s reason=%s",
+                job["id"],
+                mapped.reason or "empty_response",
+            )
             await _continue_and_discard_job(client, job, mapped.reason or "empty_response")
             return
         await _mark_job_continuing(job["id"], mapped.execute_handlers)
@@ -478,11 +557,13 @@ async def _process_ready_job(job: dict) -> None:
         await _mark_job_sent(job["id"], response_payload)
         await _store_assistant_message_after_delivery(customer, job, result, mapped.customer_text)
     except KommoAPIError as e:
+        logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         if not continuation_started and job.get("return_url"):
             await _continue_and_discard_job(client, job, sanitize_job_error(e))
             return
         await _mark_job(job["id"], _status_after_continuation_error(e, continuation_started), sanitize_job_error(e))
     except Exception as e:
+        logger.exception("Kommo ready job failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         if not continuation_started and job.get("return_url"):
             await _continue_and_discard_job(client, job, sanitize_job_error(e))
             return
@@ -535,6 +616,7 @@ def _claim_as_str(claims: dict, key: str) -> str | None:
 async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str | None) -> None:
     continuation_started = False
     try:
+        logger.info("Kommo continuing Salesbot with finish handler: job_id=%s reason=%s", job["id"], reason)
         await _mark_job_continuing(job["id"], _FINISH_HANDLERS)
         continuation_started = True
         response_payload = await client.continue_salesbot(job["return_url"], _FINISH_HANDLERS)
@@ -573,6 +655,7 @@ async def _mark_job_sent(job_id: str, response_payload) -> None:
         """,
         {"id": job_id, "continuation_response": json.dumps({"response": response_payload})},
     )
+    logger.info("Kommo job marked sent: job_id=%s", job_id)
 
 
 async def _mark_job_discarded(job_id: str, reason: str | None, response_payload) -> None:
@@ -593,6 +676,7 @@ async def _mark_job_discarded(job_id: str, reason: str | None, response_payload)
             "continuation_response": json.dumps({"response": response_payload}),
         },
     )
+    logger.info("Kommo job marked discarded: job_id=%s reason=%s", job_id, reason)
 
 
 async def _store_assistant_message_after_delivery(customer: dict, job: dict, result: dict, customer_text: str | None) -> None:
@@ -632,6 +716,7 @@ async def _mark_job(job_id: str, status: str, error: str | None) -> None:
         """,
         {"status": status, "last_error": sanitize_job_error(error) if error else None, "id": job_id},
     )
+    logger.info("Kommo job marked %s: job_id=%s reason=%s", status, job_id, sanitize_job_error(error) if error else None)
 
 
 async def _store_user_message_if_suppressed(customer: dict, job: dict) -> None:
@@ -680,3 +765,40 @@ def _customer_profile_from_lead(job: dict, lead: dict | None) -> dict:
     if job.get("channel") == "instagram":
         profile["instagram_handle"] = None
     return profile
+
+
+def _job_log_context(job: dict) -> dict:
+    return {
+        "job_id": str(job.get("id")) if job.get("id") is not None else None,
+        "status": job.get("status"),
+        "channel": job.get("channel"),
+        "origin": job.get("origin"),
+        "lead_id": job.get("lead_id"),
+        "contact_id": job.get("contact_id"),
+        "chat_id": job.get("chat_id"),
+        "talk_id": job.get("talk_id"),
+        "has_message": bool(job.get("combined_message")),
+        "has_media": bool(job.get("media_url")),
+        "has_return_url": bool(job.get("return_url")),
+        "attempt_count": job.get("attempt_count"),
+        "seconds_until_due": float(job["seconds_until_due"]) if job.get("seconds_until_due") is not None else None,
+        "salesbot_launched_at": _timestamp_for_log(job.get("salesbot_launched_at")),
+        "processing_started_at": _timestamp_for_log(job.get("processing_started_at")),
+        "created_at": _timestamp_for_log(job.get("created_at")),
+        "updated_at": _timestamp_for_log(job.get("updated_at")),
+    }
+
+
+def _timestamp_for_log(value) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else (str(value) if value else None)
+
+
+def _affected_rows(value) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.rsplit(" ", 1)[-1])
+        except ValueError:
+            return 0
+    return 0
