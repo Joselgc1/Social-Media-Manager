@@ -77,7 +77,7 @@ def validate_salesbot_jwt(token: str, config) -> dict:
             token,
             config.kommo_integration_secret,
             algorithms=KOMMO_JWT_ALGORITHMS,
-            options={"verify_aud": False, "require": ["exp", "iss"]},
+            options={"verify_aud": False, "require": ["exp"]},
         )
     except jwt.ExpiredSignatureError as e:
         raise KommoAuthError("Expired Salesbot token") from e
@@ -85,16 +85,22 @@ def validate_salesbot_jwt(token: str, config) -> dict:
         raise KommoAuthError("Invalid Salesbot token") from e
 
     expected_subdomain = (config.kommo_subdomain or "").strip().lower()
+    expected_issuer = f"https://{kommo_account_hostname(expected_subdomain)}"
+
+    token_issuer = str(claims.get("iss") or "").rstrip("/")
+    if token_issuer and token_issuer != expected_issuer:
+        raise KommoAuthError("Salesbot token issuer mismatch")
+
     token_subdomain = str(claims.get("subdomain") or "").strip().lower()
     if token_subdomain and token_subdomain != expected_subdomain:
         raise KommoAuthError("Salesbot token subdomain mismatch")
+    if not token_issuer and not token_subdomain:
+        raise KommoAuthError("Salesbot token missing account identity")
 
-    expected_iss = f"https://{kommo_account_hostname(expected_subdomain)}"
-    if str(claims.get("iss") or "").rstrip("/") != expected_iss:
-        raise KommoAuthError("Salesbot token issuer mismatch")
-
-    client_uuid = str(claims.get("client_uuid") or "").strip()
-    if client_uuid and client_uuid != str(config.kommo_integration_id).strip():
+    client_id = str(claims.get("client_uid") or claims.get("client_uuid") or "").strip()
+    if client_id and client_id != str(config.kommo_integration_id).strip():
         raise KommoAuthError("Salesbot token integration mismatch")
+    if client_id:
+        claims["client_uuid"] = client_id
 
     return claims

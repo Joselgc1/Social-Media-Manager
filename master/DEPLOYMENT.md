@@ -4,7 +4,7 @@ How to deploy and manage multiple stores from a single Master Control Plane. Eac
 
 This guide has 7 parts. Part 1 sets up the master service infrastructure. Part 2 covers local testing. Part 3 deploys the master service. Part 4 shows how to add your first store. Part 5 covers adding subsequent stores and Railway credential deployment. Part 6 is the testing checklist. Part 7 is a quick reference.
 
-**Prerequisites:** You should already be familiar with deploying a single store. See the main `DEPLOYMENT.md` in the project root for the per-store deployment process (database, API keys, webhooks, etc.).
+**Prerequisites:** You should already be familiar with deploying a single store. See [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md) for the per-store deployment process, including the choice between direct Meta mode and Kommo mode.
 
 ---
 
@@ -285,14 +285,38 @@ Click on the store card to open the detail view. Under **Credentials**, add the 
 Click **"+ Add Credential"** and add each one:
 
 
-| Key                        | Value                |
-| -------------------------- | -------------------- |
-| `OPENAI_API_KEY`           | sk-...               |
-| `ANTHROPIC_API_KEY`        | sk-ant-...           |
-| `WHATSAPP_ACCESS_TOKEN`    | EAAG...              |
-| `WHATSAPP_PHONE_NUMBER_ID` | 123...               |
-| `TELEGRAM_BOT_TOKEN`       | 123:ABC...           |
-| ...                        | (all other env vars) |
+| Key | Value |
+| --- | ----- |
+| `CHANNEL_BACKEND` | `meta` or `kommo` |
+| `OPENAI_API_KEY` | sk-... |
+| `ANTHROPIC_API_KEY` | sk-ant-... |
+| `ADMIN_PASSWORD` | Store dashboard password |
+| `DATABASE_URL` | Store Supabase URL |
+| `GOOGLE_SHEETS_CREDENTIALS_B64` | Catalog service account JSON, base64 encoded |
+| `PRODUCT_SHEET_ID` | Store catalog sheet ID |
+| `STORE_NAME` | Store display name |
+| `OWNER_NAME` | Owner display name |
+| `APP_BASE_URL` | Store public URL |
+| `DEBUG` | `false` in production |
+| `TELEGRAM_BOT_TOKEN` | Optional Telegram bot token |
+| `TELEGRAM_ADMIN_CHAT_ID` | Optional Telegram admin chat ID |
+| `META_APP_SECRET` | Meta mode only |
+| `WHATSAPP_ACCESS_TOKEN` | Meta mode only |
+| `WHATSAPP_PHONE_NUMBER_ID` | Meta mode only |
+| `WHATSAPP_VERIFY_TOKEN` | Meta mode only |
+| `INSTAGRAM_ACCESS_TOKEN` | Optional Meta mode Instagram |
+| `INSTAGRAM_VERIFY_TOKEN` | Optional Meta mode Instagram |
+| `KOMMO_SUBDOMAIN` | Kommo mode only, subdomain only |
+| `KOMMO_ACCESS_TOKEN` | Kommo mode only |
+| `KOMMO_INTEGRATION_ID` | Kommo mode only |
+| `KOMMO_INTEGRATION_SECRET` | Kommo mode only |
+| `KOMMO_SALESBOT_ID` | Kommo mode only |
+| `KOMMO_WEBHOOK_SECRET` | Kommo mode only |
+| `KOMMO_AI_MODE_FIELD_ID` | Kommo mode only |
+| `KOMMO_AI_ACTIVE_ENUM_ID` | Kommo mode only |
+| `KOMMO_AI_HUMAN_ENUM_ID` | Kommo mode only |
+| `KOMMO_AI_PAUSED_ENUM_ID` | Kommo mode only |
+| `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` | Optional Kommo escalation assignee |
 
 
 All values are encrypted with Fernet before storage. The dashboard only shows masked values (e.g., `sk-p`**).
@@ -317,12 +341,12 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 ### 5.1 Set up external services for the new store
 
-Follow **Parts 1.1 through 1.6** of the main `DEPLOYMENT.md` (in the project root), but for the new store's accounts:
+Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), plus either the Meta section 1.7 or the Kommo migration guide, but for the new store's accounts:
 
-1. **New Supabase project** (e.g., "store-maria"). Run all 4 migrations (`001` through `004`).
+1. **New Supabase project** (e.g., "store-maria"). Run `store/migrations/001_schema.sql`. If the store uses Kommo, also run `store/migrations/002_kommo_integration.sql` and `store/migrations/003_kommo_hardening.sql`.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
-4. **Same Meta Developer App** (or a new one): Add their WhatsApp phone number and generate an access token.
+4. **Channel backend:** choose either direct Meta credentials or Kommo channel/private integration credentials for this store.
 5. **Same or new LLM API keys** (they can share API keys or have their own).
 
 ### 5.2 Deploy a new Railway service
@@ -330,10 +354,11 @@ Follow **Parts 1.1 through 1.6** of the main `DEPLOYMENT.md` (in the project roo
 - **Option A:** Same repo, new Railway service. In Railway, add a new service to the store's Railway project, deploy from the same GitHub repo, but with different environment variables.
 - **Option B:** Fork the repo. Create a separate GitHub repo for the new store and deploy from there.
 
-Either way, set the root directory to `/` (the store app, not master), and add all environment variables for the new store. Key variables to customize:
+Either way, set the Railway service root directory to `store/`, and add all environment variables for the new store. Key variables to customize:
 
 ```ini
 DATABASE_URL=postgresql://...          # NEW Supabase project
+CHANNEL_BACKEND=meta                   # Or kommo
 WHATSAPP_ACCESS_TOKEN=...              # NEW phone number token
 WHATSAPP_PHONE_NUMBER_ID=...           # NEW phone number ID
 TELEGRAM_BOT_TOKEN=...                 # NEW Telegram bot
@@ -346,15 +371,19 @@ ADMIN_PASSWORD=marias-secret-password  # Protects the store dashboard
 APP_BASE_URL=https://store-maria.railway.app
 ```
 
+For a Kommo store, replace the Meta WhatsApp values with the Kommo variables from [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md) and [`docs/KOMMO_MIGRATION.md`](../docs/KOMMO_MIGRATION.md). Make sure `KOMMO_SUBDOMAIN` is only the subdomain, not a full URL.
+
 Optionally, set `SYSTEM_PROMPT_OVERRIDE` to customize the AI persona for this store. If not set, it uses the default `prompts/system_prompt.md` file.
 
 ### 5.3 Connect webhooks for the new store
 
-Follow **Parts 4 and 6** of the main `DEPLOYMENT.md`, using the new store's Railway URL:
+Follow **Parts 4 and 6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), using the new store's Railway URL:
 
-1. **WhatsApp webhook:** `https://store-maria.railway.app/webhooks/whatsapp`
+1. **Meta mode WhatsApp webhook:** `https://store-maria.railway.app/webhooks/whatsapp`
 2. **Telegram webhook:** `POST https://store-maria.railway.app/admin/settings/telegram/setup-webhook`
-3. **Instagram webhook** (after App Review): `https://store-maria.railway.app/webhooks/instagram`
+3. **Meta mode Instagram webhook** (after App Review): `https://store-maria.railway.app/webhooks/instagram`
+4. **Kommo mode Salesbot URL:** `https://store-maria.railway.app/webhooks/kommo/salesbot`
+5. **Kommo mode general webhook:** `https://store-maria.railway.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`
 
 ### 5.4 Register in the master dashboard
 
@@ -481,6 +510,10 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 [ ] Store with LLM_MANAGED_EXTERNALLY=true -> PUT /admin/settings/llm_provider returns 403
 [ ] Store with LLM_MANAGED_EXTERNALLY=true -> Telegram /provider returns managed message
 [ ] Store without LLM_MANAGED_EXTERNALLY -> LLM controls work as normal
+[ ] Store with CHANNEL_BACKEND=meta -> Meta webhook routes are present and Kommo routes are absent
+[ ] Store with CHANNEL_BACKEND=kommo -> Kommo webhook routes are present and Meta routes are absent
+[ ] Kommo store -> GET /admin/settings/kommo/status returns sanitized diagnostics
+[ ] Kommo store -> POST /admin/settings/kommo/test verifies read-only Kommo API checks
 ```
 
 ### 6.2b AI Settings from Master
@@ -613,8 +646,8 @@ Master Control Plane (1 deployment)
 
 Store A (1 deployment)                   Store B (1 deployment)
   ├── Own Supabase DB                    ├── Own Supabase DB
-  ├── Own WhatsApp number                ├── Own WhatsApp number
-  ├── Own Instagram account              ├── Own Instagram account
+  ├── Own channel backend                ├── Own channel backend
+  │   (Meta or Kommo)                    │   (Meta or Kommo)
   ├── Own Telegram bot                   ├── Own Telegram bot
   ├── Own Google Sheet catalog           ├── Own Google Sheet catalog
   ├── Own LLM API keys                   ├── Own LLM API keys

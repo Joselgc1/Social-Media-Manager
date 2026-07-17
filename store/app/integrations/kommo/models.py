@@ -19,11 +19,14 @@ KommoEventType = Literal[
 ]
 KommoJobStatus = Literal[
     "pending",
+    "prepared",
     "waiting_for_salesbot",
     "ready",
     "processing",
+    "continuing",
     "sent",
     "discarded",
+    "delivery_unknown",
     "failed",
 ]
 
@@ -98,7 +101,10 @@ class SalesbotWidgetData(BaseModel):
     def _blank_to_none(cls, value):
         if value in ("", None):
             return None
-        return str(value)
+        text = str(value).strip()
+        if text.startswith("{{") and text.endswith("}}"):
+            return None
+        return text
 
 
 class SalesbotWidgetRequest(BaseModel):

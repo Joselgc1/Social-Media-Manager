@@ -6,7 +6,7 @@ The sales flow is tuned for Venezuelan operations: shipments are offered through
 
 Dashboard-managed runtime settings live in each store's `settings` table. That includes shared AI configuration plus master-managed scheduler timings such as `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, and the daily cron times. Store payment methods are persisted separately in the same table under `payment_methods` and are managed only from the store dashboard. When a store is connected to `master/`, both dashboards read and write the shared AI rows, and the master dashboard manages the scheduler rows.
 
-**Multi-store support:** A Master Control Plane (`master/`) lets you manage multiple independent store deployments from a single dashboard — each with its own database, API keys, WhatsApp number, and Telegram bot. See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the multi-store setup guide.
+**Multi-store support:** A Master Control Plane (`master/`) lets you manage multiple independent store deployments from a single dashboard — each with its own database, API keys, channel backend, and Telegram bot. See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the multi-store setup guide.
 
 ## Quick Start
 
@@ -27,6 +27,7 @@ cp store/.env.example store/.env
 #   store/migrations/001_schema.sql
 # For Kommo mode also run:
 #   store/migrations/002_kommo_integration.sql
+#   store/migrations/003_kommo_hardening.sql
 
 # 4. Run locally
 cd store
@@ -36,6 +37,17 @@ uvicorn app.main:app --reload --port 8000
 # Use ngrok or similar to get a public HTTPS URL
 ngrok http 8000
 ```
+
+## Deployment Guides
+
+| Goal | Guide |
+| :--- | :---- |
+| Deploy one store in direct Meta mode | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) |
+| Deploy one store in Kommo mode | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) plus [`docs/KOMMO_MIGRATION.md`](docs/KOMMO_MIGRATION.md) |
+| Manage multiple stores from one dashboard | [`master/DEPLOYMENT.md`](master/DEPLOYMENT.md) |
+| Build/upload the Kommo Salesbot widget | [`store/kommo-widget/README.md`](store/kommo-widget/README.md) |
+
+Use `CHANNEL_BACKEND=meta` for direct Meta WhatsApp/Instagram webhooks. Use `CHANNEL_BACKEND=kommo` when Kommo owns the official WhatsApp/Instagram channel integrations and this backend only receives Kommo events plus Salesbot callbacks.
 
 ## Architecture
 
@@ -172,6 +184,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 - Text-first WhatsApp and Instagram DM handling through Kommo Salesbot.
 - Salesbot buttons when supported, otherwise numbered text choices.
 - Product images and catalog PDF links degraded to text plus public URLs.
+- Durable Salesbot jobs track `delivery_unknown` when continuation delivery cannot be confirmed; inspect Kommo before manual retry.
 - Instagram public comments are handled by native Kommo comment automations that lead to a private DM; this app handles the resulting DM only.
 
 ## Telegram Admin Commands
@@ -239,6 +252,7 @@ If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API
 - **Dashboard sessions:** Both the store and master dashboards use dedicated login forms (`/admin/login` and `/login`), then set HTTP-only session cookies after successful authentication.
 - **Webhook verification:** WhatsApp and Instagram webhooks verify `X-Hub-Signature-256` using HMAC-SHA256 with timing-safe comparison.
 - **Kommo webhook verification:** General Kommo webhooks use a path secret with timing-safe comparison. Salesbot callbacks validate the Kommo JWT with HS256, the private integration secret, expiration, issuer/subdomain, Integration ID when present, and a strict `return_url` host check.
+- **Direct media download safety:** Payment-image downloads from direct URLs are limited to HTTPS URLs on trusted Meta/Instagram/Kommo host suffixes, with userinfo/custom ports rejected, redirects disabled, content-type checks, and a 5 MB size limit.
 - **Master auth:** All `/api/stores/` endpoints require Bearer token (`MASTER_SECRET_KEY`) or the `master_session` cookie. All token comparisons use `hmac.compare_digest`.
 - **Credentials at rest:** Store credentials in the master DB are Fernet-encrypted. API responses only return masked values.
 - **Test endpoints:** `/test/` routes are disabled in production (`DEBUG=false` for store, non-localhost for master).
@@ -266,8 +280,8 @@ Master Control Plane (1 deployment, port 9000)
 
 Store A (port 8000)          Store B (port 8001)          Store C ...
   ├── Own Supabase DB          ├── Own Supabase DB
-  ├── Own WhatsApp number      ├── Own WhatsApp number
-  ├── Own Instagram account    ├── Own Instagram account
+  ├── Own channel backend      ├── Own channel backend
+  │   (Meta or Kommo)          │   (Meta or Kommo)
   ├── Own Telegram bot         ├── Own Telegram bot
   ├── Own Google Sheet         ├── Own Google Sheet
   └── Own admin dashboard      └── Own admin dashboard

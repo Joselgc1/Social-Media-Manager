@@ -11,6 +11,11 @@ from app.integrations.kommo.models import NormalizedResponseOutput
 
 KOMMO_MAX_EXECUTE_HANDLERS = 10
 KOMMO_SHOW_VALUE_LIMIT = 80
+KOMMO_MAX_BUTTONS = 25
+
+
+class KommoResponseMappingError(ValueError):
+    """Raised when an AI response cannot be mapped to valid Salesbot handlers."""
 
 
 def _clean_text(text: str | None) -> str:
@@ -52,6 +57,8 @@ def _is_public_url(value: str | None) -> bool:
 
 def _append_text_handlers(handlers: list[dict], text: str) -> None:
     remaining_slots = KOMMO_MAX_EXECUTE_HANDLERS - 1 - len(handlers)
+    if remaining_slots <= 0:
+        return
     for chunk in _split_text(text)[:remaining_slots]:
         handlers.append(_text_handler(chunk))
 
@@ -73,10 +80,10 @@ def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
     if interactive.get("type") == "interactive_buttons":
         buttons = [_clean_text(str(btn)) for btn in interactive.get("buttons", []) if _clean_text(str(btn))]
         body_text = _clean_text(interactive.get("body_text"))
-        if buttons and len(buttons) <= 25 and len(body_text) <= KOMMO_SHOW_VALUE_LIMIT:
+        if buttons and len(buttons) <= KOMMO_MAX_BUTTONS and len(body_text) <= KOMMO_SHOW_VALUE_LIMIT:
             handlers.append({
                 "handler": "show",
-                "params": {"type": "buttons", "value": body_text or "Elige una opcion:", "buttons": buttons},
+                "params": {"type": "buttons", "value": body_text or "Elige una opcion:", "buttons": buttons[:KOMMO_MAX_BUTTONS]},
             })
             customer_parts.append(_buttons_as_numbered_text(body_text, buttons))
         else:
@@ -89,17 +96,16 @@ def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
         buttons = []
         for item in interactive.get("buttons", []):
             url = item.get("url") if isinstance(item, dict) else str(item)
-            label = item.get("text") if isinstance(item, dict) else str(item)
             if _is_public_url(url):
-                buttons.append({"text": _clean_text(label)[:40] or url, "url": url})
+                buttons.append(url)
         if buttons and len(body_text) <= KOMMO_SHOW_VALUE_LIMIT:
             handlers.append({
                 "handler": "show",
-                "params": {"type": "buttons_url", "value": body_text or "Abre el enlace:", "buttons": buttons[:25]},
+                "params": {"type": "buttons_url", "value": body_text or "Abre el enlace:", "buttons": buttons[:KOMMO_MAX_BUTTONS]},
             })
             customer_parts.append(body_text)
         else:
-            urls = "\n".join(item["url"] for item in buttons)
+            urls = "\n".join(buttons)
             text = "\n".join(part for part in (body_text, urls) if part)
             _append_text_handlers(handlers, text)
             customer_parts.append(text)
@@ -131,7 +137,43 @@ def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
 
     handlers = handlers[: KOMMO_MAX_EXECUTE_HANDLERS - 1]
     handlers.append(_finish_handler())
+    _validate_execute_handlers(handlers)
     return NormalizedResponseOutput(
         execute_handlers=handlers,
         customer_text="\n".join(part for part in customer_parts if part).strip() or None,
     )
+
+
+def _validate_execute_handlers(handlers: list[dict]) -> None:
+    if len(handlers) > KOMMO_MAX_EXECUTE_HANDLERS:
+        raise KommoResponseMappingError("Too many Salesbot execute_handlers")
+    for handler in handlers:
+        name = handler.get("handler")
+        params = handler.get("params") or {}
+        if name == "show":
+            value = str(params.get("value") or "")
+            if len(value) > KOMMO_SHOW_VALUE_LIMIT:
+                raise KommoResponseMappingError("Salesbot show value exceeds 80 characters")
+            show_type = params.get("type")
+            if show_type == "text":
+                continue
+            if show_type == "buttons":
+                buttons = params.get("buttons") or []
+                if not isinstance(buttons, list) or len(buttons) > KOMMO_MAX_BUTTONS:
+                    raise KommoResponseMappingError("Salesbot buttons payload is invalid")
+                continue
+            if show_type == "buttons_url":
+                buttons = params.get("buttons") or []
+                if not isinstance(buttons, list) or len(buttons) > KOMMO_MAX_BUTTONS:
+                    raise KommoResponseMappingError("Salesbot URL buttons payload is invalid")
+                if any(not _is_public_url(str(url)) for url in buttons):
+                    raise KommoResponseMappingError("Salesbot URL buttons must be public HTTPS URLs")
+                continue
+            raise KommoResponseMappingError("Unsupported Salesbot show handler type")
+        if name == "goto":
+            if params.get("type") not in {"question", "answer", "finish"}:
+                raise KommoResponseMappingError("Unsupported Salesbot goto handler type")
+            if "step" not in params:
+                raise KommoResponseMappingError("Salesbot goto handler is missing step")
+            continue
+        raise KommoResponseMappingError("Unsupported Salesbot execute_handler")

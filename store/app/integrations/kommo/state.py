@@ -45,7 +45,7 @@ def evaluate_automation_state(
         return AutomationDecision(False, "local_blocked")
     if local_conversation_state == "escalated":
         return AutomationDecision(False, "local_escalated")
-    if job_status in {"sent", "discarded", "failed"}:
+    if job_status in {"sent", "discarded", "failed", "delivery_unknown"}:
         return AutomationDecision(False, f"job_{job_status}")
     if kommo_ai_mode_enum_id is None:
         return AutomationDecision(False, "kommo_ai_mode_empty", needs_ai_mode_initialization=True)
@@ -110,28 +110,32 @@ async def sync_escalation_to_kommo(
     reason: str,
     urgency: str,
     conversation_summary: str,
+    lead_id: str | None = None,
 ) -> None:
     config = get_config()
     if config.channel_backend != "kommo":
         return
 
     try:
-        from app.crm.channel_mappings import get_mapping_by_customer
+        if lead_id:
+            target_lead_id = str(lead_id)
+        else:
+            from app.crm.channel_mappings import get_mapping_by_customer
 
-        mapping = await get_mapping_by_customer(customer_id, provider="kommo")
-        if not mapping or not mapping.get("external_lead_id"):
-            return
-        lead_id = str(mapping["external_lead_id"])
+            mapping = await get_mapping_by_customer(customer_id, provider="kommo")
+            if not mapping or not mapping.get("external_lead_id"):
+                return
+            target_lead_id = str(mapping["external_lead_id"])
         client = KommoClient.from_config()
-        await client.update_ai_mode(lead_id, int(config.kommo_ai_human_enum_id))
+        await client.update_ai_mode(target_lead_id, int(config.kommo_ai_human_enum_id))
         if config.kommo_default_responsible_user_id:
-            await client.change_responsible_user(lead_id, int(config.kommo_default_responsible_user_id))
+            await client.change_responsible_user(target_lead_id, int(config.kommo_default_responsible_user_id))
         note = (
             "Eva escalated this conversation to a human.\n"
             f"Urgency: {urgency}\n"
             f"Reason: {reason}\n\n"
             f"Recent summary:\n{conversation_summary}"
         )
-        await client.add_note(lead_id, note)
+        await client.add_note(target_lead_id, note)
     except Exception as e:
         logger.warning("Kommo escalation sync failed: %s", sanitize_kommo_error(e))

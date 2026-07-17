@@ -144,9 +144,41 @@ async def test_atomic_job_claiming_prevents_concurrent_salesbot_runs(monkeypatch
 async def test_duplicate_callback_prevention(monkeypatch):
     from app.integrations.kommo import jobs
 
-    monkeypatch.setattr(jobs, "_find_waiting_job_for_callback", AsyncMock(return_value={"id": "job", "status": "sent"}))
-    result = await jobs.persist_salesbot_callback(SalesbotWidgetData(lead_id="100"), "https://acme.kommo.com/api/v4/salesbot/1/continue/2")
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[None, {"id": "job", "status": "sent"}])
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(lead_id="100"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {"jti": "token-id", "account_id": 123, "user_id": 456, "client_uid": "client-uuid"},
+    )
     assert result == {"status": "duplicate", "job_id": "job"}
+    claim_query = mock_db.fetch_one.await_args_list[0].args[0]
+    claim_values = mock_db.fetch_one.await_args_list[0].args[1]
+    assert "FOR UPDATE SKIP LOCKED" in claim_query
+    assert "callback_claims" in claim_query
+    assert claim_values["salesbot_token_jti"] == "token-id"
+
+
+@pytest.mark.asyncio
+async def test_ready_job_discard_continues_salesbot_before_marking_discarded(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    job = {"id": "job", "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2"}
+
+    await jobs._continue_and_discard_job(client, job, "global_ai_paused")
+
+    client.continue_salesbot.assert_awaited_once()
+    assert mock_db.execute.await_count == 2
+    assert "status = 'continuing'" in mock_db.execute.await_args_list[0].args[0]
+    assert "status = 'discarded'" in mock_db.execute.await_args_list[1].args[0]
 
 
 @pytest.mark.asyncio
@@ -157,8 +189,9 @@ async def test_stale_job_recovery_runs_all_updates(monkeypatch):
     mock_db.execute = AsyncMock(return_value=1)
     monkeypatch.setattr(jobs, "db", mock_db)
     result = await jobs.recover_stale_jobs()
-    assert mock_db.execute.await_count == 3
+    assert mock_db.execute.await_count == 4
     assert result["failed_waiting"] == 1
+    assert result["marked_delivery_unknown"] == 1
 
 
 @pytest.mark.asyncio

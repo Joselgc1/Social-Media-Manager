@@ -9,6 +9,7 @@ from app.integrations.kommo.auth import (
     validate_salesbot_jwt,
     validate_webhook_secret,
 )
+from app.integrations.kommo.models import SalesbotWidgetData
 from app.integrations.kommo.response_mapper import map_ai_response_to_salesbot
 from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, origin_to_channel, parse_nested_form
 
@@ -29,7 +30,7 @@ def _token(config=None, **claims):
     payload = {
         "iss": "https://acme.kommo.com",
         "subdomain": "acme",
-        "client_uuid": "client-uuid",
+        "client_uid": "client-uuid",
         "exp": datetime.now(UTC) + timedelta(minutes=5),
     }
     payload.update(claims)
@@ -69,15 +70,29 @@ def test_unexpected_algorithm_rejected():
 
 def test_integration_id_and_subdomain_claims_validated():
     with pytest.raises(KommoAuthError, match="integration"):
-        validate_salesbot_jwt(_token(client_uuid="other"), _config())
+        validate_salesbot_jwt(_token(client_uid="other"), _config())
     with pytest.raises(KommoAuthError, match="subdomain"):
         validate_salesbot_jwt(_token(subdomain="other"), _config())
+
+
+def test_salesbot_jwt_accepts_legacy_client_uuid_claim():
+    claims = validate_salesbot_jwt(_token(client_uid=None, client_uuid="client-uuid"), _config())
+    assert claims["client_uuid"] == "client-uuid"
+
+
+def test_salesbot_jwt_accepts_subdomain_without_issuer():
+    claims = validate_salesbot_jwt(_token(iss=None), _config())
+    assert claims["subdomain"] == "acme"
 
 
 def test_missing_required_claims_handled_safely():
     token = jwt.encode({"subdomain": "acme"}, "secret", algorithm="HS256")
     with pytest.raises(KommoAuthError):
         validate_salesbot_jwt(token, _config())
+
+    missing_account = jwt.encode({"exp": datetime.now(UTC) + timedelta(minutes=5)}, "secret", algorithm="HS256")
+    with pytest.raises(KommoAuthError, match="account identity"):
+        validate_salesbot_jwt(missing_account, _config())
 
 
 def test_general_webhook_secret_constant_time_acceptance():
@@ -167,6 +182,12 @@ def test_missing_optional_and_unknown_events_are_safe():
     assert normalize_kommo_webhook({"unsupported[0][id]": "x"}) == []
 
 
+def test_salesbot_widget_data_ignores_unresolved_placeholders():
+    data = SalesbotWidgetData(lead_id="{{lead.id}}", contact_id="42")
+    assert data.lead_id is None
+    assert data.contact_id == "42"
+
+
 def test_origin_mapping():
     assert origin_to_channel("whatsapp") == "whatsapp"
     assert origin_to_channel("instagram") == "instagram"
@@ -187,6 +208,24 @@ def test_text_button_image_and_pdf_response_mapping(monkeypatch):
     assert "https://cdn.example/p.jpg" in all_values
     assert "https://store.example/static/catalog/catalog.pdf" in all_values
     assert output.execute_handlers[-1]["handler"] == "goto"
+
+
+def test_url_buttons_are_schema_valid_and_limited(monkeypatch):
+    monkeypatch.setattr(
+        "app.integrations.kommo.response_mapper.get_config",
+        lambda: SimpleNamespace(app_base_url="https://store.example"),
+    )
+    output = map_ai_response_to_salesbot({
+        "interactive": {
+            "type": "buttons_url",
+            "body_text": "Abre",
+            "buttons": [{"text": "Catalogo", "url": "https://store.example/catalog.pdf"}],
+        }
+    })
+    handler = output.execute_handlers[0]
+    assert handler["params"]["type"] == "buttons_url"
+    assert handler["params"]["buttons"] == ["https://store.example/catalog.pdf"]
+    assert len(handler["params"]["value"]) <= 80
 
 
 @pytest.mark.asyncio

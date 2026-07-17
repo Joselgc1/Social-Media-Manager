@@ -20,6 +20,7 @@ from app.integrations.kommo.jobs import (
     persist_salesbot_callback,
     process_ready_jobs,
     record_incoming_event,
+    sanitize_job_error,
     schedule_due_job_processing,
 )
 from app.integrations.kommo.models import SalesbotWidgetRequest
@@ -69,13 +70,13 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
     try:
         body = await request.json()
         callback = SalesbotWidgetRequest.model_validate(body)
-        validate_salesbot_jwt(callback.token, config)
+        claims = validate_salesbot_jwt(callback.token, config)
         return_url = validate_return_url(callback.return_url, config.kommo_subdomain)
     except (ValueError, KommoAuthError) as e:
-        logger.warning("Rejected Kommo Salesbot callback: %s", str(e))
+        logger.warning("Rejected Kommo Salesbot callback: %s", sanitize_job_error(e))
         raise HTTPException(status_code=401, detail="Invalid Salesbot callback") from e
 
-    result = await persist_salesbot_callback(callback.data, return_url)
+    result = await persist_salesbot_callback(callback.data, return_url, claims)
     if result.get("status") == "ready":
         background_tasks.add_task(process_ready_jobs, 3)
 

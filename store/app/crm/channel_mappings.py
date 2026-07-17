@@ -69,29 +69,6 @@ async def upsert_mapping(
     external_talk_id: str | None = None,
     external_origin: str | None = None,
 ) -> dict:
-    row = await db.fetch_one(
-        """
-        SELECT id FROM customer_channel_mappings
-        WHERE provider = :provider
-          AND channel = :channel
-          AND (
-              (:external_contact_id IS NOT NULL AND external_contact_id = :external_contact_id)
-              OR (:external_lead_id IS NOT NULL AND external_lead_id = :external_lead_id)
-              OR (:external_chat_id IS NOT NULL AND external_chat_id = :external_chat_id)
-              OR (:external_talk_id IS NOT NULL AND external_talk_id = :external_talk_id)
-          )
-        ORDER BY updated_at DESC
-        LIMIT 1
-        """,
-        {
-            "provider": provider,
-            "channel": channel,
-            "external_contact_id": external_contact_id,
-            "external_lead_id": external_lead_id,
-            "external_chat_id": external_chat_id,
-            "external_talk_id": external_talk_id,
-        },
-    )
     values = {
         "customer_id": customer_id,
         "provider": provider,
@@ -102,6 +79,7 @@ async def upsert_mapping(
         "external_talk_id": external_talk_id,
         "external_origin": external_origin,
     }
+    row = await _find_mapping_for_upsert(values)
     if row:
         await db.execute(
             """
@@ -120,7 +98,7 @@ async def upsert_mapping(
         mapping = await db.fetch_one("SELECT * FROM customer_channel_mappings WHERE id = :id", {"id": row["id"]})
         return dict(mapping)
 
-    mapping_id = await db.execute(
+    inserted = await db.fetch_one(
         """
         INSERT INTO customer_channel_mappings (
             customer_id, provider, channel, external_contact_id, external_lead_id,
@@ -129,10 +107,33 @@ async def upsert_mapping(
             :customer_id, :provider, :channel, :external_contact_id, :external_lead_id,
             :external_chat_id, :external_talk_id, :external_origin
         )
+        ON CONFLICT DO NOTHING
         RETURNING id
         """,
         values,
     )
+    if not inserted:
+        row = await _find_mapping_for_upsert(values)
+        if not row:
+            raise RuntimeError("Could not upsert customer channel mapping")
+        await db.execute(
+            """
+            UPDATE customer_channel_mappings
+            SET customer_id = :customer_id,
+                external_contact_id = COALESCE(:external_contact_id, external_contact_id),
+                external_lead_id = COALESCE(:external_lead_id, external_lead_id),
+                external_chat_id = COALESCE(:external_chat_id, external_chat_id),
+                external_talk_id = COALESCE(:external_talk_id, external_talk_id),
+                external_origin = COALESCE(:external_origin, external_origin),
+                updated_at = NOW()
+            WHERE id = :id
+            """,
+            values | {"id": row["id"]},
+        )
+        mapping = await db.fetch_one("SELECT * FROM customer_channel_mappings WHERE id = :id", {"id": row["id"]})
+        return dict(mapping)
+
+    mapping_id = inserted["id"]
     mapping = await db.fetch_one("SELECT * FROM customer_channel_mappings WHERE id = :id", {"id": mapping_id})
     return dict(mapping)
 
@@ -190,8 +191,8 @@ async def _lookup_existing_kommo_mapping(job: dict) -> dict | None:
     for key, value in (
         ("external_lead_id", job.get("lead_id")),
         ("external_chat_id", job.get("chat_id")),
-        ("external_contact_id", job.get("contact_id")),
         ("external_talk_id", job.get("talk_id")),
+        ("external_contact_id", job.get("contact_id")),
     ):
         if not value:
             continue
@@ -214,6 +215,34 @@ async def _lookup_one(provider: str, column: str, value: str) -> dict | None:
         {"provider": provider, "value": value},
     )
     return dict(row) if row else None
+
+
+async def _find_mapping_for_upsert(values: dict[str, Any]) -> dict | None:
+    lookup_order = (
+        ("external_lead_id", values.get("external_lead_id")),
+        ("external_chat_id", values.get("external_chat_id")),
+        ("external_talk_id", values.get("external_talk_id")),
+    )
+    if not any(value for _, value in lookup_order):
+        lookup_order += (("external_contact_id", values.get("external_contact_id")),)
+
+    for column, value in lookup_order:
+        if not value:
+            continue
+        row = await db.fetch_one(
+            f"""
+            SELECT id FROM customer_channel_mappings
+            WHERE provider = :provider
+              AND channel = :channel
+              AND {column} = :value
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            {"provider": values["provider"], "channel": values["channel"], "value": value},
+        )
+        if row:
+            return dict(row)
+    return None
 
 
 def _local_platform_id(job: dict[str, Any]) -> str:

@@ -293,9 +293,11 @@ async def health():
         "scheduler": "running" if scheduler.running else "stopped",
         "channels": {
             "backend": config.channel_backend,
-            "whatsapp": bool(config.whatsapp_access_token) if config.channel_backend == "meta" else True,
-            "instagram": bool(config.instagram_access_token) if config.channel_backend == "meta" else True,
+            "whatsapp": bool(config.whatsapp_access_token) if config.channel_backend == "meta" else False,
+            "instagram": bool(config.instagram_access_token) if config.channel_backend == "meta" else False,
             "kommo": config.channel_backend == "kommo",
+            "whatsapp_via_kommo": config.channel_backend == "kommo",
+            "instagram_via_kommo": config.channel_backend == "kommo",
         },
         "providers": list_providers(),
         "active_provider": settings.get("llm_provider"),

@@ -127,34 +127,52 @@ Run migrations manually in Supabase SQL Editor:
 
 1. `store/migrations/001_schema.sql` for fresh databases.
 2. `store/migrations/002_kommo_integration.sql` for Kommo tables and indexes.
+3. `store/migrations/003_kommo_hardening.sql` for callback claim storage, continuation tracking, `delivery_unknown`, and lead-safe contact mappings.
 
-`002_kommo_integration.sql` adds `customer_channel_mappings` and `kommo_message_jobs` without changing existing customer, order, conversation, usage, or broadcast rows.
+`002_kommo_integration.sql` adds `customer_channel_mappings` and `kommo_message_jobs` without changing existing customer, order, conversation, usage, or broadcast rows. It also adds indexes that keep one pending debounce job per Kommo conversation and one active Salesbot job per conversation.
+
+`003_kommo_hardening.sql` is non-destructive. It drops the old contact-only unique index so one Kommo contact can have multiple lead mappings, expands job statuses, and adds JSONB fields for the last Salesbot callback/continuation metadata.
 
 ## Widget Build
 
+Create or open the private Kommo integration and copy the Widget code first.
+
 ```bash
 cd store/kommo-widget
-python3 build_widget.py
+python3 build_widget.py --widget-code YOUR_WIDGET_CODE
 ```
 
-The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
+Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
 
-## Widget Upload
+## Widget Installation
 
-1. Open the private Kommo integration.
-2. Upload `social-media-manager-kommo-widget.zip`.
-3. Confirm the widget is available in `salesbot_designer`.
-4. Verify the widget placeholders in the real account before production.
+1. Create or open the private Kommo integration.
+2. Obtain the Widget code.
+3. Build with `python3 build_widget.py --widget-code YOUR_WIDGET_CODE`.
+4. Upload `social-media-manager-kommo-widget.zip` to the private integration.
+5. Save the integration.
+6. Return to Settings -> Integrations.
+7. Open the Social Media Manager widget.
+8. Enter `https://YOUR-STORE-DOMAIN/webhooks/kommo/salesbot` in `backend_url`.
+9. Enable/install it and save the settings.
+10. Refresh Kommo.
+11. Open Salesbot.
+12. Add a Widget step.
+13. Select Social Media Manager AI from the installed widget list.
+
+The widget must be installed from Settings -> Integrations before it is expected to appear as an installed widget in Salesbot. The manifest intentionally uses `installation=true`, top-level `settings.backend_url`, and both `settings` and `salesbot_designer` locations.
+
+If invalid manifests were previously uploaded and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive.
 
 ## Salesbot Creation
 
-Create a Salesbot that contains the uploaded widget step. Configure the widget URL as:
+Create a Salesbot that contains the installed widget step. If needed, override the block URL as:
 
 ```text
 https://<store-domain>/webhooks/kommo/salesbot
 ```
 
-The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, `{{origin}}`, and `{{lead.responsible.id}}` where supported.
+The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, and `{{origin}}`. Its saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`.
 
 ## Salesbot ID Retrieval
 
@@ -180,17 +198,38 @@ The path secret is compared with constant-time comparison. Do not reuse producti
 
 ## Railway Configuration
 
-Set store service variables in Railway directly or through the master dashboard credential manager. Do not deploy automatically from this guide. Redeploy only after verifying all variables and migration state.
+Set the store Railway service root directory to `store/`. Set store service variables in Railway directly or through the master dashboard credential manager. Do not deploy automatically from this guide. Redeploy only after verifying all variables and migration state.
+
+When using the master dashboard to deploy credentials, store all Kommo variables as normal encrypted store credentials. The master does not interpret the values; it pushes them to Railway and triggers the store redeploy.
 
 ## Kommo Mode Activation
 
-1. Run `002_kommo_integration.sql`.
+1. Run `002_kommo_integration.sql` and `003_kommo_hardening.sql`.
 2. Upload the widget.
 3. Create and test the Salesbot.
 4. Register the general webhook.
 5. Set all Kommo env vars.
 6. Set `CHANNEL_BACKEND=kommo`.
 7. Redeploy manually when ready.
+
+## Production Go-Live Checklist
+
+```text
+[ ] Store Railway root directory is store/
+[ ] 001_schema.sql has already been run
+[ ] 002_kommo_integration.sql has been run once for this store DB
+[ ] 003_kommo_hardening.sql has been run once for this store DB
+[ ] CHANNEL_BACKEND=kommo is set in the store environment
+[ ] All required KOMMO_* variables are set
+[ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL
+[ ] Widget ZIP uploaded to the private integration
+[ ] Widget installed from Settings -> Integrations with backend_url=https://<store-domain>/webhooks/kommo/salesbot
+[ ] Social Media Manager AI appears in Salesbot as an installed widget
+[ ] General webhook points to https://<store-domain>/webhooks/kommo/events/<secret>
+[ ] /admin/settings/kommo/test passes with admin auth
+[ ] A real WhatsApp or Instagram DM produces one customer reply through Kommo
+[ ] AI Mode=Human suppresses future AI replies
+```
 
 ## WhatsApp Test Procedure
 
@@ -234,7 +273,17 @@ The first release is text-first. Product images become caption plus public image
 
 ## Payment-Image Limitations
 
-If Kommo provides a direct HTTPS image URL, the existing vision flow can attempt a safe download with timeout, content-type, redirect, and size limits. If Kommo provides only an inaccessible media identifier, the app stores the message and does not treat it as a URL. Real Kommo image payloads require production validation.
+If Kommo provides a direct HTTPS image URL, the existing vision flow can attempt a safe download only when the URL host is a trusted Meta/Instagram/Kommo host suffix. The downloader rejects userinfo, custom ports, non-HTTPS URLs, IP literals, localhost, redirects, non-image content types, and files over 5 MB. If Kommo provides only an inaccessible media identifier or an untrusted URL, the app stores the message and does not treat it as downloadable media. Real Kommo image payloads still require production validation.
+
+Current trusted direct-media host suffixes are:
+
+- `amocrm.com`
+- `cdninstagram.com`
+- `facebook.com`
+- `fbcdn.net`
+- `fbsbx.com`
+- `instagram.com`
+- `kommo.com`
 
 ## Broadcast Limitation
 
@@ -255,11 +304,16 @@ Authenticated endpoints:
 
 They return booleans, timestamps, counts, and sanitized errors only. They do not return tokens, secrets, JWTs, phone numbers, full messages, or raw payloads.
 
+## Delivery-Unknown Reconciliation
+
+Jobs marked `delivery_unknown` mean the backend started a Salesbot continuation but could not confirm whether Kommo accepted it, usually because of a timeout, transient 5xx/429 response, or process interruption while status was `continuing`. Do not blindly retry these jobs. First check the Kommo lead/chat to see whether the customer already received the message, then either leave the job as an audit record or reconcile manually with a one-off human reply.
+
 ## Troubleshooting
 
 - `401` on Salesbot callback: verify JWT secret, subdomain, Integration ID, and expiration.
 - `return_url` rejected: ensure it is `https://{KOMMO_SUBDOMAIN}.kommo.com/...` with no userinfo or custom port.
 - Jobs stuck in `waiting_for_salesbot`: verify Salesbot widget URL and webhook reachability.
+- Jobs in `delivery_unknown`: manually inspect the Kommo conversation before retrying or sending a replacement reply.
 - Jobs failed after AI Mode initialization: verify field and enum IDs.
 - No automatic reply: check global `ai_enabled`, local customer state, Kommo `AI Mode`, and job diagnostics.
 

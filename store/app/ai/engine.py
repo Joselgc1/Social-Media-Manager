@@ -63,6 +63,9 @@ async def generate_response(
     message_text: str,
     media_url: str | None = None,
     customer_profile: dict | None = None,
+    customer_id: str | None = None,
+    integration_context: dict | None = None,
+    persist_assistant_message: bool = True,
 ) -> dict:
     """
     Full pipeline: message in -> AI response out.
@@ -81,13 +84,19 @@ async def generate_response(
     payment_methods = settings.get("payment_methods", [])
 
     # ── 2. Get or create customer ────────────────────────────
-    customer = await customers.get_or_create_customer(
-        channel=channel,
-        platform_id=sender_id,
-        display_name=(customer_profile or {}).get("display_name"),
-        phone=(customer_profile or {}).get("phone"),
-        instagram_handle=(customer_profile or {}).get("instagram_handle"),
-    )
+    if customer_id:
+        customer_row = await db.fetch_one("SELECT * FROM customers WHERE id = :id", {"id": customer_id})
+        customer = dict(customer_row) if customer_row else None
+    else:
+        customer = None
+    if not customer:
+        customer = await customers.get_or_create_customer(
+            channel=channel,
+            platform_id=sender_id,
+            display_name=(customer_profile or {}).get("display_name"),
+            phone=(customer_profile or {}).get("phone"),
+            instagram_handle=(customer_profile or {}).get("instagram_handle"),
+        )
 
     # ── 2b. Check if AI is paused (globally or per-customer) ─
     ai_enabled = settings.get("ai_enabled", True)
@@ -145,6 +154,7 @@ async def generate_response(
             reason=hostility_reason,
             urgency="high",
             conversation_summary=summary,
+            lead_id=(integration_context or {}).get("lead_id"),
         )
         await notify_escalation(
             customer_name=customer.get("display_name"),
@@ -158,12 +168,13 @@ async def generate_response(
             "Voy a dejar esta conversación en manos de una persona del equipo "
             "para que te atienda directamente."
         )
-        await conversations.store_message(
-            customer_id=customer["id"],
-            role="assistant",
-            content=handoff_text,
-            channel=channel,
-        )
+        if persist_assistant_message:
+            await conversations.store_message(
+                customer_id=customer["id"],
+                role="assistant",
+                content=handoff_text,
+                channel=channel,
+            )
         return {
             "text": handoff_text,
             "interactive": None,
@@ -227,10 +238,12 @@ async def generate_response(
     vision_result = None
     payment_proof_attempt = False
     if media_url:
+        direct_media_url = bool((integration_context or {}).get("media_url_is_direct"))
+        vision_channel = "instagram" if direct_media_url else channel
         vision_result = await analyze_payment_screenshot(
-            media_id=media_url if channel == "whatsapp" else None,
-            media_url=media_url if channel == "instagram" else None,
-            channel=channel,
+            media_id=media_url if vision_channel == "whatsapp" else None,
+            media_url=media_url if vision_channel != "whatsapp" else None,
+            channel=vision_channel,
         )
         if vision_result.get("analyzed"):
             payment_proof_attempt = _looks_like_payment_proof_message(message_text, vision_result)
@@ -254,12 +267,13 @@ async def generate_response(
             f"{greeting_name.capitalize()}, todavía no tengo el pedido registrado para poder validar ese comprobante. "
             "Déjame primero dejarte el pedido armado y enseguida seguimos con el pago."
         )
-        await conversations.store_message(
-            customer_id=customer["id"],
-            role="assistant",
-            content=reply_text,
-            channel=channel,
-        )
+        if persist_assistant_message:
+            await conversations.store_message(
+                customer_id=customer["id"],
+                role="assistant",
+                content=reply_text,
+                channel=channel,
+            )
         return {
             "text": reply_text,
             "interactive": None,
@@ -348,6 +362,7 @@ async def generate_response(
                 vision_result=vision_result,
                 payment_proof_attempt=payment_proof_attempt,
                 latest_user_message=message_text,
+                integration_context=integration_context,
             )
             if name in {"create_order", "update_payment_status"} and result.get("status") != "error":
                 single_use_tool_results[name] = result
@@ -433,13 +448,14 @@ async def generate_response(
         reply_text = response.text or "Lo siento, no pude generar una respuesta. ¿Puedes repetir tu pregunta?"
     reply_text = _clean_assistant_reply_text(reply_text) or "Lo siento, no pude generar una respuesta. ¿Puedes repetir tu pregunta?"
 
-    await conversations.store_message(
-        customer_id=customer["id"],
-        role="assistant",
-        content=reply_text,
-        channel=channel,
-        function_calls=tool_log if tool_log else None,
-    )
+    if persist_assistant_message:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="assistant",
+            content=reply_text,
+            channel=channel,
+            function_calls=tool_log if tool_log else None,
+        )
 
     return {
         "text": reply_text,
@@ -448,6 +464,7 @@ async def generate_response(
         "product_image": product_image_payload,
         "customer_id": customer["id"],
         "escalated": False,
+        "function_calls": tool_log if tool_log else None,
     }
 
 
@@ -480,6 +497,7 @@ async def _execute_tool(
     vision_result: dict | None = None,
     payment_proof_attempt: bool = False,
     latest_user_message: str = "",
+    integration_context: dict | None = None,
 ) -> dict:
     """
     Execute a tool call and return the result as a dict.
@@ -593,6 +611,7 @@ async def _execute_tool(
             reason=args.get("reason", "Razón no especificada"),
             urgency=args.get("urgency", "medium"),
             conversation_summary=summary,
+            lead_id=(integration_context or {}).get("lead_id"),
         )
         return {
             "status": "escalated",
@@ -1021,6 +1040,7 @@ async def _sync_kommo_escalation_if_needed(
     reason: str,
     urgency: str,
     conversation_summary: str,
+    lead_id: str | None = None,
 ) -> None:
     if get_config().channel_backend != "kommo":
         return
@@ -1031,6 +1051,7 @@ async def _sync_kommo_escalation_if_needed(
         reason=reason,
         urgency=urgency,
         conversation_summary=conversation_summary,
+        lead_id=lead_id,
     )
 
 

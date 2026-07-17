@@ -180,23 +180,36 @@ async def _download_url(url: str) -> tuple[bytes | None, str]:
     """Download an image from a direct URL (used for Instagram media)."""
     try:
         safe_url = await _validate_direct_media_url(url)
-        async with httpx.AsyncClient(timeout=DIRECT_IMAGE_TIMEOUT_SECONDS, follow_redirects=False) as client:
-            resp = await client.get(safe_url)
-            if resp.status_code != 200:
-                return None, "image/jpeg"
+        async with (
+            httpx.AsyncClient(timeout=DIRECT_IMAGE_TIMEOUT_SECONDS, follow_redirects=False) as client,
+            client.stream("GET", safe_url) as resp,
+        ):
+                if resp.status_code != 200:
+                    return None, "image/jpeg"
 
-            content_type = resp.headers.get("content-type", "image/jpeg")
-            mime_type = content_type.split(";")[0].strip()
-            if not mime_type.startswith("image/"):
-                logger.warning("Direct media URL rejected due to non-image content type.")
-                return None, "image/jpeg"
-            if len(resp.content) > MAX_IMAGE_BYTES:
-                logger.warning("Direct media URL rejected because it exceeded the size limit.")
-                return None, "image/jpeg"
-            return resp.content, mime_type
+                content_type = resp.headers.get("content-type", "image/jpeg")
+                mime_type = content_type.split(";")[0].strip()
+                if not mime_type.startswith("image/"):
+                    logger.warning("Direct media URL rejected due to non-image content type.")
+                    return None, "image/jpeg"
+
+                content_length = resp.headers.get("content-length")
+                if content_length and int(content_length) > MAX_IMAGE_BYTES:
+                    logger.warning("Direct media URL rejected because it exceeded the size limit.")
+                    return None, "image/jpeg"
+
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_IMAGE_BYTES:
+                        logger.warning("Direct media URL rejected because it exceeded the size limit.")
+                        return None, "image/jpeg"
+                    chunks.append(chunk)
+                return b"".join(chunks), mime_type
 
     except Exception as e:
-        logger.error(f"Image download failed: {e}")
+        logger.error("Image download failed: %s", str(e)[:200])
         return None, "image/jpeg"
 
 
