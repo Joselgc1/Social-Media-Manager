@@ -3,25 +3,39 @@
     "name": "widget.name",
     "description": "widget.description",
     "short_description": "widget.short_description",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "interface_version": 2,
     "init_once": true,
     "locale": ["en", "es"],
-    "installation": true,
-    "support": {
-      "link": "https://example.invalid/docs/kommo",
-      "email": "support@example.invalid"
+    "installation": true
+  },
+  "locations": [
+    "settings",
+    "salesbot_designer"
+  ],
+  "tour": {
+    "is_tour": true,
+    "tour_images": {
+      "en": ["/images/tour_1_en.png"],
+      "es": ["/images/tour_1_es.png"]
+    },
+    "tour_description": "widget.tour_description"
+  },
+  "settings": {
+    "backend_url": {
+      "name": "settings.backend_url",
+      "type": "text",
+      "required": true
     }
   },
-  "locations": ["salesbot_designer"],
   "salesbot_designer": {
-    "logo": "/widgets/social_media_manager_kommo/images/logo.svg",
+    "logo": "/widgets/__WIDGET_CODE__/images/logo_small.png",
     "kommo_ai_request": {
       "name": "salesbot.handler_name",
       "settings": {
         "webhook_url": {
           "name": "salesbot.webhook_url",
-          "default_value": "https://your-store.example/webhooks/kommo/salesbot",
+          "default_value": "",
           "type": "url",
           "manual": true
         }

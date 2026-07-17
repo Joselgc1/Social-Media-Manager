@@ -1,63 +1,174 @@
 define(['jquery'], function ($) {
   return function SocialMediaManagerKommoWidget() {
-    const createStep = function (handlers) {
-      return { question: handlers, require: [] };
-    };
+    const self = this;
+
+    function normalizeBackendUrl(value) {
+      try {
+        const parsed = new URL(String(value || '').trim());
+
+        if (parsed.protocol !== 'https:') {
+          return null;
+        }
+
+        if (parsed.username || parsed.password) {
+          return null;
+        }
+
+        if (
+          parsed.hostname === 'localhost' ||
+          parsed.hostname === '127.0.0.1' ||
+          parsed.hostname === '::1'
+        ) {
+          return null;
+        }
+
+        if (!parsed.pathname.endsWith('/webhooks/kommo/salesbot')) {
+          return null;
+        }
+
+        return parsed.toString();
+      } catch (_error) {
+        return null;
+      }
+    }
 
     this.callbacks = {
-      settings: function () { return true; },
-      init: function () { return true; },
-      bind_actions: function () { return true; },
-      render: function () { return true; },
-      destroy: function () { return true; },
-      onSave: function () { return true; },
+      settings: function () {
+        return true;
+      },
+
+      render: function () {
+        return true;
+      },
+
+      init: function () {
+        return true;
+      },
+
+      bind_actions: function () {
+        return true;
+      },
+
+      onInstall: function () {
+        return true;
+      },
+
+      onSave: function (widgetConfiguration) {
+        const active = String(
+          widgetConfiguration && widgetConfiguration.active
+            ? widgetConfiguration.active
+            : ''
+        ).toLowerCase();
+
+        if (active !== 'y') {
+          return true;
+        }
+
+        const fields =
+          widgetConfiguration && widgetConfiguration.fields
+            ? widgetConfiguration.fields
+            : {};
+
+        const backendUrl = normalizeBackendUrl(fields.backend_url);
+
+        if (!backendUrl) {
+          self.set_status('error');
+          return false;
+        }
+
+        self.set_settings({ backend_url: backendUrl });
+        self.set_status('installed');
+        return true;
+      },
+
+      destroy: function () {
+        return true;
+      },
 
       onSalesbotDesignerSave: function (_handlerCode, params) {
-        const webhookUrl = params && params.webhook_url ? params.webhook_url : '';
+        const blockUrl =
+          params && params.webhook_url
+            ? normalizeBackendUrl(params.webhook_url)
+            : null;
+
+        const globalSettings = self.get_settings
+          ? self.get_settings()
+          : {};
+
+        const savedUrl = normalizeBackendUrl(
+          globalSettings && globalSettings.backend_url
+        );
+
+        const webhookUrl = blockUrl || savedUrl;
+
+        if (!webhookUrl) {
+          throw new Error(
+            'A valid HTTPS Social Media Manager Salesbot callback URL is required.'
+          );
+        }
+
         const requestData = {
           message: '{{message_text}}',
           lead_id: '{{lead.id}}',
           contact_id: '{{contact.id}}',
-          origin: '{{origin}}',
-          responsible_user_id: '{{lead.responsible.id}}'
+          origin: '{{origin}}'
         };
 
-        return JSON.stringify([
-          createStep([
-            {
-              handler: 'widget_request',
-              params: {
-                url: webhookUrl,
-                data: requestData
+        const flow = [
+          {
+            question: [
+              {
+                handler: 'widget_request',
+                params: {
+                  url: webhookUrl,
+                  data: requestData
+                }
+              },
+              {
+                handler: 'goto',
+                params: {
+                  type: 'question',
+                  step: 1
+                }
               }
-            }
-          ]),
-          createStep([
-            {
-              handler: 'conditions',
-              params: {
-                logic: 'and',
-                conditions: [
-                  {
-                    term1: '{{json.status}}',
-                    term2: 'success',
-                    operation: '='
-                  }
-                ],
-                result: [
-                  {
-                    handler: 'exits',
-                    params: { value: 'success' }
-                  }
-                ]
+            ],
+            require: []
+          },
+          {
+            question: [
+              {
+                handler: 'conditions',
+                params: {
+                  logic: 'and',
+                  conditions: [
+                    {
+                      term1: '{{json.status}}',
+                      term2: 'success',
+                      operation: '='
+                    }
+                  ],
+                  result: [
+                    {
+                      handler: 'exits',
+                      params: {
+                        value: 'success'
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                handler: 'exits',
+                params: {
+                  value: 'fail'
+                }
               }
-            },
-            {
-              handler: 'exits',
-              params: { value: 'fail' }
-            }
-          ])
-        ]);
+            ],
+            require: []
+          }
+        ];
+
+        return JSON.stringify(flow);
       }
     };
 
