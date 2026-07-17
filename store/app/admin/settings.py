@@ -6,22 +6,23 @@ and other configuration via HTTP endpoints or Telegram commands.
 
 import json
 import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
 from app import db
-from app.ai.providers import AVAILABLE_MODELS, get_model_costs
-from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata, PDF_PATH
-from app.catalog.sheets import get_cached_catalog
-from app.channels.instagram_sender import setup_ice_breakers, subscribe_page_to_webhooks
-from app.config import get_config
 from app.admin.auth import require_admin
 from app.admin.telegram_bot import setup_telegram_webhook
+from app.ai.providers import AVAILABLE_MODELS, get_model_costs
+from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf, get_pdf_metadata
+from app.catalog.sheets import get_cached_catalog
+from app.config import get_config
 from app.crm import conversations, orders
 from app.crm import customers as customer_crm
-from app.crm.customers import add_tags, remove_tag, normalize_tags
+from app.crm.customers import add_tags, normalize_tags, remove_tag
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
-from app.runtime_settings import STORE_EDITABLE_SETTING_KEYS, LLM_MANAGED_KEYS
+from app.runtime_settings import LLM_MANAGED_KEYS, STORE_EDITABLE_SETTING_KEYS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/settings", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -180,7 +181,7 @@ async def get_payment_methods():
     try:
         payment_methods = normalize_payment_methods(raw_methods)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=f"Stored payment methods are invalid: {e}")
+        raise HTTPException(status_code=500, detail=f"Stored payment methods are invalid: {e}") from e
     return {"payment_methods": payment_methods}
 
 
@@ -190,6 +191,94 @@ async def list_available_providers():
     return AVAILABLE_MODELS
 
 
+@router.get("/kommo/status")
+async def kommo_status():
+    """Safe Kommo configuration and job diagnostics."""
+    config = get_config()
+    try:
+        from app.integrations.kommo.jobs import diagnostics_summary
+
+        diagnostics = await diagnostics_summary()
+    except Exception as e:
+        logger.warning("Kommo diagnostics summary unavailable: %s", e)
+        diagnostics = {
+            "pending_job_count": 0,
+            "failed_job_count": 0,
+            "stale_job_count": 0,
+            "last_kommo_api_error_summary": "Diagnostics unavailable",
+        }
+    return {
+        "channel_backend": config.channel_backend,
+        "kommo_subdomain_configured": bool(config.kommo_subdomain),
+        "kommo_access_token_configured": bool(config.kommo_access_token),
+        "kommo_integration_id_configured": bool(config.kommo_integration_id),
+        "kommo_integration_secret_configured": bool(config.kommo_integration_secret),
+        "kommo_salesbot_id_configured": config.kommo_salesbot_id is not None,
+        "kommo_webhook_secret_configured": bool(config.kommo_webhook_secret),
+        "kommo_ai_mode_field_configured": config.kommo_ai_mode_field_id is not None,
+        "kommo_ai_mode_enum_ids_configured": all(
+            value is not None
+            for value in (
+                config.kommo_ai_active_enum_id,
+                config.kommo_ai_human_enum_id,
+                config.kommo_ai_paused_enum_id,
+            )
+        ),
+        "kommo_responsible_user_configured": config.kommo_default_responsible_user_id is not None,
+        **diagnostics,
+    }
+
+
+@router.post("/kommo/test")
+async def kommo_test():
+    """Run safe read-only Kommo connectivity and configuration checks."""
+    config = get_config()
+    if config.channel_backend != "kommo":
+        return {"channel_backend": config.channel_backend, "checks": [], "ok": False}
+
+    from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
+
+    client = KommoClient.from_config()
+    checks = []
+
+    async def _check(name: str, func):
+        try:
+            await func()
+            checks.append({"name": name, "ok": True})
+        except Exception as e:
+            checks.append({"name": name, "ok": False, "error": sanitize_kommo_error(e)})
+
+    await _check("account_connectivity", client.get_account)
+
+    async def _field_check():
+        field = await client.get_lead_custom_field(config.kommo_ai_mode_field_id)
+        enums = {
+            int(enum.get("id"))
+            for enum in (field.get("enums") or [])
+            if str(enum.get("id", "")).isdigit()
+        }
+        expected = {
+            int(config.kommo_ai_active_enum_id),
+            int(config.kommo_ai_human_enum_id),
+            int(config.kommo_ai_paused_enum_id),
+        }
+        if not expected.issubset(enums):
+            raise RuntimeError("AI Mode enum IDs were not found on the configured field")
+
+    await _check("ai_mode_field_and_enums", _field_check)
+
+    if config.kommo_default_responsible_user_id:
+        await _check(
+            "responsible_user",
+            lambda: client.get_user(config.kommo_default_responsible_user_id),
+        )
+
+    salesbot_id_ok = isinstance(config.kommo_salesbot_id, int) and config.kommo_salesbot_id > 0
+    checks.append({"name": "salesbot_id_format", "ok": salesbot_id_ok})
+
+    return {"channel_backend": config.channel_backend, "ok": all(item["ok"] for item in checks), "checks": checks}
+
+
 @router.put("/payment-methods")
 async def update_payment_methods(body: PaymentMethodsUpdate):
     try:
@@ -197,7 +286,7 @@ async def update_payment_methods(body: PaymentMethodsUpdate):
             [item.model_dump() for item in body.payment_methods]
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     await db.execute(
         """
@@ -377,6 +466,8 @@ async def setup_ice_breakers_endpoint(ig_user_id: str):
     ----------
     ig_user_id : Your Instagram Professional account's numeric user ID.
     """
+    from app.channels.instagram_sender import setup_ice_breakers
+
     await setup_ice_breakers(ig_user_id)
     return {"status": "ok", "message": "Ice Breakers configured."}
 
@@ -387,6 +478,8 @@ async def subscribe_page_endpoint(page_id: str):
     Subscribe the Facebook Page to messaging webhooks.
     Must be called once after initial setup to start receiving Instagram DMs.
     """
+    from app.channels.instagram_sender import subscribe_page_to_webhooks
+
     await subscribe_page_to_webhooks(page_id)
     return {"status": "ok", "message": f"Page {page_id} subscribed to messaging webhooks."}
 
@@ -688,7 +781,7 @@ async def update_order(order_id: str, body: OrderUpdate):
                 tracking_number=body.tracking_number,
             )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     updated = await orders.get_order(order_id)
     return {
@@ -732,7 +825,7 @@ async def generate_catalog_pdf_endpoint():
     if not catalog:
         raise HTTPException(status_code=400, detail="Catalog is empty. Check Google Sheets connection.")
 
-    pdf_path = generate_catalog_pdf(catalog)
+    generate_catalog_pdf(catalog)
     meta = get_pdf_metadata()
 
     return {

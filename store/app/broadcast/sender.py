@@ -11,13 +11,14 @@ WhatsApp broadcast rules:
 - Rate limit: starts at 250 unique contacts/24h, scales after business verification
 """
 
-import json
 import asyncio
+import json
 import logging
 from datetime import datetime
+
 from app import db
-from app.channels.whatsapp_sender import send_template
 from app.admin.notify import notify_owner
+from app.config import get_config
 from app.customer_identity import extract_safe_first_name
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,16 @@ async def execute_broadcast(broadcast_id: str) -> dict:
 
     if broadcast["status"] not in ("draft", "scheduled"):
         return {"error": f"Broadcast already in status '{broadcast['status']}'. Cannot re-send."}
+
+    if get_config().channel_backend == "kommo":
+        return {
+            "error": (
+                "WhatsApp broadcast delivery is unavailable while CHANNEL_BACKEND=kommo. "
+                "Use Kommo broadcasts or an approved Kommo WhatsApp template flow."
+            )
+        }
+
+    from app.channels.whatsapp_sender import send_template
 
     # Mark as sending
     await db.execute(

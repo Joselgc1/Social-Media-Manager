@@ -1,6 +1,6 @@
 # VS Chatbot - AI Sales Assistant
 
-AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, dynamic store-defined payment methods, a store-managed daily exchange-rate setting, sortable dashboard tables, and a dark mode admin dashboard.
+AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, dynamic store-defined payment methods, a store-managed daily exchange-rate setting, sortable dashboard tables, and a dark mode admin dashboard. Channel transport can run in direct Meta mode or Kommo mode.
 
 The sales flow is tuned for Venezuelan operations: shipments are offered through `MRW` or `Zoom` with `cobro a destino`, owners can update the daily accepted exchange rate from the store dashboard, and the customer-facing catalog PDF does not expose internal SKU or stock columns.
 
@@ -25,6 +25,8 @@ cp store/.env.example store/.env
 # 3. Set up the database
 # Run this SQL file manually against your Supabase PostgreSQL instance:
 #   store/migrations/001_schema.sql
+# For Kommo mode also run:
+#   store/migrations/002_kommo_integration.sql
 
 # 4. Run locally
 cd store
@@ -39,13 +41,13 @@ ngrok http 8000
 
 ```txt
 Customer (WhatsApp or Instagram DM)
-    -> Webhook (FastAPI)
+    -> Meta webhook or Kommo official channel integration
         -> Normalize message (text, buttons, images, ice breakers, postbacks)
         -> Conversation Router
             -> LLM Engine (OpenAI or Anthropic, admin-selectable)
                 -> Tool Calls (inventory, tags, orders, escalation)
             -> Response
-        -> Send reply via Meta API
+        -> Send reply via Meta API or Kommo Salesbot
             -> WhatsApp: text, interactive buttons, templates
             -> Instagram: text, quick replies, images, carousels
 
@@ -57,12 +59,23 @@ Store DB settings (source of truth for runtime settings)
 
 ## Webhook Endpoints
 
+Registered channel endpoints depend on `CHANNEL_BACKEND`.
+
+Meta mode:
+
 | Method | Path                   | Purpose                        |
 | :----- | :--------------------- | :----------------------------- |
 | GET    | `/webhooks/whatsapp`   | WhatsApp webhook verification  |
 | POST   | `/webhooks/whatsapp`   | Receive WhatsApp messages      |
 | GET    | `/webhooks/instagram`  | Instagram webhook verification |
 | POST   | `/webhooks/instagram`  | Receive Instagram DMs          |
+
+Kommo mode:
+
+| Method | Path                                      | Purpose                                  |
+| :----- | :---------------------------------------- | :--------------------------------------- |
+| POST   | `/webhooks/kommo/events/{webhook_secret}` | Receive Kommo general webhook events     |
+| POST   | `/webhooks/kommo/salesbot`                | Receive Salesbot `widget_request` calls  |
 
 ## Admin Endpoints
 
@@ -77,6 +90,8 @@ Store DB settings (source of truth for runtime settings)
 | POST   | `/admin/logout`                                   | Clear store admin session cookie                |
 | GET    | `/admin/settings/`                                | View all settings                               |
 | GET    | `/admin/settings/providers`                       | List available LLM providers and models         |
+| GET    | `/admin/settings/kommo/status`                    | Safe Kommo configuration/job diagnostics         |
+| POST   | `/admin/settings/kommo/test`                      | Safe read-only Kommo API checks                  |
 | PUT    | `/admin/settings/{key}`                           | Update a setting                                |
 | POST   | `/admin/settings/switch-provider`                 | Quick provider switch                           |
 | GET    | `/admin/settings/usage-summary`                   | Today's token usage and cost estimate           |
@@ -119,6 +134,8 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 
 ## Instagram Setup (after Meta App Review approval)
 
+This section applies to `CHANNEL_BACKEND=meta`. For Kommo mode, connect Instagram inside Kommo and see [docs/KOMMO_MIGRATION.md](docs/KOMMO_MIGRATION.md).
+
 ```bash
 # 1. Subscribe your Facebook Page to messaging webhooks (once)
 curl -X POST "http://localhost:8000/admin/settings/instagram/subscribe-page?page_id=YOUR_PAGE_ID"
@@ -149,6 +166,13 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 - Post/Reel shares
 - Message deletions (acknowledged)
 - Postbacks from buttons
+
+### Kommo Mode
+
+- Text-first WhatsApp and Instagram DM handling through Kommo Salesbot.
+- Salesbot buttons when supported, otherwise numbered text choices.
+- Product images and catalog PDF links degraded to text plus public URLs.
+- Instagram public comments are handled by native Kommo comment automations that lead to a private DM; this app handles the resulting DM only.
 
 ## Telegram Admin Commands
 
@@ -214,6 +238,7 @@ If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API
 - **Admin authentication:** All `/admin/` API endpoints (settings, broadcasts, analytics, customers, orders) require `ADMIN_PASSWORD` via `Authorization: Bearer <password>` header or HTTP-only session cookie. Without `ADMIN_PASSWORD` set in production (`DEBUG=false`), all admin routes return 403.
 - **Dashboard sessions:** Both the store and master dashboards use dedicated login forms (`/admin/login` and `/login`), then set HTTP-only session cookies after successful authentication.
 - **Webhook verification:** WhatsApp and Instagram webhooks verify `X-Hub-Signature-256` using HMAC-SHA256 with timing-safe comparison.
+- **Kommo webhook verification:** General Kommo webhooks use a path secret with timing-safe comparison. Salesbot callbacks validate the Kommo JWT with HS256, the private integration secret, expiration, issuer/subdomain, Integration ID when present, and a strict `return_url` host check.
 - **Master auth:** All `/api/stores/` endpoints require Bearer token (`MASTER_SECRET_KEY`) or the `master_session` cookie. All token comparisons use `hmac.compare_digest`.
 - **Credentials at rest:** Store credentials in the master DB are Fernet-encrypted. API responses only return masked values.
 - **Test endpoints:** `/test/` routes are disabled in production (`DEBUG=false` for store, non-localhost for master).
@@ -221,7 +246,7 @@ If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API
 - **CORS:** Restricted to the app's own origin (`APP_BASE_URL`).
 - **Security headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Strict-Transport-Security` (production), `Content-Security-Policy` (production).
 - **Error sanitization:** Unhandled exceptions return a generic 500 in production; full errors only shown in debug mode.
-- **Production startup validation:** In `store/`, production boot now fails fast if `ADMIN_PASSWORD`, the WhatsApp credentials, or all LLM keys are missing. Instagram and Telegram remain optional, but if either integration is enabled it must be fully configured.
+- **Production startup validation:** In `store/`, production boot fails fast if `ADMIN_PASSWORD` or all LLM keys are missing. Meta mode requires WhatsApp Meta credentials. Kommo mode requires the Kommo private integration, Salesbot, webhook secret, and AI Mode field/enum variables. Instagram and Telegram remain optional, but if either Meta Instagram or Telegram is enabled it must be fully configured.
 - **Log redaction:** Normal webhook logging uses masked sender IDs and avoids logging raw customer message text or tool arguments at `INFO`.
 - **Inbound debounce:** Rapid consecutive inbound messages from the same customer are buffered briefly and grouped into a single AI turn, so the bot does not answer twice when the user is still typing follow-up context.
 
@@ -284,3 +309,22 @@ See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the full setup guide.
 | `ADMIN_PASSWORD`         | **Required in production.** Protects dashboard and all admin API endpoints                           |
 | `SYSTEM_PROMPT_OVERRIDE` | If set, replaces `prompts/system_prompt.md` content for this store                                   |
 | `LLM_MANAGED_EXTERNALLY` | If `true`, locks LLM controls in store dashboard/API/Telegram so those keys are managed from master  |
+
+Channel backend variables managed per store can include:
+
+```env
+CHANNEL_BACKEND=meta|kommo
+KOMMO_SUBDOMAIN=
+KOMMO_ACCESS_TOKEN=
+KOMMO_INTEGRATION_ID=
+KOMMO_INTEGRATION_SECRET=
+KOMMO_SALESBOT_ID=
+KOMMO_WEBHOOK_SECRET=
+KOMMO_AI_MODE_FIELD_ID=
+KOMMO_AI_ACTIVE_ENUM_ID=
+KOMMO_AI_HUMAN_ENUM_ID=
+KOMMO_AI_PAUSED_ENUM_ID=
+KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
+```
+
+See [docs/KOMMO_MIGRATION.md](docs/KOMMO_MIGRATION.md) for the full Kommo setup, widget build, Salesbot configuration, diagnostics, limitations, and rollback procedure.

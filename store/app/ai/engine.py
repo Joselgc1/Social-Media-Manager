@@ -7,23 +7,23 @@ the final text response.
 """
 
 import json
-import time
 import logging
 import re
+import time
 import unicodedata
-from app import db
-from app import analytics
-from app.ai.safety import sanitize_customer_facing_text
-from app.ai.providers import get_provider, AVAILABLE_MODELS, list_providers as _list_providers
-from app.ai.providers.base import LLMResponse
+
+from app import analytics, db
+from app.admin.notify import notify_escalation, notify_incoming_message, notify_new_order
 from app.ai.functions import TOOLS
 from app.ai.prompts import build_system_prompt, format_catalog_as_markdown
+from app.ai.providers import AVAILABLE_MODELS, get_provider
+from app.ai.providers import list_providers as _list_providers
+from app.ai.safety import sanitize_customer_facing_text
 from app.ai.vision import analyze_payment_screenshot
-from app.crm import customers, conversations, orders
-from app.admin.notify import notify_escalation, notify_incoming_message, notify_new_order
-from app.catalog.sheets import get_cached_catalog, get_product_sizes, group_catalog_products
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
+from app.catalog.sheets import get_cached_catalog, get_product_sizes, group_catalog_products
 from app.config import get_config
+from app.crm import conversations, customers, orders
 from app.customer_identity import extract_safe_first_name
 from app.payment_methods import payment_method_tag_value
 
@@ -140,6 +140,12 @@ async def generate_response(
         )
         await customers.set_conversation_state(customer["id"], "escalated")
         summary = await conversations.get_recent_summary(customer["id"], limit=5)
+        await _sync_kommo_escalation_if_needed(
+            customer_id=customer["id"],
+            reason=hostility_reason,
+            urgency="high",
+            conversation_summary=summary,
+        )
         await notify_escalation(
             customer_name=customer.get("display_name"),
             customer_channel=channel,
@@ -582,6 +588,12 @@ async def _execute_tool(
             conversation_summary=summary,
         )
         await customers.set_conversation_state(customer_id, "escalated")
+        await _sync_kommo_escalation_if_needed(
+            customer_id=customer_id,
+            reason=args.get("reason", "Razón no especificada"),
+            urgency=args.get("urgency", "medium"),
+            conversation_summary=summary,
+        )
         return {
             "status": "escalated",
             "message": "The store owner has been notified and will respond shortly.",
@@ -711,9 +723,8 @@ def _find_catalog_matches(product_query: str, size_filter: str | None = None) ->
         ])
         searchable = _normalize_catalog_text(searchable)
 
-        if query not in searchable:
-            if not query_terms or not all(term in searchable for term in query_terms):
-                continue
+        if query not in searchable and (not query_terms or not all(term in searchable for term in query_terms)):
+            continue
 
         if size_filter:
             available_sizes = get_product_sizes(product)
@@ -1002,6 +1013,25 @@ def _should_block_product_inquiry_escalation(reason: str, latest_user_message: s
     message_is_product_related = any(marker in normalized_message for marker in message_product_markers)
 
     return reason_is_product_related and message_is_product_related
+
+
+async def _sync_kommo_escalation_if_needed(
+    *,
+    customer_id: str,
+    reason: str,
+    urgency: str,
+    conversation_summary: str,
+) -> None:
+    if get_config().channel_backend != "kommo":
+        return
+    from app.integrations.kommo.state import sync_escalation_to_kommo
+
+    await sync_escalation_to_kommo(
+        customer_id=customer_id,
+        reason=reason,
+        urgency=urgency,
+        conversation_summary=conversation_summary,
+    )
 
 
 # Usage logging is now handled by app.analytics.log_response()
