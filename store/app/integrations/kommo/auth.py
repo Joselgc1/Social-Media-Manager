@@ -9,7 +9,7 @@ from urllib.parse import urlparse, urlunparse
 
 import jwt
 
-KOMMO_JWT_ALGORITHMS = ["HS256"]
+KOMMO_JWT_ALGORITHMS = ["HS256", "HS512"]
 _SUBDOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -129,8 +129,11 @@ def _positive_int_claim(claims: dict, key: str) -> int:
 
 def _normalize_entity_type(value) -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"lead", "leads"}:
-        return "leads"
-    if normalized in {"contact", "contacts"}:
+
+    if normalized in {"1", "contact", "contacts"}:
         return "contacts"
+
+    if normalized in {"2", "lead", "leads"}:
+        return "leads"
+
     raise KommoAuthError("Salesbot token invalid entity_type")
