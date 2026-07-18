@@ -1,3 +1,4 @@
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +18,28 @@ class _Tx:
 class _DBHandle:
     def transaction(self):
         return _Tx()
+
+
+def _bind_names(query: str) -> set[str]:
+    return set(re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", query))
+
+
+class _StrictCallbackDB:
+    def __init__(self, *, update_job=None, latest_job=None):
+        self.update_job = update_job
+        self.latest_job = latest_job
+        self.calls = []
+
+    async def fetch_one(self, query, values=None):
+        supplied = set((values or {}).keys())
+        expected = _bind_names(query)
+        assert supplied == expected
+        self.calls.append((query, dict(values or {})))
+        if "UPDATE kommo_message_jobs job" in query:
+            return self.update_job
+        if "SELECT * FROM kommo_message_jobs" in query:
+            return self.latest_job
+        return None
 
 
 def test_ai_state_decisions():
@@ -151,14 +174,283 @@ async def test_duplicate_callback_prevention(monkeypatch):
     result = await jobs.persist_salesbot_callback(
         SalesbotWidgetData(lead_id="100"),
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        {"jti": "token-id", "account_id": 123, "user_id": 456, "client_uid": "client-uuid"},
+        {
+            "jti": "token-id",
+            "account_id": 123,
+            "user_id": 456,
+            "client_uid": "client-uuid",
+            "subdomain": "acme",
+            "entity_type": "leads",
+            "entity_id": "100",
+        },
     )
     assert result == {"status": "duplicate", "job_id": "job"}
     claim_query = mock_db.fetch_one.await_args_list[0].args[0]
     claim_values = mock_db.fetch_one.await_args_list[0].args[1]
     assert "FOR UPDATE SKIP LOCKED" in claim_query
     assert "callback_claims" in claim_query
+    assert "candidate.lead_id = :entity_id" in claim_query
     assert claim_values["salesbot_token_jti"] == "token-id"
+    assert claim_values["entity_id"] == "100"
+    assert "lead_id" not in claim_values
+    assert "contact_id" not in claim_values
+    fallback_values = mock_db.fetch_one.await_args_list[1].args[1]
+    assert fallback_values == {"entity_type": "leads", "entity_id": "100"}
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_uses_signed_lead_identity(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(return_value={"id": "job", "status": "waiting_for_salesbot"})
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(contact_id="200"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {"account_id": 123, "client_uid": "client-uuid", "entity_type": "leads", "entity_id": "100"},
+    )
+    query = mock_db.fetch_one.await_args.args[0]
+    values = mock_db.fetch_one.await_args.args[1]
+    assert result == {"status": "ready", "job_id": "job"}
+    assert "candidate.lead_id = :entity_id" in query
+    assert values["entity_type"] == "leads"
+    assert values["entity_id"] == "100"
+    assert "lead_id" not in values
+    assert "contact_id" not in values
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_uses_signed_contact_identity(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(return_value={"id": "job", "status": "waiting_for_salesbot"})
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(lead_id="100"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {"account_id": 123, "client_uid": "client-uuid", "entity_type": "contacts", "entity_id": "200"},
+    )
+    query = mock_db.fetch_one.await_args.args[0]
+    values = mock_db.fetch_one.await_args.args[1]
+    assert result == {"status": "ready", "job_id": "job"}
+    assert "candidate.contact_id = :entity_id" in query
+    assert values["entity_type"] == "contacts"
+    assert values["entity_id"] == "200"
+    assert "lead_id" not in values
+    assert "contact_id" not in values
+
+
+@pytest.mark.asyncio
+async def test_valid_lead_callback_uses_exact_update_bind_parameters(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    strict_db = _StrictCallbackDB(update_job={"id": "lead-job", "status": "ready"})
+    monkeypatch.setattr(jobs, "db", strict_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(lead_id="100", contact_id="200"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {
+            "jti": "token-id",
+            "account_id": 123,
+            "user_id": 456,
+            "client_uid": "client-uuid",
+            "entity_type": "leads",
+            "entity_id": "100",
+        },
+    )
+
+    assert result == {"status": "ready", "job_id": "lead-job"}
+    query, values = strict_db.calls[0]
+    assert "candidate.lead_id = :entity_id" in query
+    assert values == {
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "entity_id": "100",
+        "entity_type": "leads",
+        "callback_claims": values["callback_claims"],
+        "salesbot_token_jti": "token-id",
+        "salesbot_account_id": "123",
+        "salesbot_user_id": "456",
+        "salesbot_client_uuid": "client-uuid",
+    }
+
+
+@pytest.mark.asyncio
+async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    strict_db = _StrictCallbackDB(update_job={"id": "contact-job", "status": "ready"})
+    monkeypatch.setattr(jobs, "db", strict_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(contact_id="200"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {
+            "account_id": 123,
+            "client_uid": "client-uuid",
+            "entity_type": "contacts",
+            "entity_id": "200",
+        },
+    )
+
+    assert result == {"status": "ready", "job_id": "contact-job"}
+    query, values = strict_db.calls[0]
+    assert "candidate.contact_id = :entity_id" in query
+    assert set(values) == {
+        "return_url",
+        "entity_id",
+        "entity_type",
+        "callback_claims",
+        "salesbot_token_jti",
+        "salesbot_account_id",
+        "salesbot_user_id",
+        "salesbot_client_uuid",
+    }
+    assert values["entity_type"] == "contacts"
+    assert values["entity_id"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_callback_without_waiting_job_uses_exact_fallback_bind_parameters(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    strict_db = _StrictCallbackDB(update_job=None, latest_job=None)
+    monkeypatch.setattr(jobs, "db", strict_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(lead_id="100"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {
+            "account_id": 123,
+            "client_uid": "client-uuid",
+            "entity_type": "leads",
+            "entity_id": "100",
+        },
+    )
+
+    assert result == {"status": "ignored", "reason": "no_waiting_job"}
+    assert len(strict_db.calls) == 2
+    assert strict_db.calls[1][1] == {"entity_type": "leads", "entity_id": "100"}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_callback_uses_exact_fallback_bind_parameters(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    strict_db = _StrictCallbackDB(update_job=None, latest_job={"id": "sent-job", "status": "sent"})
+    monkeypatch.setattr(jobs, "db", strict_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(lead_id="100"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {
+            "account_id": 123,
+            "client_uid": "client-uuid",
+            "entity_type": "leads",
+            "entity_id": "100",
+        },
+    )
+
+    assert result == {"status": "duplicate", "job_id": "sent-job"}
+    assert strict_db.calls[1][1] == {"entity_type": "leads", "entity_id": "100"}
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_rejects_mismatched_widget_lead_id(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    with pytest.raises(ValueError, match="lead_id_mismatch"):
+        await jobs.persist_salesbot_callback(
+            SalesbotWidgetData(lead_id="999"),
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            {"account_id": 123, "client_uid": "client-uuid", "entity_type": "leads", "entity_id": "100"},
+        )
+    mock_db.fetch_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_salesbot_launch_race_preserves_ready_callback(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    class _RaceDB:
+        def __init__(self):
+            self.status = "processing"
+            self.ready_count = 0
+            self.status_when_run_started = None
+            self.execute_queries = []
+
+        async def get_settings(self):
+            return {"ai_enabled": True}
+
+        async def fetch_one(self, query, values=None):
+            if "SET status = 'waiting_for_salesbot'" in query and "RETURNING" in query:
+                assert self.status == "processing"
+                self.status = "waiting_for_salesbot"
+                return {"id": values["id"], "status": self.status}
+            if "SELECT status FROM kommo_message_jobs" in query:
+                return {"status": self.status}
+            return None
+
+        async def execute(self, query, values=None):
+            self.execute_queries.append(query)
+            if "SET status = 'waiting_for_salesbot'" in query:
+                self.status = "waiting_for_salesbot"
+            return None
+
+    race_db = _RaceDB()
+    monkeypatch.setattr(jobs, "db", race_db)
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(channel_backend="kommo", kommo_ai_active_enum_id=1),
+    )
+    monkeypatch.setattr(jobs, "ensure_ai_mode_initialized", AsyncMock(return_value=(1, False)))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason="allowed", needs_ai_mode_initialization=False),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+
+    client = MagicMock()
+    client.get_lead = AsyncMock(return_value={"id": 100})
+
+    async def run_salesbot(_entity_id, _entity_type):
+        race_db.status_when_run_started = race_db.status
+        race_db.status = "ready"
+        race_db.ready_count += 1
+
+    client.run_salesbot = AsyncMock(side_effect=run_salesbot)
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._launch_salesbot_for_job(
+        {
+            "id": "job",
+            "status": "processing",
+            "lead_id": "100",
+            "contact_id": "200",
+            "combined_message": "Hola",
+            "channel": "whatsapp",
+        }
+    )
+
+    assert race_db.status_when_run_started == "waiting_for_salesbot"
+    assert race_db.status == "ready"
+    assert race_db.ready_count == 1
+    assert not any("SET status = 'waiting_for_salesbot'" in query for query in race_db.execute_queries)
 
 
 @pytest.mark.asyncio

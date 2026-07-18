@@ -1,0 +1,195 @@
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from urllib.parse import urlencode
+
+import jwt
+import pytest
+from app.webhooks import kommo
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+RETURN_URL = "https://acme.kommo.com/api/v4/salesbot/1/continue/2?request_id=secret-query"
+
+
+def _config(**overrides):
+    data = {
+        "channel_backend": "kommo",
+        "kommo_subdomain": "acme",
+        "kommo_integration_secret": "secret",
+        "kommo_integration_id": "client-uuid",
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def _token(**claims):
+    payload = {
+        "subdomain": "acme",
+        "client_uid": "client-uuid",
+        "account_id": 123,
+        "entity_type": "lead",
+        "entity_id": 100,
+    }
+    payload.update(claims)
+    payload = {key: value for key, value in payload.items() if value is not None}
+    return jwt.encode(payload, "secret", algorithm="HS256")
+
+
+@pytest.fixture
+def app(monkeypatch):
+    app = FastAPI()
+    app.include_router(kommo.router)
+    monkeypatch.setattr(kommo, "get_config", lambda: _config())
+    monkeypatch.setattr(kommo, "persist_salesbot_callback", AsyncMock(return_value={"status": "ready", "job_id": "job-1"}))
+    monkeypatch.setattr(kommo, "process_ready_jobs", AsyncMock(return_value=1))
+    return app
+
+
+@pytest.fixture
+async def client(app):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+async def _post(client, **kwargs):
+    return await client.post("/webhooks/kommo/salesbot", **kwargs)
+
+
+def _json_body(**overrides):
+    body = {
+        "token": _token(),
+        "return_url": RETURN_URL,
+        "data": {"message": "Hola secreta", "lead_id": "100", "contact_id": "200", "origin": "whatsapp"},
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_accepts_json_body(client):
+    response = await _post(client, json=_json_body())
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    callback_data = kommo.persist_salesbot_callback.await_args.args[0]
+    assert callback_data.lead_id == "100"
+    assert callback_data.message == "Hola secreta"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_accepts_urlencoded_body(client):
+    response = await _post(
+        client,
+        content=urlencode(
+            {
+                "token": _token(),
+                "return_url": RETURN_URL,
+                "data": '{"message":"Hola secreta","lead_id":"100","origin":"whatsapp"}',
+            }
+        ),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200
+    assert kommo.persist_salesbot_callback.await_args.args[0].lead_id == "100"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_accepts_multipart_body(client):
+    response = await _post(
+        client,
+        files={
+            "token": (None, _token()),
+            "return_url": (None, RETURN_URL),
+            "data": (None, '{"lead_id":"100","origin":"whatsapp"}'),
+        },
+    )
+    assert response.status_code == 200
+    assert kommo.persist_salesbot_callback.await_args.args[0].lead_id == "100"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_accepts_json_string_data_field(client):
+    response = await _post(client, json=_json_body(data='{"lead_id":"100","origin":"whatsapp"}'))
+    assert response.status_code == 200
+    assert kommo.persist_salesbot_callback.await_args.args[0].origin == "whatsapp"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_accepts_flattened_form_data_fields(client):
+    response = await _post(
+        client,
+        content=urlencode(
+            {
+                "token": _token(),
+                "return_url": RETURN_URL,
+                "data[message]": "Hola secreta",
+                "data[lead_id]": "100",
+                "data[contact_id]": "200",
+                "data[origin]": "whatsapp",
+            }
+        ),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200
+    callback_data = kommo.persist_salesbot_callback.await_args.args[0]
+    assert callback_data.message == "Hola secreta"
+    assert callback_data.lead_id == "100"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_falls_back_for_missing_or_wrong_content_type(client):
+    response = await _post(
+        client,
+        content=urlencode({"token": _token(), "return_url": RETURN_URL, "data[lead_id]": "100"}),
+        headers={"content-type": "text/plain"},
+    )
+    assert response.status_code == 200
+    assert kommo.persist_salesbot_callback.await_args.args[0].lead_id == "100"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_missing_body_returns_400_not_401(client):
+    response = await _post(client)
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_invalid_json_returns_400_not_401(client):
+    response = await _post(client, content="{", headers={"content-type": "application/json"})
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_unsupported_body_shape_returns_400_not_401(client):
+    response = await _post(client, json=[])
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_parse_logs_exclude_token_return_url_query_and_customer_message(client, caplog):
+    token = _token()
+    with caplog.at_level("INFO", logger="app.webhooks.kommo"):
+        response = await _post(client, json=_json_body(token=token))
+    assert response.status_code == 200
+    assert token not in caplog.text
+    assert "Hola secreta" not in caplog.text
+    assert "secret-query" not in caplog.text
+    assert "top_level_keys" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_invalid_jwt_returns_401(client):
+    bad_token = jwt.encode(
+        {"subdomain": "acme", "client_uid": "other", "account_id": 123, "entity_type": "lead", "entity_id": 100},
+        "secret",
+        algorithm="HS256",
+    )
+    response = await _post(client, json=_json_body(token=bad_token))
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_expired_jwt_returns_401(client):
+    response = await _post(client, json=_json_body(token=_token(exp=datetime.now(UTC) - timedelta(minutes=1))))
+    assert response.status_code == 401

@@ -7,6 +7,11 @@ from zipfile import ZipFile
 import pytest
 
 WIDGET_ROOT = Path(__file__).resolve().parents[2] / "store" / "kommo-widget"
+GLOBAL_URL = "https://global.example/webhooks/kommo/salesbot"
+BLOCK_URL = "https://block.example/webhooks/kommo/salesbot"
+NESTED_URL = "https://nested.example/webhooks/kommo/salesbot"
+MANUAL_URL = "https://manual.example/webhooks/kommo/salesbot"
+VALUE_URL = "https://value.example/webhooks/kommo/salesbot"
 
 
 def _load_builder():
@@ -29,11 +34,34 @@ let Widget;
 function define(_deps, factory) {{ Widget = factory({{}}); }}
 eval(fs.readFileSync({script_path}, 'utf8'));
 const widget = new Widget();
-let status = null;
 let settings = {{}};
-widget.set_status = value => {{ status = value; }};
-widget.set_settings = value => {{ settings = Object.assign(settings, value); }};
+let setSettingsCalls = 0;
+let setStatusCalls = 0;
+const warnings = [];
+widget.set_settings = value => {{
+  setSettingsCalls += 1;
+  settings = Object.assign(settings, value);
+}};
+widget.set_status = _value => {{ setStatusCalls += 1; }};
 widget.get_settings = () => settings;
+widget.i18n = section => {{
+  const translations = {{
+    salesbot: {{
+      handler_name: 'Ask Eva AI',
+      webhook_url: 'Salesbot callback URL override',
+      success_exit: 'AI response completed',
+      fail_exit: 'AI response failed'
+    }}
+  }};
+  return translations[section] || {{}};
+}};
+console.warn = (message, details) => {{ warnings.push({{ message, details }}); }};
+
+function parseFlow(params) {{
+  const source = widget.callbacks.onSalesbotDesignerSave('kommo_ai_request', params);
+  return JSON.parse(source);
+}}
+
 const invalidUrls = [
   'http://store.example/webhooks/kommo/salesbot',
   'https://localhost/webhooks/kommo/salesbot',
@@ -41,47 +69,83 @@ const invalidUrls = [
   'https://user:pass@store.example/webhooks/kommo/salesbot',
   'https://store.example/wrong/path'
 ];
+const inactiveResult = widget.callbacks.onSave({{ active: 'n', fields: {{}} }});
 const invalidResults = invalidUrls.map(url => widget.callbacks.onSave({{ active: 'y', fields: {{ backend_url: url }} }}));
 const validResult = widget.callbacks.onSave({{
   active: 'y',
-  fields: {{ backend_url: 'https://store.example/webhooks/kommo/salesbot' }}
+  fields: {{ backend_url: '{GLOBAL_URL}' }}
 }});
-    let missingBlockUrlError = null;
-    try {{
-      widget.callbacks.onSalesbotDesignerSave('kommo_ai_request', {{}});
-    }} catch (error) {{
-      missingBlockUrlError = error.message;
-    }}
-    const flow = JSON.parse(widget.callbacks.onSalesbotDesignerSave('kommo_ai_request', {{
-      webhook_url: 'https://store.example/webhooks/kommo/salesbot'
-    }}));
+const setCallsAfterSave = {{ setSettingsCalls, setStatusCalls }};
+
+const designerSettings = widget.callbacks.salesbotDesignerSettings(null, null, null);
+settings = {{ backend_url: '{GLOBAL_URL}' }};
+const globalFlow = parseFlow({{}});
+const invalidBlockFallsBackToGlobalFlow = parseFlow({{ webhook_url: 'https://block.example/wrong/path' }});
+const blockOverrideFlow = parseFlow({{ webhook_url: '{BLOCK_URL}' }});
+const directStringFlow = parseFlow({{ webhook_url: '{BLOCK_URL}' }});
+const nestedParamsFlow = parseFlow({{ params: {{ webhook_url: '{NESTED_URL}' }} }});
+const objectManualFlow = parseFlow({{ webhook_url: {{ value_manual: '{MANUAL_URL}' }} }});
+const objectValueFlow = parseFlow({{ webhook_url: {{ value: '{VALUE_URL}' }} }});
+
+settings = {{}};
+let failureMessage = null;
+try {{
+  parseFlow({{}});
+}} catch (error) {{
+  failureMessage = error.message;
+}}
+
 console.log(JSON.stringify({{
+  callbackNames: Object.keys(widget.callbacks),
+  inactiveResult,
   invalidResults,
   validResult,
-  status,
-  settings,
-   missingBlockUrlError,
-   flow
+  setCallsAfterSave,
+  designerSettings,
+  globalFlow,
+  invalidBlockFallsBackToGlobalFlow,
+  blockOverrideFlow,
+  directStringFlow,
+  nestedParamsFlow,
+  objectManualFlow,
+  objectValueFlow,
+  failureMessage,
+  warnings
 }}));
 """
     result = subprocess.run(["node", "-e", probe], check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
 
 
+def _widget_request_url(flow: list[dict]) -> str:
+    return flow[0]["question"][0]["params"]["url"]
+
+
+def _flow_exit_codes(flow: list[dict]) -> set[str]:
+    success_result = flow[1]["question"][0]["params"]["result"]
+    fail_exit = flow[1]["question"][1]
+    return {success_result[0]["params"]["value"], fail_exit["params"]["value"]}
+
+
 def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     manifest = _source_manifest()
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.1"
-    assert "settings" in manifest["locations"]
-    assert "salesbot_designer" in manifest["locations"]
+    assert manifest["widget"]["version"] == "1.2.3"
+    assert manifest["locations"] == ["settings", "salesbot_designer"]
     assert manifest["settings"]["backend_url"] == {
         "name": "settings.backend_url",
         "type": "text",
         "required": True,
     }
+    webhook_url = manifest["salesbot_designer"]["kommo_ai_request"]["settings"]["webhook_url"]
     assert manifest["salesbot_designer"]["logo"] == "/widgets/__WIDGET_CODE__/images/logo_small.png"
-    assert manifest["salesbot_designer"]["kommo_ai_request"]["settings"]["webhook_url"]["default_value"] == ""
-    assert manifest["salesbot_designer"]["kommo_ai_request"]["settings"]["webhook_url"]["required"] is True
+    assert webhook_url == {
+        "name": "salesbot.webhook_url",
+        "default_value": "",
+        "type": "url",
+        "manual": True,
+    }
+    assert "required" not in webhook_url
 
 
 def test_all_manifest_localization_keys_exist_in_both_locales():
@@ -93,6 +157,8 @@ def test_all_manifest_localization_keys_exist_in_both_locales():
         translations = json.loads((WIDGET_ROOT / "i18n" / f"{locale}.json").read_text(encoding="utf-8"))
         assert "backend_url" in translations["settings"]
         assert "webhook_url" in translations["salesbot"]
+        assert translations["salesbot"]["success_exit"]
+        assert translations["salesbot"]["fail_exit"]
 
 
 def test_required_png_logos_and_tour_images_are_valid():
@@ -122,13 +188,17 @@ def test_widget_build_substitutes_widget_code_and_includes_expected_archive_cont
     with ZipFile(output) as archive:
         names = archive.namelist()
         manifest = json.loads(archive.read("manifest.json"))
+        script = archive.read("script.js").decode("utf-8")
 
     assert "manifest.json" in names
     assert "__WIDGET_CODE__" not in json.dumps(manifest)
     assert manifest["widget"]["installation"] is True
+    assert manifest["widget"]["version"] == "1.2.3"
     assert "settings" in manifest
     assert {"settings", "salesbot_designer"}.issubset(set(manifest["locations"]))
     assert manifest["salesbot_designer"]["logo"] == "/widgets/social_media_manager_kommo_v2/images/logo_small.png"
+    assert "salesbotDesignerSettings" in script
+    assert "getInstalledBackendUrl" in script
     assert set(names) == {"manifest.json", *builder.INCLUDE}
 
 
@@ -138,24 +208,77 @@ def test_widget_build_rejects_placeholder_widget_code(tmp_path):
         builder.build("__WIDGET_CODE__", output=tmp_path / "bad.zip")
 
 
-def test_widget_script_rejects_invalid_backend_urls_and_accepts_valid_https_url():
+def test_salesbot_designer_settings_exists_and_returns_success_and_fail_exits():
     result = _run_widget_script_probe()
+    assert "salesbotDesignerSettings" in result["callbackNames"]
+    exits = result["designerSettings"]["exits"]
+    assert [exit_["code"] for exit_ in exits] == ["success", "fail"]
+    assert all(exit_["title"] for exit_ in exits)
+
+
+def test_installation_on_save_validates_url_without_manual_settings_or_status_mutation():
+    result = _run_widget_script_probe()
+    assert result["inactiveResult"] is True
     assert result["invalidResults"] == [False, False, False, False, False]
     assert result["validResult"] is True
-    assert result["status"] == "installed"
-    assert result["settings"]["backend_url"] == "https://store.example/webhooks/kommo/salesbot"
+    assert result["setCallsAfterSave"] == {"setSettingsCalls": 0, "setStatusCalls": 0}
 
 
-def test_salesbot_script_uses_widget_request_goto_step_one_and_success_fail_exits():
+def test_salesbot_save_uses_global_installation_url_when_block_url_is_absent_or_invalid():
     result = _run_widget_script_probe()
-    assert "Salesbot callback URL" in result["missingBlockUrlError"]
-    flow = result["flow"]
+    assert _widget_request_url(result["globalFlow"]) == GLOBAL_URL
+    assert _widget_request_url(result["invalidBlockFallsBackToGlobalFlow"]) == GLOBAL_URL
+
+
+def test_salesbot_save_block_url_overrides_global_url_when_valid():
+    result = _run_widget_script_probe()
+    assert _widget_request_url(result["blockOverrideFlow"]) == BLOCK_URL
+
+
+def test_salesbot_save_accepts_direct_nested_and_object_url_values():
+    result = _run_widget_script_probe()
+    assert _widget_request_url(result["directStringFlow"]) == BLOCK_URL
+    assert _widget_request_url(result["nestedParamsFlow"]) == NESTED_URL
+    assert _widget_request_url(result["objectManualFlow"]) == MANUAL_URL
+    assert _widget_request_url(result["objectValueFlow"]) == VALUE_URL
+
+
+def test_salesbot_save_fails_clearly_only_without_any_url_and_logs_safe_diagnostics():
+    result = _run_widget_script_probe()
+    assert result["failureMessage"] == "Configure the Salesbot callback URL in the integration settings or in this widget block."
+    assert result["warnings"] == [
+        {
+            "message": "Kommo Salesbot widget configuration is invalid",
+            "details": {"handlerCode": "kommo_ai_request", "parameterKeys": []},
+        }
+    ]
+    assert "https://" not in json.dumps(result["warnings"])
+
+
+def test_salesbot_script_uses_documented_widget_request_flow_and_matching_exits():
+    result = _run_widget_script_probe()
+    flow = result["blockOverrideFlow"]
     first_question = flow[0]["question"]
-    assert first_question[0]["handler"] == "widget_request"
-    assert first_question[0]["params"]["url"] == "https://store.example/webhooks/kommo/salesbot"
+    assert first_question[0] == {
+        "handler": "widget_request",
+        "params": {
+            "url": BLOCK_URL,
+            "data": {
+                "message": "{{message_text}}",
+                "lead_id": "{{lead.id}}",
+                "contact_id": "{{contact.id}}",
+                "origin": "{{origin}}",
+            },
+        },
+    }
     assert first_question[1] == {"handler": "goto", "params": {"type": "question", "step": 1}}
-    exits = [item for item in flow[1]["question"] if item["handler"] == "exits"]
-    condition_result = flow[1]["question"][0]["params"]["result"]
-    assert condition_result == [{"handler": "exits", "params": {"value": "success"}}]
-    assert exits == [{"handler": "exits", "params": {"value": "fail"}}]
+    assert flow[0]["require"] == []
+    assert flow[1]["require"] == []
+    assert flow[1]["question"][0]["handler"] == "conditions"
+    assert flow[1]["question"][0]["params"]["conditions"] == [
+        {"term1": "{{json.status}}", "term2": "success", "operation": "="}
+    ]
+    assert flow[1]["question"][0]["params"]["result"] == [{"handler": "exits", "params": {"value": "success"}}]
+    assert flow[1]["question"][1] == {"handler": "exits", "params": {"value": "fail"}}
+    assert _flow_exit_codes(flow) == {exit_["code"] for exit_ in result["designerSettings"]["exits"]}
     assert "{{lead.responsible.id}}" not in (WIDGET_ROOT / "script.js").read_text(encoding="utf-8")

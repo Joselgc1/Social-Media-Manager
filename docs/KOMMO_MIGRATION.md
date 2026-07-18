@@ -142,7 +142,9 @@ cd store/kommo-widget
 python3 build_widget.py --widget-code YOUR_WIDGET_CODE
 ```
 
-Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
+Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, widget version, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
+
+The widget version must be incremented on every upload. Current version: `1.2.3`.
 
 ## Widget Installation
 
@@ -155,24 +157,26 @@ Use the real widget code shown by the private Kommo integration. The source `man
 7. Open the Social Media Manager widget.
 8. Enter `https://YOUR-STORE-DOMAIN/webhooks/kommo/salesbot` in `backend_url`.
 9. Enable/install it and save the settings.
-10. Refresh Kommo.
-11. Open Salesbot.
-12. Add a Widget step.
-13. Select Social Media Manager AI from the installed widget list.
+10. Disable and re-enable the integration, or refresh Kommo after uploading a new widget version.
+11. Hard refresh the browser if Salesbot still shows stale widget fields.
+12. Open Salesbot.
+13. Add a Widget step.
+14. Select Social Media Manager AI from the installed widget list.
+15. Leave the block-level `Salesbot callback URL override` empty unless this block must call a different store backend.
 
-The widget must be installed from Settings -> Integrations before it is expected to appear as an installed widget in Salesbot. The manifest intentionally uses `installation=true`, top-level `settings.backend_url`, and both `settings` and `salesbot_designer` locations.
+The widget must be installed from Settings -> Integrations before it is expected to appear as an installed widget in Salesbot. The manifest intentionally uses `installation=true`, top-level `settings.backend_url`, and both `settings` and `salesbot_designer` locations. The top-level `backend_url` is required and is configured once in the integration settings. The block-level `webhook_url` is optional and only overrides the global URL when it is valid.
 
-If invalid manifests were previously uploaded and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive.
+If invalid manifests were previously uploaded first and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive, following Kommo's widget update behavior.
 
 ## Salesbot Creation
 
-Create a Salesbot that contains the installed widget step. If needed, override the block URL as:
+Create a Salesbot that contains the installed widget step. The integration settings `backend_url` is used automatically, so do not enter the same URL twice. If needed for a per-block override, set the block URL as:
 
 ```text
 https://<store-domain>/webhooks/kommo/salesbot
 ```
 
-The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, and `{{origin}}`. Its saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`.
+The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, and `{{origin}}`. Its saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes `success` and `fail` branches; use `success` for normal AI completion and `fail` for fallback/human handling.
 
 ## Salesbot ID Retrieval
 
