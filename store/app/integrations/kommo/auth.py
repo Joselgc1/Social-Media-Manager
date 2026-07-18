@@ -77,10 +77,14 @@ def validate_salesbot_jwt(token: str, config) -> dict:
             token,
             config.kommo_integration_secret,
             algorithms=KOMMO_JWT_ALGORITHMS,
-            options={"verify_aud": False, "require": ["exp"]},
+            options={"verify_aud": False},
         )
     except jwt.ExpiredSignatureError as e:
         raise KommoAuthError("Expired Salesbot token") from e
+    except jwt.ImmatureSignatureError as e:
+        raise KommoAuthError("Immature Salesbot token") from e
+    except jwt.InvalidIssuedAtError as e:
+        raise KommoAuthError("Invalid Salesbot token issued-at time") from e
     except jwt.PyJWTError as e:
         raise KommoAuthError("Invalid Salesbot token") from e
 
@@ -92,15 +96,41 @@ def validate_salesbot_jwt(token: str, config) -> dict:
         raise KommoAuthError("Salesbot token issuer mismatch")
 
     token_subdomain = str(claims.get("subdomain") or "").strip().lower()
-    if token_subdomain and token_subdomain != expected_subdomain:
+    if not token_subdomain:
+        raise KommoAuthError("Salesbot token missing subdomain")
+    if token_subdomain != expected_subdomain:
         raise KommoAuthError("Salesbot token subdomain mismatch")
-    if not token_issuer and not token_subdomain:
-        raise KommoAuthError("Salesbot token missing account identity")
 
     client_id = str(claims.get("client_uid") or claims.get("client_uuid") or "").strip()
-    if client_id and client_id != str(config.kommo_integration_id).strip():
+    if not client_id:
+        raise KommoAuthError("Salesbot token missing client_uid")
+    if client_id != str(config.kommo_integration_id).strip():
         raise KommoAuthError("Salesbot token integration mismatch")
-    if client_id:
-        claims["client_uuid"] = client_id
+
+    claims["client_uid"] = client_id
+    claims["client_uuid"] = client_id
+    claims["account_id"] = _positive_int_claim(claims, "account_id")
+    claims["entity_id"] = str(_positive_int_claim(claims, "entity_id"))
+    claims["entity_type"] = _normalize_entity_type(claims.get("entity_type"))
+    claims["subdomain"] = token_subdomain
 
     return claims
+
+
+def _positive_int_claim(claims: dict, key: str) -> int:
+    try:
+        value = int(claims.get(key))
+    except (TypeError, ValueError) as e:
+        raise KommoAuthError(f"Salesbot token missing {key}") from e
+    if value <= 0:
+        raise KommoAuthError(f"Salesbot token invalid {key}")
+    return value
+
+
+def _normalize_entity_type(value) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"lead", "leads"}:
+        return "leads"
+    if normalized in {"contact", "contacts"}:
+        return "contacts"
+    raise KommoAuthError("Salesbot token invalid entity_type")

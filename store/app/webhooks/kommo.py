@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
+from pydantic import ValidationError
 
 from app.config import get_config
 from app.crm.channel_mappings import lookup_by_lead_id
@@ -24,10 +28,14 @@ from app.integrations.kommo.jobs import (
     schedule_due_job_processing,
 )
 from app.integrations.kommo.models import SalesbotWidgetRequest
-from app.integrations.kommo.webhook_parser import normalize_kommo_webhook
+from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, parse_nested_form
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks/kommo", tags=["kommo"])
+
+
+class SalesbotCallbackParseError(ValueError):
+    """Raised when a Salesbot widget callback body cannot be parsed safely."""
 
 
 @router.post("/events/{webhook_secret}")
@@ -81,19 +89,117 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
 async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTasks):
     config = get_config()
     try:
-        body = await request.json()
-        callback = SalesbotWidgetRequest.model_validate(body)
+        callback = await parse_salesbot_callback_request(request)
+    except SalesbotCallbackParseError as e:
+        logger.warning("Rejected malformed Kommo Salesbot callback: %s", sanitize_job_error(e))
+        raise HTTPException(status_code=400, detail="Invalid Salesbot callback body") from e
+
+    try:
         claims = validate_salesbot_jwt(callback.token, config)
         return_url = validate_return_url(callback.return_url, config.kommo_subdomain)
-    except (ValueError, KommoAuthError) as e:
+    except KommoAuthError as e:
         logger.warning("Rejected Kommo Salesbot callback: %s", sanitize_job_error(e))
         raise HTTPException(status_code=401, detail="Invalid Salesbot callback") from e
 
-    result = await persist_salesbot_callback(callback.data, return_url, claims)
+    try:
+        result = await persist_salesbot_callback(callback.data, return_url, claims)
+    except ValueError as e:
+        logger.warning("Rejected invalid Kommo Salesbot callback identity: %s", sanitize_job_error(e))
+        raise HTTPException(status_code=400, detail="Invalid Salesbot callback body") from e
+
     if result.get("status") == "ready":
         background_tasks.add_task(process_ready_jobs, 3)
 
     return {"status": "accepted"}
+
+
+async def parse_salesbot_callback_request(request: Request) -> SalesbotWidgetRequest:
+    content_type = request.headers.get("content-type", "")
+    content_length = request.headers.get("content-length")
+    payload = await _read_salesbot_callback_payload(request, content_type)
+    callback = _coerce_salesbot_callback_payload(payload)
+    logger.info(
+        "Kommo Salesbot callback received: content_type=%s content_length=%s top_level_keys=%s data_field_names=%s",
+        content_type.split(";", 1)[0] or "missing",
+        content_length or "missing",
+        sorted(map(str, payload.keys()))[:12],
+        sorted(map(str, callback.data.model_dump(exclude_none=True).keys()))[:12],
+    )
+    return callback
+
+
+async def _read_salesbot_callback_payload(request: Request, content_type: str) -> dict[str, Any]:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type == "application/json":
+        try:
+            body = await request.json()
+        except json.JSONDecodeError as e:
+            raise SalesbotCallbackParseError("Invalid JSON callback body") from e
+        return _normalize_callback_mapping(body)
+
+    if media_type == "application/x-www-form-urlencoded":
+        body = await request.body()
+        return _parse_form_encoded_body(body)
+
+    if media_type == "multipart/form-data":
+        try:
+            form = await request.form()
+        except Exception as e:
+            raise SalesbotCallbackParseError("Invalid multipart callback body") from e
+        return _normalize_callback_mapping({key: value for key, value in form.multi_items() if isinstance(value, str)})
+
+    body = await request.body()
+    if not body:
+        raise SalesbotCallbackParseError("Missing callback body")
+    stripped = body.lstrip()
+    if stripped.startswith((b"{", b"[")):
+        try:
+            return _normalize_callback_mapping(json.loads(body))
+        except json.JSONDecodeError as e:
+            raise SalesbotCallbackParseError("Invalid JSON callback body") from e
+    return _parse_form_encoded_body(body)
+
+
+def _parse_form_encoded_body(body: bytes) -> dict[str, Any]:
+    if not body:
+        raise SalesbotCallbackParseError("Missing callback body")
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise SalesbotCallbackParseError("Unreadable callback body") from e
+    parsed = parse_qs(text, keep_blank_values=True)
+    flat = {key: values[-1] if values else "" for key, values in parsed.items()}
+    return _normalize_callback_mapping(flat)
+
+
+def _normalize_callback_mapping(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise SalesbotCallbackParseError("Callback body must be an object")
+    if any("[" in str(key) for key in payload):
+        payload = parse_nested_form(payload)
+    return dict(payload)
+
+
+def _coerce_salesbot_callback_payload(payload: dict[str, Any]) -> SalesbotWidgetRequest:
+    values = dict(payload)
+    data = values.get("data")
+    if isinstance(data, str):
+        if data.strip():
+            try:
+                values["data"] = json.loads(data)
+            except json.JSONDecodeError as e:
+                raise SalesbotCallbackParseError("Callback data field must be valid JSON") from e
+        else:
+            values["data"] = {}
+    elif data is None:
+        values["data"] = {}
+    elif not isinstance(data, dict):
+        raise SalesbotCallbackParseError("Callback data field must be an object")
+
+    try:
+        return SalesbotWidgetRequest.model_validate(values)
+    except ValidationError as e:
+        raise SalesbotCallbackParseError("Callback body is missing required fields") from e
 
 
 async def _sync_lead_ai_mode(lead_id: str, enum_id: int) -> None:

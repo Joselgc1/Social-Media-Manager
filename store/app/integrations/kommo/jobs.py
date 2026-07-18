@@ -169,9 +169,6 @@ async def process_ready_jobs(limit: int = 5) -> int:
 
 async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, claims: dict | None = None) -> dict:
     values = _callback_values(data, return_url, claims or {})
-    if not (values.get("lead_id") or values.get("contact_id")):
-        logger.info("Kommo Salesbot callback ignored: missing_entity_id")
-        return {"status": "ignored", "reason": "missing_entity_id"}
 
     job = await db.fetch_one(
         """
@@ -189,8 +186,8 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             FROM kommo_message_jobs candidate
             WHERE candidate.status = 'waiting_for_salesbot'
               AND (
-                  (:lead_id IS NOT NULL AND candidate.lead_id = :lead_id)
-                  OR (:lead_id IS NULL AND :contact_id IS NOT NULL AND candidate.contact_id = :contact_id)
+                  (:entity_type = 'leads' AND candidate.lead_id = :entity_id)
+                  OR (:entity_type = 'contacts' AND candidate.contact_id = :entity_id)
               )
             ORDER BY candidate.salesbot_launched_at DESC NULLS LAST, candidate.created_at DESC
             FOR UPDATE SKIP LOCKED
@@ -204,14 +201,14 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         logger.info("Kommo Salesbot callback matched waiting job: %s", _job_log_context(dict(job)))
         return {"status": "ready", "job_id": str(job["id"])}
 
-    latest = await _find_latest_job_for_callback(data)
+    latest = await _find_latest_job_for_callback(values)
     if latest and latest["status"] in _TERMINAL_STATUSES | _ACTIVE_SALESBOT_STATUSES:
         logger.info("Kommo Salesbot callback ignored as duplicate for job: %s", _job_log_context(dict(latest)))
         return {"status": "duplicate", "job_id": str(latest["id"])}
     logger.info(
-        "Kommo Salesbot callback ignored: no_waiting_job lead_id=%s contact_id=%s",
-        data.lead_id,
-        data.contact_id,
+        "Kommo Salesbot callback ignored: no_waiting_job entity_type=%s entity_id=%s",
+        values["entity_type"],
+        values["entity_id"],
     )
     return {"status": "ignored", "reason": "no_waiting_job"}
 
@@ -450,22 +447,87 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             logger.warning("Kommo job failed before Salesbot launch: job_id=%s reason=missing_entity_id", job["id"])
             await _mark_job(job["id"], "failed", "missing_entity_id")
             return
-        await client.run_salesbot(entity_id, entity_type)
-        await db.execute(
-            """
-            UPDATE kommo_message_jobs
-            SET status = 'waiting_for_salesbot',
-                salesbot_launched_at = NOW(),
-                processing_started_at = NULL,
-                updated_at = NOW()
-            WHERE id = :id AND status = 'processing'
-            """,
-            {"id": job["id"]},
-        )
-        logger.info("Kommo job waiting for Salesbot callback: job_id=%s", job["id"])
+        waiting_job = await _mark_job_waiting_for_salesbot(job["id"])
+        if not waiting_job:
+            logger.info("Kommo Salesbot launch skipped because job was no longer processing: job_id=%s", job["id"])
+            return
+        logger.info("Kommo job waiting for Salesbot callback before launch: job_id=%s", job["id"])
+        try:
+            await client.run_salesbot(entity_id, entity_type)
+        except KommoAPIError as e:
+            error = sanitize_job_error(e)
+            if _is_definitive_launch_error(e):
+                logger.warning("Kommo Salesbot launch rejected definitively: job_id=%s error=%s", job["id"], error)
+                await _mark_waiting_job_failed(job["id"], error)
+                return
+            logger.warning("Kommo Salesbot launch outcome uncertain: job_id=%s error=%s", job["id"], error)
+            await _record_uncertain_launch_warning(job["id"], error)
+            return
+        except Exception as e:
+            error = sanitize_job_error(e)
+            logger.warning("Kommo Salesbot launch outcome uncertain: job_id=%s error=%s", job["id"], error)
+            await _record_uncertain_launch_warning(job["id"], error)
+            return
+        logger.info("Kommo Salesbot launch accepted for job_id=%s", job["id"])
     except Exception as e:
         logger.exception("Kommo Salesbot launch failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         await _mark_job(job["id"], "failed", sanitize_job_error(e))
+
+
+async def _mark_job_waiting_for_salesbot(job_id: str):
+    return await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs
+        SET status = 'waiting_for_salesbot',
+            salesbot_launched_at = NOW(),
+            processing_started_at = NULL,
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'processing'
+        RETURNING *
+        """,
+        {"id": job_id},
+    )
+
+
+def _is_definitive_launch_error(error: KommoAPIError) -> bool:
+    return error.status_code is not None and 400 <= error.status_code < 500 and error.status_code != 429
+
+
+async def _mark_waiting_job_failed(job_id: str, error: str) -> None:
+    await db.execute(
+        """
+        UPDATE kommo_message_jobs
+        SET status = 'failed',
+            last_error = :last_error,
+            processing_started_at = NULL,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'waiting_for_salesbot'
+        """,
+        {"id": job_id, "last_error": sanitize_job_error(error)},
+    )
+
+
+async def _record_uncertain_launch_warning(job_id: str, error: str) -> None:
+    current = await db.fetch_one("SELECT status FROM kommo_message_jobs WHERE id = :id", {"id": job_id})
+    if current and current["status"] == "ready":
+        logger.info("Kommo Salesbot callback already arrived after uncertain launch: job_id=%s", job_id)
+        return
+    if not current or current["status"] != "waiting_for_salesbot":
+        logger.info("Kommo launch warning skipped because job status changed: job_id=%s", job_id)
+        return
+    await db.execute(
+        """
+        UPDATE kommo_message_jobs
+        SET last_error = :last_error,
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'waiting_for_salesbot'
+        """,
+        {"id": job_id, "last_error": f"Salesbot launch outcome uncertain: {sanitize_job_error(error)}"},
+    )
 
 
 async def _process_ready_job(job: dict) -> None:
@@ -570,20 +632,13 @@ async def _process_ready_job(job: dict) -> None:
         await _mark_job(job["id"], "delivery_unknown" if continuation_started else "failed", sanitize_job_error(e))
 
 
-async def _find_latest_job_for_callback(data: SalesbotWidgetData):
-    clauses = []
-    values = {}
-    if data.lead_id:
-        clauses.append("lead_id = :lead_id")
-        values["lead_id"] = data.lead_id
-    elif data.contact_id:
-        clauses.append("contact_id = :contact_id")
-        values["contact_id"] = data.contact_id
-    else:
-        return None
-    query = f"""
+async def _find_latest_job_for_callback(values: dict):
+    query = """
         SELECT * FROM kommo_message_jobs
-        WHERE {' AND '.join(clauses)}
+        WHERE (
+            (:entity_type = 'leads' AND lead_id = :entity_id)
+            OR (:entity_type = 'contacts' AND contact_id = :entity_id)
+        )
         ORDER BY salesbot_launched_at DESC NULLS LAST, created_at DESC
         LIMIT 1
     """
@@ -591,20 +646,30 @@ async def _find_latest_job_for_callback(data: SalesbotWidgetData):
 
 
 def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) -> dict:
+    entity_type = claims.get("entity_type")
+    entity_id = _claim_as_str(claims, "entity_id")
+    if entity_type not in {"leads", "contacts"} or not entity_id:
+        raise ValueError("missing_signed_entity_identity")
+    if entity_type == "leads" and data.lead_id and data.lead_id != entity_id:
+        raise ValueError("widget_lead_id_mismatch")
+    if entity_type == "contacts" and data.contact_id and data.contact_id != entity_id:
+        raise ValueError("widget_contact_id_mismatch")
     return {
         "return_url": return_url,
-        "lead_id": data.lead_id,
-        "contact_id": data.contact_id,
+        "entity_id": entity_id,
+        "entity_type": entity_type,
+        "lead_id": entity_id if entity_type == "leads" else None,
+        "contact_id": entity_id if entity_type == "contacts" else None,
         "callback_claims": json.dumps(_safe_claims(claims)),
         "salesbot_token_jti": _claim_as_str(claims, "jti"),
         "salesbot_account_id": _claim_as_str(claims, "account_id"),
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
-        "salesbot_client_uuid": _claim_as_str(claims, "client_uuid") or _claim_as_str(claims, "client_uid"),
+        "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
     }
 
 
 def _safe_claims(claims: dict) -> dict:
-    allowed = {"iss", "aud", "jti", "iat", "nbf", "exp", "account_id", "user_id", "subdomain", "client_uuid", "client_uid"}
+    allowed = {"iss", "aud", "jti", "iat", "nbf", "exp", "account_id", "user_id", "subdomain", "client_uuid", "client_uid", "entity_id", "entity_type"}
     return {key: claims[key] for key in allowed if key in claims}
 
 
