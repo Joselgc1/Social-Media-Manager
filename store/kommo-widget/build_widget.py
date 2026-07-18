@@ -39,10 +39,11 @@ INCLUDE = [
 ]
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_IMAGE_BYTES = 300 * 1024
+EXPECTED_WIDGET_VERSION = "1.2.3"
 REQUIRED_I18N_KEYS = {
     "widget": {"name", "short_description", "description", "tour_description"},
     "settings": {"backend_url"},
-    "salesbot": {"handler_name", "webhook_url"},
+    "salesbot": {"handler_name", "webhook_url", "success_exit", "fail_exit"},
 }
 REQUIRED_LOCATIONS = {"settings", "salesbot_designer"}
 UNRESOLVED_PLACEHOLDERS = (WIDGET_CODE_PLACEHOLDER, "YOUR_WIDGET_CODE", "YOUR-STORE-DOMAIN")
@@ -102,6 +103,8 @@ def _validate_widget_code(widget_code: str) -> str:
 
 def _validate_manifest(manifest: dict, widget_code: str) -> None:
     widget = manifest.get("widget") or {}
+    if widget.get("version") != EXPECTED_WIDGET_VERSION:
+        raise WidgetBuildError(f"manifest.widget.version must be {EXPECTED_WIDGET_VERSION}")
     if widget.get("installation") is not True:
         raise WidgetBuildError("Private Salesbot widget must set widget.installation=true")
     locations = set(manifest.get("locations") or [])
@@ -128,14 +131,10 @@ def _validate_manifest(manifest: dict, widget_code: str) -> None:
         raise WidgetBuildError(f"salesbot_designer.logo must be {expected_logo}")
     handler = salesbot.get("kommo_ai_request") or {}
     webhook = (handler.get("settings") or {}).get("webhook_url") or {}
-    if (
-        webhook.get("name") != "salesbot.webhook_url"
-        or webhook.get("default_value") != ""
-        or webhook.get("type") != "url"
-        or webhook.get("manual") is not True
-        or webhook.get("required") is not True
-    ):
-        raise WidgetBuildError("salesbot webhook_url must be a required manual URL setting")
+    if webhook.get("name") != "salesbot.webhook_url" or webhook.get("default_value") != "" or webhook.get("type") != "url" or webhook.get("manual") is not True:
+        raise WidgetBuildError("salesbot webhook_url must be an optional manual URL setting")
+    if "required" in webhook:
+        raise WidgetBuildError("salesbot webhook_url must not be required")
 
 
 def _validate_i18n_files(manifest: dict) -> None:

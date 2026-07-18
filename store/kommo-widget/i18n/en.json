@@ -10,6 +10,8 @@
   },
   "salesbot": {
     "handler_name": "Ask Eva AI",
-    "webhook_url": "Salesbot callback URL"
+    "webhook_url": "Salesbot callback URL override",
+    "success_exit": "AI response completed",
+    "fail_exit": "AI response failed"
   }
 }

@@ -9,7 +9,9 @@
     "backend_url": "URL callback de Salesbot"
   },
   "salesbot": {
-    "handler_name": "Preguntar a Eva AI",
-    "webhook_url": "URL callback de Salesbot"
+    "handler_name": "Consultar a Eva AI",
+    "webhook_url": "URL alternativa del callback de Salesbot",
+    "success_exit": "Respuesta de AI completada",
+    "fail_exit": "Error en la respuesta de AI"
   }
 }

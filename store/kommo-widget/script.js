@@ -32,6 +32,61 @@ define(['jquery'], function ($) {
       }
     }
 
+    function unwrapSettingValue(value) {
+      if (typeof value === 'string') {
+        return value;
+      }
+
+      if (value && typeof value === 'object') {
+        return (
+          value.value_manual ||
+          value.value ||
+          value.url ||
+          value.text ||
+          ''
+        );
+      }
+
+      return '';
+    }
+
+    function getBlockParams(params) {
+      if (!params || typeof params !== 'object') {
+        return {};
+      }
+
+      if (params.params && typeof params.params === 'object') {
+        return params.params;
+      }
+
+      return params;
+    }
+
+    function getInstalledBackendUrl() {
+      if (!self.get_settings) {
+        return null;
+      }
+
+      const settings = self.get_settings() || {};
+      const candidates = [
+        settings.backend_url,
+        settings.fields && settings.fields.backend_url,
+        settings.params && settings.params.backend_url
+      ];
+
+      for (const candidate of candidates) {
+        const normalized = normalizeBackendUrl(
+          unwrapSettingValue(candidate)
+        );
+
+        if (normalized) {
+          return normalized;
+        }
+      }
+
+      return null;
+    }
+
     this.callbacks = {
       settings: function () {
         return true;
@@ -69,31 +124,42 @@ define(['jquery'], function ($) {
             ? widgetConfiguration.fields
             : {};
 
-        const backendUrl = normalizeBackendUrl(fields.backend_url);
-
-        if (!backendUrl) {
-          self.set_status('error');
-          return false;
-        }
-
-        self.set_settings({ backend_url: backendUrl });
-        self.set_status('installed');
-        return true;
+        return Boolean(normalizeBackendUrl(fields.backend_url));
       },
 
       destroy: function () {
         return true;
       },
 
+      salesbotDesignerSettings: function (_body, _renderRow, _params) {
+        return {
+          exits: [
+            {
+              code: 'success',
+              title: self.i18n('salesbot').success_exit
+            },
+            {
+              code: 'fail',
+              title: self.i18n('salesbot').fail_exit
+            }
+          ]
+        };
+      },
+
       onSalesbotDesignerSave: function (_handlerCode, params) {
-        const blockParams = params && params.params ? params.params : params;
-        const webhookUrl = normalizeBackendUrl(
-          blockParams && blockParams.webhook_url
+        const blockParams = getBlockParams(params);
+        const blockUrl = normalizeBackendUrl(
+          unwrapSettingValue(blockParams.webhook_url)
         );
+        const webhookUrl = blockUrl || getInstalledBackendUrl();
 
         if (!webhookUrl) {
+          console.warn('Kommo Salesbot widget configuration is invalid', {
+            handlerCode: _handlerCode,
+            parameterKeys: Object.keys(blockParams)
+          });
           throw new Error(
-            'Enter the HTTPS Social Media Manager Salesbot callback URL in this Salesbot block.'
+            'Configure the Salesbot callback URL in the integration settings or in this widget block.'
           );
         }
 
@@ -158,7 +224,9 @@ define(['jquery'], function ($) {
           }
         ];
 
-        return JSON.stringify(flow);
+        const serializedFlow = JSON.stringify(flow);
+        JSON.parse(serializedFlow);
+        return serializedFlow;
       }
     };
 
