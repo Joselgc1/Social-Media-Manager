@@ -624,6 +624,8 @@ async def _process_ready_job(job: dict) -> None:
             await _continue_and_discard_job(client, job, mapped.reason or "empty_response")
             return
         continuation_data = {"status": "success", "message": customer_text}
+        if (result.get("catalog_pdf") or {}).get("type") == "catalog_pdf":
+            continuation_data["attachment_type"] = "catalog_pdf"
         await _mark_job_continuing(job["id"], continuation_data)
         continuation_started = True
         _log_continuation_prepared(job["id"], continuation_data)

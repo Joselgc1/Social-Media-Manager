@@ -6,7 +6,6 @@ import re
 from urllib.parse import urlparse
 
 from app.ai.safety import sanitize_customer_facing_text
-from app.config import get_config
 from app.integrations.kommo.models import NormalizedResponseOutput
 
 KOMMO_MAX_EXECUTE_HANDLERS = 10
@@ -20,6 +19,12 @@ class KommoResponseMappingError(ValueError):
 
 def _clean_text(text: str | None) -> str:
     return sanitize_customer_facing_text(text or "").strip()
+
+
+def _clean_catalog_text(text: str | None) -> str:
+    cleaned = _clean_text(text)
+    cleaned = re.sub(r"\s*https://[^\s]+/static/catalog/catalog\.pdf\S*\s*", "\n", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _split_text(text: str, limit: int = KOMMO_SHOW_VALUE_LIMIT) -> list[str]:
@@ -71,6 +76,17 @@ def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
     handlers: list[dict] = []
     customer_parts: list[str] = []
 
+    catalog_pdf = result.get("catalog_pdf") or {}
+    if catalog_pdf.get("type") == "catalog_pdf":
+        reply_text = _clean_catalog_text(result.get("text"))
+        catalog_caption = _clean_catalog_text(catalog_pdf.get("caption"))
+        customer_text = reply_text or catalog_caption
+        if not customer_text:
+            return NormalizedResponseOutput(execute_handlers=[], discarded=True, reason="empty_response")
+        _append_text_handlers(handlers, customer_text)
+        _validate_execute_handlers(handlers)
+        return NormalizedResponseOutput(execute_handlers=handlers, customer_text=customer_text)
+
     interactive = result.get("interactive") or {}
     if interactive.get("type") == "interactive_buttons":
         buttons = [_clean_text(str(btn)) for btn in interactive.get("buttons", []) if _clean_text(str(btn))]
@@ -110,15 +126,6 @@ def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
         caption = _clean_text(product_image.get("caption")) or "Aqui tienes la foto del producto:"
         image_url = product_image.get("image_url")
         text = f"{caption}\n{image_url}" if _is_public_url(image_url) else caption
-        _append_text_handlers(handlers, text)
-        customer_parts.append(text)
-
-    catalog_pdf = result.get("catalog_pdf") or {}
-    if catalog_pdf.get("type") == "catalog_pdf":
-        config = get_config()
-        pdf_url = f"{config.app_base_url.rstrip('/')}/static/catalog/catalog.pdf"
-        caption = _clean_text(catalog_pdf.get("caption")) or "Aqui tienes nuestro catalogo:"
-        text = f"{caption}\n{pdf_url}"
         _append_text_handlers(handlers, text)
         customer_parts.append(text)
 

@@ -119,6 +119,11 @@ INSERT INTO settings (key, value) VALUES
     ('daily_analytics_hour',       '1'),
     ('daily_analytics_minute',     '0'),
     ('accepted_exchange_rate',     '""'),
+    ('kommo_catalog_file_uuid',     '""'),
+    ('kommo_catalog_version_uuid',  '""'),
+    ('kommo_catalog_drive_url',     '""'),
+    ('kommo_catalog_pdf_sha256',    '""'),
+    ('kommo_catalog_synced_at',     '""'),
     ('payment_methods',            '[]');
 
 -- ============================================================

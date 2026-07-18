@@ -629,15 +629,21 @@ async def _execute_tool(
 
     elif name == "send_catalog_pdf":
         # Auto-generate the PDF if it doesn't exist yet, then signal the webhook handler.
+        generated_pdf = False
         if not PDF_PATH.exists():
             catalog = get_cached_catalog()
             if not catalog:
                 return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
             try:
                 generate_catalog_pdf(catalog)
+                generated_pdf = True
             except Exception as e:
                 logger.error(f"Auto-generate catalog PDF failed: {e}")
                 return {"status": "error", "message": "Could not generate catalog PDF."}
+        if generated_pdf and get_config().channel_backend == "kommo":
+            from app.integrations.kommo.files import sync_catalog_pdf_to_kommo
+
+            await sync_catalog_pdf_to_kommo(PDF_PATH)
         return {
             "type": "catalog_pdf",
             "caption": args.get("caption", "Aqui tienes nuestro catalogo de productos 📖"),

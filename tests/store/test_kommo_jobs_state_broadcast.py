@@ -527,6 +527,57 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
     assert "https://store.example/static/catalog/catalog.pdf" in continuation_payload["data"]["message"]
     assert "Aquí" in continuation_payload["data"]["message"]
     assert "💕" in continuation_payload["data"]["message"]
+    assert "attachment_type" not in continuation_payload["data"]
+
+
+@pytest.mark.asyncio
+async def test_ready_job_catalog_reply_includes_attachment_metadata(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_settings = AsyncMock(return_value={"ai_enabled": True})
+    mock_db.fetch_one = AsyncMock(return_value={"conversation_state": "active"})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason=None, needs_ai_mode_initialization=False),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    reply = "¡Hola Jose! Claro, aquí tienes el catálogo completo de Zona Pink 💗"
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(return_value={"text": reply, "catalog_pdf": {"type": "catalog_pdf", "caption": "Catalogo"}, "escalated": False}),
+    )
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job({
+        "id": "job",
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "combined_message": "Catalogo",
+        "channel": "whatsapp",
+        "correlation_id": "corr",
+    })
+
+    assert client.continue_salesbot.await_args.kwargs == {
+        "data": {"status": "success", "message": reply, "attachment_type": "catalog_pdf"},
+    }
+    continuation_payload = json.loads(mock_db.execute.await_args_list[0].args[1]["continuation_payload"])
+    assert continuation_payload == {
+        "data": {"status": "success", "message": reply, "attachment_type": "catalog_pdf"},
+    }
 
 
 @pytest.mark.asyncio

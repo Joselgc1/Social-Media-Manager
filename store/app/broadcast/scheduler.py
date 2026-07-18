@@ -19,7 +19,7 @@ from app import db
 from app.admin.notify import notify_owner
 from app.analytics import build_daily_aggregate
 from app.broadcast.sender import execute_broadcast
-from app.catalog.pdf_generator import generate_catalog_pdf
+from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
 from app.config import get_config
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
@@ -230,6 +230,10 @@ async def _refresh_catalog_pdf():
         catalog = get_cached_catalog()
         if catalog:
             generate_catalog_pdf(catalog)
+            if get_config().channel_backend == "kommo":
+                from app.integrations.kommo.files import sync_catalog_pdf_to_kommo
+
+                await sync_catalog_pdf_to_kommo(PDF_PATH)
             logger.info(
                 "Scheduled catalog PDF refresh completed (%s grouped products).",
                 count_grouped_catalog_products(catalog),

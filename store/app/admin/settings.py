@@ -826,6 +826,10 @@ async def generate_catalog_pdf_endpoint():
         raise HTTPException(status_code=400, detail="Catalog is empty. Check Google Sheets connection.")
 
     generate_catalog_pdf(catalog)
+    if get_config().channel_backend == "kommo":
+        from app.integrations.kommo.files import sync_catalog_pdf_to_kommo
+
+        await sync_catalog_pdf_to_kommo(PDF_PATH)
     meta = get_pdf_metadata()
 
     return {

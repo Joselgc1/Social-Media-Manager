@@ -278,21 +278,46 @@ def test_origin_mapping():
     assert origin_to_channel("telegram") is None
 
 
-def test_text_button_image_and_pdf_response_mapping(monkeypatch):
-    config = SimpleNamespace(app_base_url="https://store.example")
-    monkeypatch.setattr("app.integrations.kommo.response_mapper.get_config", lambda: config)
+def test_text_button_and_image_response_mapping():
     output = map_ai_response_to_salesbot({
         "text": "Hola, aqui tienes opciones",
         "interactive": {"type": "interactive_buttons", "body_text": "Elige", "buttons": ["S", "M"]},
         "product_image": {"type": "product_image", "caption": "Foto", "image_url": "https://cdn.example/p.jpg"},
-        "catalog_pdf": {"type": "catalog_pdf", "caption": "Catalogo"},
     })
     assert output.execute_handlers[0]["params"]["type"] == "buttons"
     all_values = "\n".join(str(handler.get("params", {}).get("value", "")) for handler in output.execute_handlers)
     assert "https://cdn.example/p.jpg" in all_values
-    assert "https://store.example/static/catalog/catalog.pdf" in all_values
     assert all(handler["handler"] == "show" for handler in output.execute_handlers)
     assert not any(handler.get("params", {}).get("type") == "finish" for handler in output.execute_handlers)
+
+
+def test_catalog_pdf_response_uses_one_message_without_public_url():
+    reply = (
+        "¡Hola Jose! Claro, aquí tienes el catálogo completo de Zona Pink 💗\n"
+        "¿Qué te interesa más: pijamas, sets o lencería con encaje?"
+    )
+    output = map_ai_response_to_salesbot({
+        "text": reply,
+        "catalog_pdf": {"type": "catalog_pdf", "caption": "Catalogo\nhttps://store.example/static/catalog/catalog.pdf"},
+    })
+
+    assert output.customer_text == reply
+    assert "https://store.example/static/catalog/catalog.pdf" not in output.customer_text
+    assert "Catalogo" not in output.customer_text
+    assert output.customer_text.count("catálogo") == 1
+
+
+def test_catalog_pdf_response_falls_back_to_caption_without_url():
+    output = map_ai_response_to_salesbot({
+        "text": "",
+        "catalog_pdf": {
+            "type": "catalog_pdf",
+            "caption": "Aquí tienes nuestro catálogo\nhttps://store.example/static/catalog/catalog.pdf",
+        },
+    })
+
+    assert output.customer_text == "Aquí tienes nuestro catálogo"
+    assert "https://store.example/static/catalog/catalog.pdf" not in output.customer_text
 
 
 def test_plain_ai_text_maps_to_show_handlers_without_finish_jump():
@@ -316,11 +341,7 @@ def test_empty_ai_response_discards_without_finish_jump():
     assert output.execute_handlers == []
 
 
-def test_url_buttons_are_schema_valid_and_limited(monkeypatch):
-    monkeypatch.setattr(
-        "app.integrations.kommo.response_mapper.get_config",
-        lambda: SimpleNamespace(app_base_url="https://store.example"),
-    )
+def test_url_buttons_are_schema_valid_and_limited():
     output = map_ai_response_to_salesbot({
         "interactive": {
             "type": "buttons_url",
