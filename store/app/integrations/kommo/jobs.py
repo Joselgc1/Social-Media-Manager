@@ -169,6 +169,16 @@ async def process_ready_jobs(limit: int = 5) -> int:
 
 async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, claims: dict | None = None) -> dict:
     values = _callback_values(data, return_url, claims or {})
+    update_values = {
+        "return_url": values["return_url"],
+        "entity_id": values["entity_id"],
+        "entity_type": values["entity_type"],
+        "callback_claims": values["callback_claims"],
+        "salesbot_token_jti": values["salesbot_token_jti"],
+        "salesbot_account_id": values["salesbot_account_id"],
+        "salesbot_user_id": values["salesbot_user_id"],
+        "salesbot_client_uuid": values["salesbot_client_uuid"],
+    }
 
     job = await db.fetch_one(
         """
@@ -195,7 +205,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         )
         RETURNING *
         """,
-        values,
+        update_values,
     )
     if job:
         logger.info("Kommo Salesbot callback matched waiting job: %s", _job_log_context(dict(job)))
@@ -633,6 +643,10 @@ async def _process_ready_job(job: dict) -> None:
 
 
 async def _find_latest_job_for_callback(values: dict):
+    query_values = {
+        "entity_type": values["entity_type"],
+        "entity_id": values["entity_id"],
+    }
     query = """
         SELECT * FROM kommo_message_jobs
         WHERE (
@@ -642,7 +656,7 @@ async def _find_latest_job_for_callback(values: dict):
         ORDER BY salesbot_launched_at DESC NULLS LAST, created_at DESC
         LIMIT 1
     """
-    return await db.fetch_one(query, values)
+    return await db.fetch_one(query, query_values)
 
 
 def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) -> dict:
@@ -658,8 +672,6 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         "return_url": return_url,
         "entity_id": entity_id,
         "entity_type": entity_type,
-        "lead_id": entity_id if entity_type == "leads" else None,
-        "contact_id": entity_id if entity_type == "contacts" else None,
         "callback_claims": json.dumps(_safe_claims(claims)),
         "salesbot_token_jti": _claim_as_str(claims, "jti"),
         "salesbot_account_id": _claim_as_str(claims, "account_id"),
