@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -136,7 +136,6 @@ class PersistentKommoJob(BaseModel):
 
 
 class NormalizedResponseOutput(BaseModel):
-    execute_handlers: list[dict[str, Any]]
     customer_text: str | None = None
     discarded: bool = False
     reason: str | None = None

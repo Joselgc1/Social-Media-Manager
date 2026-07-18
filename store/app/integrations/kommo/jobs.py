@@ -718,11 +718,8 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
 async def _mark_job_continuing(
     job_id: str,
     continuation_data: dict,
-    execute_handlers: list[dict] | None = None,
 ) -> None:
     continuation_payload = {"data": continuation_data}
-    if execute_handlers:
-        continuation_payload["execute_handlers"] = execute_handlers
     await db.execute(
         """
         UPDATE kommo_message_jobs
@@ -759,16 +756,14 @@ async def _mark_job_sent(job_id: str, response_payload) -> None:
 def _log_continuation_prepared(
     job_id: str,
     continuation_data: dict,
-    execute_handlers: list[dict] | None = None,
 ) -> None:
     message = str(continuation_data.get("message") or "")
     logger.info(
-        "Kommo continuation prepared: job_id=%s status=%s message_present=%s message_length=%s handler_count=%s",
+        "Kommo continuation prepared: job_id=%s status=%s message_present=%s message_length=%s",
         job_id,
         continuation_data.get("status"),
         bool(message),
         len(message),
-        len(execute_handlers or []),
     )
 
 

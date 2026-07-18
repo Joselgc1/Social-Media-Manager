@@ -209,13 +209,10 @@ class KommoClient:
         return_url: str,
         *,
         data: dict[str, Any],
-        execute_handlers: list[dict[str, Any]] | None = None,
     ) -> Any:
         config = get_config()
         validated_url = validate_return_url(return_url, config.kommo_subdomain)
         payload = {"data": data}
-        if execute_handlers:
-            payload["execute_handlers"] = execute_handlers[:10]
         return await self._request(
             "POST",
             validated_url,

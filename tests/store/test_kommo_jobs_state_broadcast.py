@@ -602,11 +602,11 @@ def test_continuation_prepared_log_is_structural_only(caplog):
 
     continuation_data = {"status": "success", "message": "Mensaje secreto del cliente"}
     with caplog.at_level("INFO", logger="app.integrations.kommo.jobs"):
-        jobs._log_continuation_prepared("job", continuation_data, [])
+        jobs._log_continuation_prepared("job", continuation_data)
 
     assert "message_present=True" in caplog.text
     assert f"message_length={len(continuation_data['message'])}" in caplog.text
-    assert "handler_count=0" in caplog.text
+    assert "handler_count" not in caplog.text
     assert "status=success" in caplog.text
     assert "Mensaje secreto del cliente" not in caplog.text
 

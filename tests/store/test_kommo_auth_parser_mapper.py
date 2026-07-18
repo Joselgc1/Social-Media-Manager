@@ -10,7 +10,7 @@ from app.integrations.kommo.auth import (
     validate_webhook_secret,
 )
 from app.integrations.kommo.models import SalesbotWidgetData
-from app.integrations.kommo.response_mapper import KOMMO_MAX_EXECUTE_HANDLERS, map_ai_response_to_salesbot
+from app.integrations.kommo.response_mapper import map_ai_response_to_salesbot
 from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, origin_to_channel, parse_nested_form
 
 
@@ -284,11 +284,13 @@ def test_text_button_and_image_response_mapping():
         "interactive": {"type": "interactive_buttons", "body_text": "Elige", "buttons": ["S", "M"]},
         "product_image": {"type": "product_image", "caption": "Foto", "image_url": "https://cdn.example/p.jpg"},
     })
-    assert output.execute_handlers[0]["params"]["type"] == "buttons"
-    all_values = "\n".join(str(handler.get("params", {}).get("value", "")) for handler in output.execute_handlers)
-    assert "https://cdn.example/p.jpg" in all_values
-    assert all(handler["handler"] == "show" for handler in output.execute_handlers)
-    assert not any(handler.get("params", {}).get("type") == "finish" for handler in output.execute_handlers)
+    assert output.customer_text
+    assert "Elige" in output.customer_text
+    assert "1. S" in output.customer_text
+    assert "2. M" in output.customer_text
+    assert "Foto" in output.customer_text
+    assert "https://cdn.example/p.jpg" in output.customer_text
+    assert "Hola, aqui tienes opciones" in output.customer_text
 
 
 def test_catalog_pdf_response_uses_one_message_without_public_url():
@@ -320,28 +322,27 @@ def test_catalog_pdf_response_falls_back_to_caption_without_url():
     assert "https://store.example/static/catalog/catalog.pdf" not in output.customer_text
 
 
-def test_plain_ai_text_maps_to_show_handlers_without_finish_jump():
-    output = map_ai_response_to_salesbot({"text": "Hola, gracias por escribirnos. Tenemos opciones disponibles."})
+def test_plain_ai_text_maps_to_salesbot_message():
+    reply = "Hola, gracias por escribirnos. Tenemos opciones disponibles."
+    output = map_ai_response_to_salesbot({"text": reply})
     assert output.discarded is False
-    assert output.execute_handlers
-    assert all(handler["handler"] == "show" for handler in output.execute_handlers)
-    assert not any(handler["handler"] == "goto" for handler in output.execute_handlers)
+    assert output.customer_text == reply
 
 
-def test_generated_show_values_are_limited_and_max_handler_limit_is_enforced():
-    output = map_ai_response_to_salesbot({"text": " ".join(["producto"] * 200)})
-    assert len(output.execute_handlers) == KOMMO_MAX_EXECUTE_HANDLERS
-    assert all(len(handler["params"]["value"]) <= 80 for handler in output.execute_handlers)
-    assert all(handler["handler"] == "show" for handler in output.execute_handlers)
+def test_long_ai_text_is_preserved_as_salesbot_message():
+    reply = " ".join(["producto"] * 200)
+    output = map_ai_response_to_salesbot({"text": reply})
+    assert output.discarded is False
+    assert output.customer_text == reply
 
 
-def test_empty_ai_response_discards_without_finish_jump():
+def test_empty_ai_response_discards_without_message():
     output = map_ai_response_to_salesbot({"text": ""})
     assert output.discarded is True
-    assert output.execute_handlers == []
+    assert output.customer_text is None
 
 
-def test_url_buttons_are_schema_valid_and_limited():
+def test_url_buttons_are_included_in_salesbot_message():
     output = map_ai_response_to_salesbot({
         "interactive": {
             "type": "buttons_url",
@@ -349,11 +350,7 @@ def test_url_buttons_are_schema_valid_and_limited():
             "buttons": [{"text": "Catalogo", "url": "https://store.example/catalog.pdf"}],
         }
     })
-    handler = output.execute_handlers[0]
-    assert handler["params"]["type"] == "buttons_url"
-    assert handler["params"]["buttons"] == ["https://store.example/catalog.pdf"]
-    assert len(handler["params"]["value"]) <= 80
-    assert not any(item["handler"] == "goto" for item in output.execute_handlers)
+    assert output.customer_text == "Abre\nhttps://store.example/catalog.pdf"
 
 
 @pytest.mark.asyncio
@@ -475,11 +472,10 @@ async def test_salesbot_continuation_disables_redirects(monkeypatch):
     await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
         data={"status": "success", "message": "Hola"},
-        execute_handlers=[{"handler": "show", "params": {"type": "text", "value": "Hola"}}],
     )
     assert recorded["client_kwargs"]["follow_redirects"] is False
-    assert recorded["json"]["data"] == {"status": "success", "message": "Hola"}
-    assert recorded["json"]["execute_handlers"][0]["handler"] == "show"
+    assert recorded["json"] == {"data": {"status": "success", "message": "Hola"}}
+    assert "execute_handlers" not in recorded["json"]
 
 
 @pytest.mark.asyncio
@@ -515,7 +511,6 @@ async def test_salesbot_continuation_accepts_explicit_failure_status(monkeypatch
     await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
         data={"status": "fail", "message": ""},
-        execute_handlers=[],
     )
     assert recorded["json"] == {"data": {"status": "fail", "message": ""}}
     assert "execute_handlers" not in recorded["json"]
