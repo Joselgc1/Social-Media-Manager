@@ -472,13 +472,11 @@ async def test_ready_job_discard_continues_salesbot_before_marking_discarded(mon
     assert client.continue_salesbot.await_args.args == ("https://acme.kommo.com/api/v4/salesbot/1/continue/2",)
     assert client.continue_salesbot.await_args.kwargs == {
         "data": {"status": "fail", "message": ""},
-        "execute_handlers": [],
     }
     assert mock_db.execute.await_count == 2
     assert "status = 'continuing'" in mock_db.execute.await_args_list[0].args[0]
     assert json.loads(mock_db.execute.await_args_list[0].args[1]["continuation_payload"]) == {
         "data": {"status": "fail", "message": ""},
-        "execute_handlers": [],
     }
     assert "status = 'discarded'" in mock_db.execute.await_args_list[1].args[0]
 
@@ -504,7 +502,7 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
         "resolve_customer_from_kommo_job",
         AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
     )
-    reply = "Aqui tienes el catalogo: https://store.example/static/catalog/catalog.pdf"
+    reply = "Aquí tienes el catálogo: https://store.example/static/catalog/catalog.pdf 💕"
     monkeypatch.setattr(jobs, "generate_response", AsyncMock(return_value={"text": reply, "escalated": False}))
     monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
 
@@ -523,11 +521,12 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
     client.continue_salesbot.assert_awaited_once()
     assert client.continue_salesbot.await_args.kwargs == {
         "data": {"status": "success", "message": reply},
-        "execute_handlers": [],
     }
     continuation_payload = json.loads(mock_db.execute.await_args_list[0].args[1]["continuation_payload"])
-    assert continuation_payload == {"data": {"status": "success", "message": reply}, "execute_handlers": []}
+    assert continuation_payload == {"data": {"status": "success", "message": reply}}
     assert "https://store.example/static/catalog/catalog.pdf" in continuation_payload["data"]["message"]
+    assert "Aquí" in continuation_payload["data"]["message"]
+    assert "💕" in continuation_payload["data"]["message"]
 
 
 @pytest.mark.asyncio

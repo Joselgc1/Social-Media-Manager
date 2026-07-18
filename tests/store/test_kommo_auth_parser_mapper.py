@@ -379,6 +379,49 @@ def test_kommo_client_rejects_invalid_subdomain():
 
 
 @pytest.mark.asyncio
+async def test_salesbot_continuation_data_only_omits_handlers_and_preserves_message(monkeypatch):
+    from app.integrations.kommo.client import KommoClient
+
+    recorded = {}
+
+    class _Response:
+        status_code = 202
+        content = b""
+        headers = {}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            recorded["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, headers=None, json=None):
+            recorded.update({"method": method, "url": url, "headers": headers, "json": json})
+            return _Response()
+
+    monkeypatch.setattr("app.integrations.kommo.client.httpx.AsyncClient", _Client)
+    monkeypatch.setattr(
+        "app.integrations.kommo.client.get_config",
+        lambda: SimpleNamespace(kommo_subdomain="acme"),
+    )
+    message = "¡Hola! Aquí está el catálogo: https://store.example/static/catalog/catalog.pdf 💕"
+    await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        data={"status": "success", "message": message},
+    )
+
+    assert recorded["json"] == {"data": {"status": "success", "message": message}}
+    assert "execute_handlers" not in recorded["json"]
+    assert "https://store.example/static/catalog/catalog.pdf" in recorded["json"]["data"]["message"]
+    assert "¡Hola!" in recorded["json"]["data"]["message"]
+    assert "💕" in recorded["json"]["data"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_salesbot_continuation_disables_redirects(monkeypatch):
     from app.integrations.kommo.client import KommoClient
 
@@ -453,4 +496,110 @@ async def test_salesbot_continuation_accepts_explicit_failure_status(monkeypatch
         data={"status": "fail", "message": ""},
         execute_handlers=[],
     )
-    assert recorded["json"] == {"data": {"status": "fail", "message": ""}, "execute_handlers": []}
+    assert recorded["json"] == {"data": {"status": "fail", "message": ""}}
+    assert "execute_handlers" not in recorded["json"]
+
+
+@pytest.mark.asyncio
+async def test_kommo_400_json_problem_detail_is_reported_safely(monkeypatch):
+    from app.integrations.kommo.client import KommoAPIError, KommoClient
+
+    class _Response:
+        status_code = 400
+        content = b'{"detail":"Incorrect data"}'
+        headers = {"content-type": "application/problem+json"}
+
+        def json(self):
+            return {
+                "status": 400,
+                "title": "Bad Request",
+                "detail": "Incorrect data",
+                "unsafe": {"authorization": "Bearer hidden-token"},
+            }
+
+        @property
+        def text(self):
+            return "Incorrect data Bearer hidden-token"
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, headers=None, json=None):
+            return _Response()
+
+    monkeypatch.setattr("app.integrations.kommo.client.httpx.AsyncClient", _Client)
+    monkeypatch.setattr(
+        "app.integrations.kommo.client.get_config",
+        lambda: SimpleNamespace(kommo_subdomain="acme"),
+    )
+    with pytest.raises(KommoAPIError) as exc:
+        await KommoClient(subdomain="acme", access_token="secret-access-token").continue_salesbot(
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            data={"status": "success", "message": "Mensaje privado del cliente"},
+        )
+
+    error = str(exc.value)
+    assert "Kommo API returned HTTP 400" in error
+    assert "Incorrect data" in error
+    assert "Mensaje privado del cliente" not in error
+    assert "hidden-token" not in error
+    assert "secret-access-token" not in error
+
+
+@pytest.mark.asyncio
+async def test_kommo_400_text_detail_redacts_secrets_urls_and_message(monkeypatch):
+    from app.integrations.kommo.client import KommoAPIError, KommoClient
+
+    customer_message = "Mensaje privado del cliente"
+
+    class _Response:
+        status_code = 400
+        content = b"bad request"
+        headers = {"content-type": "text/plain"}
+
+        @property
+        def text(self):
+            return (
+                "Incorrect data for Mensaje privado del cliente with Bearer hidden-token "
+                "at https://acme.kommo.com/api/v4/salesbot/1/continue/2"
+            )
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, headers=None, json=None):
+            return _Response()
+
+    monkeypatch.setattr("app.integrations.kommo.client.httpx.AsyncClient", _Client)
+    monkeypatch.setattr(
+        "app.integrations.kommo.client.get_config",
+        lambda: SimpleNamespace(kommo_subdomain="acme"),
+    )
+    with pytest.raises(KommoAPIError) as exc:
+        await KommoClient(subdomain="acme", access_token="secret-access-token").continue_salesbot(
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            data={"status": "success", "message": customer_message},
+        )
+
+    error = str(exc.value)
+    assert "Kommo API returned HTTP 400" in error
+    assert "Kommo API error (details redacted)" in error
+    assert customer_message not in error
+    assert "hidden-token" not in error
+    assert "secret-access-token" not in error
+    assert "https://acme.kommo.com/api/v4/salesbot/1/continue/2" not in error
+    assert len(error) <= 500 + len("Kommo API returned HTTP 400: ")

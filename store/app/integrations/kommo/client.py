@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 KOMMO_HTTP_TIMEOUT_SECONDS = 15
 _TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
+_MAX_ERROR_DETAIL_LENGTH = 500
+_SAFE_ERROR_FIELDS = ("detail", "error", "title", "hint", "status")
 
 
 class KommoAPIError(RuntimeError):
@@ -24,12 +27,55 @@ class KommoAPIError(RuntimeError):
 
 
 def sanitize_kommo_error(error: Exception | str) -> str:
-    text = str(error or "Kommo API error")
-    redacted_markers = ("Bearer ", "authorization", "access_token", "token", "secret")
+    return _sanitize_error_text(str(error or "Kommo API error"))
+
+
+def _sanitize_error_text(text: str, request_payload: Any | None = None) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    for message in _request_messages(request_payload):
+        text = text.replace(message, "[message redacted]")
+    text = re.sub(r"https://[^\s\"']+", "[url redacted]", text)
+    redacted_markers = ("Bearer ", "authorization", "access_token", "token", "secret", "jwt")
     lowered = text.lower()
     if any(marker.lower() in lowered for marker in redacted_markers):
         return "Kommo API error (details redacted)"
-    return text[:500]
+    return text[:_MAX_ERROR_DETAIL_LENGTH]
+
+
+def _request_messages(payload: Any | None) -> list[str]:
+    messages: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).lower() == "message" and isinstance(item, str) and item:
+                    messages.append(item)
+                    continue
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(payload)
+    return messages
+
+
+def _safe_response_detail(response: httpx.Response, request_payload: Any | None) -> str:
+    content_type = response.headers.get("content-type", "").lower()
+    if "json" in content_type:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            values = []
+            for field in _SAFE_ERROR_FIELDS:
+                value = body.get(field)
+                if isinstance(value, str | int | float | bool):
+                    values.append(str(value))
+            detail = "; ".join(dict.fromkeys(values))
+            return _sanitize_error_text(detail, request_payload)
+    return _sanitize_error_text(response.text, request_payload)
 
 
 class KommoClient:
@@ -79,10 +125,11 @@ class KommoClient:
                 if idempotent and response.status_code in _TRANSIENT_STATUSES and attempt + 1 < attempts:
                     await asyncio.sleep(0.5)
                     continue
-                raise KommoAPIError(
-                    f"Kommo API returned HTTP {response.status_code}",
-                    status_code=response.status_code,
-                )
+                detail = _safe_response_detail(response, json)
+                message = f"Kommo API returned HTTP {response.status_code}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise KommoAPIError(message, status_code=response.status_code)
             except httpx.HTTPError as e:
                 if idempotent and attempt + 1 < attempts:
                     await asyncio.sleep(0.5)
@@ -166,10 +213,9 @@ class KommoClient:
     ) -> Any:
         config = get_config()
         validated_url = validate_return_url(return_url, config.kommo_subdomain)
-        payload = {
-            "data": data,
-            "execute_handlers": (execute_handlers or [])[:10],
-        }
+        payload = {"data": data}
+        if execute_handlers:
+            payload["execute_handlers"] = execute_handlers[:10]
         return await self._request(
             "POST",
             validated_url,
