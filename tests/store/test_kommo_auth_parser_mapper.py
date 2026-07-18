@@ -10,7 +10,7 @@ from app.integrations.kommo.auth import (
     validate_webhook_secret,
 )
 from app.integrations.kommo.models import SalesbotWidgetData
-from app.integrations.kommo.response_mapper import map_ai_response_to_salesbot
+from app.integrations.kommo.response_mapper import KOMMO_MAX_EXECUTE_HANDLERS, map_ai_response_to_salesbot
 from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, origin_to_channel, parse_nested_form
 
 
@@ -291,7 +291,29 @@ def test_text_button_image_and_pdf_response_mapping(monkeypatch):
     all_values = "\n".join(str(handler.get("params", {}).get("value", "")) for handler in output.execute_handlers)
     assert "https://cdn.example/p.jpg" in all_values
     assert "https://store.example/static/catalog/catalog.pdf" in all_values
-    assert output.execute_handlers[-1]["handler"] == "goto"
+    assert all(handler["handler"] == "show" for handler in output.execute_handlers)
+    assert not any(handler.get("params", {}).get("type") == "finish" for handler in output.execute_handlers)
+
+
+def test_plain_ai_text_maps_to_show_handlers_without_finish_jump():
+    output = map_ai_response_to_salesbot({"text": "Hola, gracias por escribirnos. Tenemos opciones disponibles."})
+    assert output.discarded is False
+    assert output.execute_handlers
+    assert all(handler["handler"] == "show" for handler in output.execute_handlers)
+    assert not any(handler["handler"] == "goto" for handler in output.execute_handlers)
+
+
+def test_generated_show_values_are_limited_and_max_handler_limit_is_enforced():
+    output = map_ai_response_to_salesbot({"text": " ".join(["producto"] * 200)})
+    assert len(output.execute_handlers) == KOMMO_MAX_EXECUTE_HANDLERS
+    assert all(len(handler["params"]["value"]) <= 80 for handler in output.execute_handlers)
+    assert all(handler["handler"] == "show" for handler in output.execute_handlers)
+
+
+def test_empty_ai_response_discards_without_finish_jump():
+    output = map_ai_response_to_salesbot({"text": ""})
+    assert output.discarded is True
+    assert output.execute_handlers == []
 
 
 def test_url_buttons_are_schema_valid_and_limited(monkeypatch):
@@ -310,6 +332,7 @@ def test_url_buttons_are_schema_valid_and_limited(monkeypatch):
     assert handler["params"]["type"] == "buttons_url"
     assert handler["params"]["buttons"] == ["https://store.example/catalog.pdf"]
     assert len(handler["params"]["value"]) <= 80
+    assert not any(item["handler"] == "goto" for item in output.execute_handlers)
 
 
 @pytest.mark.asyncio
@@ -387,7 +410,46 @@ async def test_salesbot_continuation_disables_redirects(monkeypatch):
     )
     await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        [{"handler": "goto", "params": {"type": "finish", "step": 0}}],
+        [{"handler": "show", "params": {"type": "text", "value": "Hola"}}],
     )
     assert recorded["client_kwargs"]["follow_redirects"] is False
-    assert recorded["json"]["execute_handlers"][0]["handler"] == "goto"
+    assert recorded["json"]["data"]["status"] == "success"
+    assert recorded["json"]["execute_handlers"][0]["handler"] == "show"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_continuation_accepts_explicit_failure_status(monkeypatch):
+    from app.integrations.kommo.client import KommoClient
+
+    recorded = {}
+
+    class _Response:
+        status_code = 202
+        content = b""
+        headers = {}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            recorded["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, headers=None, json=None):
+            recorded.update({"method": method, "url": url, "headers": headers, "json": json})
+            return _Response()
+
+    monkeypatch.setattr("app.integrations.kommo.client.httpx.AsyncClient", _Client)
+    monkeypatch.setattr(
+        "app.integrations.kommo.client.get_config",
+        lambda: SimpleNamespace(kommo_subdomain="acme"),
+    )
+    await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        [],
+        status="fail",
+    )
+    assert recorded["json"] == {"data": {"status": "fail"}, "execute_handlers": []}

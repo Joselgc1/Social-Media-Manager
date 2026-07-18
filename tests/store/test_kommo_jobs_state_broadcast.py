@@ -468,9 +468,42 @@ async def test_ready_job_discard_continues_salesbot_before_marking_discarded(mon
     await jobs._continue_and_discard_job(client, job, "global_ai_paused")
 
     client.continue_salesbot.assert_awaited_once()
+    assert client.continue_salesbot.await_args.args[1] == []
+    assert client.continue_salesbot.await_args.kwargs == {"status": "fail"}
     assert mock_db.execute.await_count == 2
     assert "status = 'continuing'" in mock_db.execute.await_args_list[0].args[0]
+    assert mock_db.execute.await_args_list[0].args[1]["continuation_payload"] == '{"execute_handlers": []}'
     assert "status = 'discarded'" in mock_db.execute.await_args_list[1].args[0]
+
+
+@pytest.mark.asyncio
+async def test_accepted_continuation_log_does_not_claim_delivery(monkeypatch, caplog):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    with caplog.at_level("INFO", logger="app.integrations.kommo.jobs"):
+        await jobs._mark_job_sent("job", {"accepted": True})
+
+    assert "Kommo continuation accepted" in caplog.text
+    assert "marked sent" not in caplog.text
+    assert "confirmed" not in caplog.text.lower()
+    assert "WhatsApp delivery" not in caplog.text
+
+
+def test_continuation_prepared_log_is_structural_only(caplog):
+    from app.integrations.kommo import jobs
+
+    handlers = [{"handler": "show", "params": {"type": "text", "value": "Mensaje secreto del cliente"}}]
+    with caplog.at_level("INFO", logger="app.integrations.kommo.jobs"):
+        jobs._log_continuation_prepared("job", "success", handlers)
+
+    assert "handler_types=['show']" in caplog.text
+    assert "handler_count=1" in caplog.text
+    assert "status=success" in caplog.text
+    assert "Mensaje secreto del cliente" not in caplog.text
 
 
 @pytest.mark.asyncio

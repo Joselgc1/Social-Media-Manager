@@ -43,11 +43,6 @@ def _text_handler(text: str) -> dict:
     return {"handler": "show", "params": {"type": "text", "value": text}}
 
 
-def _finish_handler() -> dict:
-    # The continuation API documents show/goto handlers. A finish goto cleanly ends this Salesbot branch.
-    return {"handler": "goto", "params": {"type": "finish", "step": 0}}
-
-
 def _is_public_url(value: str | None) -> bool:
     if not value:
         return False
@@ -56,7 +51,7 @@ def _is_public_url(value: str | None) -> bool:
 
 
 def _append_text_handlers(handlers: list[dict], text: str) -> None:
-    remaining_slots = KOMMO_MAX_EXECUTE_HANDLERS - 1 - len(handlers)
+    remaining_slots = KOMMO_MAX_EXECUTE_HANDLERS - len(handlers)
     if remaining_slots <= 0:
         return
     for chunk in _split_text(text)[:remaining_slots]:
@@ -133,10 +128,9 @@ def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
         customer_parts.append(reply_text)
 
     if not handlers:
-        return NormalizedResponseOutput(execute_handlers=[_finish_handler()], discarded=True, reason="empty_response")
+        return NormalizedResponseOutput(execute_handlers=[], discarded=True, reason="empty_response")
 
-    handlers = handlers[: KOMMO_MAX_EXECUTE_HANDLERS - 1]
-    handlers.append(_finish_handler())
+    handlers = handlers[:KOMMO_MAX_EXECUTE_HANDLERS]
     _validate_execute_handlers(handlers)
     return NormalizedResponseOutput(
         execute_handlers=handlers,

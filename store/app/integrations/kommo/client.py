@@ -157,11 +157,17 @@ class KommoClient:
         payload = [{"id": int(lead_id), "responsible_user_id": int(user_id)}]
         await self._request("PATCH", "/api/v4/leads", json=payload)
 
-    async def continue_salesbot(self, return_url: str, execute_handlers: list[dict[str, Any]]) -> Any:
+    async def continue_salesbot(
+        self,
+        return_url: str,
+        execute_handlers: list[dict[str, Any]],
+        *,
+        status: str = "success",
+    ) -> Any:
         config = get_config()
         validated_url = validate_return_url(return_url, config.kommo_subdomain)
         payload = {
-            "data": {"status": "success"},
+            "data": {"status": status},
             "execute_handlers": execute_handlers[:10],
         }
         return await self._request(
