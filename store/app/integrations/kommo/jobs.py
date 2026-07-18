@@ -614,7 +614,8 @@ async def _process_ready_job(job: dict) -> None:
                 return
 
         mapped = map_ai_response_to_salesbot(result)
-        if mapped.discarded:
+        customer_text = (mapped.customer_text or "").strip()
+        if not customer_text:
             logger.info(
                 "Kommo ready job produced no deliverable reply: job_id=%s reason=%s",
                 job["id"],
@@ -622,10 +623,16 @@ async def _process_ready_job(job: dict) -> None:
             )
             await _continue_and_discard_job(client, job, mapped.reason or "empty_response")
             return
-        await _mark_job_continuing(job["id"], mapped.execute_handlers)
+        continuation_data = {"status": "success", "message": customer_text}
+        execute_handlers: list[dict] = []
+        await _mark_job_continuing(job["id"], continuation_data, execute_handlers)
         continuation_started = True
-        _log_continuation_prepared(job["id"], "success", mapped.execute_handlers)
-        response_payload = await client.continue_salesbot(job["return_url"], mapped.execute_handlers)
+        _log_continuation_prepared(job["id"], continuation_data, execute_handlers)
+        response_payload = await client.continue_salesbot(
+            job["return_url"],
+            data=continuation_data,
+            execute_handlers=execute_handlers,
+        )
         await _mark_job_sent(job["id"], response_payload)
     except KommoAPIError as e:
         logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
@@ -693,11 +700,16 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
     continuation_started = False
     try:
         execute_handlers: list[dict] = []
+        continuation_data = {"status": "fail", "message": ""}
         logger.info("Kommo continuing Salesbot with failure status: job_id=%s reason=%s", job["id"], reason)
-        await _mark_job_continuing(job["id"], execute_handlers)
+        await _mark_job_continuing(job["id"], continuation_data, execute_handlers)
         continuation_started = True
-        _log_continuation_prepared(job["id"], "fail", execute_handlers)
-        response_payload = await client.continue_salesbot(job["return_url"], execute_handlers, status="fail")
+        _log_continuation_prepared(job["id"], continuation_data, execute_handlers)
+        response_payload = await client.continue_salesbot(
+            job["return_url"],
+            data=continuation_data,
+            execute_handlers=execute_handlers,
+        )
         await _mark_job_discarded(job["id"], reason, response_payload)
     except KommoAPIError as e:
         await _mark_job(job["id"], _status_after_continuation_error(e, continuation_started), sanitize_job_error(e))
@@ -705,7 +717,7 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
         await _mark_job(job["id"], "delivery_unknown" if continuation_started else "failed", sanitize_job_error(e))
 
 
-async def _mark_job_continuing(job_id: str, execute_handlers: list[dict]) -> None:
+async def _mark_job_continuing(job_id: str, continuation_data: dict, execute_handlers: list[dict]) -> None:
     await db.execute(
         """
         UPDATE kommo_message_jobs
@@ -715,7 +727,10 @@ async def _mark_job_continuing(job_id: str, execute_handlers: list[dict]) -> Non
             updated_at = NOW()
         WHERE id = :id AND status = 'processing'
         """,
-        {"id": job_id, "continuation_payload": json.dumps({"execute_handlers": execute_handlers})},
+        {
+            "id": job_id,
+            "continuation_payload": json.dumps({"data": continuation_data, "execute_handlers": execute_handlers}),
+        },
     )
 
 
@@ -736,13 +751,14 @@ async def _mark_job_sent(job_id: str, response_payload) -> None:
     logger.info("Kommo continuation accepted: job_id=%s", job_id)
 
 
-def _log_continuation_prepared(job_id: str, status: str, execute_handlers: list[dict]) -> None:
-    handler_types = [str(handler.get("handler") or "") for handler in execute_handlers]
+def _log_continuation_prepared(job_id: str, continuation_data: dict, execute_handlers: list[dict]) -> None:
+    message = str(continuation_data.get("message") or "")
     logger.info(
-        "Kommo continuation prepared: job_id=%s status=%s handler_types=%s handler_count=%s",
+        "Kommo continuation prepared: job_id=%s status=%s message_present=%s message_length=%s handler_count=%s",
         job_id,
-        status,
-        handler_types,
+        continuation_data.get("status"),
+        bool(message),
+        len(message),
         len(execute_handlers),
     )
 

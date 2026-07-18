@@ -410,10 +410,11 @@ async def test_salesbot_continuation_disables_redirects(monkeypatch):
     )
     await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        [{"handler": "show", "params": {"type": "text", "value": "Hola"}}],
+        data={"status": "success", "message": "Hola"},
+        execute_handlers=[{"handler": "show", "params": {"type": "text", "value": "Hola"}}],
     )
     assert recorded["client_kwargs"]["follow_redirects"] is False
-    assert recorded["json"]["data"]["status"] == "success"
+    assert recorded["json"]["data"] == {"status": "success", "message": "Hola"}
     assert recorded["json"]["execute_handlers"][0]["handler"] == "show"
 
 
@@ -449,7 +450,7 @@ async def test_salesbot_continuation_accepts_explicit_failure_status(monkeypatch
     )
     await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        [],
-        status="fail",
+        data={"status": "fail", "message": ""},
+        execute_handlers=[],
     )
-    assert recorded["json"] == {"data": {"status": "fail"}, "execute_handlers": []}
+    assert recorded["json"] == {"data": {"status": "fail", "message": ""}, "execute_handlers": []}

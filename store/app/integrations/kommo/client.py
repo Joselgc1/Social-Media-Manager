@@ -160,15 +160,15 @@ class KommoClient:
     async def continue_salesbot(
         self,
         return_url: str,
-        execute_handlers: list[dict[str, Any]],
         *,
-        status: str = "success",
+        data: dict[str, Any],
+        execute_handlers: list[dict[str, Any]] | None = None,
     ) -> Any:
         config = get_config()
         validated_url = validate_return_url(return_url, config.kommo_subdomain)
         payload = {
-            "data": {"status": status},
-            "execute_handlers": execute_handlers[:10],
+            "data": data,
+            "execute_handlers": (execute_handlers or [])[:10],
         }
         return await self._request(
             "POST",
