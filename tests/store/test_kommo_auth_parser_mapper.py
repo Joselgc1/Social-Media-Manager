@@ -70,14 +70,16 @@ def test_invalid_signature_rejected():
         "wrong",
         algorithm="HS256",
     )
-    with pytest.raises(KommoAuthError):
+    with pytest.raises(KommoAuthError) as exc:
         validate_salesbot_jwt(bad, _config())
+    assert exc.value.reason_code == "invalid_signature"
 
 
 def test_expired_jwt_rejected():
     token = _token(exp=datetime.now(UTC) - timedelta(minutes=1))
-    with pytest.raises(KommoAuthError, match="Expired"):
+    with pytest.raises(KommoAuthError, match="Expired") as exc:
         validate_salesbot_jwt(token, _config())
+    assert exc.value.reason_code == "expired_token"
 
 
 def test_unexpected_algorithm_rejected():
@@ -86,15 +88,24 @@ def test_unexpected_algorithm_rejected():
         "secret",
         algorithm="HS384",
     )
-    with pytest.raises(KommoAuthError, match="algorithm"):
+    with pytest.raises(KommoAuthError, match="algorithm") as exc:
         validate_salesbot_jwt(token, _config())
+    assert exc.value.reason_code == "unsupported_algorithm"
 
 
 def test_integration_id_and_subdomain_claims_validated():
-    with pytest.raises(KommoAuthError, match="integration"):
+    with pytest.raises(KommoAuthError, match="integration") as exc:
         validate_salesbot_jwt(_token(client_uid="other"), _config())
-    with pytest.raises(KommoAuthError, match="subdomain"):
+    assert exc.value.reason_code == "integration_mismatch"
+    with pytest.raises(KommoAuthError, match="subdomain") as exc:
         validate_salesbot_jwt(_token(subdomain="other"), _config())
+    assert exc.value.reason_code == "subdomain_mismatch"
+
+
+def test_salesbot_jwt_issuer_claim_validated():
+    with pytest.raises(KommoAuthError, match="issuer") as exc:
+        validate_salesbot_jwt(_token(iss="https://other.kommo.com"), _config())
+    assert exc.value.reason_code == "issuer_mismatch"
 
 
 def test_salesbot_jwt_accepts_legacy_client_uuid_claim():
@@ -109,17 +120,20 @@ def test_salesbot_jwt_accepts_subdomain_without_issuer():
 
 
 def test_salesbot_jwt_missing_required_identity_claims_rejected():
-    with pytest.raises(KommoAuthError, match="account_id"):
+    with pytest.raises(KommoAuthError, match="account_id") as exc:
         validate_salesbot_jwt(_token(account_id=None), _config())
-    with pytest.raises(KommoAuthError, match="entity_id"):
+    assert exc.value.reason_code == "invalid_entity_claims"
+    with pytest.raises(KommoAuthError, match="entity_id") as exc:
         validate_salesbot_jwt(_token(entity_id=None), _config())
+    assert exc.value.reason_code == "invalid_entity_claims"
     with pytest.raises(KommoAuthError, match="client_uid"):
         validate_salesbot_jwt(_token(client_uid=None), _config())
 
 
 def test_salesbot_jwt_invalid_entity_type_rejected():
-    with pytest.raises(KommoAuthError, match="entity_type"):
+    with pytest.raises(KommoAuthError, match="entity_type") as exc:
         validate_salesbot_jwt(_token(entity_type="company"), _config())
+    assert exc.value.reason_code == "invalid_entity_claims"
 
 
 def test_salesbot_jwt_normalizes_supported_entity_types():
@@ -149,8 +163,9 @@ def test_general_webhook_secret_constant_time_acceptance():
     ],
 )
 def test_invalid_return_urls_rejected(url):
-    with pytest.raises(KommoAuthError):
+    with pytest.raises(KommoAuthError) as exc:
         validate_return_url(url, "acme")
+    assert exc.value.reason_code == "invalid_return_url"
 
 
 def test_https_return_url_accepted_and_normalized():

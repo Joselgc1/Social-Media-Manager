@@ -116,6 +116,18 @@ def _validate_startup_config(config):
         raise RuntimeError("Startup configuration is invalid:\n- " + "\n- ".join(errors))
 
 
+def _log_kommo_startup_config_summary(config) -> None:
+    logger.info(
+        "Kommo startup config summary: channel_backend=%s kommo_subdomain=%s "
+        "integration_id_present=%s integration_secret_present=%s integration_secret_length=%s",
+        config.channel_backend,
+        config.kommo_subdomain or "",
+        bool(config.kommo_integration_id),
+        bool(config.kommo_integration_secret),
+        len(config.kommo_integration_secret or ""),
+    )
+
+
 def _include_channel_routers(fastapi_app: FastAPI, config):
     if config.channel_backend == "kommo":
         from app.webhooks.kommo import router as kommo_router
@@ -143,6 +155,7 @@ async def lifespan(app: FastAPI):
 
     # ── Startup ──────────────────────────────────────────────
     logger.info(f"Starting {config.store_name} chatbot with channel backend '{config.channel_backend}'...")
+    _log_kommo_startup_config_summary(config)
     _validate_startup_config(config)
 
     # 1. Connect to PostgreSQL

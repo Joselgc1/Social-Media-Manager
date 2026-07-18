@@ -90,6 +90,31 @@ def test_optional_kommo_responsible_user_accepts_empty_string(monkeypatch):
     assert Settings().kommo_default_responsible_user_id is None
 
 
+def test_kommo_startup_config_summary_logs_only_safe_fields(caplog):
+    from app.main import _log_kommo_startup_config_summary
+
+    config = _base_config(
+        channel_backend="kommo",
+        kommo_access_token="access-token-secret",
+        kommo_integration_id="client-uuid-secret",
+        kommo_integration_secret="integration-secret",
+        kommo_webhook_secret="webhook-secret",
+    )
+
+    with caplog.at_level("INFO", logger="app.main"):
+        _log_kommo_startup_config_summary(config)
+
+    assert "channel_backend=kommo" in caplog.text
+    assert "kommo_subdomain=store" in caplog.text
+    assert "integration_id_present=True" in caplog.text
+    assert "integration_secret_present=True" in caplog.text
+    assert "integration_secret_length=18" in caplog.text
+    assert "access-token-secret" not in caplog.text
+    assert "client-uuid-secret" not in caplog.text
+    assert "integration-secret" not in caplog.text
+    assert "webhook-secret" not in caplog.text
+
+
 def _load_main_for_backend(monkeypatch, backend: str):
     monkeypatch.setenv("CHANNEL_BACKEND", backend)
     monkeypatch.setenv("DEBUG", "true")

@@ -112,7 +112,10 @@ async def test_first_sync_creates_new_kommo_file(monkeypatch, tmp_path):
         {"upload_url": "https://drive-c.kommo.com/v1.0/sessions/upload/one", "max_part_size": 50, "max_file_size": 500},
     ])
     _patch_upload_client(monkeypatch, files, [
-        _Response(payload={"uuid": "file-uuid", "version_uuid": "version-uuid"}),
+        _Response(payload={
+            "uuid": "version-uuid",
+            "_links": {"self": {"href": "https://drive-c.kommo.com/v1.0/files/file-uuid"}},
+        }),
     ])
 
     result = await files.KommoCatalogFileSync(client=client).sync(pdf)
@@ -141,12 +144,14 @@ async def test_later_sync_includes_stored_file_uuid(monkeypatch, tmp_path):
         {"upload_url": "https://drive-c.kommo.com/v1.0/sessions/upload/one", "max_part_size": 50},
     ])
     _patch_upload_client(monkeypatch, files, [
-        _Response(payload={"uuid": "file-uuid", "version_uuid": "new-version"}),
+        _Response(payload={"uuid": "new-version"}),
     ])
 
     result = await files.KommoCatalogFileSync(client=client).sync(pdf)
 
     assert result.action == "version_uploaded"
+    assert result.file_uuid == "file-uuid"
+    assert result.version_uuid == "new-version"
     assert client.requests[1]["json"]["file_uuid"] == "file-uuid"
 
 
@@ -183,7 +188,7 @@ async def test_changed_pdf_uploads_new_version(monkeypatch, tmp_path):
         {"upload_url": "https://drive-c.kommo.com/v1.0/sessions/upload/one", "max_part_size": 50},
     ])
     _patch_upload_client(monkeypatch, files, [
-        _Response(payload={"uuid": "file-uuid", "version_uuid": "new"}),
+        _Response(payload={"uuid": "new"}),
     ])
 
     result = await files.KommoCatalogFileSync(client=client).sync(pdf)
@@ -207,7 +212,10 @@ async def test_multipart_uploads_respect_max_part_size_and_follow_next_url(monke
     upload_calls = _patch_upload_client(monkeypatch, files, [
         _Response(payload={"session_id": 1, "next_url": "https://drive-c.kommo.com/v1.0/sessions/upload/two"}),
         _Response(payload={"session_id": 1, "next_url": "https://drive-c.kommo.com/v1.0/sessions/upload/three"}),
-        _Response(payload={"uuid": "file-uuid", "version_uuid": "version-uuid"}),
+        _Response(payload={
+            "uuid": "version-uuid",
+            "_links": {"self": {"href": "https://drive-c.kommo.com/v1.0/files/file-uuid"}},
+        }),
     ])
 
     await files.KommoCatalogFileSync(client=client).sync(pdf)
@@ -218,6 +226,55 @@ async def test_multipart_uploads_respect_max_part_size_and_follow_next_url(monke
         "https://drive-c.kommo.com/v1.0/sessions/upload/two",
         "https://drive-c.kommo.com/v1.0/sessions/upload/three",
     ]
+
+
+@pytest.mark.asyncio
+async def test_first_sync_resolves_stable_file_uuid_from_files_lookup(monkeypatch, tmp_path):
+    from app.integrations.kommo import files
+
+    pdf = tmp_path / "catalog.pdf"
+    pdf.write_bytes(b"pdf-content")
+    mock_db = _db_mock(monkeypatch, files, {})
+    client = _FakeClient([
+        {"drive_url": "https://drive-c.kommo.com"},
+        {"upload_url": "https://drive-c.kommo.com/v1.0/sessions/upload/one", "max_part_size": 50},
+        {"_embedded": {"files": [{"name": "catalog.pdf", "uuid": "file-uuid", "version_uuid": "version-uuid"}]}},
+    ])
+    _patch_upload_client(monkeypatch, files, [
+        _Response(payload={"uuid": "version-uuid"}),
+    ])
+
+    result = await files.KommoCatalogFileSync(client=client).sync(pdf)
+
+    assert result.file_uuid == "file-uuid"
+    assert result.version_uuid == "version-uuid"
+    assert client.requests[2]["method"] == "GET"
+    assert client.requests[2]["path_or_url"] == "https://drive-c.kommo.com/v1.0/files?filter[name]=catalog.pdf"
+    persisted_values = {call.args[1]["key"]: call.args[1]["value"] for call in mock_db.execute.await_args_list}
+    assert persisted_values["kommo_catalog_file_uuid"] == '"file-uuid"'
+    assert persisted_values["kommo_catalog_version_uuid"] == '"version-uuid"'
+
+
+@pytest.mark.asyncio
+async def test_first_sync_fails_without_resolvable_stable_file_uuid(monkeypatch, tmp_path):
+    from app.integrations.kommo import files
+    from app.integrations.kommo.files import KommoCatalogSyncError
+
+    pdf = tmp_path / "catalog.pdf"
+    pdf.write_bytes(b"pdf-content")
+    mock_db = _db_mock(monkeypatch, files, {})
+    client = _FakeClient([
+        {"drive_url": "https://drive-c.kommo.com"},
+        {"upload_url": "https://drive-c.kommo.com/v1.0/sessions/upload/one", "max_part_size": 50},
+        None,
+    ])
+    _patch_upload_client(monkeypatch, files, [
+        _Response(payload={"uuid": "version-only"}),
+    ])
+
+    with pytest.raises(KommoCatalogSyncError, match="resolvable file_uuid"):
+        await files.KommoCatalogFileSync(client=client).sync(pdf)
+    mock_db.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

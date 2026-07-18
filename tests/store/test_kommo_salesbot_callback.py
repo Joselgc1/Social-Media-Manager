@@ -179,17 +179,55 @@ async def test_salesbot_callback_parse_logs_exclude_token_return_url_query_and_c
 
 
 @pytest.mark.asyncio
-async def test_salesbot_callback_invalid_jwt_returns_401(client):
+async def test_salesbot_callback_invalid_signature_logs_safe_reason_code_only(client, caplog):
+    bad_token = jwt.encode(
+        {"subdomain": "acme", "client_uid": "client-uuid", "account_id": 123, "entity_type": "lead", "entity_id": 100},
+        "wrong-secret",
+        algorithm="HS256",
+    )
+    with caplog.at_level("WARNING", logger="app.webhooks.kommo"):
+        response = await _post(client, json=_json_body(token=bad_token))
+    assert response.status_code == 401
+    assert "reason=invalid_signature" in caplog.text
+    assert bad_token not in caplog.text
+    assert "wrong-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_invalid_jwt_logs_safe_reason_code_only(client, caplog):
     bad_token = jwt.encode(
         {"subdomain": "acme", "client_uid": "other", "account_id": 123, "entity_type": "lead", "entity_id": 100},
         "secret",
         algorithm="HS256",
     )
-    response = await _post(client, json=_json_body(token=bad_token))
+    with caplog.at_level("WARNING", logger="app.webhooks.kommo"):
+        response = await _post(client, json=_json_body(token=bad_token))
     assert response.status_code == 401
+    assert "reason=integration_mismatch" in caplog.text
+    assert bad_token not in caplog.text
+    assert "secret" not in caplog.text
+    assert RETURN_URL not in caplog.text
+    assert "secret-query" not in caplog.text
+    assert "client_uid" not in caplog.text
+    assert "other" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_salesbot_callback_expired_jwt_returns_401(client):
-    response = await _post(client, json=_json_body(token=_token(exp=datetime.now(UTC) - timedelta(minutes=1))))
+async def test_salesbot_callback_invalid_return_url_logs_safe_reason_code_only(client, caplog):
+    return_url = "https://evil.example/api/v4/salesbot/1/continue/2?secret=query"
+    with caplog.at_level("WARNING", logger="app.webhooks.kommo"):
+        response = await _post(client, json=_json_body(return_url=return_url))
     assert response.status_code == 401
+    assert "reason=invalid_return_url" in caplog.text
+    assert return_url not in caplog.text
+    assert "secret=query" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_expired_jwt_logs_safe_reason_code_only(client, caplog):
+    token = _token(exp=datetime.now(UTC) - timedelta(minutes=1))
+    with caplog.at_level("WARNING", logger="app.webhooks.kommo"):
+        response = await _post(client, json=_json_body(token=token))
+    assert response.status_code == 401
+    assert "reason=expired_token" in caplog.text
+    assert token not in caplog.text

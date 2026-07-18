@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -109,20 +109,25 @@ class KommoCatalogFileSync:
         drive_url = await self.get_drive_url()
         session = await self.create_upload_session(drive_url, file_size, existing_file_uuid or None)
         final_response = await self.upload_file(path, session, drive_url)
-        file_uuid = _require_response_str(final_response, "uuid", "final upload response")
-        version_uuid = _optional_response_str(final_response, "version_uuid")
+        version_uuid = _uploaded_version_uuid(final_response)
+        file_uuid = await self.resolve_uploaded_file_uuid(
+            drive_url=drive_url,
+            final_response=final_response,
+            existing_file_uuid=existing_file_uuid or None,
+            version_uuid=version_uuid,
+        )
         synced_at = datetime.now(UTC).isoformat()
 
         await _persist_sync_state(
             file_uuid=file_uuid,
-            version_uuid=version_uuid or "",
+            version_uuid=version_uuid,
             drive_url=drive_url,
             sha256=sha256,
             synced_at=synced_at,
         )
 
         action = "version_uploaded" if existing_file_uuid else "created"
-        version_updated = bool(version_uuid and version_uuid != previous_version_uuid)
+        version_updated = version_uuid != previous_version_uuid
         logger.info("Kommo catalog sync completed: action=%s version_updated=%s", action, version_updated)
         return KommoCatalogSyncResult(
             action=action,
@@ -167,6 +172,58 @@ class KommoCatalogFileSync:
             raise KommoCatalogSyncError("Catalog PDF exceeds Kommo max_file_size")
         return response
 
+    async def resolve_uploaded_file_uuid(
+        self,
+        *,
+        drive_url: str,
+        final_response: dict,
+        existing_file_uuid: str | None,
+        version_uuid: str,
+    ) -> str:
+        if existing_file_uuid:
+            return existing_file_uuid
+
+        file_uuid = _file_uuid_from_self_link(final_response, drive_url)
+        if file_uuid:
+            return file_uuid
+
+        file_uuid = await self.find_file_uuid_by_version(drive_url, version_uuid)
+        if file_uuid:
+            return file_uuid
+
+        raise KommoCatalogSyncError("Kommo upload response did not include a resolvable file_uuid")
+
+    async def find_file_uuid_by_version(self, drive_url: str, version_uuid: str) -> str | None:
+        response = await self.client._request(
+            "GET",
+            f"{drive_url}/v1.0/files?filter[name]={quote(CATALOG_FILE_NAME)}",
+            idempotent=True,
+            expected_statuses={200, 204},
+        )
+        if response is None:
+            return None
+        if not isinstance(response, dict):
+            raise KommoCatalogSyncError("Kommo files lookup response is not an object")
+
+        embedded = response.get("_embedded") or {}
+        files = embedded.get("files") if isinstance(embedded, dict) else None
+        if not isinstance(files, list):
+            raise KommoCatalogSyncError("Kommo files lookup response is missing files")
+
+        matches = []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            if _optional_response_str(item, "name") != CATALOG_FILE_NAME:
+                continue
+            if _optional_response_str(item, "version_uuid") != version_uuid:
+                continue
+            matches.append(_require_response_str(item, "uuid", "files lookup response"))
+
+        if len(matches) > 1:
+            raise KommoCatalogSyncError("Kommo files lookup returned multiple matching files")
+        return matches[0] if matches else None
+
     async def upload_file(self, path: Path, session: dict, drive_url: str) -> dict:
         upload_url = _validate_upload_url(_require_response_str(session, "upload_url", "upload session response"), drive_url)
         max_part_size = _require_positive_int(session, "max_part_size", "upload session response")
@@ -186,7 +243,7 @@ class KommoCatalogFileSync:
                 final_response = response
         if final_response is None:
             raise KommoCatalogSyncError("Catalog PDF upload produced no final response")
-        _require_response_str(final_response, "uuid", "final upload response")
+        _uploaded_version_uuid(final_response)
         return final_response
 
     async def _upload_part(self, upload_url: str, chunk: bytes) -> Any:
@@ -283,6 +340,35 @@ def _require_response_str(response: dict, key: str, source: str) -> str:
 def _optional_response_str(response: dict, key: str) -> str | None:
     value = response.get(key)
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _uploaded_version_uuid(response: dict) -> str:
+    return _optional_response_str(response, "version_uuid") or _require_response_str(
+        response,
+        "uuid",
+        "final upload response",
+    )
+
+
+def _file_uuid_from_self_link(response: dict, drive_url: str) -> str | None:
+    links = response.get("_links") or {}
+    self_link = links.get("self") if isinstance(links, dict) else None
+    href = self_link.get("href") if isinstance(self_link, dict) else None
+    if not isinstance(href, str) or not href.strip():
+        return None
+
+    parsed = urlparse(href.strip())
+    _validate_kommo_url_parts(parsed)
+    drive_host = urlparse(drive_url).hostname
+    if parsed.hostname != drive_host:
+        raise KommoCatalogSyncError("Kommo file self URL host does not match drive_url")
+    if parsed.query or parsed.fragment:
+        raise KommoCatalogSyncError("Kommo file self URL must not include query or fragment")
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 3 or parts[:2] != ["v1.0", "files"]:
+        raise KommoCatalogSyncError("Kommo file self URL path is invalid")
+    return parts[2]
 
 
 def _require_positive_int(response: dict, key: str, source: str) -> int:

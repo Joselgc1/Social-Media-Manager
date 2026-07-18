@@ -98,7 +98,7 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
         claims = validate_salesbot_jwt(callback.token, config)
         return_url = validate_return_url(callback.return_url, config.kommo_subdomain)
     except KommoAuthError as e:
-        logger.warning("Rejected Kommo Salesbot callback: %s", sanitize_job_error(e))
+        logger.warning("Rejected Kommo Salesbot callback: reason=%s", e.reason_code)
         raise HTTPException(status_code=401, detail="Invalid Salesbot callback") from e
 
     try:
