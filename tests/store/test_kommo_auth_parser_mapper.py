@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import jwt
 import pytest
 from app.integrations.kommo.auth import (
+    KOMMO_JWT_LEEWAY_SECONDS,
     KommoAuthError,
     validate_return_url,
     validate_salesbot_jwt,
@@ -62,6 +63,26 @@ def test_salesbot_jwt_hs512_accepted():
 def test_salesbot_jwt_with_valid_optional_exp_accepted():
     claims = validate_salesbot_jwt(_token(exp=datetime.now(UTC) + timedelta(minutes=5)), _config())
     assert claims["entity_type"] == "leads"
+
+
+def test_salesbot_jwt_accepts_nbf_and_iat_within_leeway():
+    future = datetime.now(UTC) + timedelta(seconds=KOMMO_JWT_LEEWAY_SECONDS)
+    claims = validate_salesbot_jwt(_token(nbf=future, iat=future), _config())
+    assert claims["entity_type"] == "leads"
+
+
+def test_salesbot_jwt_rejects_nbf_and_iat_beyond_leeway_as_immature():
+    future = datetime.now(UTC) + timedelta(seconds=KOMMO_JWT_LEEWAY_SECONDS + 30)
+    with pytest.raises(KommoAuthError, match="Immature") as exc:
+        validate_salesbot_jwt(_token(nbf=future, iat=future), _config())
+    assert exc.value.reason_code == "immature"
+
+
+def test_salesbot_jwt_rejects_expired_token_beyond_leeway():
+    expired = datetime.now(UTC) - timedelta(seconds=KOMMO_JWT_LEEWAY_SECONDS + 30)
+    with pytest.raises(KommoAuthError, match="Expired") as exc:
+        validate_salesbot_jwt(_token(exp=expired), _config())
+    assert exc.value.reason_code == "expired_token"
 
 
 def test_invalid_signature_rejected():

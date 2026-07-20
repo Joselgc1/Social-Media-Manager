@@ -179,6 +179,26 @@ async def test_salesbot_callback_parse_logs_exclude_token_return_url_query_and_c
 
 
 @pytest.mark.asyncio
+async def test_salesbot_callback_immature_jwt_logs_safe_reason_code_only(client, caplog):
+    token = _token(
+        nbf=datetime.now(UTC) + timedelta(seconds=30),
+        iat=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    with caplog.at_level("WARNING", logger="app.webhooks.kommo"):
+        response = await _post(client, json=_json_body(token=token))
+    assert response.status_code == 401
+    assert "reason=immature" in caplog.text
+    assert token not in caplog.text
+    assert "secret" not in caplog.text
+    assert "client_uid" not in caplog.text
+    assert "client-uuid" not in caplog.text
+    assert "account_id" not in caplog.text
+    assert RETURN_URL not in caplog.text
+    assert "secret-query" not in caplog.text
+    assert "Hola secreta" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_salesbot_callback_invalid_signature_logs_safe_reason_code_only(client, caplog):
     bad_token = jwt.encode(
         {"subdomain": "acme", "client_uid": "client-uuid", "account_id": 123, "entity_type": "lead", "entity_id": 100},

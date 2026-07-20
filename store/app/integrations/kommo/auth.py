@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlunparse
 import jwt
 
 KOMMO_JWT_ALGORITHMS = ["HS256", "HS512"]
+KOMMO_JWT_LEEWAY_SECONDS = 10
 _SUBDOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -81,6 +82,7 @@ def validate_salesbot_jwt(token: str, config) -> dict:
             token,
             config.kommo_integration_secret,
             algorithms=KOMMO_JWT_ALGORITHMS,
+            leeway=KOMMO_JWT_LEEWAY_SECONDS,
             options={"verify_aud": False},
         )
     except jwt.ExpiredSignatureError as e:
