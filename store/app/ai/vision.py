@@ -8,16 +8,31 @@ and bank transfer (bolívares) confirmations.
 """
 
 import base64
+import ipaddress
 import json
 import logging
+from urllib.parse import urlparse
+
 import httpx
-from app.config import get_config
+
 from app import db
 from app.ai.providers import get_provider
+from app.config import get_config
 
 logger = logging.getLogger(__name__)
 
 GRAPH_API = "https://graph.facebook.com/v21.0"
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+DIRECT_IMAGE_TIMEOUT_SECONDS = 15
+DIRECT_MEDIA_TRUSTED_HOSTS = {
+    "amocrm.com",
+    "cdninstagram.com",
+    "facebook.com",
+    "fbcdn.net",
+    "fbsbx.com",
+    "instagram.com",
+    "kommo.com",
+}
 
 PAYMENT_ANALYSIS_PROMPT = """Analyze this payment screenshot. Extract the following information if visible:
 
@@ -164,15 +179,72 @@ async def _download_whatsapp_media(media_id: str) -> tuple[bytes | None, str]:
 async def _download_url(url: str) -> tuple[bytes | None, str]:
     """Download an image from a direct URL (used for Instagram media)."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                return None, "image/jpeg"
+        safe_url = await _validate_direct_media_url(url)
+        async with (
+            httpx.AsyncClient(timeout=DIRECT_IMAGE_TIMEOUT_SECONDS, follow_redirects=False) as client,
+            client.stream("GET", safe_url) as resp,
+        ):
+                if resp.status_code != 200:
+                    return None, "image/jpeg"
 
-            content_type = resp.headers.get("content-type", "image/jpeg")
-            mime_type = content_type.split(";")[0].strip()
-            return resp.content, mime_type
+                content_type = resp.headers.get("content-type", "image/jpeg")
+                mime_type = content_type.split(";")[0].strip()
+                if not mime_type.startswith("image/"):
+                    logger.warning("Direct media URL rejected due to non-image content type.")
+                    return None, "image/jpeg"
+
+                content_length = resp.headers.get("content-length")
+                if content_length and int(content_length) > MAX_IMAGE_BYTES:
+                    logger.warning("Direct media URL rejected because it exceeded the size limit.")
+                    return None, "image/jpeg"
+
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_IMAGE_BYTES:
+                        logger.warning("Direct media URL rejected because it exceeded the size limit.")
+                        return None, "image/jpeg"
+                    chunks.append(chunk)
+                return b"".join(chunks), mime_type
 
     except Exception as e:
-        logger.error(f"Image download failed: {e}")
+        logger.error("Image download failed: %s", str(e)[:200])
         return None, "image/jpeg"
+
+
+async def _validate_direct_media_url(url: str) -> str:
+    """Allow direct media downloads only from trusted channel-provider hosts."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError("Direct media URL must use HTTPS")
+    if parsed.username or parsed.password:
+        raise ValueError("Direct media URL must not include user information")
+    if parsed.port not in (None, 443):
+        raise ValueError("Direct media URL uses an unexpected port")
+
+    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not hostname:
+        raise ValueError("Direct media URL is missing a hostname")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError("Direct media URL host is not allowed")
+
+    try:
+        ipaddress.ip_address(hostname.strip("[]"))
+    except ValueError as e:
+        if "does not appear" not in str(e):
+            raise
+    else:
+        raise ValueError("Direct media URL host is not allowed")
+
+    if not _is_trusted_media_hostname(hostname):
+        raise ValueError("Direct media URL host is not trusted")
+
+    return url
+
+
+def _is_trusted_media_hostname(hostname: str) -> bool:
+    return any(
+        hostname == trusted_host or hostname.endswith(f".{trusted_host}")
+        for trusted_host in DIRECT_MEDIA_TRUSTED_HOSTS
+    )

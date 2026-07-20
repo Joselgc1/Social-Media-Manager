@@ -71,6 +71,32 @@ async def get_history(customer_id: str, limit: int = 20) -> list[dict]:
     return messages
 
 
+def prepare_history_for_generation(history: list[dict], latest_user_message: str | None = None) -> list[dict]:
+    """Return model-ready history that alternates user/assistant turns."""
+    prepared: list[dict] = []
+    for message in history:
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"user", "assistant"} or not content:
+            continue
+        normalized = {"role": role, "content": content}
+        if not prepared:
+            if role == "user":
+                prepared.append(normalized)
+            continue
+        if prepared[-1]["role"] == role:
+            prepared[-1] = normalized
+        else:
+            prepared.append(normalized)
+
+    if latest_user_message is not None:
+        while prepared and prepared[-1]["role"] == "user":
+            prepared.pop()
+        prepared.append({"role": "user", "content": latest_user_message})
+
+    return prepared
+
+
 async def get_recent_summary(customer_id: str, limit: int = 5) -> str:
     """
     Get a plain-text summary of the last few messages.

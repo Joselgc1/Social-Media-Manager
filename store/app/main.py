@@ -18,18 +18,16 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.config import get_config
 from app import db
-from app.ai.providers import init_providers, list_providers
-from app.catalog.sheets import count_grouped_catalog_products, refresh_catalog, get_cached_catalog
-from app.broadcast.scheduler import start_scheduler, stop_scheduler, get_scheduler
-from app.webhooks.whatsapp import router as whatsapp_router
-from app.webhooks.instagram import router as instagram_router
-from app.admin.settings import router as settings_router
-from app.admin.dashboard import router as dashboard_router
-from app.admin.telegram_bot import router as telegram_router
-from app.broadcast.api import router as broadcast_router
 from app.admin.analytics_api import router as analytics_router
+from app.admin.dashboard import router as dashboard_router
+from app.admin.settings import router as settings_router
+from app.admin.telegram_bot import router as telegram_router
+from app.ai.providers import init_providers, list_providers
+from app.broadcast.api import router as broadcast_router
+from app.broadcast.scheduler import get_scheduler, start_scheduler, stop_scheduler
+from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
+from app.config import get_config
 from app.test_endpoint import router as test_router
 
 # ── Logging ──────────────────────────────────────────────────
@@ -56,28 +54,56 @@ def _validate_startup_config(config):
         if not config.admin_password:
             errors.append("ADMIN_PASSWORD must be set when DEBUG is false.")
 
-        required_whatsapp = {
-            "META_APP_SECRET": config.meta_app_secret,
-            "WHATSAPP_ACCESS_TOKEN": config.whatsapp_access_token,
-            "WHATSAPP_PHONE_NUMBER_ID": config.whatsapp_phone_number_id,
-            "WHATSAPP_VERIFY_TOKEN": config.whatsapp_verify_token,
-        }
-        missing_whatsapp = [name for name, value in required_whatsapp.items() if not value]
-        if missing_whatsapp:
-            errors.append(
-                "WhatsApp is required for launch. Missing: " + ", ".join(missing_whatsapp)
-            )
+        if config.channel_backend == "meta":
+            required_whatsapp = {
+                "META_APP_SECRET": config.meta_app_secret,
+                "WHATSAPP_ACCESS_TOKEN": config.whatsapp_access_token,
+                "WHATSAPP_PHONE_NUMBER_ID": config.whatsapp_phone_number_id,
+                "WHATSAPP_VERIFY_TOKEN": config.whatsapp_verify_token,
+            }
+            missing_whatsapp = [name for name, value in required_whatsapp.items() if not value]
+            if missing_whatsapp:
+                errors.append(
+                    "WhatsApp is required for Meta mode. Missing: " + ", ".join(missing_whatsapp)
+                )
+
+        if config.channel_backend == "kommo":
+            from app.integrations.kommo.auth import KommoAuthError, kommo_account_hostname
+
+            required_kommo = {
+                "KOMMO_SUBDOMAIN": config.kommo_subdomain,
+                "KOMMO_ACCESS_TOKEN": config.kommo_access_token,
+                "KOMMO_INTEGRATION_ID": config.kommo_integration_id,
+                "KOMMO_INTEGRATION_SECRET": config.kommo_integration_secret,
+                "KOMMO_SALESBOT_ID": config.kommo_salesbot_id,
+                "KOMMO_WEBHOOK_SECRET": config.kommo_webhook_secret,
+                "KOMMO_AI_MODE_FIELD_ID": config.kommo_ai_mode_field_id,
+                "KOMMO_AI_ACTIVE_ENUM_ID": config.kommo_ai_active_enum_id,
+                "KOMMO_AI_HUMAN_ENUM_ID": config.kommo_ai_human_enum_id,
+                "KOMMO_AI_PAUSED_ENUM_ID": config.kommo_ai_paused_enum_id,
+            }
+            missing_kommo = [name for name, value in required_kommo.items() if value in (None, "")]
+            if missing_kommo:
+                errors.append(
+                    "Kommo mode is missing required settings: " + ", ".join(missing_kommo)
+                )
+            else:
+                try:
+                    kommo_account_hostname(config.kommo_subdomain)
+                except KommoAuthError as e:
+                    errors.append(f"KOMMO_SUBDOMAIN is invalid: {e}")
 
         optional_integrations = {
-            "Instagram": {
-                "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
-                "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
-            },
             "Telegram": {
                 "TELEGRAM_BOT_TOKEN": config.telegram_bot_token,
                 "TELEGRAM_ADMIN_CHAT_ID": config.telegram_admin_chat_id,
             },
         }
+        if config.channel_backend == "meta":
+            optional_integrations["Instagram"] = {
+                "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
+                "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
+            }
         for label, fields in optional_integrations.items():
             present = [name for name, value in fields.items() if value]
             if present and len(present) != len(fields):
@@ -88,6 +114,32 @@ def _validate_startup_config(config):
 
     if errors:
         raise RuntimeError("Startup configuration is invalid:\n- " + "\n- ".join(errors))
+
+
+def _log_kommo_startup_config_summary(config) -> None:
+    logger.info(
+        "Kommo startup config summary: channel_backend=%s kommo_subdomain=%s "
+        "integration_id_present=%s integration_secret_present=%s integration_secret_length=%s",
+        config.channel_backend,
+        config.kommo_subdomain or "",
+        bool(config.kommo_integration_id),
+        bool(config.kommo_integration_secret),
+        len(config.kommo_integration_secret or ""),
+    )
+
+
+def _include_channel_routers(fastapi_app: FastAPI, config):
+    if config.channel_backend == "kommo":
+        from app.webhooks.kommo import router as kommo_router
+
+        fastapi_app.include_router(kommo_router)
+        return
+
+    from app.webhooks.instagram import router as instagram_router
+    from app.webhooks.whatsapp import router as whatsapp_router
+
+    fastapi_app.include_router(whatsapp_router)
+    fastapi_app.include_router(instagram_router)
 
 
 # ── Lifespan (startup + shutdown) ────────────────────────────
@@ -102,7 +154,8 @@ async def lifespan(app: FastAPI):
     config = get_config()
 
     # ── Startup ──────────────────────────────────────────────
-    logger.info(f"Starting {config.store_name} chatbot...")
+    logger.info(f"Starting {config.store_name} chatbot with channel backend '{config.channel_backend}'...")
+    _log_kommo_startup_config_summary(config)
     _validate_startup_config(config)
 
     # 1. Connect to PostgreSQL
@@ -210,8 +263,7 @@ async def _global_exception_handler(request: Request, exc: Exception):
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 # Register route modules
-app.include_router(whatsapp_router)
-app.include_router(instagram_router)
+_include_channel_routers(app, get_config())
 app.include_router(settings_router)
 app.include_router(dashboard_router)
 app.include_router(telegram_router)
@@ -253,8 +305,12 @@ async def health():
         "database": "connected",
         "scheduler": "running" if scheduler.running else "stopped",
         "channels": {
-            "whatsapp": bool(config.whatsapp_access_token),
-            "instagram": bool(config.instagram_access_token),
+            "backend": config.channel_backend,
+            "whatsapp": bool(config.whatsapp_access_token) if config.channel_backend == "meta" else False,
+            "instagram": bool(config.instagram_access_token) if config.channel_backend == "meta" else False,
+            "kommo": config.channel_backend == "kommo",
+            "whatsapp_via_kommo": config.channel_backend == "kommo",
+            "instagram_via_kommo": config.channel_backend == "kommo",
         },
         "providers": list_providers(),
         "active_provider": settings.get("llm_provider"),

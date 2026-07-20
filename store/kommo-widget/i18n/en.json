@@ -1,0 +1,17 @@
+{
+  "widget": {
+    "name": "Social Media Manager AI",
+    "short_description": "Calls the Social Media Manager backend from Salesbot.",
+    "description": "Private Salesbot widget that sends incoming Kommo chat context to the Social Media Manager backend using widget_request.",
+    "tour_description": "Add this block to call Eva from a Kommo Salesbot and continue the flow after the backend replies."
+  },
+  "settings": {
+    "backend_url": "Salesbot callback URL"
+  },
+  "salesbot": {
+    "handler_name": "Ask Eva AI",
+    "webhook_url": "Salesbot callback URL override",
+    "success_exit": "AI response completed",
+    "fail_exit": "AI response failed"
+  }
+}

@@ -13,7 +13,10 @@ Key differences from WhatsApp:
 """
 
 import logging
+
 import httpx
+
+from app.channels.text_formatting import format_customer_text
 from app.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -34,10 +37,11 @@ async def send_text(to: str, text: str):
     """
     config = get_config()
     url = f"{GRAPH_API}/me/messages"
+    body_text = format_customer_text(text, "instagram")
 
     payload = {
         "recipient": {"id": to},
-        "message": {"text": text[:1000]},  # Enforce 1000-byte limit
+        "message": {"text": body_text[:1000]},  # Enforce 1000-byte limit
     }
 
     await _send(url, payload, config.instagram_access_token)
@@ -56,6 +60,7 @@ async def send_text_with_quick_replies(to: str, text: str, quick_replies: list[d
     """
     config = get_config()
     url = f"{GRAPH_API}/me/messages"
+    body_text = format_customer_text(text, "instagram")
 
     qr_objects = [
         {
@@ -69,7 +74,7 @@ async def send_text_with_quick_replies(to: str, text: str, quick_replies: list[d
     payload = {
         "recipient": {"id": to},
         "message": {
-            "text": text[:1000],
+            "text": body_text[:1000],
             "quick_replies": qr_objects,
         },
     }
@@ -138,10 +143,11 @@ async def send_private_reply(comment_id: str, text: str):
     """
     config = get_config()
     url = f"{GRAPH_API}/me/messages"
+    body_text = format_customer_text(text, "instagram")
 
     payload = {
         "recipient": {"comment_id": comment_id},
-        "message": {"text": text[:1000]},
+        "message": {"text": body_text[:1000]},
     }
 
     await _send(url, payload, config.instagram_access_token)

@@ -51,7 +51,7 @@ curl -X POST http://localhost:8000/test/chat \
 
 ### Minimal .env for local testing
 
-For local debug, either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` plus `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, and `PRODUCT_SHEET_ID` are the core minimum. Meta and Telegram fields may stay empty when `DEBUG=true`. In production (`DEBUG=false`), startup validation now requires `ADMIN_PASSWORD` plus the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`); Instagram and Telegram remain optional but must be all-or-nothing if enabled.
+For local debug, either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` plus `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, and `PRODUCT_SHEET_ID` are the core minimum. Meta, Kommo, and Telegram fields may stay empty when `DEBUG=true` unless you are testing that specific channel backend. In production (`DEBUG=false`), startup validation requires `ADMIN_PASSWORD`, at least one LLM key, and the complete credential set for the selected `CHANNEL_BACKEND`: Meta mode requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`); Kommo mode requires the Kommo private integration, Salesbot, webhook secret, and AI Mode field/enum vars. Instagram and Telegram remain optional but must be all-or-nothing if enabled.
 
 ## Development workflow
 
@@ -130,7 +130,9 @@ When adding new models, update BOTH files:
 
 **Entry point:** `store/app/main.py` — FastAPI app with lifespan that connects DB, initializes LLM providers, loads product catalog from Google Sheets, and starts the APScheduler background scheduler.
 
-**Webhook channels:** WhatsApp (`store/app/webhooks/whatsapp.py`), Instagram (`store/app/webhooks/instagram.py`), Telegram admin bot (`store/app/admin/telegram_bot.py` at `/webhooks/telegram`).
+**Webhook channels:** WhatsApp (`store/app/webhooks/whatsapp.py`), Instagram (`store/app/webhooks/instagram.py`), Kommo (`store/app/webhooks/kommo.py` when `CHANNEL_BACKEND=kommo`), Telegram admin bot (`store/app/admin/telegram_bot.py` at `/webhooks/telegram`).
+
+**Channel backend switch:** `CHANNEL_BACKEND=meta` registers direct Meta WhatsApp/Instagram webhooks and uses Meta sender modules. `CHANNEL_BACKEND=kommo` registers `/webhooks/kommo/events/{webhook_secret}` and `/webhooks/kommo/salesbot`, does not require Meta credentials, does not register Meta webhooks, and sends customer replies by launching/resuming Kommo Salesbot. Keep Meta modules for rollback.
 
 **Request flow (WhatsApp/Instagram):**
 
@@ -141,6 +143,8 @@ When adding new models, update BOTH files:
 5. The selected agent prompt is composed from `store/prompts/shared/` plus `store/prompts/agents/`, direct SDK providers are called, and `store/app/ai/runner.py` enforces per-agent tool allowlists
 6. Response sent back via `store/app/channels/{whatsapp,instagram}_sender.py`
 
+In Kommo mode, Kommo sends general webhooks to `store/app/webhooks/kommo.py`; the app persists durable jobs, launches the configured Salesbot, receives the Salesbot `widget_request` callback, runs the existing AI engine, then posts a data-only Salesbot continuation (`data.status`, `data.message`) to the validated Kommo `return_url`.
+
 **Key modules:**
 
 - `store/app/ai/orchestrator.py` — Resolves orchestration mode and coordinates legacy, shadow, and multi-agent runs.
@@ -149,6 +153,7 @@ When adding new models, update BOTH files:
 - `store/app/ai/tools/` — Provider-agnostic tool schemas, handlers, registry, and executor. `store/app/ai/functions.py` remains as compatibility surface for provider tool conversion.
 - `store/app/ai/providers/` — Provider abstraction with `base.py` (LLMResponse dataclass + abstract base), `openai_provider.py`, `anthropic_provider.py`. Each provider converts shared tool definitions to its native format.
 - `store/app/ai/payment/` — Deterministic payment proof verification and response formatting after LLM vision extraction.
+- `store/app/integrations/kommo/` — Kommo private integration client, JWT/return URL validation, webhook parser, Salesbot response mapper, AI Mode state decisions, and durable PostgreSQL-backed Kommo jobs.
 - `store/app/ai/vision.py` — Payment screenshot analysis via LLM vision API
 - `store/app/crm/` — Customer, conversation, and order management (all DB-backed via Supabase PostgreSQL)
 - `store/app/catalog/sheets.py` — Google Sheets product catalog with in-memory cache and periodic refresh
@@ -159,11 +164,11 @@ When adding new models, update BOTH files:
 - `store/app/db.py` — Async DB wrapper using `databases` library with version-aware settings cache invalidation
 - `store/app/test_endpoint.py` — `/test/ui` chat UI + `/test/chat` API for local testing without Meta APIs
 
-**Background scheduler** (`store/app/broadcast/scheduler.py`): 5 business jobs — catalog refresh, broadcast execution, daily analytics aggregation, token usage reminders, catalog PDF auto-refresh — plus an internal sync job that keeps APScheduler timings aligned with DB settings from `master/`.
+**Background scheduler** (`store/app/broadcast/scheduler.py`): 5 business jobs — catalog refresh, broadcast execution, daily analytics aggregation, token usage reminders, catalog PDF auto-refresh — plus an internal sync job that keeps APScheduler timings aligned with DB settings from `master/`. In Kommo mode it also runs durable Kommo job processing and stale-job recovery.
 
-**Database:** Supabase PostgreSQL. Fresh installs use the consolidated schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor), then incremental migrations such as `002_conversation_sessions.sql` and `003_ai_run_observability.sql` for existing databases. Tables include customers, conversations, orders, broadcasts, settings, usage_log, ai_run_logs, daily_analytics, product_analytics, and conversation_sessions.
+**Database:** Supabase PostgreSQL. Fresh installs use the consolidated schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor). This single store schema includes Kommo tables, conversation sessions, and AI run observability. Tables include customers, conversations, orders, broadcasts, settings, usage_log, ai_run_logs, daily_analytics, product_analytics, conversation_sessions, customer_channel_mappings, kommo_message_jobs, and kommo_message_receipts.
 
-**Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Multi-store fields: `admin_password` (protects store dashboard), `system_prompt_override` (replaces prompt template file), `llm_managed_externally` (when True, locks LLM controls in store dashboard/Telegram/API — managed from master instead), and `ai_orchestration_mode` (optional env default; DB setting wins).
+**Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Multi-store fields: `admin_password` (protects store dashboard), `system_prompt_override` (replaces prompt template file), `llm_managed_externally` (when True, locks LLM controls in store dashboard/Telegram/API — managed from master instead), and `ai_orchestration_mode` (optional env default; DB setting wins). Kommo env vars are exactly: `CHANNEL_BACKEND`, `KOMMO_SUBDOMAIN`, `KOMMO_ACCESS_TOKEN`, `KOMMO_INTEGRATION_ID`, `KOMMO_INTEGRATION_SECRET`, `KOMMO_SALESBOT_ID`, `KOMMO_WEBHOOK_SECRET`, `KOMMO_AI_MODE_FIELD_ID`, `KOMMO_AI_ACTIVE_ENUM_ID`, `KOMMO_AI_HUMAN_ENUM_ID`, `KOMMO_AI_PAUSED_ENUM_ID`, `KOMMO_DEFAULT_RESPONSIBLE_USER_ID`.
 
 ### Master Control Plane (`master/`)
 
@@ -217,11 +222,16 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - **Inventory privacy:** `_tool_check_inventory` returns `in_stock` (boolean) only — never the raw `stock` count. This prevents the LLM from revealing exact inventory levels to customers. System prompt rule 13 also explicitly prohibits outputting raw JSON, tool results, or technical metadata.
 - WhatsApp supports interactive buttons; Instagram uses quick replies. The engine returns an `interactive` dict that the channel sender interprets.
 - Global AI pause (`ai_enabled` setting) and per-customer escalation (`conversation_state = 'escalated'`) both suppress auto-replies. Messages are stored and the owner is notified via Telegram only once (first unanswered message), not on every subsequent message.
+- In Kommo mode, per-conversation automation source of truth is the Kommo lead `AI Mode` field. `AI Active` maps to local `active`; `Human` and `Paused` map to local `escalated`. Empty AI Mode must be initialized to `AI Active` successfully before automatic replies are sent. Never overwrite existing Human/Paused automatically.
+- Store-dashboard manual reactivation in Kommo mode must sync Kommo first: set lead `AI Mode` to `AI Active`, re-read and verify the enum, then set local `conversation_state='active'` and clear local history. Single-customer failures return sanitized `502`; resolve-all reports per-customer `activated`, `local_only`, or `failed`.
+- Kommo Salesbot callbacks include a JWT and `return_url`. Validate HS256 with `KOMMO_INTEGRATION_SECRET`, expiration, issuer/subdomain, and `client_uid`/`client_uuid` when present. Validate `return_url` strictly against `https://{KOMMO_SUBDOMAIN}.kommo.com` with no userinfo, IPs, localhost, deceptive suffixes, redirects, or unexpected ports before posting the Salesbot continuation.
+- Kommo jobs are durable in `kommo_message_jobs`. Do not depend only on `BackgroundTasks`, `asyncio.create_task`, or in-memory buffers. The in-process task may accelerate handling after DB commit, but PostgreSQL is the source of truth. Ready jobs should attempt a Salesbot continuation even on discard/error paths; `delivery_unknown` means a continuation was attempted but Kommo acceptance could not be confirmed and must be manually reconciled before retrying.
 - Customer shipping addresses are saved on the customer record after order creation (`last_shipping_address`, `last_shipping_city`, `last_shipping_method`). The AI offers to reuse the saved address for returning customers.
 - OpenAI newer models require `max_completion_tokens` instead of `max_tokens` (changed in `openai_provider.py`).
 - Dashboard dark mode uses Tailwind CDN with `darkMode: 'class'` config. The `tailwind.config` must be set after the CDN `<script>` loads (not before, or `tailwind` is undefined). Custom component dark styles (`.dark .card`, etc.) live in `store/app/static/css/dashboard.css`. The `dark` class is toggled on `<html>` via `toggleDarkMode()` in `store/app/static/js/dashboard.js`.
-- Store dashboard settings tab exposes the locally configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, orchestration mode, fallback provider/model/auto-enable, dynamic payment methods, accepted exchange rate, automatic order discount percent/threshold, and AI pause. Most settings map to `PUT /admin/settings/{key}` calls; payment methods use `GET/PUT /admin/settings/payment-methods`. Scheduler timings are master-only.
+- Store dashboard settings tab exposes the locally configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, orchestration mode, fallback provider/model/auto-enable, dynamic payment methods, accepted exchange rate, automatic order discount percent/threshold, catalog PDF generation/download, and AI pause. Most settings map to `PUT /admin/settings/{key}` calls; payment methods use `GET/PUT /admin/settings/payment-methods`. Scheduler timings are master-only.
 - Broadcast execution wraps the send loop in try/except — if it crashes after setting status to `'sending'`, it auto-sets status to `'failed'`. A `POST /{id}/reset` endpoint resets stuck broadcasts back to `'draft'`. The dashboard shows a "Resetear" button for broadcasts in `sending` or `failed` status.
+- In `CHANNEL_BACKEND=kommo`, direct WhatsApp broadcast delivery is rejected before marking the broadcast as sending. Use Kommo broadcasts or approved Kommo WhatsApp template flows. Meta-mode broadcast behavior is preserved.
 - The `databases` library returns record objects that support `[]` bracket access but not `.get()`. Use `record["key"]` with a conditional fallback, not `record.get("key", default)`.
 - JSONB queries with the `databases` library must use `CAST(:param AS jsonb)` instead of `:param::jsonb` because the `::` cast syntax conflicts with SQLAlchemy's `:param` bind parameter syntax.
 - **Multi-store: separate deployments, not multi-tenant.** Each store is a full independent deployment of this app with its own `.env` and database. The master service is a separate FastAPI app (not a router on the store app). This gives true data isolation and means a bug in one store doesn't affect others.
@@ -235,10 +245,13 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 ### Store app (port 8000)
 
 ```text
-Webhooks:       GET/POST /webhooks/whatsapp, /webhooks/instagram, POST /webhooks/telegram
+Webhooks:       Meta mode: GET/POST /webhooks/whatsapp, /webhooks/instagram
+                Kommo mode: POST /webhooks/kommo/events/{webhook_secret}, POST /webhooks/kommo/salesbot
+                Telegram: POST /webhooks/telegram
 Health:         GET /, GET /health
 Settings:       GET /admin/settings/, GET /admin/settings/providers, PUT /admin/settings/{key}
                 GET /admin/settings/payment-methods, PUT /admin/settings/payment-methods
+                GET /admin/settings/kommo/status, POST /admin/settings/kommo/test
                 POST /admin/settings/switch-provider, GET /admin/settings/usage-summary
                 GET /admin/settings/stats/conversations, POST /admin/settings/telegram/setup-webhook
                 POST /admin/settings/instagram/setup-ice-breakers, POST /admin/settings/instagram/subscribe-page
@@ -249,14 +262,15 @@ Customers:      GET /admin/settings/customers, PUT /admin/settings/customers/{id
                 POST /admin/settings/customers/{id}/resolve, POST /admin/settings/customers/resolve-all
                 GET /admin/settings/customers/{id}/tags, POST /admin/settings/customers/{id}/tags
                 DELETE /admin/settings/customers/{id}/tags/{tag}
-Orders:         GET /admin/settings/orders, GET /admin/settings/orders/{id}, PUT /admin/settings/orders/{id}
-                DELETE /admin/settings/orders/{id}
+Orders:         GET /admin/settings/orders, GET /admin/settings/orders/{id}
+                PUT /admin/settings/orders/{id}, DELETE /admin/settings/orders/{id}
 Dashboard:      GET /admin/login, POST /admin/login, POST /admin/logout, GET /admin/dashboard
                 GET /admin/orders/{order_id}
 Broadcasts:     POST /admin/broadcasts/create, /preview, GET /list, POST /{id}/send, POST /{id}/reset
 Analytics:      GET /admin/analytics/conversion, /response-times, /popular-products, /daily
                 POST /admin/analytics/build-daily
-Testing:        GET /test/ui, POST /test/chat, GET /test/history, DELETE /test/reset, GET /test/catalog
+Testing:        GET /test/ui, POST /test/chat, GET /test/catalog
+                GET /test/history, DELETE /test/reset
 ```
 
 ### Master control plane (port 9000)
@@ -267,8 +281,8 @@ Dashboard:      GET /login, POST /login, POST /logout, GET /dashboard
 Stores:         GET/POST /api/stores/, GET/PUT/DELETE /api/stores/{id}
 Credentials:    GET/POST /api/stores/{id}/credentials, DELETE /api/stores/{id}/credentials/{key}
 Stats:          GET /api/stores/{id}/stats
-Runtime:        GET/PUT /api/stores/{id}/settings, GET/PUT /api/stores/{id}/llm-settings
-                GET /api/stores/{id}/llm-usage?days=N
+Runtime:        GET/PUT /api/stores/{id}/settings, GET /api/stores/{id}/llm-usage?days=N
+                GET/PUT /api/stores/{id}/llm-settings, GET /api/stores/{id}/conversations
                 GET /api/stores/llm-costs/aggregate?days=N
 Conversations:  GET /api/stores/{id}/conversations
 Railway:        GET /api/stores/{id}/railway/status, POST /api/stores/{id}/deploy
@@ -311,4 +325,6 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 - **LLM model costs are duplicated.** The `_MODEL_COSTS` dict in `master/app/stores/api.py` must match the `cost_per_m_tokens` values in the store app's `store/app/ai/providers/__init__.py`. When adding new models, update both.
 - **LLM_MANAGED_EXTERNALLY must be deployed as an env var.** It's read from the store's `.env`, not from the DB. Set it via the master's credential management + Railway deploy flow (`LLM_MANAGED_EXTERNALLY=true`).
 - **Cost endpoints support `?days=N`.** Both `GET /api/stores/{id}/llm-usage` and `GET /api/stores/llm-costs/aggregate` accept `?days=1` (today, default), `?days=7`, or `?days=30`. Max 90 days. The cutoff is computed in Python and passed as a query parameter to avoid SQL dialect issues across Supabase instances.
-- **Master dashboard credential grouping.** API keys (OPENAI/ANTHROPIC) have a dedicated panel with status badges. Other credentials are grouped by category: Channels, Infrastructure, Customization, Other. The grouping is purely frontend — the backend stores all credentials the same way.
+- **Master dashboard credential grouping.** API keys (OPENAI/ANTHROPIC) have a dedicated panel with status badges. Other credentials are grouped by category: Channel Backend, Kommo, Meta Channels, Telegram, Infrastructure, Customization, Other. The grouping is purely frontend — the backend stores all credentials the same way.
+- **Kommo widget package.** `store/kommo-widget/` contains the private Salesbot widget. Build it with `python3 build_widget.py --widget-code <kommo-widget-code>`; upload the generated ZIP manually. The widget uses `widget_request`, then `goto` question step `1`, and no secrets or production domains. Configure the callback once in integration settings as `backend_url`; the Salesbot block URL is optional and only overrides the global URL when valid. The widget exposes `success` and `fail` exits. Increment `widget.version` for every upload, then disable/re-enable the integration or refresh Kommo and hard refresh the browser if stale widget fields remain. A bad first upload may require a fresh widget code/private integration per Kommo widget update behavior.
+- **Unsupported in first Kommo release:** dynamic public Instagram AI comments, native rich-media delivery through Kommo, automatic human takeover from outgoing/native phone replies, Kommo broadcasts from this backend, and verified production Salesbot delivery without testing in a real Kommo account.

@@ -9,17 +9,19 @@ Uses APScheduler running inside the FastAPI process.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db
 from app.admin.notify import notify_owner
 from app.analytics import build_daily_aggregate
-from app.catalog.sheets import count_grouped_catalog_products, refresh_catalog, get_cached_catalog
-from app.catalog.pdf_generator import generate_catalog_pdf
 from app.broadcast.sender import execute_broadcast
+from app.catalog.pdf_generator import generate_catalog_pdf
+from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
+from app.config import get_config
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,7 @@ def start_scheduler():
     # Job 3: Refresh long-lived access token reminders. Time is synced from DB settings.
     scheduler.add_job(
         _token_refresh_reminder,
-        trigger=CronTrigger(hour=3, minute=0, timezone=timezone.utc),
+        trigger=CronTrigger(hour=3, minute=0, timezone=UTC),
         id="token_reminder",
         name="Check if access tokens need refresh",
         replace_existing=True,
@@ -72,7 +74,7 @@ def start_scheduler():
     # Job 4: Build daily analytics aggregates. Time is synced from DB settings.
     scheduler.add_job(
         _build_daily_analytics,
-        trigger=CronTrigger(hour=1, minute=0, timezone=timezone.utc),
+        trigger=CronTrigger(hour=1, minute=0, timezone=UTC),
         id="daily_analytics",
         name="Aggregate daily analytics",
         replace_existing=True,
@@ -96,9 +98,18 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    if get_config().channel_backend == "kommo":
+        scheduler.add_job(
+            _process_kommo_jobs,
+            trigger=IntervalTrigger(seconds=15),
+            id="kommo_job_processor",
+            name="Process durable Kommo Salesbot jobs",
+            replace_existing=True,
+        )
+
     scheduler.start()
     asyncio.create_task(_sync_scheduler_config())
-    logger.info("Background scheduler started with 6 jobs.")
+    logger.info("Background scheduler started.")
 
 
 def stop_scheduler():
@@ -126,7 +137,7 @@ async def _check_scheduled_broadcasts():
     time has passed, and execute them.
     """
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         rows = await db.fetch_all(
             """
@@ -146,6 +157,11 @@ async def _check_scheduled_broadcasts():
             try:
                 result = await execute_broadcast(broadcast_id)
                 logger.info(f"Broadcast {broadcast_id} result: {result}")
+                if result.get("error"):
+                    await db.execute(
+                        "UPDATE broadcasts SET status = 'failed' WHERE id = :id AND status = 'scheduled'",
+                        {"id": broadcast_id},
+                    )
             except Exception as e:
                 logger.error(f"Broadcast {broadcast_id} failed: {e}")
                 await db.execute(
@@ -163,6 +179,9 @@ async def _token_refresh_reminder():
     Meta long-lived tokens last ~60 days. This runs daily and warns
     at 50 days so there's time to refresh.
     """
+    if get_config().channel_backend != "meta":
+        return
+
     # This is a reminder system, not an auto-refresh.
     # Token expiry tracking would need a separate table.
     # For now, just remind every 45 days.
@@ -172,7 +191,7 @@ async def _token_refresh_reminder():
     if last_reminder:
         try:
             last_dt = datetime.fromisoformat(last_reminder)
-            if datetime.now(timezone.utc) - last_dt < timedelta(days=45):
+            if datetime.now(UTC) - last_dt < timedelta(days=45):
                 return  # Too soon for another reminder
         except (ValueError, TypeError):
             pass
@@ -190,7 +209,7 @@ async def _token_refresh_reminder():
         INSERT INTO settings (key, value) VALUES ('last_token_reminder', :val)
         ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()
         """,
-        {"val": f'"{datetime.now(timezone.utc).isoformat()}"'},
+        {"val": f'"{datetime.now(UTC).isoformat()}"'},
     )
 
 
@@ -219,6 +238,17 @@ async def _refresh_catalog_pdf():
             logger.warning("Scheduled PDF refresh skipped: catalog is empty.")
     except Exception as e:
         logger.error(f"Scheduled catalog PDF refresh failed: {e}")
+
+
+async def _process_kommo_jobs():
+    try:
+        from app.integrations.kommo.jobs import process_pending_jobs, process_ready_jobs, recover_stale_jobs
+
+        await recover_stale_jobs()
+        await process_pending_jobs(limit=10)
+        await process_ready_jobs(limit=5)
+    except Exception as e:
+        logger.error(f"Kommo job processor failed: {e}")
 
 
 def _bounded_int(settings: dict, key: str, *, minimum: int, maximum: int) -> int:
@@ -281,7 +311,7 @@ async def _sync_scheduler_config():
             trigger=CronTrigger(
                 hour=config["token_reminder_hour"],
                 minute=config["token_reminder_minute"],
-                timezone=timezone.utc,
+                timezone=UTC,
             ),
         )
         scheduler.reschedule_job(
@@ -289,7 +319,7 @@ async def _sync_scheduler_config():
             trigger=CronTrigger(
                 hour=config["daily_analytics_hour"],
                 minute=config["daily_analytics_minute"],
-                timezone=timezone.utc,
+                timezone=UTC,
             ),
         )
         scheduler.reschedule_job(

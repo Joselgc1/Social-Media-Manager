@@ -6,22 +6,24 @@ and other configuration via HTTP endpoints or Telegram commands.
 
 import json
 import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
 from app import db
-from app.ai.providers import AVAILABLE_MODELS, get_model_costs
-from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata, PDF_PATH
-from app.catalog.sheets import get_cached_catalog
-from app.channels.instagram_sender import setup_ice_breakers, subscribe_page_to_webhooks
-from app.config import get_config
 from app.admin.auth import require_admin
+from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
 from app.admin.telegram_bot import setup_telegram_webhook
-from app.crm import conversations, orders
+from app.ai.providers import AVAILABLE_MODELS, get_model_costs
+from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf, get_pdf_metadata
+from app.catalog.sheets import get_cached_catalog
+from app.config import get_config
+from app.crm import orders
 from app.crm import customers as customer_crm
-from app.crm.customers import add_tags, remove_tag, normalize_tags
+from app.crm.customers import add_tags, normalize_tags, remove_tag
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
-from app.runtime_settings import STORE_EDITABLE_SETTING_KEYS, LLM_MANAGED_KEYS
+from app.runtime_settings import LLM_MANAGED_KEYS, STORE_EDITABLE_SETTING_KEYS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/settings", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -63,6 +65,21 @@ class CustomerUpdate(BaseModel):
 
 VALID_CUSTOMER_CHANNELS = {"whatsapp", "instagram"}
 VALID_CUSTOMER_STATES = {"active", "escalated", "blocked"}
+VALID_KOMMO_EMOJI_MODES = {"preserve", "safe", "strip"}
+
+
+def _coerce_setting_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    raise HTTPException(status_code=400, detail="Boolean setting must be true or false.")
 
 
 def _validate_setting_value(key: str, value, current_settings: dict):
@@ -139,8 +156,14 @@ def _validate_setting_value(key: str, value, current_settings: dict):
             )
         return hours
 
-    if key in ("auto_fallback", "ai_enabled", "escalation_telegram_enabled"):
-        return bool(value)
+    if key in ("auto_fallback", "ai_enabled", "escalation_telegram_enabled", "kommo_strip_emoji"):
+        return _coerce_setting_bool(value)
+
+    if key in ("kommo_emoji_mode_whatsapp", "kommo_emoji_mode_instagram"):
+        mode = str(value).strip().lower()
+        if mode not in VALID_KOMMO_EMOJI_MODES:
+            raise HTTPException(status_code=400, detail="Kommo emoji mode must be preserve, safe, or strip.")
+        return mode
 
     if key == "catalog_refresh_minutes":
         minutes = int(value)
@@ -190,7 +213,7 @@ async def get_payment_methods():
     try:
         payment_methods = normalize_payment_methods(raw_methods)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=f"Stored payment methods are invalid: {e}")
+        raise HTTPException(status_code=500, detail=f"Stored payment methods are invalid: {e}") from e
     return {"payment_methods": payment_methods}
 
 
@@ -200,6 +223,94 @@ async def list_available_providers():
     return AVAILABLE_MODELS
 
 
+@router.get("/kommo/status")
+async def kommo_status():
+    """Safe Kommo configuration and job diagnostics."""
+    config = get_config()
+    try:
+        from app.integrations.kommo.jobs import diagnostics_summary
+
+        diagnostics = await diagnostics_summary()
+    except Exception as e:
+        logger.warning("Kommo diagnostics summary unavailable: %s", e)
+        diagnostics = {
+            "pending_job_count": 0,
+            "failed_job_count": 0,
+            "stale_job_count": 0,
+            "last_kommo_api_error_summary": "Diagnostics unavailable",
+        }
+    return {
+        "channel_backend": config.channel_backend,
+        "kommo_subdomain_configured": bool(config.kommo_subdomain),
+        "kommo_access_token_configured": bool(config.kommo_access_token),
+        "kommo_integration_id_configured": bool(config.kommo_integration_id),
+        "kommo_integration_secret_configured": bool(config.kommo_integration_secret),
+        "kommo_salesbot_id_configured": config.kommo_salesbot_id is not None,
+        "kommo_webhook_secret_configured": bool(config.kommo_webhook_secret),
+        "kommo_ai_mode_field_configured": config.kommo_ai_mode_field_id is not None,
+        "kommo_ai_mode_enum_ids_configured": all(
+            value is not None
+            for value in (
+                config.kommo_ai_active_enum_id,
+                config.kommo_ai_human_enum_id,
+                config.kommo_ai_paused_enum_id,
+            )
+        ),
+        "kommo_responsible_user_configured": config.kommo_default_responsible_user_id is not None,
+        **diagnostics,
+    }
+
+
+@router.post("/kommo/test")
+async def kommo_test():
+    """Run safe read-only Kommo connectivity and configuration checks."""
+    config = get_config()
+    if config.channel_backend != "kommo":
+        return {"channel_backend": config.channel_backend, "checks": [], "ok": False}
+
+    from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
+
+    client = KommoClient.from_config()
+    checks = []
+
+    async def _check(name: str, func):
+        try:
+            await func()
+            checks.append({"name": name, "ok": True})
+        except Exception as e:
+            checks.append({"name": name, "ok": False, "error": sanitize_kommo_error(e)})
+
+    await _check("account_connectivity", client.get_account)
+
+    async def _field_check():
+        field = await client.get_lead_custom_field(config.kommo_ai_mode_field_id)
+        enums = {
+            int(enum.get("id"))
+            for enum in (field.get("enums") or [])
+            if str(enum.get("id", "")).isdigit()
+        }
+        expected = {
+            int(config.kommo_ai_active_enum_id),
+            int(config.kommo_ai_human_enum_id),
+            int(config.kommo_ai_paused_enum_id),
+        }
+        if not expected.issubset(enums):
+            raise RuntimeError("AI Mode enum IDs were not found on the configured field")
+
+    await _check("ai_mode_field_and_enums", _field_check)
+
+    if config.kommo_default_responsible_user_id:
+        await _check(
+            "responsible_user",
+            lambda: client.get_user(config.kommo_default_responsible_user_id),
+        )
+
+    salesbot_id_ok = isinstance(config.kommo_salesbot_id, int) and config.kommo_salesbot_id > 0
+    checks.append({"name": "salesbot_id_format", "ok": salesbot_id_ok})
+
+    return {"channel_backend": config.channel_backend, "ok": all(item["ok"] for item in checks), "checks": checks}
+
+
 @router.put("/payment-methods")
 async def update_payment_methods(body: PaymentMethodsUpdate):
     try:
@@ -207,7 +318,7 @@ async def update_payment_methods(body: PaymentMethodsUpdate):
             [item.model_dump() for item in body.payment_methods]
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     await db.execute(
         """
@@ -387,6 +498,8 @@ async def setup_ice_breakers_endpoint(ig_user_id: str):
     ----------
     ig_user_id : Your Instagram Professional account's numeric user ID.
     """
+    from app.channels.instagram_sender import setup_ice_breakers
+
     await setup_ice_breakers(ig_user_id)
     return {"status": "ok", "message": "Ice Breakers configured."}
 
@@ -397,6 +510,8 @@ async def subscribe_page_endpoint(page_id: str):
     Subscribe the Facebook Page to messaging webhooks.
     Must be called once after initial setup to start receiving Instagram DMs.
     """
+    from app.channels.instagram_sender import subscribe_page_to_webhooks
+
     await subscribe_page_to_webhooks(page_id)
     return {"status": "ok", "message": f"Page {page_id} subscribed to messaging webhooks."}
 
@@ -499,39 +614,50 @@ async def list_customers(tag: str | None = None, limit: int = 200):
 async def resolve_customer(customer_id: str):
     """Resolve an escalated customer back to active (AI resumes)."""
     row = await db.fetch_one(
-        "SELECT id, display_name FROM customers WHERE id::text = :cid AND conversation_state = 'escalated'",
+        """
+        SELECT id, display_name, channel, platform_id, conversation_state
+        FROM customers
+        WHERE id::text = :cid AND conversation_state = 'escalated'
+        """,
         {"cid": customer_id},
     )
     if not row:
         raise HTTPException(status_code=404, detail="Customer not found or not escalated")
 
-    await conversations.clear_history(str(row["id"]))
-    await db.execute(
-        "UPDATE customers SET conversation_state = 'active' WHERE id = :id",
-        {"id": row["id"]},
-    )
-    return {"status": "resolved", "customer_id": str(row["id"])}
+    try:
+        result = await activate_customer_for_admin(dict(row))
+    except ManualActivationError as e:
+        raise HTTPException(status_code=502, detail=e.safe_detail) from e
+
+    return {"status": "resolved", "customer_id": result.customer_id, "activation_status": result.status}
 
 
 @router.post("/customers/resolve-all")
 async def resolve_all_customers():
     """Resolve all escalated customers back to active."""
-    result = await db.fetch_one(
-        "SELECT COUNT(*) as cnt FROM customers WHERE conversation_state = 'escalated'"
-    )
-    count = result["cnt"] if result else 0
-
-    if count == 0:
-        return {"status": "ok", "resolved": 0}
-
     rows = await db.fetch_all(
-        "SELECT id FROM customers WHERE conversation_state = 'escalated'"
+        """
+        SELECT id, display_name, channel, platform_id, conversation_state
+        FROM customers
+        WHERE conversation_state = 'escalated'
+        """
     )
-    await conversations.clear_history_for_customers([str(row["id"]) for row in rows])
-    await db.execute(
-        "UPDATE customers SET conversation_state = 'active' WHERE conversation_state = 'escalated'"
-    )
-    return {"status": "resolved", "resolved": count}
+    if not rows:
+        return {"status": "ok", "resolved": 0, "failed": 0, "results": []}
+
+    results = []
+    for row in rows:
+        customer_id = str(row["id"])
+        try:
+            result = await activate_customer_for_admin(dict(row))
+            results.append({"customer_id": result.customer_id, "status": result.status})
+        except ManualActivationError as e:
+            results.append({"customer_id": customer_id, "status": "failed", "detail": e.safe_detail})
+
+    resolved = sum(1 for result in results if result["status"] in {"activated", "local_only"})
+    failed = sum(1 for result in results if result["status"] == "failed")
+    status = "resolved" if failed == 0 else "partial" if resolved else "failed"
+    return {"status": status, "resolved": resolved, "failed": failed, "results": results}
 
 
 class TagsPayload(BaseModel):
@@ -661,7 +787,11 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
         return {"status": "unchanged", "customer": dict(existing) if existing else None}
 
     if updates.get("conversation_state") == "active" and row["conversation_state"] != "active":
-        await conversations.clear_history(str(row["id"]))
+        try:
+            result = await activate_customer_for_admin(dict(row), channel=updates.get("channel"))
+        except ManualActivationError as e:
+            raise HTTPException(status_code=502, detail=e.safe_detail) from e
+        return {"status": "updated", "customer": result.customer, "activation_status": result.status}
 
     updated = await customer_crm.update_customer(
         customer_id=str(row["id"]),
@@ -698,7 +828,7 @@ async def update_order(order_id: str, body: OrderUpdate):
                 tracking_number=body.tracking_number,
             )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     updated = await orders.get_order(order_id)
     return {
@@ -742,7 +872,7 @@ async def generate_catalog_pdf_endpoint():
     if not catalog:
         raise HTTPException(status_code=400, detail="Catalog is empty. Check Google Sheets connection.")
 
-    pdf_path = generate_catalog_pdf(catalog)
+    generate_catalog_pdf(catalog)
     meta = get_pdf_metadata()
 
     return {

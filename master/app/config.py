@@ -16,7 +16,7 @@ class MasterSettings(BaseSettings):
     # Encryption key for store credentials (Fernet key)
     encryption_key: str  # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
-    # Railway API (Phase 2 — optional for now)
+    # Railway API (optional unless deploying store credentials from master)
     railway_api_token: str = ""
 
     # App config

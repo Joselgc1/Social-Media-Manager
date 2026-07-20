@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Eva AI">
+  <rect width="128" height="128" rx="28" fill="#111827"/>
+  <path d="M32 74c0-24 14-40 34-40 12 0 22 5 29 14l-13 11c-4-5-9-8-16-8-10 0-17 8-17 21 0 14 8 22 20 22 7 0 13-3 18-8l10 13c-8 8-18 12-30 12-21 0-35-15-35-37Z" fill="#f9a8d4"/>
+  <path d="M56 75h40v14H56z" fill="#f472b6"/>
+</svg>

@@ -464,7 +464,10 @@ function renderApiKeysPanel(store, stats, creds) {
 // ── Grouped Credentials ────────────────────────────────────
 const CRED_GROUPS = [
     { name: 'LLM API Keys', test: k => /^(OPENAI_API_KEY|ANTHROPIC_API_KEY)$/.test(k) },
-    { name: 'Channels', test: k => /^(WHATSAPP_|INSTAGRAM_|META_|TELEGRAM_)/.test(k) },
+    { name: 'Channel Backend', test: k => /^CHANNEL_BACKEND$/.test(k) },
+    { name: 'Kommo', test: k => /^KOMMO_/.test(k) },
+    { name: 'Meta Channels', test: k => /^(WHATSAPP_|INSTAGRAM_|META_)/.test(k) },
+    { name: 'Telegram', test: k => /^TELEGRAM_/.test(k) },
     { name: 'Infrastructure', test: k => /^(DATABASE_URL|GOOGLE_SHEETS_|APP_BASE_URL|PRODUCT_SHEET_ID)/.test(k) },
     { name: 'Customization', test: k => /^(STORE_NAME|OWNER_NAME|ADMIN_PASSWORD|SYSTEM_PROMPT_OVERRIDE|LLM_MANAGED_EXTERNALLY)/.test(k) },
 ];
@@ -621,9 +624,14 @@ async function confirmDeleteStore(storeId, name) {
 // ── Credential Modals ───────────────────────────────────────
 function showAddCredentialModal(storeId) {
     const commonKeys = [
+        'CHANNEL_BACKEND',
         'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DATABASE_URL',
         'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_VERIFY_TOKEN',
         'META_APP_SECRET', 'INSTAGRAM_ACCESS_TOKEN', 'INSTAGRAM_VERIFY_TOKEN',
+        'KOMMO_SUBDOMAIN', 'KOMMO_ACCESS_TOKEN', 'KOMMO_INTEGRATION_ID',
+        'KOMMO_INTEGRATION_SECRET', 'KOMMO_SALESBOT_ID', 'KOMMO_WEBHOOK_SECRET',
+        'KOMMO_AI_MODE_FIELD_ID', 'KOMMO_AI_ACTIVE_ENUM_ID', 'KOMMO_AI_HUMAN_ENUM_ID',
+        'KOMMO_AI_PAUSED_ENUM_ID', 'KOMMO_DEFAULT_RESPONSIBLE_USER_ID',
         'GOOGLE_SHEETS_CREDENTIALS_B64', 'PRODUCT_SHEET_ID',
         'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_CHAT_ID',
         'STORE_NAME', 'OWNER_NAME', 'APP_BASE_URL',

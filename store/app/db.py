@@ -4,17 +4,21 @@ Provides a thin wrapper for common queries.
 """
 
 import json
+import logging
 import time
+
 import databases
+
 from app.config import get_config
-from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 from app.payment_methods import (
     LEGACY_PAYMENT_SETTING_KEYS,
     PAYMENT_METHODS_SETTING_KEY,
     build_payment_methods_from_legacy,
 )
+from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 _db: databases.Database | None = None
+logger = logging.getLogger(__name__)
 
 
 async def connect():
@@ -41,15 +45,41 @@ def get_db() -> databases.Database:
 # ── Convenience helpers ──────────────────────────────────────
 
 async def fetch_one(query: str, values: dict | None = None):
-    return await get_db().fetch_one(query=query, values=values or {})
+    try:
+        return await get_db().fetch_one(query=query, values=values or {})
+    except Exception as e:
+        _log_query_error("fetch_one", query, values, e)
+        raise
 
 
 async def fetch_all(query: str, values: dict | None = None):
-    return await get_db().fetch_all(query=query, values=values or {})
+    try:
+        return await get_db().fetch_all(query=query, values=values or {})
+    except Exception as e:
+        _log_query_error("fetch_all", query, values, e)
+        raise
 
 
 async def execute(query: str, values: dict | None = None):
-    return await get_db().execute(query=query, values=values or {})
+    try:
+        return await get_db().execute(query=query, values=values or {})
+    except Exception as e:
+        _log_query_error("execute", query, values, e)
+        raise
+
+
+def _log_query_error(operation: str, query: str, values: dict | None, error: Exception) -> None:
+    message = str(error)
+    if "bound parameter" not in message:
+        return
+    compact_query = " ".join(str(query).split())[:500]
+    logger.error(
+        "Database %s failed while binding query params: value_keys=%s query=%s error=%s",
+        operation,
+        sorted((values or {}).keys()),
+        compact_query,
+        message,
+    )
 
 
 # ── Settings cache ───────────────────────────────────────────

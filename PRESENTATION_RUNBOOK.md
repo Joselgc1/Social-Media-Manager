@@ -43,6 +43,7 @@ Use this rule:
 - Use the real store dashboard for operations
 - Use the real master dashboard for cross-store management
 - Only use WhatsApp, Instagram, Telegram, or Railway live features if you already know they work in your environment
+- Keep `CHANNEL_BACKEND=meta` for the local test UI demo unless you are explicitly testing a real Kommo account
 
 Important:
 
@@ -73,6 +74,7 @@ APP_BASE_URL=http://localhost:8000
 DEBUG=true
 
 ADMIN_PASSWORD=demo-store-password
+CHANNEL_BACKEND=meta
 ```
 
 Notes:
@@ -82,6 +84,7 @@ Notes:
 - At least one LLM key is required. `OPENAI_API_KEY` alone is enough.
 - Google Sheets credentials and sheet ID must be valid if you want the catalog to load correctly.
 - Meta, Instagram, and Telegram values can stay empty for the local demo.
+- Kommo values can stay empty for the local test UI demo. If you set `CHANNEL_BACKEND=kommo`, you need real Kommo credentials, the consolidated `001_schema.sql`, a Salesbot widget, and public HTTPS webhooks.
 
 Optional store env vars you may add manually if needed:
 
@@ -146,6 +149,8 @@ After that, verify the `settings` table contains at least:
 - `max_conversation_history`
 - `ai_enabled`
 - `catalog_pdf_interval_hours`
+- `kommo_emoji_mode_whatsapp`
+- `kommo_emoji_mode_instagram`
 - `payment_methods`
 - `accepted_exchange_rate`
 

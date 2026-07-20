@@ -35,6 +35,7 @@ class AgentRunContext:
     payment_proof_attempt: bool = False
     latest_user_message: str = ""
     session: Any | None = None
+    integration_context: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -57,6 +58,10 @@ class AgentRunResult:
 
 class AgentRunner:
     """Run a configured agent against the active LLM provider and tool executor."""
+
+    def __init__(self, provider_getter=None, provider_lister=None):
+        self._get_provider = provider_getter or get_provider
+        self._list_providers = provider_lister or _list_providers
 
     async def run(
         self,
@@ -94,6 +99,7 @@ class AgentRunner:
             payment_proof_attempt=context.payment_proof_attempt,
             latest_user_message=context.latest_user_message,
             session=context.session,
+            integration_context=context.integration_context,
         )
 
         while response.tool_calls and rounds < agent.max_tool_rounds:
@@ -146,7 +152,7 @@ class AgentRunner:
 
             if authorized and name == "send_interactive_buttons" and context.channel == "whatsapp":
                 interactive_payload = result
-            if authorized and name == "send_catalog_pdf" and context.channel == "whatsapp":
+            if authorized and name == "send_catalog_pdf" and result.get("type") == "catalog_pdf":
                 catalog_pdf_payload = result
             if authorized and name == "send_product_image" and result.get("type") == "product_image":
                 product_image_payload = result
@@ -198,7 +204,7 @@ class AgentRunner:
     ):
         provider_name = settings.get("llm_provider", "openai")
         model = settings.get("llm_model", "gpt-5.4-nano")
-        available = _list_providers()
+        available = self._list_providers()
 
         if provider_name not in available:
             if not available:
@@ -211,7 +217,7 @@ class AgentRunner:
                 "gpt-5.4-nano",
             )
 
-        provider = get_provider(provider_name)
+        provider = self._get_provider(provider_name)
         tool_schemas = get_tool_schemas(agent.tool_names)
 
         try:
@@ -232,7 +238,7 @@ class AgentRunner:
         fallback_name = settings.get("fallback_provider", "anthropic")
         fallback_model = settings.get("fallback_model", "claude-haiku-4-5")
         logger.info(f"Falling back to {fallback_name}/{fallback_model}")
-        fallback_provider = get_provider(fallback_name)
+        fallback_provider = self._get_provider(fallback_name)
         response = await fallback_provider.chat(
             model=fallback_model,
             system_prompt=system_prompt,

@@ -19,3 +19,4 @@ class ToolExecutionContext:
     payment_proof_attempt: bool = False
     latest_user_message: str = ""
     session: Any | None = None
+    integration_context: dict[str, Any] | None = None

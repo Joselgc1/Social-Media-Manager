@@ -12,6 +12,7 @@ from app.admin.notify import notify_escalation
 from app.ai.tools.context import ToolExecutionContext
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.catalog.sheets import get_cached_catalog
+from app.config import get_config
 from app.crm import conversations, customers
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,13 @@ async def escalate_to_human(args: dict, context: ToolExecutionContext) -> dict:
         conversation_summary=summary,
     )
     await customers.set_conversation_state(customer_id, "escalated")
+    await _sync_kommo_escalation_if_needed(
+        customer_id=customer_id,
+        reason=args.get("reason", "Razón no especificada"),
+        urgency=args.get("urgency", "medium"),
+        conversation_summary=summary,
+        lead_id=(context.integration_context or {}).get("lead_id"),
+    )
     return {
         "status": "escalated",
         "message": "The store owner has been notified and will respond shortly.",
@@ -61,6 +69,11 @@ async def send_interactive_buttons(args: dict, context: ToolExecutionContext) ->
 
 async def send_catalog_pdf(args: dict, context: ToolExecutionContext) -> dict:
     """Ensure the catalog PDF exists and return a PDF payload for the channel sender."""
+    if not _catalog_pdf_supported(context.channel, context.integration_context):
+        return {
+            "status": "error",
+            "message": "Catalog PDF delivery is unavailable here. Describe catalog categories in text instead.",
+        }
     if not PDF_PATH.exists():
         catalog = get_cached_catalog()
         if not catalog:
@@ -127,3 +140,33 @@ def should_block_product_inquiry_escalation(reason: str, latest_user_message: st
     message_is_product_related = any(marker in normalized_message for marker in message_product_markers)
 
     return reason_is_product_related and message_is_product_related
+
+
+def _catalog_pdf_supported(channel: str, integration_context: dict | None) -> bool:
+    delivery_provider = (integration_context or {}).get("provider")
+    if not delivery_provider:
+        delivery_provider = getattr(get_config(), "channel_backend", "meta")
+    if not isinstance(delivery_provider, str) or delivery_provider not in {"meta", "kommo"}:
+        delivery_provider = "meta"
+    return channel == "whatsapp" and delivery_provider == "meta"
+
+
+async def _sync_kommo_escalation_if_needed(
+    *,
+    customer_id: str,
+    reason: str,
+    urgency: str,
+    conversation_summary: str,
+    lead_id: str | None = None,
+) -> None:
+    if getattr(get_config(), "channel_backend", "meta") != "kommo":
+        return
+    from app.integrations.kommo.state import sync_escalation_to_kommo
+
+    await sync_escalation_to_kommo(
+        customer_id=customer_id,
+        reason=reason,
+        urgency=urgency,
+        conversation_summary=conversation_summary,
+        lead_id=lead_id,
+    )

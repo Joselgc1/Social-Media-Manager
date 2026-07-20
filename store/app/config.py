@@ -4,12 +4,16 @@ All secrets live in .env (never committed to git).
 """
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # --- Channel backend ---
+    channel_backend: Literal["meta", "kommo"] = "meta"
+
     # --- Meta APIs (optional for local testing without webhooks) ---
     meta_app_secret: str = ""
     whatsapp_access_token: str = ""
@@ -17,6 +21,19 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str = ""
     instagram_access_token: str = ""
     instagram_verify_token: str = ""
+
+    # --- Kommo private integration / Salesbot transport ---
+    kommo_subdomain: str = ""
+    kommo_access_token: str = ""
+    kommo_integration_id: str = ""
+    kommo_integration_secret: str = ""
+    kommo_salesbot_id: int | None = None
+    kommo_webhook_secret: str = ""
+    kommo_ai_mode_field_id: int | None = None
+    kommo_ai_active_enum_id: int | None = None
+    kommo_ai_human_enum_id: int | None = None
+    kommo_ai_paused_enum_id: int | None = None
+    kommo_default_responsible_user_id: int | None = None
 
     # --- LLM Providers (at least one is required) ---
     openai_api_key: str = ""
@@ -64,6 +81,21 @@ class Settings(BaseSettings):
     def _safe_orchestration_mode(cls, value):
         mode = str(value or "legacy").strip().lower()
         return mode if mode in {"legacy", "shadow", "multi_agent"} else "legacy"
+
+    @field_validator(
+        "kommo_salesbot_id",
+        "kommo_ai_mode_field_id",
+        "kommo_ai_active_enum_id",
+        "kommo_ai_human_enum_id",
+        "kommo_ai_paused_enum_id",
+        "kommo_default_responsible_user_id",
+        mode="before",
+    )
+    @classmethod
+    def _empty_string_to_none(cls, value):
+        if value == "":
+            return None
+        return value
 
 
 @lru_cache

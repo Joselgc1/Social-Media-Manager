@@ -28,6 +28,9 @@ RUNTIME_SETTING_DEFAULTS = {
     "accepted_exchange_rate": "",
     "order_discount_percent": 10.0,
     "order_discount_threshold_usd": 350.0,
+    "kommo_strip_emoji": False,
+    "kommo_emoji_mode_whatsapp": "safe",
+    "kommo_emoji_mode_instagram": "safe",
     PAYMENT_METHODS_SETTING_KEY: [],
 }
 
