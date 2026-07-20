@@ -275,6 +275,19 @@
                 <button class="btn btn-primary w-full" onclick="saveDiscountSettings()">Guardar descuento</button>
               </div>
             </div>
+            <div class="card h-full">
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Pausa automática por escalación</h3>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tiempo de pausa después de escalar al equipo</label>
+                  <input id="set-automatic-escalation-timeout" type="number" step="5" min="0" max="10080" class="w-full" placeholder="180">
+                </div>
+                <p class="text-xs text-gray-500 dark:text-gray-500">
+                  180 significa tres horas. Usa 0 para mantener las escalaciones pausadas hasta que un administrador reactive al cliente manualmente.
+                </p>
+                <button class="btn btn-primary w-full" onclick="saveEscalationTimeoutSetting()">Guardar pausa</button>
+              </div>
+            </div>
           </div>
           <div class="card h-full">
             <div class="flex items-start justify-between gap-4 mb-4">

@@ -143,7 +143,8 @@ def engine_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(engine.db, "execute", AsyncMock(return_value=None))
     monkeypatch.setattr(engine.customers, "get_or_create_customer", AsyncMock(return_value=customer))
     monkeypatch.setattr(engine.customers, "add_tags", AsyncMock(return_value=None))
-    monkeypatch.setattr(engine.customers, "set_conversation_state", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine.escalations, "escalate_customer_automatically", AsyncMock(return_value={"id": "customer-1"}))
+    monkeypatch.setattr(engine.escalations, "reactivate_if_expired", AsyncMock(return_value=SimpleNamespace(status="skipped")))
     monkeypatch.setattr(engine.conversations, "get_history", AsyncMock(return_value=[]))
     monkeypatch.setattr(engine.conversations, "get_recent_summary", AsyncMock(return_value="Resumen reciente"))
     monkeypatch.setattr(engine.conversations, "store_message", AsyncMock(return_value=None))
@@ -434,7 +435,7 @@ async def test_explicit_human_request_escalates_before_router_or_llm(engine_harn
 
     assert response["escalated"] is True
     assert "persona del equipo" in response["text"]
-    engine.customers.set_conversation_state.assert_awaited_once_with("customer-1", "escalated")
+    engine.escalations.escalate_customer_automatically.assert_awaited_once_with("customer-1", settings=engine_harness.settings)
     engine.notify_escalation.assert_awaited_once()
     engine_harness.provider.chat.assert_not_awaited()
     engine.conversations.get_history.assert_not_awaited()
@@ -446,7 +447,7 @@ async def test_hostile_message_escalates_before_normal_llm_flow(engine_harness):
 
     assert response["escalated"] is True
     assert "persona del equipo" in response["text"]
-    engine.customers.set_conversation_state.assert_awaited_once_with("customer-1", "escalated")
+    engine.escalations.escalate_customer_automatically.assert_awaited_once_with("customer-1", settings=engine_harness.settings)
     engine.notify_escalation.assert_awaited_once()
     engine_harness.provider.chat.assert_not_awaited()
     engine.conversations.get_history.assert_not_awaited()
@@ -639,4 +640,4 @@ async def test_product_unavailable_inquiry_is_not_escalated_merely_for_availabil
     assert result["status"] == "error"
     assert "No escales preguntas normales de productos" in result["message"]
     tool_messaging.notify_escalation.assert_not_awaited()
-    engine.customers.set_conversation_state.assert_not_awaited()
+    engine.escalations.escalate_customer_automatically.assert_not_awaited()

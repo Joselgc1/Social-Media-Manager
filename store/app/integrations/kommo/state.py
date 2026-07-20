@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from app import db
 from app.config import get_config
+from app.crm import escalations
 from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
 
 logger = logging.getLogger(__name__)
@@ -79,14 +79,13 @@ def extract_ai_mode_enum_from_lead(lead: dict, config=None) -> int | None:
     return None
 
 
-async def sync_local_state_from_ai_mode(customer_id: str, enum_id: int | None) -> None:
+async def sync_local_state_from_ai_mode(customer_id: str, enum_id: int | None) -> dict | None:
     state = ai_mode_enum_to_local_state(enum_id)
     if not state:
-        return
-    await db.execute(
-        "UPDATE customers SET conversation_state = :state, last_active = NOW() WHERE id = :id",
-        {"state": state, "id": customer_id},
-    )
+        return None
+    if state == "active":
+        return await escalations.mark_external_active(customer_id)
+    return await escalations.mark_external_escalation(customer_id)
 
 
 async def ensure_ai_mode_initialized(client: KommoClient, lead_id: str, lead: dict) -> tuple[int | None, bool]:

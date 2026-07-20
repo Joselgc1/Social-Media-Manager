@@ -134,7 +134,8 @@ class TranscriptHarness:
         monkeypatch.setattr(engine.db, "fetch_one", AsyncMock(return_value=None))
         monkeypatch.setattr(engine.db, "execute", AsyncMock(return_value=None))
         monkeypatch.setattr(engine.customers, "get_or_create_customer", AsyncMock(return_value=self.customer))
-        monkeypatch.setattr(engine.customers, "set_conversation_state", AsyncMock(return_value=None))
+        monkeypatch.setattr(engine.escalations, "escalate_customer_automatically", AsyncMock(return_value={"id": "customer-1"}))
+        monkeypatch.setattr(engine.escalations, "reactivate_if_expired", AsyncMock(return_value=SimpleNamespace(status="skipped")))
         monkeypatch.setattr(engine.customers, "add_tags", AsyncMock(return_value=None))
         monkeypatch.setattr(engine.conversations, "get_history", AsyncMock(side_effect=lambda customer_id, limit=20: list(self.messages)))
         monkeypatch.setattr(engine.conversations, "get_recent_summary", AsyncMock(return_value="Resumen reciente"))
@@ -409,7 +410,7 @@ async def test_hostile_message(monkeypatch):
     assert h.selected_agent() == "support"
     assert response["escalated"] is True
     h.provider.chat.assert_not_awaited()
-    engine.customers.set_conversation_state.assert_awaited_once_with("customer-1", "escalated")
+    engine.escalations.escalate_customer_automatically.assert_awaited_once()
 
 
 @pytest.mark.asyncio

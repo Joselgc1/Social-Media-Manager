@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from app import db
 from app.ai.engine import generate_response
 from app.config import get_config
-from app.crm import conversations
+from app.crm import conversations, escalations
 from app.crm.channel_mappings import resolve_customer_from_kommo_job, upsert_mapping
 from app.integrations.kommo.client import KommoAPIError, KommoClient, sanitize_kommo_error
 from app.integrations.kommo.customer_profile import build_kommo_customer_profile
@@ -441,8 +441,10 @@ async def _launch_salesbot_for_job(job: dict) -> None:
         profile = build_kommo_customer_profile(job=job, contact=None)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, profile=profile)
         if ai_mode_enum is not None:
-            await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
-            customer["conversation_state"] = "active" if ai_mode_enum == get_config().kommo_ai_active_enum_id else "escalated"
+            synced_customer = await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
+            if isinstance(synced_customer, dict):
+                customer.update(synced_customer)
+        ai_mode_enum = await _reactivate_expired_escalation_if_needed(customer, ai_mode_enum)
 
         decision = evaluate_automation_state(
             ai_enabled=bool(settings.get("ai_enabled", True)),
@@ -549,6 +551,19 @@ async def _record_uncertain_launch_warning(job_id: str, error: str) -> None:
     )
 
 
+async def _reactivate_expired_escalation_if_needed(customer: dict, ai_mode_enum: int | None) -> int | None:
+    result = await escalations.reactivate_if_expired(customer)
+    if result.status != "reactivated":
+        return ai_mode_enum
+
+    if result.customer:
+        customer.update(result.customer)
+    customer["conversation_state"] = "active"
+    if result.provider == "kommo":
+        return get_config().kommo_ai_active_enum_id
+    return ai_mode_enum
+
+
 async def _process_ready_job(job: dict) -> None:
     config = get_config()
     client = KommoClient.from_config()
@@ -562,8 +577,10 @@ async def _process_ready_job(job: dict) -> None:
         profile = build_kommo_customer_profile(job=job, contact=contact)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
         if ai_mode_enum is not None:
-            await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
-            customer["conversation_state"] = "active" if ai_mode_enum == config.kommo_ai_active_enum_id else "escalated"
+            synced_customer = await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
+            if isinstance(synced_customer, dict):
+                customer.update(synced_customer)
+        ai_mode_enum = await _reactivate_expired_escalation_if_needed(customer, ai_mode_enum)
 
         before = evaluate_automation_state(
             ai_enabled=bool(settings.get("ai_enabled", True)),

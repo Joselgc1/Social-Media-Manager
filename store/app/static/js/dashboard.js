@@ -1503,6 +1503,25 @@ async function saveDiscountSettings() {
   await loadSettings();
 }
 
+async function saveEscalationTimeoutSetting() {
+  const timeoutInput = document.getElementById('set-automatic-escalation-timeout');
+  const minutes = Number(timeoutInput?.value ?? 180);
+
+  if (!Number.isInteger(minutes) || (minutes !== 0 && (minutes < 5 || minutes > 10080))) {
+    toast('La pausa debe ser 0 o entre 5 y 10080 minutos', '#dc2626');
+    return;
+  }
+
+  await apiFetch(API + '/automatic_escalation_timeout_minutes', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: minutes}),
+  });
+
+  toast('Tiempo de pausa guardado');
+  await loadSettings();
+}
+
 // -- Settings --
 async function loadSettings() {
   const [settings, paymentData] = await Promise.all([
@@ -1531,6 +1550,10 @@ async function loadSettings() {
   const discountThresholdInput = document.getElementById('set-order-discount-threshold');
   if (discountThresholdInput) {
     discountThresholdInput.value = settings.order_discount_threshold_usd ?? 350;
+  }
+  const escalationTimeoutInput = document.getElementById('set-automatic-escalation-timeout');
+  if (escalationTimeoutInput) {
+    escalationTimeoutInput.value = settings.automatic_escalation_timeout_minutes ?? 180;
   }
   renderPaymentMethods(paymentData.payment_methods || []);
   loadCatalogPdfStatus();

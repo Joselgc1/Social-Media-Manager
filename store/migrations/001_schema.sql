@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS customers (
     last_active           TIMESTAMPTZ DEFAULT NOW(),
     notes                 TEXT,
     conversation_state    TEXT DEFAULT 'active',       -- "active", "escalated", "blocked"
+    escalation_source     TEXT,                         -- "automatic", "manual", "external"
+    escalated_at          TIMESTAMPTZ,
+    escalation_expires_at TIMESTAMPTZ,
     is_blocked            BOOLEAN DEFAULT FALSE,
     last_shipping_address TEXT,
     last_shipping_city    TEXT,
@@ -39,8 +42,22 @@ CREATE TABLE IF NOT EXISTS customers (
     UNIQUE(channel, platform_id)
 );
 
+ALTER TABLE customers
+    DROP CONSTRAINT IF EXISTS customers_escalation_source_check;
+
+ALTER TABLE customers
+    ADD CONSTRAINT customers_escalation_source_check CHECK (
+        escalation_source IS NULL
+        OR escalation_source IN ('automatic', 'manual', 'external')
+    );
+
 CREATE INDEX IF NOT EXISTS idx_customers_tags ON customers USING gin(tags);
 CREATE INDEX IF NOT EXISTS idx_customers_last_active ON customers(last_active DESC);
+CREATE INDEX IF NOT EXISTS idx_customers_expired_automatic_escalations
+    ON customers(escalation_expires_at ASC, id)
+    WHERE conversation_state = 'escalated'
+      AND escalation_source = 'automatic'
+      AND escalation_expires_at IS NOT NULL;
 
 -- ============================================================
 -- Conversations (message history)
@@ -140,6 +157,7 @@ INSERT INTO settings (key, value) VALUES
     ('auto_fallback',              'true'),
     ('ai_enabled',                 'true'),
     ('ai_orchestration_mode',      '"legacy"'),
+    ('automatic_escalation_timeout_minutes', '180'),
     ('catalog_refresh_minutes',    '15'),
     ('catalog_pdf_interval_hours', '24'),
     ('max_conversation_history',   '20'),

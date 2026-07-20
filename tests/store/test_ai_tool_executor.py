@@ -168,10 +168,10 @@ async def test_executor_create_order_returns_catalog_validation_error(monkeypatc
 async def test_executor_escalation_notifies_owner_and_sets_state(monkeypatch):
     get_recent_summary = AsyncMock(return_value="Resumen")
     notify_escalation = AsyncMock(return_value=None)
-    set_state = AsyncMock(return_value=None)
+    escalate = AsyncMock(return_value={"id": "customer-1"})
     monkeypatch.setattr(tool_messaging.conversations, "get_recent_summary", get_recent_summary)
     monkeypatch.setattr(tool_messaging, "notify_escalation", notify_escalation)
-    monkeypatch.setattr(tool_messaging.customers, "set_conversation_state", set_state)
+    monkeypatch.setattr(tool_messaging.escalations, "escalate_customer_automatically", escalate)
 
     result = await execute_tool(
         "escalate_to_human",
@@ -182,7 +182,7 @@ async def test_executor_escalation_notifies_owner_and_sets_state(monkeypatch):
     assert result["status"] == "escalated"
     notify_escalation.assert_awaited_once()
     assert notify_escalation.await_args.kwargs["customer_platform_id"] == "584121234567"
-    set_state.assert_awaited_once_with("customer-1", "escalated")
+    escalate.assert_awaited_once_with("customer-1")
 
 
 @pytest.mark.asyncio

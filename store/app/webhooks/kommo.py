@@ -13,7 +13,6 @@ from pydantic import ValidationError
 
 from app.config import get_config
 from app.crm.channel_mappings import lookup_by_lead_id
-from app.crm.customers import set_conversation_state
 from app.integrations.kommo.auth import (
     KommoAuthError,
     validate_return_url,
@@ -28,6 +27,7 @@ from app.integrations.kommo.jobs import (
     schedule_due_job_processing,
 )
 from app.integrations.kommo.models import SalesbotWidgetRequest
+from app.integrations.kommo.state import sync_local_state_from_ai_mode
 from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, parse_nested_form
 
 logger = logging.getLogger(__name__)
@@ -207,10 +207,8 @@ async def _sync_lead_ai_mode(lead_id: str, enum_id: int) -> None:
     mapping = await lookup_by_lead_id("kommo", lead_id)
     if not mapping:
         return
-    if enum_id == config.kommo_ai_active_enum_id:
-        await set_conversation_state(str(mapping["customer_id"]), "active")
-    elif enum_id in {config.kommo_ai_human_enum_id, config.kommo_ai_paused_enum_id}:
-        await set_conversation_state(str(mapping["customer_id"]), "escalated")
+    if enum_id in {config.kommo_ai_active_enum_id, config.kommo_ai_human_enum_id, config.kommo_ai_paused_enum_id}:
+        await sync_local_state_from_ai_mode(str(mapping["customer_id"]), enum_id)
 
 
 def _event_log_context(event) -> dict:

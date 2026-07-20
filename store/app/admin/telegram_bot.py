@@ -25,6 +25,7 @@ import httpx
 from fastapi import APIRouter, Request, Response
 
 from app import db
+from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
 from app.admin.notify import notify_owner
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs
 from app.analytics import get_conversion_funnel, get_popular_products, get_response_time_stats
@@ -32,8 +33,8 @@ from app.broadcast.sender import execute_broadcast, list_broadcasts, preview_bro
 from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
-from app.crm import conversations, orders
-from app.crm.customers import add_tags, remove_tag, set_conversation_state
+from app.crm import orders
+from app.crm.customers import add_tags, remove_tag
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -344,11 +345,17 @@ async def _cmd_resolve(args: str) -> str:
         count = len(rows)
         if count == 0:
             return "✅ No hay clientes escalados."
-        await conversations.clear_history_for_customers([str(row["id"]) for row in rows])
-        await db.execute(
-            "UPDATE customers SET conversation_state = 'active' WHERE conversation_state = 'escalated'"
-        )
-        return f"✅ {count} cliente(s) resueltos. El bot volverá a atenderles con un chat nuevo."
+        resolved = 0
+        failed = 0
+        for row in rows:
+            try:
+                await activate_customer_for_admin(dict(row))
+                resolved += 1
+            except ManualActivationError:
+                failed += 1
+        if failed:
+            return f"⚠️ {resolved} cliente(s) resueltos y {failed} fallaron. Revisa la configuración de Kommo si aplica."
+        return f"✅ {resolved} cliente(s) resueltos. El bot volverá a atenderles con un chat nuevo."
 
     row = await db.fetch_one(
         "SELECT id, display_name FROM customers WHERE id::text LIKE :prefix AND conversation_state = 'escalated'",
@@ -358,8 +365,10 @@ async def _cmd_resolve(args: str) -> str:
     if not row:
         return f"No se encontró cliente escalado con ID que empiece con '{arg}'"
 
-    await conversations.clear_history(str(row["id"]))
-    await set_conversation_state(str(row["id"]), "active")
+    try:
+        await activate_customer_for_admin(dict(row))
+    except ManualActivationError as e:
+        return f"⚠️ No pude reactivar este cliente: {e.safe_detail}"
     name = row["display_name"] or str(row["id"])[:8]
     return f"✅ Escalación resuelta para *{name}*. El bot volverá a atenderle con un chat nuevo."
 

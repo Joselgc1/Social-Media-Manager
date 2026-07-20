@@ -22,6 +22,7 @@ from app.broadcast.sender import execute_broadcast
 from app.catalog.pdf_generator import generate_catalog_pdf
 from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
 from app.config import get_config
+from app.crm import escalations
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,14 @@ def start_scheduler():
         trigger=IntervalTrigger(minutes=1),
         id="scheduler_config_sync",
         name="Sync scheduler timings from DB settings",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        _process_expired_escalations,
+        trigger=IntervalTrigger(minutes=1),
+        id="automatic_escalation_reactivation",
+        name="Reactivate expired automatic escalations",
         replace_existing=True,
     )
 
@@ -249,6 +258,21 @@ async def _process_kommo_jobs():
         await process_ready_jobs(limit=5)
     except Exception as e:
         logger.error(f"Kommo job processor failed: {e}")
+
+
+async def _process_expired_escalations():
+    try:
+        result = await escalations.process_expired_automatic_escalations()
+        if result.get("checked"):
+            logger.info(
+                "Expired escalation processor completed: checked=%s reactivated=%s failed=%s skipped=%s",
+                result.get("checked"),
+                result.get("reactivated"),
+                result.get("failed"),
+                result.get("skipped"),
+            )
+    except Exception as e:
+        logger.error("Expired escalation processor failed: %s", e)
 
 
 def _bounded_int(settings: dict, key: str, *, minimum: int, maximum: int) -> int:

@@ -20,7 +20,7 @@ from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf, get_pdf_me
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
 from app.crm import customers as customer_crm
-from app.crm import orders
+from app.crm import escalations, orders
 from app.crm.customers import add_tags, normalize_tags, remove_tag
 from app.exchange_rates import ALLOWED_EXCHANGE_RATE_REFERENCES, normalize_rate_setting_value
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
@@ -138,6 +138,17 @@ def _validate_setting_value(key: str, value, current_settings: dict):
                 detail="Conversation history must be between 5 and 50.",
             )
         return history
+
+    if key == "automatic_escalation_timeout_minutes":
+        minutes = int(value)
+        if minutes == 0:
+            return 0
+        if not (5 <= minutes <= 10080):
+            raise HTTPException(
+                status_code=400,
+                detail="Automatic escalation timeout must be 0 or between 5 and 10080 minutes.",
+            )
+        return minutes
 
     if key == "ai_orchestration_mode":
         mode = str(value or "").strip().lower()
@@ -809,11 +820,17 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
             raise HTTPException(status_code=502, detail=e.safe_detail) from e
         return {"status": "updated", "customer": result.customer, "activation_status": result.status}
 
-    updated = await customer_crm.update_customer(
-        customer_id=str(row["id"]),
-        channel=updates.get("channel"),
-        conversation_state=updates.get("conversation_state"),
-    )
+    requested_state = updates.get("conversation_state")
+    if requested_state == "escalated":
+        updated = await escalations.escalate_customer_manually(str(row["id"]), channel=updates.get("channel"))
+    elif requested_state == "blocked":
+        updated = await escalations.mark_customer_blocked(str(row["id"]), channel=updates.get("channel"))
+    else:
+        updated = await customer_crm.update_customer(
+            customer_id=str(row["id"]),
+            channel=updates.get("channel"),
+            conversation_state=requested_state,
+        )
     return {"status": "updated", "customer": updated}
 
 

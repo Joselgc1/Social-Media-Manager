@@ -36,7 +36,7 @@ from app.ai.vision import analyze_payment_screenshot
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
-from app.crm import conversations, customers, orders, sessions
+from app.crm import conversations, customers, escalations, orders, sessions
 from app.exchange_rates import build_customer_exchange_rate_reply
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,12 @@ async def generate_response(
     is_escalated = guards.is_customer_escalated(customer)
     is_blocked = guards.is_customer_blocked(customer)
 
+    if is_escalated and not is_blocked:
+        expiry_result = await escalations.reactivate_if_expired(customer)
+        if expiry_result.status == "reactivated":
+            customer = expiry_result.customer or {**customer, "conversation_state": "active"}
+            is_escalated = False
+
     if not ai_enabled or is_escalated or is_blocked:
         await conversations.store_message(
             customer_id=customer["id"],
@@ -155,7 +161,7 @@ async def generate_response(
             channel=channel,
             media_url=media_url,
         )
-        await customers.set_conversation_state(customer["id"], "escalated")
+        await escalations.escalate_customer_automatically(customer["id"], settings=settings)
         summary = await conversations.get_recent_summary(customer["id"], limit=5)
         await _sync_kommo_escalation_if_needed(
             customer_id=customer["id"],
@@ -235,7 +241,7 @@ async def generate_response(
             channel=channel,
             media_url=media_url,
         )
-        await customers.set_conversation_state(customer["id"], "escalated")
+        await escalations.escalate_customer_automatically(customer["id"], settings=settings)
         summary = await conversations.get_recent_summary(customer["id"], limit=5)
         await _sync_kommo_escalation_if_needed(
             customer_id=customer["id"],

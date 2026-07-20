@@ -51,15 +51,11 @@ async def test_admin_activation_syncs_kommo_before_local_update_and_history_clea
     client.get_lead = AsyncMock(side_effect=get_lead)
     monkeypatch.setattr(customer_activation.KommoClient, "from_config", lambda: client)
 
-    async def update_customer(*, customer_id, channel=None, conversation_state=None):
-        events.append(("local_update", customer_id, channel, conversation_state))
-        return {"id": customer_id, "channel": channel, "conversation_state": conversation_state}
+    async def mark_active(customer_id, *, channel=None):
+        events.append(("local_reactivate", customer_id, channel))
+        return {"id": customer_id, "channel": channel, "conversation_state": "active"}
 
-    async def clear_history(customer_id):
-        events.append(("clear_history", customer_id))
-
-    monkeypatch.setattr(customer_activation.customer_crm, "update_customer", AsyncMock(side_effect=update_customer))
-    monkeypatch.setattr(customer_activation.conversations, "clear_history", AsyncMock(side_effect=clear_history))
+    monkeypatch.setattr(customer_activation.escalations, "mark_customer_active_for_admin", AsyncMock(side_effect=mark_active))
 
     result = await customer_activation.activate_customer_for_admin({"id": "customer"}, channel="instagram")
 
@@ -68,8 +64,7 @@ async def test_admin_activation_syncs_kommo_before_local_update_and_history_clea
     assert events == [
         ("kommo_update", "100", 222),
         ("kommo_get", "100"),
-        ("local_update", "customer", "instagram", "active"),
-        ("clear_history", "customer"),
+        ("local_reactivate", "customer", "instagram"),
     ]
 
 
@@ -89,18 +84,15 @@ async def test_admin_activation_failure_does_not_update_local_state_or_clear_his
     client.get_lead = AsyncMock()
     monkeypatch.setattr(customer_activation.KommoClient, "from_config", lambda: client)
 
-    update_customer = AsyncMock()
-    clear_history = AsyncMock()
-    monkeypatch.setattr(customer_activation.customer_crm, "update_customer", update_customer)
-    monkeypatch.setattr(customer_activation.conversations, "clear_history", clear_history)
+    mark_active = AsyncMock()
+    monkeypatch.setattr(customer_activation.escalations, "mark_customer_active_for_admin", mark_active)
 
     with pytest.raises(customer_activation.ManualActivationError) as exc:
         await customer_activation.activate_customer_for_admin({"id": "customer"})
 
     assert "secret-token" not in exc.value.safe_detail
     assert "redacted" in exc.value.safe_detail.lower()
-    update_customer.assert_not_awaited()
-    clear_history.assert_not_awaited()
+    mark_active.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -113,19 +105,17 @@ async def test_admin_activation_without_kommo_mapping_is_local_only(monkeypatch)
     monkeypatch.setattr(customer_activation.KommoClient, "from_config", from_config)
 
     monkeypatch.setattr(
-        customer_activation.customer_crm,
-        "update_customer",
+        customer_activation.escalations,
+        "mark_customer_active_for_admin",
         AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
     )
-    monkeypatch.setattr(customer_activation.conversations, "clear_history", AsyncMock())
 
     result = await customer_activation.activate_customer_for_admin({"id": "customer"})
 
     assert result.status == "local_only"
     assert result.kommo_lead_id is None
     from_config.assert_not_called()
-    customer_activation.customer_crm.update_customer.assert_awaited_once()
-    customer_activation.conversations.clear_history.assert_awaited_once_with("customer")
+    customer_activation.escalations.mark_customer_active_for_admin.assert_awaited_once_with("customer", channel=None)
 
 
 @pytest.mark.asyncio
@@ -136,11 +126,10 @@ async def test_admin_activation_in_meta_backend_is_local_only_without_mapping_lo
     get_mapping = AsyncMock()
     monkeypatch.setattr(customer_activation, "get_mapping_by_customer", get_mapping)
     monkeypatch.setattr(
-        customer_activation.customer_crm,
-        "update_customer",
+        customer_activation.escalations,
+        "mark_customer_active_for_admin",
         AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
     )
-    monkeypatch.setattr(customer_activation.conversations, "clear_history", AsyncMock())
 
     result = await customer_activation.activate_customer_for_admin({"id": "customer"})
 
@@ -214,6 +203,56 @@ async def test_update_customer_to_active_uses_activation_helper(monkeypatch):
     }
     activation.assert_awaited_once()
     settings.customer_crm.update_customer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_customer_to_manual_escalation_uses_metadata_service(monkeypatch):
+    from app.admin import settings
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(
+        return_value={
+            "id": "customer",
+            "channel": "whatsapp",
+            "platform_id": "58412",
+            "conversation_state": "active",
+        }
+    )
+    monkeypatch.setattr(settings, "db", mock_db)
+    manual = AsyncMock(return_value={"id": "customer", "conversation_state": "escalated", "escalation_source": "manual"})
+    monkeypatch.setattr(settings.escalations, "escalate_customer_manually", manual)
+    monkeypatch.setattr(settings.customer_crm, "update_customer", AsyncMock())
+
+    response = await settings.update_customer("customer", settings.CustomerUpdate(conversation_state="escalated"))
+
+    assert response["customer"]["escalation_source"] == "manual"
+    manual.assert_awaited_once_with("customer", channel=None)
+    settings.customer_crm.update_customer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_customer_to_blocked_clears_escalation_metadata(monkeypatch):
+    from app.admin import settings
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(
+        return_value={
+            "id": "customer",
+            "channel": "whatsapp",
+            "platform_id": "58412",
+            "conversation_state": "escalated",
+        }
+    )
+    monkeypatch.setattr(settings, "db", mock_db)
+    block = AsyncMock(return_value={"id": "customer", "conversation_state": "blocked", "escalation_source": None})
+    monkeypatch.setattr(settings.escalations, "mark_customer_blocked", block)
+    monkeypatch.setattr(settings.customer_crm, "update_customer", AsyncMock())
+
+    response = await settings.update_customer("customer", settings.CustomerUpdate(conversation_state="blocked"))
+
+    assert response["customer"]["conversation_state"] == "blocked"
+    assert response["customer"]["escalation_source"] is None
+    block.assert_awaited_once_with("customer", channel=None)
 
 
 @pytest.mark.asyncio

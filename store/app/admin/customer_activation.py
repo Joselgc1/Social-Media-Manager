@@ -6,8 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.config import get_config
-from app.crm import conversations
-from app.crm import customers as customer_crm
+from app.crm import escalations
 from app.crm.channel_mappings import get_mapping_by_customer
 from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
 from app.integrations.kommo.state import extract_ai_mode_enum_from_lead
@@ -36,12 +35,7 @@ async def activate_customer_for_admin(customer: dict, *, channel: str | None = N
     customer_id = str(customer["id"])
     kommo_lead_id = await _sync_kommo_ai_active_if_needed(customer_id)
 
-    updated = await customer_crm.update_customer(
-        customer_id=customer_id,
-        channel=channel,
-        conversation_state="active",
-    )
-    await conversations.clear_history(customer_id)
+    updated = await escalations.mark_customer_active_for_admin(customer_id, channel=channel)
 
     return ManualActivationResult(
         customer_id=customer_id,

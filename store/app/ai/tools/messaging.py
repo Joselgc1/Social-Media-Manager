@@ -13,7 +13,7 @@ from app.ai.tools.context import ToolExecutionContext
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
-from app.crm import conversations, customers
+from app.crm import conversations, escalations
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ async def escalate_to_human(args: dict, context: ToolExecutionContext) -> dict:
         urgency=args.get("urgency", "medium"),
         conversation_summary=summary,
     )
-    await customers.set_conversation_state(customer_id, "escalated")
+    await escalations.escalate_customer_automatically(customer_id)
     await _sync_kommo_escalation_if_needed(
         customer_id=customer_id,
         reason=args.get("reason", "Razón no especificada"),

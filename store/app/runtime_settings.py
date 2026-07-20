@@ -22,6 +22,7 @@ RUNTIME_SETTING_DEFAULTS = {
     "max_conversation_history": 20,
     "ai_enabled": True,
     "ai_orchestration_mode": "legacy",
+    "automatic_escalation_timeout_minutes": 180,
     "catalog_refresh_minutes": 15,
     "broadcast_check_interval_minutes": 1,
     "catalog_pdf_interval_hours": 24,
