@@ -1,5 +1,6 @@
 -- Full store schema
--- Consolidated schema for fresh installs, including Kommo integration tables and hardening.
+-- Single consolidated schema for fresh installs, including multi-agent workflow state,
+-- AI run observability, Kommo integration tables, and hardening.
 -- Run this against your Supabase PostgreSQL instance
 
 -- Enable UUID generation

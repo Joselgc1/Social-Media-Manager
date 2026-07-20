@@ -1,4 +1,5 @@
 import json
+import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -44,6 +45,20 @@ async def test_existing_session_retrieval(monkeypatch):
 
     assert session.active_agent == "checkout"
     assert session.workflow_stage == "checkout_collecting"
+
+
+@pytest.mark.asyncio
+async def test_set_active_agent_normalizes_uuid_customer_id(monkeypatch):
+    customer_id = uuid.UUID("4534aae1-e5b3-47b2-b321-8250a1e20444")
+    fetch_one = AsyncMock(return_value=_row(customer_id=str(customer_id), active_agent="sales", workflow_stage="sales"))
+    monkeypatch.setattr(sessions.db, "fetch_one", fetch_one)
+
+    session = await sessions.set_active_agent(customer_id, "sales", workflow_stage="sales")
+
+    values = fetch_one.await_args.args[1]
+    assert values["customer_id"] == str(customer_id)
+    assert session.customer_id == str(customer_id)
+    assert session.active_agent == "sales"
 
 
 @pytest.mark.asyncio
@@ -123,7 +138,7 @@ def test_merge_item_patch_updates_first_item():
 
 
 def test_migration_uses_safe_deletion_behavior():
-    migration = sessions.__file__.replace("store/app/crm/sessions.py", "store/migrations/002_conversation_sessions.sql")
+    migration = sessions.__file__.replace("store/app/crm/sessions.py", "store/migrations/001_schema.sql")
     with open(migration, encoding="utf-8") as handle:
         sql = handle.read()
 

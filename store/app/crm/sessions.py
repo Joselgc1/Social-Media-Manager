@@ -133,6 +133,11 @@ class ConversationSession(BaseModel):
     created_at: Any = None
     updated_at: Any = None
 
+    @field_validator("customer_id", mode="before")
+    @classmethod
+    def _normalize_customer_id(cls, value):
+        return _customer_id_text(value)
+
     @field_validator("active_agent", mode="before")
     @classmethod
     def _normalize_active_agent(cls, value):
@@ -218,6 +223,7 @@ def merge_checkout_draft(existing: CheckoutDraft | dict | str | None, partial_up
 
 
 async def get_session(customer_id: str) -> ConversationSession | None:
+    customer_id = _customer_id_text(customer_id)
     row = await db.fetch_one(
         """
         SELECT customer_id, active_agent, active_intent, workflow_stage, checkout_draft,
@@ -231,6 +237,7 @@ async def get_session(customer_id: str) -> ConversationSession | None:
 
 
 async def get_or_create_session(customer_id: str) -> ConversationSession:
+    customer_id = _customer_id_text(customer_id)
     row = await db.fetch_one(
         """
         INSERT INTO conversation_sessions (customer_id)
@@ -256,6 +263,7 @@ async def set_active_agent(
     workflow_stage: str | None = None,
     last_route_confidence: float | None = None,
 ) -> ConversationSession:
+    customer_id = _customer_id_text(customer_id)
     normalized_agent = ConversationSession(customer_id=customer_id, active_agent=active_agent).active_agent
     normalized_stage = None
     if workflow_stage is not None:
@@ -289,6 +297,7 @@ async def set_active_agent(
 
 
 async def set_workflow_stage(customer_id: str, workflow_stage: str) -> ConversationSession:
+    customer_id = _customer_id_text(customer_id)
     normalized_stage = ConversationSession(customer_id=customer_id, workflow_stage=workflow_stage).workflow_stage
     row = await db.fetch_one(
         """
@@ -305,6 +314,7 @@ async def set_workflow_stage(customer_id: str, workflow_stage: str) -> Conversat
 
 
 async def update_checkout_draft(customer_id: str, partial_update: dict) -> ConversationSession:
+    customer_id = _customer_id_text(customer_id)
     session = await get_or_create_session(customer_id)
     draft = merge_checkout_draft(session.checkout_draft, partial_update)
     row = await db.fetch_one(
@@ -338,6 +348,7 @@ async def set_current_order(
     workflow_stage: str = "waiting_for_payment",
     active_agent: str = "checkout",
 ) -> ConversationSession:
+    customer_id = _customer_id_text(customer_id)
     normalized_agent = ConversationSession(customer_id=customer_id, active_agent=active_agent).active_agent
     normalized_stage = ConversationSession(customer_id=customer_id, workflow_stage=workflow_stage).workflow_stage
     row = await db.fetch_one(
@@ -368,6 +379,7 @@ async def set_current_order(
 
 
 async def reset_session(customer_id: str) -> ConversationSession:
+    customer_id = _customer_id_text(customer_id)
     row = await db.fetch_one(
         """
         INSERT INTO conversation_sessions (customer_id)
@@ -397,3 +409,7 @@ def _row_to_session(row) -> ConversationSession:
         return ConversationSession.model_validate(data)
     except ValidationError:
         return ConversationSession(customer_id=data["customer_id"])
+
+
+def _customer_id_text(customer_id) -> str:
+    return str(customer_id or "").strip()

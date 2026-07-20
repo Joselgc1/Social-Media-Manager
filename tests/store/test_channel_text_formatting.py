@@ -10,9 +10,65 @@ def test_whatsapp_formatter_converts_markdown_bold_to_whatsapp_bold():
     assert format_customer_text(" **Oferta especial** ", "whatsapp") == "*Oferta especial*"
 
 
+def test_whatsapp_formatter_converts_common_markup_to_whatsapp_syntax():
+    text = (
+        "# Promo\n"
+        "**Nuevo** __VIP__ _suave_ ~~agotado~~ `SKU-1` "
+        "[Ver catálogo](https://store.example/catalogo_v1)"
+    )
+
+    assert format_customer_text(text, "whatsapp") == (
+        "*Promo*\n"
+        "*Nuevo* *VIP* _suave_ ~agotado~ ```SKU-1``` "
+        "Ver catálogo: https://store.example/catalogo_v1"
+    )
+
+
+def test_whatsapp_formatter_converts_html_markup_to_whatsapp_syntax():
+    text = "<strong>Oferta</strong><br><em>solo hoy</em> <del>antes $40</del> <code>ABC-1</code>"
+
+    assert format_customer_text(text, "whatsapp") == "*Oferta*\n_solo hoy_ ~antes $40~ ```ABC-1```"
+
+
+def test_whatsapp_formatter_strips_generic_html_wrappers():
+    text = "<p><strong>Opciones</strong></p><ul><li>Pijama rosa</li><li>Set negro</li></ul>"
+
+    assert format_customer_text(text, "whatsapp") == "*Opciones*\n- Pijama rosa\n- Set negro"
+
+
+def test_whatsapp_formatter_preserves_formatting_markers_inside_urls():
+    url = "https://store.example/catalogo_v1?promo=**sale**&tag=~~x~~"
+
+    assert format_customer_text(f"Mira {url}", "whatsapp") == f"Mira {url}"
+
+
 def test_whatsapp_formatter_preserves_line_breaks_and_lists():
     text = "**Opciones:**\n- Pijama rosada\n- Set negro"
     assert format_customer_text(text, "whatsapp") == "*Opciones:*\n- Pijama rosada\n- Set negro"
+
+
+def test_whatsapp_formatter_breaks_inline_option_lists_into_lines():
+    text = (
+        "¡Súper! Para regalar en pijamas ahorita tenemos estas opciones: "
+        "- Pijama rayas rosa $28 (tallas S, M, L) "
+        "- Pijama amarilla $28 (tallas S, M, L, XXL) "
+        "- Pijama satén azul $32 (tallas M, L, XL) "
+        "¿Sabes qué talla usa tu novia? :)"
+    )
+
+    assert format_customer_text(text, "whatsapp") == (
+        "¡Súper! Para regalar en pijamas ahorita tenemos estas opciones:\n"
+        "- Pijama rayas rosa $28 (tallas S, M, L)\n"
+        "- Pijama amarilla $28 (tallas S, M, L, XXL)\n"
+        "- Pijama satén azul $32 (tallas M, L, XL)\n\n"
+        "¿Sabes qué talla usa tu novia? :)"
+    )
+
+
+def test_whatsapp_formatter_does_not_split_plain_hyphen_phrases():
+    text = "Tenemos pijamas - sets - lencería tipo encaje."
+
+    assert format_customer_text(text, "whatsapp") == text
 
 
 def test_instagram_formatter_removes_bold_markers_and_converts_lists():

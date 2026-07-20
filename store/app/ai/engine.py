@@ -338,6 +338,27 @@ async def generate_response(
             persist_assistant_message=persist_assistant_message,
         )
 
+    if _detect_exchange_rate_question(message_text, stored_history):
+        logger.info(
+            "AI route decision",
+            extra={
+                "orchestration_mode": orchestration_mode,
+                "selected_agent": "direct",
+                "route_intent": "exchange_rate",
+                "route_source": "deterministic_guard",
+                "route_confidence": 1.0,
+            },
+        )
+        return await _handle_exchange_rate_question(
+            customer=customer,
+            channel=channel,
+            media_url=media_url,
+            message_text=original_message_text,
+            settings=settings,
+            orchestration_mode=orchestration_mode,
+            persist_assistant_message=persist_assistant_message,
+        )
+
     # ── 5. Resolve orchestration route and build prompt ──────
     session = None
     if orchestration_mode == "multi_agent":
@@ -423,7 +444,7 @@ async def generate_response(
 
     if orchestration.mode == "multi_agent" and agent_result.handoff_target == "checkout":
         await sessions.set_active_agent(
-            customer["id"],
+            str(customer["id"]),
             "checkout",
             active_intent="checkout_or_order",
             workflow_stage="checkout_collecting",
@@ -577,6 +598,124 @@ async def _handle_payment_proof_attempt(
     return response
 
 
+async def _handle_exchange_rate_question(
+    *,
+    customer: dict,
+    channel: str,
+    media_url: str | None,
+    message_text: str,
+    settings: dict,
+    orchestration_mode: str,
+    persist_assistant_message: bool = True,
+) -> dict:
+    """Answer exchange-rate questions without routing through catalog-focused agents."""
+    t_start = time.monotonic()
+    await conversations.store_message(
+        customer_id=customer["id"],
+        role="user",
+        content=message_text,
+        channel=channel,
+        media_url=media_url,
+    )
+    reply_text = _exchange_rate_reply(settings.get("accepted_exchange_rate"))
+    response_time_ms = int((time.monotonic() - t_start) * 1000)
+    await analytics.log_ai_run(
+        customer_id=customer["id"],
+        channel=channel,
+        orchestration_mode=orchestration_mode,
+        selected_agent="direct",
+        route_intent="exchange_rate",
+        route_source="deterministic_guard",
+        route_confidence=1.0,
+        provider=None,
+        model=None,
+        usage={},
+        response_time_ms=response_time_ms,
+        tool_names=[],
+        tool_rounds=0,
+        handoff_occurred=False,
+        fallback_occurred=False,
+        escalation_occurred=False,
+        shadow_evaluation=False,
+        legacy_fallback=False,
+    )
+    if persist_assistant_message:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="assistant",
+            content=reply_text,
+            channel=channel,
+        )
+    return {
+        "text": reply_text,
+        "interactive": None,
+        "catalog_pdf": None,
+        "product_image": None,
+        "customer_id": customer["id"],
+        "escalated": False,
+    }
+
+
+def _detect_exchange_rate_question(message_text: str, stored_history: list[dict] | None = None) -> bool:
+    normalized = guards.normalize_text_for_moderation(message_text)
+    if _looks_like_exchange_rate_question(normalized):
+        return True
+    if normalized not in {"?", "??", "???", "aja", "aja?", "ajá", "aja y la tasa?"} and "tasa" not in normalized:
+        return False
+    for message in reversed(stored_history or []):
+        role = str(message.get("role") or "")
+        content = guards.normalize_text_for_moderation(str(message.get("content") or ""))
+        if role == "assistant":
+            return False
+        if role == "user" and _looks_like_exchange_rate_question(content):
+            return True
+    return False
+
+
+def _looks_like_exchange_rate_question(normalized: str) -> bool:
+    if not normalized:
+        return False
+    if "tasa" in normalized:
+        return any(
+            marker in normalized
+            for marker in (
+                "que",
+                "cual",
+                "cuanto",
+                "manejan",
+                "usan",
+                "reciben",
+                "tienen",
+                "hoy",
+                "dia",
+                "binance",
+                "?",
+            )
+        )
+    currency_markers = ("dolar", "dolares", "usd", "binance")
+    if not any(marker in normalized for marker in currency_markers):
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "a cuanto",
+            "a que",
+            "cuanto esta",
+            "cuanto tienen",
+            "cuanto manejan",
+            "cambio manejan",
+            "cambio usan",
+        )
+    )
+
+
+def _exchange_rate_reply(accepted_exchange_rate) -> str:
+    rate_text = str(accepted_exchange_rate or "").strip()
+    if rate_text:
+        return f"La tasa Binance del día que usamos de referencia es {rate_text}."
+    return "Ahorita no tengo una tasa configurada. La tienda confirma la tasa Binance del día antes del pago."
+
+
 def _with_conversation_continuity_guidance(system_prompt: str, has_previous_context: bool) -> str:
     if has_previous_context:
         guidance = (
@@ -684,7 +823,7 @@ def _log_route_decision(orchestration) -> None:
 async def _record_active_route(customer_id: str, orchestration):
     """Persist the executable specialist route for multi-agent mode."""
     return await sessions.set_active_agent(
-        customer_id,
+        str(customer_id),
         orchestration.agent.name,
         active_intent=orchestration.route_decision.intent,
         workflow_stage=_workflow_stage_for_route(orchestration.agent.name, orchestration.route_decision.intent),

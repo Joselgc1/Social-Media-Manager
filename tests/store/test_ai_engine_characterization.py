@@ -289,6 +289,27 @@ async def test_generate_response_contract_for_normal_text(engine_harness):
 
 
 @pytest.mark.asyncio
+async def test_exchange_rate_question_is_answered_without_llm(engine_harness):
+    response = await engine.generate_response("whatsapp", "584121234567", "¿A qué tasa reciben?")
+
+    _assert_active_response_contract(response)
+    assert response["text"] == "La tasa Binance del día que usamos de referencia es 40,25 Bs/USD."
+    engine_harness.provider.chat.assert_not_awaited()
+    engine.analytics.log_response.assert_not_awaited()
+    engine.analytics.log_ai_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bs_total_question_is_not_mistaken_for_exchange_rate(engine_harness):
+    engine_harness.provider.chat.return_value = LLMResponse(text="Claro, te ayudo a calcularlo según el producto.")
+
+    response = await engine.generate_response("whatsapp", "584121234567", "¿A cuánto queda en Bs?")
+
+    assert response["text"] == "Claro, te ayudo a calcularlo según el producto."
+    engine_harness.provider.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_generate_response_contract_for_interactive_buttons(engine_harness):
     engine_harness.provider.chat.return_value = LLMResponse(
         tool_calls=[

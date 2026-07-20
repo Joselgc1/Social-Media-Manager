@@ -717,7 +717,14 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
         )
         await _mark_job_discarded(job["id"], reason, response_payload)
     except KommoAPIError as e:
-        await _mark_job(job["id"], _status_after_continuation_error(e, continuation_started), sanitize_job_error(e))
+        status = _status_after_continuation_error(e, continuation_started)
+        logger.warning(
+            "Kommo failure continuation rejected: job_id=%s status=%s error=%s",
+            job["id"],
+            status,
+            sanitize_job_error(e),
+        )
+        await _mark_job(job["id"], status, sanitize_job_error(e))
     except Exception as e:
         await _mark_job(job["id"], "delivery_unknown" if continuation_started else "failed", sanitize_job_error(e))
 

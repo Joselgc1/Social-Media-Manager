@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 from app.integrations.kommo.state import evaluate_automation_state
 
@@ -501,6 +500,27 @@ async def test_ready_job_discard_continues_salesbot_before_marking_discarded(mon
         "data": {"status": "fail", "message": ""},
     }
     assert "status = 'discarded'" in mock_db.execute.await_args_list[1].args[0]
+
+
+@pytest.mark.asyncio
+async def test_ready_job_discard_marks_unauthorized_continuation_failed(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.client import KommoAPIError
+
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(side_effect=KommoAPIError("Kommo API returned HTTP 401", status_code=401))
+    job = {"id": "job", "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2"}
+
+    await jobs._continue_and_discard_job(client, job, "ai_run_error")
+
+    client.continue_salesbot.assert_awaited_once()
+    values = mock_db.execute.await_args_list[-1].args[1]
+    assert values["status"] == "failed"
+    assert values["last_error"] == "Kommo API returned HTTP 401"
 
 
 @pytest.mark.asyncio

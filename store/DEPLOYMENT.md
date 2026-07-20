@@ -26,6 +26,8 @@ The guide has 11 parts:
 
 ---
 
+
+
 ## Part 1: External Accounts and API Keys
 
 You need the core service accounts before touching the code. Then choose one customer-channel backend: direct Meta or Kommo.
@@ -48,7 +50,7 @@ Run the migrations. Go to the SQL Editor in Supabase's dashboard:
 
 This creates all tables and seeds the runtime settings used by the store dashboard and the master control plane.
 
-Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, `ai_orchestration_mode=legacy`, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), Kommo transport formatting defaults (`kommo_emoji_mode_*`, `kommo_strip_emoji`), an empty `payment_methods` row, an empty `accepted_exchange_rate` row, and automatic order discount defaults. Existing databases that were not created from the consolidated schema should also run `002_conversation_sessions.sql` and `003_ai_run_observability.sql` in order.
+Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, `ai_orchestration_mode=legacy`, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), Kommo transport formatting defaults (`kommo_emoji_mode_*`, `kommo_strip_emoji`), an empty `payment_methods` row, an empty `accepted_exchange_rate` row, and automatic order discount defaults. The same consolidated schema also creates the multi-agent workflow and AI observability tables. For existing stores created from an older schema, re-run this consolidated file in a maintenance window to create any missing tables and default settings before enabling multi-agent mode.
 
 ### 1.2 OpenAI API Key
 
@@ -140,12 +142,14 @@ Send a message to your bot (search for it by username, click **Start**). This is
 
 Set exactly one channel backend per store:
 
-| Backend | Use When | Webhooks | Sends Replies Through |
-| ------- | -------- | -------- | --------------------- |
-| `meta` | You want direct WhatsApp Cloud API and Instagram Messaging API control. | `/webhooks/whatsapp`, `/webhooks/instagram` | Meta Graph API |
-| `kommo` | You want Kommo to own WhatsApp/Instagram channel connections and shared inbox. | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | Kommo Salesbot |
 
-For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [`docs/KOMMO_MIGRATION.md`](../docs/KOMMO_MIGRATION.md) after the core Supabase, LLM, Google Sheets, and Telegram setup is complete.
+| Backend | Use When                                                                       | Webhooks                                                      | Sends Replies Through |
+| ------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------- | --------------------- |
+| `meta`  | You want direct WhatsApp Cloud API and Instagram Messaging API control.        | `/webhooks/whatsapp`, `/webhooks/instagram`                   | Meta Graph API        |
+| `kommo` | You want Kommo to own WhatsApp/Instagram channel connections and shared inbox. | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | Kommo Salesbot        |
+
+
+For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) after the core Supabase, LLM, Google Sheets, and Telegram setup is complete.
 
 ### 1.7 Meta Developer App (WhatsApp + Instagram APIs)
 
@@ -180,7 +184,11 @@ Make up any random string (e.g., `my_secret_verify_2026`). This goes in `.env` a
 
 ---
 
+
+
 ## Part 2: Local Development Setup
+
+
 
 ### 2.1 Extract and Install
 
@@ -193,6 +201,8 @@ source .venv/bin/activate    # Windows: .venv\Scripts\activate
 
 pip install -r store/requirements.txt
 ```
+
+
 
 ### 2.2 Configure Environment Variables
 
@@ -284,6 +294,8 @@ open http://localhost:8000/admin/login
 
 ---
 
+
+
 ## Part 3: Expose Your Local Server (for Development)
 
 Meta and Kommo both require a publicly accessible HTTPS URL for webhooks. Use ngrok during development.
@@ -307,7 +319,11 @@ Copy the `https://abc123.ngrok-free.app` URL. Verify: `https://abc123.ngrok-free
 
 ---
 
+
+
 ## Part 4: Connect Channel Webhooks
+
+
 
 ### 4.1 Meta Mode: WhatsApp Webhook
 
@@ -331,11 +347,15 @@ Only do this when `CHANNEL_BACKEND=kommo`.
 5. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
 6. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
 
-The complete Kommo setup is documented in [`docs/KOMMO_MIGRATION.md`](../docs/KOMMO_MIGRATION.md).
+The complete Kommo setup is documented in [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md).
 
 ---
 
+
+
 ## Part 5: Deploy to Production (Railway)
+
+
 
 ### 5.1 Push to GitHub
 
@@ -347,47 +367,55 @@ git remote add origin https://github.com/youruser/vs-chatbot.git
 git push -u origin main
 ```
 
+
+
 ### 5.2 Deploy on Railway
 
-Go to [railway.app](https://railway.app). **New Project > Deploy from GitHub Repo** > select your repo. Set the Railway service **Root Directory** to `store/`. Add all `.env` variables in the Variables tab. Set `DEBUG=false`. **Set `ADMIN_PASSWORD` to a strong random string** — this protects the admin dashboard and all admin API endpoints in production.
+Go to [railway.app](https://railway.app). **New Project > Deploy from GitHub Repo** > select your repo. Set the Railway service **Root Directory** to `store/`. Add all `.env` variables in the Variables tab. Set `DEBUG=false`. **Set** `ADMIN_PASSWORD` **to a strong random string** — this protects the admin dashboard and all admin API endpoints in production.
 
 Minimum production variables shared by both backends:
 
-| Variable | Notes |
-| -------- | ----- |
-| `CHANNEL_BACKEND` | `meta` or `kommo` |
-| `ADMIN_PASSWORD` | Required when `DEBUG=false` |
-| `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` | At least one is required |
-| `DATABASE_URL` | Store Supabase URL, preferably session pooler if direct DB is blocked |
-| `GOOGLE_SHEETS_CREDENTIALS_B64` | Base64 service-account JSON |
-| `PRODUCT_SHEET_ID` | Google Sheets catalog ID |
-| `STORE_NAME`, `OWNER_NAME`, `APP_BASE_URL`, `DEBUG` | Store metadata/runtime |
+
+| Variable                                            | Notes                                                                 |
+| --------------------------------------------------- | --------------------------------------------------------------------- |
+| `CHANNEL_BACKEND`                                   | `meta` or `kommo`                                                     |
+| `ADMIN_PASSWORD`                                    | Required when `DEBUG=false`                                           |
+| `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`             | At least one is required                                              |
+| `DATABASE_URL`                                      | Store Supabase URL, preferably session pooler if direct DB is blocked |
+| `GOOGLE_SHEETS_CREDENTIALS_B64`                     | Base64 service-account JSON                                           |
+| `PRODUCT_SHEET_ID`                                  | Google Sheets catalog ID                                              |
+| `STORE_NAME`, `OWNER_NAME`, `APP_BASE_URL`, `DEBUG` | Store metadata/runtime                                                |
+
 
 Additional variables for `CHANNEL_BACKEND=meta`:
 
-| Variable | Notes |
-| -------- | ----- |
-| `META_APP_SECRET` | Used for webhook signature verification |
-| `WHATSAPP_ACCESS_TOKEN` | WhatsApp Cloud API token |
-| `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp sender phone number ID |
-| `WHATSAPP_VERIFY_TOKEN` | Meta webhook verification token |
+
+| Variable                                           | Notes                                                |
+| -------------------------------------------------- | ---------------------------------------------------- |
+| `META_APP_SECRET`                                  | Used for webhook signature verification              |
+| `WHATSAPP_ACCESS_TOKEN`                            | WhatsApp Cloud API token                             |
+| `WHATSAPP_PHONE_NUMBER_ID`                         | WhatsApp sender phone number ID                      |
+| `WHATSAPP_VERIFY_TOKEN`                            | Meta webhook verification token                      |
 | `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_VERIFY_TOKEN` | Optional, but all-or-nothing if Instagram is enabled |
+
 
 Additional variables for `CHANNEL_BACKEND=kommo`:
 
-| Variable | Notes |
-| -------- | ----- |
-| `KOMMO_SUBDOMAIN` | Account subdomain only, for example `acme` |
-| `KOMMO_ACCESS_TOKEN` | Long-lived private integration token |
-| `KOMMO_INTEGRATION_ID` | Private integration ID/client UUID |
-| `KOMMO_INTEGRATION_SECRET` | JWT validation secret |
-| `KOMMO_SALESBOT_ID` | Salesbot that contains the private widget |
-| `KOMMO_WEBHOOK_SECRET` | Random path secret for general webhook URL |
-| `KOMMO_AI_MODE_FIELD_ID` | Lead field ID for AI Mode |
-| `KOMMO_AI_ACTIVE_ENUM_ID` | Enum ID for AI Active |
-| `KOMMO_AI_HUMAN_ENUM_ID` | Enum ID for Human |
-| `KOMMO_AI_PAUSED_ENUM_ID` | Enum ID for Paused |
-| `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` | Optional assignment target on escalation |
+
+| Variable                            | Notes                                      |
+| ----------------------------------- | ------------------------------------------ |
+| `KOMMO_SUBDOMAIN`                   | Account subdomain only, for example `acme` |
+| `KOMMO_ACCESS_TOKEN`                | Long-lived private integration token       |
+| `KOMMO_INTEGRATION_ID`              | Private integration ID/client UUID         |
+| `KOMMO_INTEGRATION_SECRET`          | JWT validation secret                      |
+| `KOMMO_SALESBOT_ID`                 | Salesbot that contains the private widget  |
+| `KOMMO_WEBHOOK_SECRET`              | Random path secret for general webhook URL |
+| `KOMMO_AI_MODE_FIELD_ID`            | Lead field ID for AI Mode                  |
+| `KOMMO_AI_ACTIVE_ENUM_ID`           | Enum ID for AI Active                      |
+| `KOMMO_AI_HUMAN_ENUM_ID`            | Enum ID for Human                          |
+| `KOMMO_AI_PAUSED_ENUM_ID`           | Enum ID for Paused                         |
+| `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` | Optional assignment target on escalation   |
+
 
 Deploy this store as a **single instance / single worker**. The scheduler runs in-process, so multiple app instances would duplicate scheduled jobs and broadcast checks.
 
@@ -416,7 +444,11 @@ For Kommo mode, update:
 
 ---
 
+
+
 ## Part 6: Connect Remaining Webhooks
+
+
 
 ### 6.1 Telegram Admin Bot
 
@@ -437,6 +469,8 @@ Test:
 /usage        -> Token usage
 ```
 
+
+
 ### 6.2 Instagram in Meta Mode (After App Review)
 
 This section applies only to `CHANNEL_BACKEND=meta`. In Kommo mode, connect Instagram inside Kommo and test that Instagram DMs appear in the Kommo inbox before enabling the store app's Kommo webhooks.
@@ -446,21 +480,21 @@ Submit for App Review requesting `instagram_business_basic`, `instagram_business
 After approval:
 
 1. Configure webhook: **Meta Developer App > Webhooks > Instagram > subscribe to `messages`:**
-    - **URL:** `https://vs-chatbot-production.up.railway.app/webhooks/instagram`
-    - **Verify token:** Your `INSTAGRAM_VERIFY_TOKEN`
+   - **URL:** `https://vs-chatbot-production.up.railway.app/webhooks/instagram`
+   - **Verify token:** Your `INSTAGRAM_VERIFY_TOKEN`
 2. Update `INSTAGRAM_ACCESS_TOKEN` in Railway.
 3. Subscribe the page and set up Ice Breakers:
-
-    ```bash
-    curl -X POST "https://your-app.railway.app/admin/settings/instagram/subscribe-page?page_id=YOUR_PAGE_ID" \
-      -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
-    curl -X POST "https://your-app.railway.app/admin/settings/instagram/setup-ice-breakers?ig_user_id=YOUR_IG_USER_ID" \
-      -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
-    ```
-
+   ```bash
+   curl -X POST "https://your-app.railway.app/admin/settings/instagram/subscribe-page?page_id=YOUR_PAGE_ID" \
+     -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
+   curl -X POST "https://your-app.railway.app/admin/settings/instagram/setup-ice-breakers?ig_user_id=YOUR_IG_USER_ID" \
+     -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
+   ```
 4. Set the Meta app to **Live** mode.
 
 ---
+
+
 
 ## Part 7: Set Up Broadcasts and the Admin Dashboard
 
@@ -470,11 +504,11 @@ Broadcast delivery depends on the channel backend. In Meta mode, this app can se
 
 In Meta Business Manager > WhatsApp > Message Templates, create:
 
-- **`new_arrivals`** (Marketing):
+- `new_arrivals` (Marketing):
   - Body: "Hola {{1}}, tenemos {{2}} nuevos que te van a encantar! Escríbenos para ver el catálogo."
-- **`payment_reminder`** (Utility):
+- `payment_reminder` (Utility):
   - Body: "Hola {{1}}, tu pedido aún está pendiente de pago. Escríbenos si necesitas ayuda."
-- **`vip_exclusive`** (Marketing):
+- `vip_exclusive` (Marketing):
   - Body: "Hola {{1}}, como cliente VIP tienes acceso exclusivo a {{2}}. Escríbenos!"
 
 Submit for approval (usually takes hours).
@@ -551,7 +585,11 @@ Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto
 
 ---
 
+
+
 ## Part 8: Activate Analytics
+
+
 
 ### 8.1 Analytics (Available Immediately)
 
@@ -579,6 +617,8 @@ curl -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
   "https://your-app.railway.app/admin/analytics/daily?days=14"
 ```
 
+
+
 ### 8.2 Daily Aggregation
 
 Runs automatically at 1:00 AM for yesterday's data. To backfill:
@@ -589,6 +629,8 @@ curl -X POST "https://your-app.railway.app/admin/analytics/build-daily" \
 curl -X POST "https://your-app.railway.app/admin/analytics/build-daily?target_date=2026-03-20" \
   -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 ```
+
+
 
 ### 8.4 Payment Screenshot Recognition
 
@@ -601,6 +643,8 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 Do not add payment credentials, raw image contents, full addresses, customer message text, tool arguments, or raw tool results to this table.
 
 ---
+
+
 
 ## Part 9: Multi-Agent Rollout and Rollback
 
@@ -634,7 +678,11 @@ Agent and tool locations:
 
 ---
 
+
+
 ## Part 10: Complete Testing Checklist
+
+
 
 ### 9.1 Infrastructure
 
@@ -655,6 +703,8 @@ Agent and tool locations:
 [ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
 [ ] GET /test/ui with DEBUG=true -> test page loads
 ```
+
+
 
 ### 9.2 WhatsApp Conversations
 
@@ -680,6 +730,8 @@ Agent and tool locations:
 [ ] Set ai_orchestration_mode=legacy -> Immediate rollback to legacy behavior
 ```
 
+
+
 ### 9.3 Instagram Conversations (After App Review)
 
 For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, test that Instagram DMs enter Kommo and are answered through the Salesbot flow.
@@ -692,6 +744,8 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] Story reply received and answered
 [ ] Long messages split correctly at sentence boundaries
 ```
+
+
 
 ### 9.4 Telegram Admin Bot
 
@@ -721,6 +775,8 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] /send [ID] -> Executes broadcast
 ```
 
+
+
 ### 9.5 Broadcasts
 
 ```text
@@ -732,6 +788,8 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] Kommo mode scheduled broadcast -> Marked failed instead of retrying forever
 [ ] Reset stuck broadcast (dashboard "Resetear" button or POST /{id}/reset) -> Returns to "draft"
 ```
+
+
 
 ### 9.5b Kommo Mode
 
@@ -748,6 +806,8 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] Store dashboard resolves a Kommo escalation -> Kommo AI Mode is confirmed active before local state/history changes
 ```
 
+
+
 ### 9.6 Analytics
 
 ```text
@@ -757,6 +817,8 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] ai_run_logs -> Contains route metadata without message text, addresses, payment credentials, or raw tool arguments
 ```
 
+
+
 ### 9.7 Resilience
 
 ```text
@@ -765,6 +827,8 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] Send 5 rapid messages -> All get responses without errors
 [ ] /health -> Scheduler shows "running"
 ```
+
+
 
 ### 9.8 First-Week Monitoring (Daily Checks)
 
@@ -781,7 +845,11 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 
 ---
 
+
+
 ## Part 11: Quick Reference
+
+
 
 ### All Endpoints
 
@@ -865,6 +933,8 @@ Testing (DEBUG=true only — disabled in production):
   DELETE /test/reset
 ```
 
+
+
 ### All Telegram Commands
 
 ```text
@@ -875,6 +945,8 @@ Testing (DEBUG=true only — disabled in production):
 ```
 
 ---
+
+
 
 ## Common Issues and Fixes
 
@@ -926,6 +998,8 @@ Testing (DEBUG=true only — disabled in production):
   Check `/health`. Restart Railway deployment if stopped.
 
 ---
+
+
 
 ## Next: Multi-Store Deployment
 
