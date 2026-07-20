@@ -56,6 +56,7 @@ class NormalizedKommoEvent(BaseModel):
     origin: str | None = None
     channel: KommoChannel | None = None
     author_id: str | None = None
+    author_name: str | None = None
     author_type: str | None = None
     created_at: datetime | None = None
     ai_mode_enum_id: int | None = None
@@ -123,6 +124,8 @@ class PersistentKommoJob(BaseModel):
     talk_id: str | None = None
     origin: str | None = None
     channel: str | None = None
+    author_id: str | None = None
+    author_name: str | None = None
     combined_message: str
     media_url: str | None = None
     return_url: str | None = None

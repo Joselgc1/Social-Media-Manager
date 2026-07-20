@@ -218,6 +218,8 @@ def _event_log_context(event) -> dict:
         "type": event.event_type,
         "channel": event.channel,
         "origin": event.origin,
+        "author_id": event.author_id,
+        "has_author_name": bool(event.author_name),
         "author_type": event.author_type,
         "has_text": bool(event.text),
         "has_media": bool(event.media_url),

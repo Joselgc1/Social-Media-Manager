@@ -127,6 +127,8 @@ async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
         text="Hola",
         origin="whatsapp",
         channel="whatsapp",
+        author_id="author-1",
+        author_name="Maria Cliente",
         author_type="external",
     )
     result = await jobs.record_incoming_event(event)
@@ -135,7 +137,10 @@ async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
     assert "FOR UPDATE" in mock_db.fetch_one.await_args_list[2].args[0]
     assert mock_db.execute.await_count == 2
     assert "INSERT INTO kommo_message_jobs" in mock_db.execute.await_args_list[0].args[0]
+    assert mock_db.execute.await_args_list[0].args[1]["author_id"] == "author-1"
+    assert mock_db.execute.await_args_list[0].args[1]["author_name"] == "Maria Cliente"
     assert "INSERT INTO kommo_message_receipts" in mock_db.execute.await_args_list[1].args[0]
+    assert mock_db.execute.await_args_list[1].args[1]["author_id"] == "author-1"
 
     mock_db.fetch_one = AsyncMock(side_effect=[None, {"job_id": "existing", "receipt_status": "created"}])
     duplicate = await jobs.record_incoming_event(event)
@@ -159,15 +164,23 @@ async def test_debounce_merges_rapid_messages(monkeypatch):
         text="Tienen pijamas?",
         origin="whatsapp",
         channel="whatsapp",
+        author_id="author-new",
+        author_name="Maria Nueva",
     )
     result = await jobs.record_incoming_event(event)
     assert result["status"] == "merged"
     update_call = mock_db.execute.await_args_list[0]
     assert update_call.args[1]["combined_message"] == "Hola\nTienen pijamas?"
+    assert "author_id = COALESCE(:author_id, author_id)" in update_call.args[0]
+    assert "author_name = COALESCE(:author_name, author_name)" in update_call.args[0]
+    assert "lead_id = COALESCE(lead_id, :lead_id)" in update_call.args[0]
+    assert update_call.args[1]["author_id"] == "author-new"
+    assert update_call.args[1]["author_name"] == "Maria Nueva"
     receipt_call = mock_db.execute.await_args_list[1]
     assert "INSERT INTO kommo_message_receipts" in receipt_call.args[0]
     assert receipt_call.args[1]["job_id"] == "pending-id"
     assert receipt_call.args[1]["receipt_status"] == "merged"
+    assert receipt_call.args[1]["author_id"] == "author-new"
     assert all("'discarded'" not in call.args[0] for call in mock_db.execute.await_args_list)
 
 
@@ -567,6 +580,48 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
     assert "💕" in continuation_payload["data"]["message"]
     assert "attachment_type" not in continuation_payload["data"]
     assert any("assistant_message_persisted_at" in call.args[0] for call in mock_db.execute.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_ready_job_contact_fetch_failure_does_not_block_processing(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.client import KommoAPIError
+
+    _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"})
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason=None, needs_ai_mode_initialization=False),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock(return_value={"text": "Hola", "escalated": False}))
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+
+    client = MagicMock()
+    client.get_contact = AsyncMock(side_effect=KommoAPIError("Kommo API returned HTTP 500", status_code=500))
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job({
+        "id": "job",
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "combined_message": "Hola",
+        "channel": "whatsapp",
+        "contact_id": "200",
+        "author_name": "Maria Cliente",
+        "correlation_id": "corr",
+    })
+
+    client.get_contact.assert_awaited_once_with("200")
+    jobs.generate_response.assert_awaited_once()
+    assert jobs.generate_response.await_args.kwargs["customer_profile"]["display_name"] == "Maria Cliente"
+    client.continue_salesbot.assert_awaited_once()
 
 
 @pytest.mark.asyncio

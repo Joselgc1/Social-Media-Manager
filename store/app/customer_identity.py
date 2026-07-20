@@ -56,6 +56,12 @@ _NON_NAME_TOKENS = {
 }
 
 _TOKEN_RE = re.compile(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'’-]{0,24}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_PHONE_DIGIT_MIN = 10
+_PHONE_DIGIT_MAX = 15
 
 
 def extract_safe_first_name(display_name: str | None) -> str | None:
@@ -94,6 +100,38 @@ def extract_safe_first_name(display_name: str | None) -> str | None:
 
 def is_safe_customer_name(display_name: str | None) -> bool:
     return bool(extract_safe_first_name(display_name))
+
+
+def is_uuid_like(value: str | None) -> bool:
+    return bool(_UUID_RE.fullmatch(str(value or "").strip()))
+
+
+def normalize_phone_number(value: str | None) -> str | None:
+    """Return a conservative phone normalization, or None for non-phone identifiers."""
+    raw = str(value or "").strip()
+    if not raw or is_uuid_like(raw):
+        return None
+
+    raw = re.sub(r"^(?:tel|phone):", "", raw, flags=re.IGNORECASE).strip()
+    if re.search(r"[A-Za-z]", raw):
+        return None
+
+    has_plus = raw.startswith("+")
+    compact = re.sub(r"[\s().-]+", "", raw)
+    if has_plus:
+        compact = "+" + compact.lstrip("+")
+
+    digits = compact[1:] if compact.startswith("+") else compact
+    if not digits.isdigit():
+        return None
+    if not (_PHONE_DIGIT_MIN <= len(digits) <= _PHONE_DIGIT_MAX):
+        return None
+
+    return f"+{digits}" if compact.startswith("+") else digits
+
+
+def looks_like_phone_number(value: str | None) -> bool:
+    return normalize_phone_number(value) is not None
 
 
 def _normalize_token(token: str) -> str:

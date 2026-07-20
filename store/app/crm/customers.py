@@ -7,6 +7,7 @@ import re
 import unicodedata
 
 from app import db
+from app.customer_identity import normalize_phone_number
 
 
 async def get_or_create_customer(
@@ -15,6 +16,7 @@ async def get_or_create_customer(
     display_name: str | None = None,
     phone: str | None = None,
     instagram_handle: str | None = None,
+    allow_platform_phone_fallback: bool = True,
 ) -> dict:
     """
     Look up a customer by channel + platform_id.
@@ -22,7 +24,7 @@ async def get_or_create_customer(
     Returns the customer row as a dict.
     """
     normalized_display_name = (display_name or "").strip() or None
-    normalized_phone = (phone or "").strip() or None
+    normalized_phone = normalize_phone_number(phone) or None
     normalized_instagram_handle = (instagram_handle or "").strip().lstrip("@") or None
 
     if channel == "instagram" and not normalized_display_name and normalized_instagram_handle:
@@ -66,7 +68,9 @@ async def get_or_create_customer(
         return dict(refreshed)
 
     # New customer
-    normalized_phone = (phone or "").strip() or (platform_id if channel == "whatsapp" else None)
+    normalized_phone = normalize_phone_number(phone)
+    if not normalized_phone and allow_platform_phone_fallback and channel == "whatsapp":
+        normalized_phone = normalize_phone_number(platform_id)
 
     new_id = await db.execute(
         """

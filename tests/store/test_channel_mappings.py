@@ -25,6 +25,7 @@ async def test_upsert_mapping_existing_row_filters_update_bind_values(monkeypatc
         external_lead_id="lead-id",
         external_chat_id="chat-id",
         external_talk_id="talk-id",
+        external_author_id="author-id",
         external_origin="waba",
     )
 
@@ -39,5 +40,6 @@ async def test_upsert_mapping_existing_row_filters_update_bind_values(monkeypatc
         "external_lead_id": "lead-id",
         "external_chat_id": "chat-id",
         "external_talk_id": "talk-id",
+        "external_author_id": "author-id",
         "external_origin": "waba",
     }

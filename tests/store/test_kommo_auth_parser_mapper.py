@@ -217,11 +217,15 @@ def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
         "add[0][text]": "Hola",
         "add[0][message_type]": "text",
         "add[0][origin]": "whatsapp",
+        "add[0][author][id]": "author-uuid",
+        "add[0][author][name]": "Maria Cliente",
         "add[0][author][type]": "external",
     })[0]
     assert incoming.event_type == "incoming_message"
     assert incoming.channel == "whatsapp"
     assert incoming.lead_id == "100"
+    assert incoming.author_id == "author-uuid"
+    assert incoming.author_name == "Maria Cliente"
 
     outgoing = normalize_kommo_webhook({
         "outgoing_message[add][0][id]": "out1",
@@ -262,6 +266,8 @@ def test_account_message_wrapper_normalization_from_real_kommo_payload():
         "message[add][0][message_type]": "text",
         "message[add][0][origin]": "whatsapp",
         "message[add][0][type]": "incoming",
+        "message[add][0][author][id]": "author-real",
+        "message[add][0][author][name]": "Cliente Real",
         "message[add][0][author][type]": "external",
     })[0]
 
@@ -272,6 +278,8 @@ def test_account_message_wrapper_normalization_from_real_kommo_payload():
     assert event.contact_id == "42"
     assert event.lead_id == "100"
     assert event.channel == "whatsapp"
+    assert event.author_id == "author-real"
+    assert event.author_name == "Cliente Real"
     assert event.author_type == "external"
 
 
@@ -286,7 +294,7 @@ def test_direct_json_account_message_normalization():
             "text": "Hola JSON",
             "origin": "instagram",
             "type": "incoming",
-            "author": {"type": "external"},
+            "author": {"id": "author-json", "name": "Cliente JSON", "type": "external"},
         },
     })[0]
 
@@ -294,6 +302,8 @@ def test_direct_json_account_message_normalization():
     assert event.message_id == "m-json"
     assert event.lead_id == "101"
     assert event.channel == "instagram"
+    assert event.author_id == "author-json"
+    assert event.author_name == "Cliente JSON"
 
 
 def test_missing_optional_and_unknown_events_are_safe():

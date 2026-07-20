@@ -13,6 +13,7 @@ from app.config import get_config
 from app.crm import conversations
 from app.crm.channel_mappings import resolve_customer_from_kommo_job, upsert_mapping
 from app.integrations.kommo.client import KommoAPIError, KommoClient, sanitize_kommo_error
+from app.integrations.kommo.customer_profile import build_kommo_customer_profile
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 from app.integrations.kommo.response_mapper import map_ai_response_to_salesbot
 from app.integrations.kommo.state import (
@@ -83,6 +84,14 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                 UPDATE kommo_message_jobs
                 SET combined_message = :combined_message,
                     media_url = COALESCE(:media_url, media_url),
+                    lead_id = COALESCE(lead_id, :lead_id),
+                    contact_id = COALESCE(contact_id, :contact_id),
+                    chat_id = COALESCE(chat_id, :chat_id),
+                    talk_id = COALESCE(talk_id, :talk_id),
+                    author_id = COALESCE(:author_id, author_id),
+                    author_name = COALESCE(:author_name, author_name),
+                    origin = COALESCE(origin, :origin),
+                    channel = COALESCE(channel, :channel),
                     updated_at = NOW(),
                     buffer_expires_at = NOW() + (:debounce_seconds * INTERVAL '1 second')
                 WHERE id = :id
@@ -90,6 +99,14 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                 {
                     "combined_message": merged,
                     "media_url": event.media_url,
+                    "lead_id": event.lead_id,
+                    "contact_id": event.contact_id,
+                    "chat_id": event.chat_id,
+                    "talk_id": event.talk_id,
+                    "author_id": event.author_id,
+                    "author_name": event.author_name,
+                    "origin": event.origin,
+                    "channel": event.channel,
                     "debounce_seconds": MESSAGE_DEBOUNCE_SECONDS,
                     "id": pending["id"],
                 },
@@ -102,10 +119,10 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
             """
             INSERT INTO kommo_message_jobs (
                 correlation_id, external_message_id, lead_id, contact_id, chat_id, talk_id,
-                origin, channel, combined_message, media_url, status, buffer_expires_at
+                author_id, author_name, origin, channel, combined_message, media_url, status, buffer_expires_at
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :chat_id, :talk_id,
-                :origin, :channel, :combined_message, :media_url, 'pending',
+                :author_id, :author_name, :origin, :channel, :combined_message, :media_url, 'pending',
                 NOW() + (:debounce_seconds * INTERVAL '1 second')
             )
             RETURNING id
@@ -421,7 +438,8 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             if initialized_now:
                 logger.info("Initialized Kommo AI Mode for lead %s", job["lead_id"])
 
-        customer = await resolve_customer_from_kommo_job(job, lead=lead)
+        profile = build_kommo_customer_profile(job=job, contact=None)
+        customer = await resolve_customer_from_kommo_job(job, lead=lead, profile=profile)
         if ai_mode_enum is not None:
             await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
             customer["conversation_state"] = "active" if ai_mode_enum == get_config().kommo_ai_active_enum_id else "escalated"
@@ -539,8 +557,10 @@ async def _process_ready_job(job: dict) -> None:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
         settings = await db.get_settings()
         lead = await client.get_lead(job["lead_id"]) if job.get("lead_id") else None
+        contact = await _fetch_contact_for_job(client, job)
         ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else config.kommo_ai_active_enum_id
-        customer = await resolve_customer_from_kommo_job(job, lead=lead)
+        profile = build_kommo_customer_profile(job=job, contact=contact)
+        customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
         if ai_mode_enum is not None:
             await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
             customer["conversation_state"] = "active" if ai_mode_enum == config.kommo_ai_active_enum_id else "escalated"
@@ -565,7 +585,7 @@ async def _process_ready_job(job: dict) -> None:
             sender_id=sender_id,
             message_text=job["combined_message"],
             media_url=media_url,
-            customer_profile=_customer_profile_from_lead(job, lead),
+            customer_profile=profile.as_customer_profile(),
             customer_id=str(customer["id"]),
             integration_context={
                 "provider": "kommo",
@@ -573,6 +593,7 @@ async def _process_ready_job(job: dict) -> None:
                 "contact_id": job.get("contact_id"),
                 "chat_id": job.get("chat_id"),
                 "talk_id": job.get("talk_id"),
+                "author_id": job.get("author_id"),
                 "media_url_is_direct": bool(job.get("media_url")),
             },
             persist_assistant_message=False,
@@ -586,6 +607,7 @@ async def _process_ready_job(job: dict) -> None:
                 external_lead_id=job.get("lead_id"),
                 external_chat_id=job.get("chat_id"),
                 external_talk_id=job.get("talk_id"),
+                external_author_id=job.get("author_id"),
                 external_origin=job.get("origin"),
             )
 
@@ -649,6 +671,29 @@ async def _process_ready_job(job: dict) -> None:
             await _continue_and_discard_job(client, job, sanitize_job_error(e))
             return
         await _mark_job(job["id"], "delivery_unknown" if continuation_started else "failed", sanitize_job_error(e))
+
+
+async def _fetch_contact_for_job(client: KommoClient, job: dict) -> dict | None:
+    contact_id = job.get("contact_id")
+    if not contact_id:
+        return None
+    try:
+        return await client.get_contact(contact_id)
+    except KommoAPIError as e:
+        logger.warning(
+            "Kommo contact enrichment skipped: job_id=%s contact_id=%s error=%s",
+            job.get("id"),
+            contact_id,
+            sanitize_job_error(e),
+        )
+    except Exception as e:
+        logger.warning(
+            "Kommo contact enrichment skipped: job_id=%s contact_id=%s error=%s",
+            job.get("id"),
+            contact_id,
+            sanitize_job_error(e),
+        )
+    return None
 
 
 async def _find_latest_job_for_callback(values: dict):
@@ -891,6 +936,8 @@ def _event_values(event: NormalizedKommoEvent, external_message_id: str, text: s
         "contact_id": event.contact_id,
         "chat_id": event.chat_id,
         "talk_id": event.talk_id,
+        "author_id": event.author_id,
+        "author_name": event.author_name,
         "origin": event.origin,
         "channel": event.channel,
         "combined_message": text,
@@ -908,10 +955,10 @@ async def _record_message_receipt(
         """
         INSERT INTO kommo_message_receipts (
             external_message_id, job_id, correlation_id, lead_id, contact_id, chat_id,
-            talk_id, origin, channel, receipt_status, received_at
+            talk_id, author_id, origin, channel, receipt_status, received_at
         ) VALUES (
             :external_message_id, :job_id, :correlation_id, :lead_id, :contact_id, :chat_id,
-            :talk_id, :origin, :channel, :receipt_status, :received_at
+            :talk_id, :author_id, :origin, :channel, :receipt_status, :received_at
         )
         ON CONFLICT (external_message_id) DO NOTHING
         """,
@@ -923,6 +970,7 @@ async def _record_message_receipt(
             "contact_id": event.contact_id,
             "chat_id": event.chat_id,
             "talk_id": event.talk_id,
+            "author_id": event.author_id,
             "origin": event.origin,
             "channel": event.channel,
             "receipt_status": receipt_status,
@@ -943,17 +991,6 @@ def _local_sender_id(job: dict) -> str:
     return str(job.get("chat_id") or job.get("contact_id") or job.get("lead_id") or job.get("correlation_id"))
 
 
-def _customer_profile_from_lead(job: dict, lead: dict | None) -> dict:
-    profile = {"display_name": None}
-    if lead and lead.get("name"):
-        profile["display_name"] = lead.get("name")
-    if job.get("channel") == "whatsapp" and job.get("contact_id"):
-        profile["phone"] = None
-    if job.get("channel") == "instagram":
-        profile["instagram_handle"] = None
-    return profile
-
-
 def _job_log_context(job: dict) -> dict:
     return {
         "job_id": str(job.get("id")) if job.get("id") is not None else None,
@@ -964,6 +1001,8 @@ def _job_log_context(job: dict) -> dict:
         "contact_id": job.get("contact_id"),
         "chat_id": job.get("chat_id"),
         "talk_id": job.get("talk_id"),
+        "author_id": job.get("author_id"),
+        "has_author_name": bool(job.get("author_name")),
         "has_message": bool(job.get("combined_message")),
         "has_media": bool(job.get("media_url")),
         "has_return_url": bool(job.get("return_url")),

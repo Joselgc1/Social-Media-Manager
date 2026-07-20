@@ -84,6 +84,7 @@ def _message_event(item: dict[str, Any], event_type: str) -> NormalizedKommoEven
         origin=origin,
         channel=origin_to_channel(origin),
         author_id=_string_or_none(author.get("id") or author.get("user_id")),
+        author_name=_string_or_none(author.get("name")),
         author_type=_string_or_none(author.get("type")),
         created_at=_timestamp(item.get("created_at")),
         media_url=media_url,

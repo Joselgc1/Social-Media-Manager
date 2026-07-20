@@ -260,6 +260,7 @@ CREATE TABLE IF NOT EXISTS customer_channel_mappings (
     external_lead_id VARCHAR,
     external_chat_id VARCHAR,
     external_talk_id VARCHAR,
+    external_author_id VARCHAR,
     external_origin VARCHAR,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -268,8 +269,24 @@ CREATE TABLE IF NOT EXISTS customer_channel_mappings (
         OR external_lead_id IS NOT NULL
         OR external_chat_id IS NOT NULL
         OR external_talk_id IS NOT NULL
+        OR external_author_id IS NOT NULL
     )
 );
+
+ALTER TABLE customer_channel_mappings
+    ADD COLUMN IF NOT EXISTS external_author_id VARCHAR;
+
+ALTER TABLE customer_channel_mappings
+    DROP CONSTRAINT IF EXISTS customer_channel_mappings_any_external_id;
+
+ALTER TABLE customer_channel_mappings
+    ADD CONSTRAINT customer_channel_mappings_any_external_id CHECK (
+        external_contact_id IS NOT NULL
+        OR external_lead_id IS NOT NULL
+        OR external_chat_id IS NOT NULL
+        OR external_talk_id IS NOT NULL
+        OR external_author_id IS NOT NULL
+    );
 
 DROP INDEX IF EXISTS uq_customer_channel_mappings_contact;
 CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_contact
@@ -284,6 +301,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_chat
 CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_talk
     ON customer_channel_mappings(provider, channel, external_talk_id)
     WHERE external_talk_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_author
+    ON customer_channel_mappings(provider, channel, external_author_id, updated_at DESC)
+    WHERE external_author_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_customer
     ON customer_channel_mappings(customer_id, provider, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_lookup
@@ -305,6 +325,8 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
     contact_id TEXT,
     chat_id TEXT,
     talk_id TEXT,
+    author_id TEXT,
+    author_name TEXT,
     origin TEXT,
     channel TEXT,
     combined_message TEXT NOT NULL,
@@ -330,6 +352,8 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
 );
 
 ALTER TABLE kommo_message_jobs
+    ADD COLUMN IF NOT EXISTS author_id TEXT,
+    ADD COLUMN IF NOT EXISTS author_name TEXT,
     ADD COLUMN IF NOT EXISTS callback_claims JSONB,
     ADD COLUMN IF NOT EXISTS salesbot_token_jti TEXT,
     ADD COLUMN IF NOT EXISTS salesbot_account_id TEXT,
@@ -381,6 +405,9 @@ CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_delivery_unknown
 CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_salesbot_token_jti
     ON kommo_message_jobs(salesbot_token_jti)
     WHERE salesbot_token_jti IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_author
+    ON kommo_message_jobs(author_id, updated_at DESC)
+    WHERE author_id IS NOT NULL;
 
 DROP TRIGGER IF EXISTS trg_kommo_message_jobs_updated_at ON kommo_message_jobs;
 CREATE TRIGGER trg_kommo_message_jobs_updated_at
@@ -404,6 +431,7 @@ CREATE TABLE IF NOT EXISTS kommo_message_receipts (
     contact_id TEXT,
     chat_id TEXT,
     talk_id TEXT,
+    author_id TEXT,
     origin TEXT,
     channel TEXT,
     receipt_status TEXT NOT NULL DEFAULT 'created',
@@ -412,16 +440,22 @@ CREATE TABLE IF NOT EXISTS kommo_message_receipts (
     CONSTRAINT kommo_message_receipts_status_check CHECK (receipt_status IN ('created', 'merged'))
 );
 
+ALTER TABLE kommo_message_receipts
+    ADD COLUMN IF NOT EXISTS author_id TEXT;
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_receipts_external_message
     ON kommo_message_receipts(external_message_id);
 CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_job
     ON kommo_message_receipts(job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_correlation
     ON kommo_message_receipts(correlation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_author
+    ON kommo_message_receipts(author_id, created_at DESC)
+    WHERE author_id IS NOT NULL;
 
 INSERT INTO kommo_message_receipts (
     external_message_id, job_id, correlation_id, lead_id, contact_id, chat_id,
-    talk_id, origin, channel, receipt_status, received_at, created_at
+    talk_id, author_id, origin, channel, receipt_status, received_at, created_at
 )
 SELECT
     external_message_id,
@@ -431,6 +465,7 @@ SELECT
     contact_id,
     chat_id,
     talk_id,
+    author_id,
     origin,
     channel,
     CASE WHEN status = 'discarded' AND COALESCE(last_error, '') LIKE 'Merged into %' THEN 'merged' ELSE 'created' END,
