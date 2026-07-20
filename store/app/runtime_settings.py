@@ -35,6 +35,7 @@ RUNTIME_SETTING_DEFAULTS = {
     "accepted_exchange_rate": "",
     "order_discount_percent": 10.0,
     "order_discount_threshold_usd": 350.0,
+    "kommo_strip_emoji": False,
     "kommo_catalog_file_uuid": "",
     "kommo_catalog_version_uuid": "",
     "kommo_catalog_drive_url": "",

@@ -233,6 +233,5 @@ def _safe_job_result(result: dict) -> dict:
     return {
         "status": result.get("status"),
         "job_id": result.get("job_id"),
-        "discarded_job_id": result.get("discarded_job_id"),
         "reason": result.get("reason"),
     }

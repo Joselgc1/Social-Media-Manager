@@ -21,6 +21,10 @@ from app.integrations.kommo.state import (
     extract_ai_mode_enum_from_lead,
     sync_local_state_from_ai_mode,
 )
+from app.integrations.kommo.text_sanitizer import (
+    build_kommo_message_diagnostics,
+    prepare_kommo_customer_message,
+)
 from app.webhooks.inbound_buffer import MESSAGE_DEBOUNCE_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -50,11 +54,15 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
             {"correlation_id": event.correlation_id},
         )
         existing = await db.fetch_one(
-            "SELECT id, status FROM kommo_message_jobs WHERE external_message_id = :external_message_id",
+            """
+            SELECT job_id, receipt_status
+            FROM kommo_message_receipts
+            WHERE external_message_id = :external_message_id
+            """,
             {"external_message_id": external_message_id},
         )
         if existing:
-            return {"status": "duplicate", "job_id": str(existing["id"])}
+            return {"status": "duplicate", "job_id": str(existing["job_id"])}
 
         pending = await db.fetch_one(
             """
@@ -87,25 +95,8 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                 },
             )
             merged_job_id = str(pending["id"])
-            inserted_id = await db.execute(
-                """
-                INSERT INTO kommo_message_jobs (
-                    correlation_id, external_message_id, lead_id, contact_id, chat_id, talk_id,
-                    origin, channel, combined_message, media_url, status, last_error, buffer_expires_at
-                ) VALUES (
-                    :correlation_id, :external_message_id, :lead_id, :contact_id, :chat_id, :talk_id,
-                    :origin, :channel, :combined_message, :media_url, 'discarded', :last_error,
-                    NOW() + (:debounce_seconds * INTERVAL '1 second')
-                )
-                RETURNING id
-                """,
-                _event_values(event, external_message_id, text)
-                | {
-                    "last_error": f"Merged into pending job {merged_job_id}",
-                    "debounce_seconds": MESSAGE_DEBOUNCE_SECONDS,
-                },
-            )
-            return {"status": "merged", "job_id": merged_job_id, "discarded_job_id": str(inserted_id)}
+            await _record_message_receipt(event, external_message_id, merged_job_id, "merged")
+            return {"status": "merged", "job_id": merged_job_id}
 
         job_id = await db.execute(
             """
@@ -122,6 +113,7 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
             _event_values(event, external_message_id, text)
             | {"debounce_seconds": MESSAGE_DEBOUNCE_SECONDS},
         )
+        await _record_message_receipt(event, external_message_id, str(job_id), "created")
         return {"status": "created", "job_id": str(job_id)}
 
 
@@ -302,7 +294,7 @@ async def diagnostics_summary() -> dict:
     timestamps = await db.fetch_one(
         """
         SELECT
-            MAX(created_at) FILTER (WHERE external_message_id IS NOT NULL) AS last_incoming,
+            (SELECT MAX(COALESCE(received_at, created_at)) FROM kommo_message_receipts) AS last_incoming,
             MAX(salesbot_launched_at) AS last_launch,
             MAX(updated_at) FILTER (WHERE return_url IS NOT NULL) AS last_callback,
             MAX(completed_at) FILTER (WHERE status = 'sent') AS last_continuation,
@@ -614,8 +606,8 @@ async def _process_ready_job(job: dict) -> None:
                 return
 
         mapped = map_ai_response_to_salesbot(result)
-        customer_text = (mapped.customer_text or "").strip()
-        if not customer_text:
+        raw_customer_text = (mapped.customer_text or "").strip()
+        if not raw_customer_text:
             logger.info(
                 "Kommo ready job produced no deliverable reply: job_id=%s reason=%s",
                 job["id"],
@@ -623,12 +615,24 @@ async def _process_ready_job(job: dict) -> None:
             )
             await _continue_and_discard_job(client, job, mapped.reason or "empty_response")
             return
+        customer_text, message_diagnostics = prepare_kommo_customer_message(
+            raw_customer_text,
+            job.get("channel") or "whatsapp",
+            settings,
+        )
+        if not customer_text:
+            logger.info(
+                "Kommo ready job produced no deliverable reply after transport sanitization: job_id=%s reason=empty_after_sanitization",
+                job["id"],
+            )
+            await _continue_and_discard_job(client, job, "empty_after_sanitization")
+            return
         continuation_data = {"status": "success", "message": customer_text}
         if (result.get("catalog_pdf") or {}).get("type") == "catalog_pdf":
             continuation_data["attachment_type"] = "catalog_pdf"
         await _mark_job_continuing(job["id"], continuation_data)
         continuation_started = True
-        _log_continuation_prepared(job["id"], continuation_data)
+        _log_continuation_prepared(job["id"], continuation_data, message_diagnostics)
         response_payload = await client.continue_salesbot(
             job["return_url"],
             data=continuation_data,
@@ -703,7 +707,11 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
         logger.info("Kommo continuing Salesbot with failure status: job_id=%s reason=%s", job["id"], reason)
         await _mark_job_continuing(job["id"], continuation_data)
         continuation_started = True
-        _log_continuation_prepared(job["id"], continuation_data)
+        _log_continuation_prepared(
+            job["id"],
+            continuation_data,
+            build_kommo_message_diagnostics("", job.get("channel") or "whatsapp", False),
+        )
         response_payload = await client.continue_salesbot(
             job["return_url"],
             data=continuation_data,
@@ -756,14 +764,23 @@ async def _mark_job_sent(job_id: str, response_payload) -> None:
 def _log_continuation_prepared(
     job_id: str,
     continuation_data: dict,
+    message_diagnostics: dict | None = None,
 ) -> None:
     message = str(continuation_data.get("message") or "")
+    diagnostics = message_diagnostics or build_kommo_message_diagnostics(message, None, False)
     logger.info(
-        "Kommo continuation prepared: job_id=%s status=%s message_present=%s message_length=%s",
+        "Kommo continuation prepared: job_id=%s status=%s channel=%s message_present=%s message_length=%s newline_count=%s non_ascii_present=%s emoji_present=%s replacement_char_present=%s literal_question_mark_present=%s kommo_strip_emoji_applied=%s",
         job_id,
         continuation_data.get("status"),
+        diagnostics["channel"],
         bool(message),
-        len(message),
+        diagnostics["message_length"],
+        diagnostics["newline_count"],
+        diagnostics["non_ascii_present"],
+        diagnostics["emoji_present"],
+        diagnostics["replacement_char_present"],
+        diagnostics["literal_question_mark_present"],
+        diagnostics["kommo_strip_emoji_applied"],
     )
 
 
@@ -851,6 +868,39 @@ def _event_values(event: NormalizedKommoEvent, external_message_id: str, text: s
         "combined_message": text,
         "media_url": event.media_url,
     }
+
+
+async def _record_message_receipt(
+    event: NormalizedKommoEvent,
+    external_message_id: str,
+    job_id: str,
+    receipt_status: str,
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO kommo_message_receipts (
+            external_message_id, job_id, correlation_id, lead_id, contact_id, chat_id,
+            talk_id, origin, channel, receipt_status, received_at
+        ) VALUES (
+            :external_message_id, :job_id, :correlation_id, :lead_id, :contact_id, :chat_id,
+            :talk_id, :origin, :channel, :receipt_status, :received_at
+        )
+        ON CONFLICT (external_message_id) DO NOTHING
+        """,
+        {
+            "external_message_id": external_message_id,
+            "job_id": job_id,
+            "correlation_id": event.correlation_id,
+            "lead_id": event.lead_id,
+            "contact_id": event.contact_id,
+            "chat_id": event.chat_id,
+            "talk_id": event.talk_id,
+            "origin": event.origin,
+            "channel": event.channel,
+            "receipt_status": receipt_status,
+            "received_at": event.created_at,
+        },
+    )
 
 
 def _message_placeholder(event: NormalizedKommoEvent) -> str:

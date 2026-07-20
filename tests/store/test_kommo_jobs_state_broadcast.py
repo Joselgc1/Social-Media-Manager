@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 from app.integrations.kommo.state import evaluate_automation_state
 
@@ -119,9 +120,11 @@ async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
     assert result == {"status": "created", "job_id": "job-id"}
     assert "pg_advisory_xact_lock" in mock_db.fetch_one.await_args_list[0].args[0]
     assert "FOR UPDATE" in mock_db.fetch_one.await_args_list[2].args[0]
-    assert mock_db.execute.await_count == 1
+    assert mock_db.execute.await_count == 2
+    assert "INSERT INTO kommo_message_jobs" in mock_db.execute.await_args_list[0].args[0]
+    assert "INSERT INTO kommo_message_receipts" in mock_db.execute.await_args_list[1].args[0]
 
-    mock_db.fetch_one = AsyncMock(side_effect=[None, {"id": "existing", "status": "pending"}])
+    mock_db.fetch_one = AsyncMock(side_effect=[None, {"job_id": "existing", "receipt_status": "created"}])
     duplicate = await jobs.record_incoming_event(event)
     assert duplicate == {"status": "duplicate", "job_id": "existing"}
 
@@ -148,6 +151,11 @@ async def test_debounce_merges_rapid_messages(monkeypatch):
     assert result["status"] == "merged"
     update_call = mock_db.execute.await_args_list[0]
     assert update_call.args[1]["combined_message"] == "Hola\nTienen pijamas?"
+    receipt_call = mock_db.execute.await_args_list[1]
+    assert "INSERT INTO kommo_message_receipts" in receipt_call.args[0]
+    assert receipt_call.args[1]["job_id"] == "pending-id"
+    assert receipt_call.args[1]["receipt_status"] == "merged"
+    assert all("'discarded'" not in call.args[0] for call in mock_db.execute.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -531,6 +539,54 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ready_job_formats_and_strips_emoji_when_kommo_setting_enabled(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_settings = AsyncMock(return_value={"ai_enabled": True, "kommo_strip_emoji": True})
+    mock_db.fetch_one = AsyncMock(return_value={"conversation_state": "active"})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason=None, needs_ai_mode_initialization=False),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(return_value={"text": "¡Hola! **Promo especial** 💕", "escalated": False}),
+    )
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job({
+        "id": "job",
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "combined_message": "Promo",
+        "channel": "whatsapp",
+        "correlation_id": "corr",
+    })
+
+    assert client.continue_salesbot.await_args.kwargs == {
+        "data": {"status": "success", "message": "¡Hola! *Promo especial*"},
+    }
+    continuation_payload = json.loads(mock_db.execute.await_args_list[0].args[1]["continuation_payload"])
+    assert continuation_payload == {"data": {"status": "success", "message": "¡Hola! *Promo especial*"}}
+    assert "?" not in continuation_payload["data"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_ready_job_catalog_reply_includes_attachment_metadata(monkeypatch):
     from app.integrations.kommo import jobs
 
@@ -606,6 +662,13 @@ def test_continuation_prepared_log_is_structural_only(caplog):
 
     assert "message_present=True" in caplog.text
     assert f"message_length={len(continuation_data['message'])}" in caplog.text
+    assert "channel=unknown" in caplog.text
+    assert "newline_count=0" in caplog.text
+    assert "non_ascii_present=False" in caplog.text
+    assert "emoji_present=False" in caplog.text
+    assert "replacement_char_present=False" in caplog.text
+    assert "literal_question_mark_present=False" in caplog.text
+    assert "kommo_strip_emoji_applied=False" in caplog.text
     assert "handler_count" not in caplog.text
     assert "status=success" in caplog.text
     assert "Mensaje secreto del cliente" not in caplog.text

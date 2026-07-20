@@ -65,6 +65,20 @@ VALID_CUSTOMER_CHANNELS = {"whatsapp", "instagram"}
 VALID_CUSTOMER_STATES = {"active", "escalated", "blocked"}
 
 
+def _coerce_setting_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    raise HTTPException(status_code=400, detail="Boolean setting must be true or false.")
+
+
 def _validate_setting_value(key: str, value, current_settings: dict):
     if key not in STORE_EDITABLE_SETTING_KEYS:
         raise HTTPException(status_code=400, detail=f"Setting '{key}' is not editable.")
@@ -130,8 +144,8 @@ def _validate_setting_value(key: str, value, current_settings: dict):
             )
         return hours
 
-    if key in ("auto_fallback", "ai_enabled", "escalation_telegram_enabled"):
-        return bool(value)
+    if key in ("auto_fallback", "ai_enabled", "escalation_telegram_enabled", "kommo_strip_emoji"):
+        return _coerce_setting_bool(value)
 
     if key == "catalog_refresh_minutes":
         minutes = int(value)
