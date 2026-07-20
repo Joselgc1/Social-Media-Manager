@@ -480,6 +480,34 @@ async def _write_store_runtime_settings(store_db: db_lib.Database, fields: dict)
         )
 
 
+async def sync_exchange_rates_to_store(store_id: str, *, rows: list[dict] | None = None) -> dict:
+    store = await _get_store_row(store_id)
+    rows = rows if rows is not None else await exchange_rate_service.get_current_exchange_rates()
+    settings = exchange_rate_service.build_store_rate_settings(rows)
+    if not settings:
+        return {
+            "store_id": store_id,
+            "store_name": store["name"],
+            "synced": False,
+            "settings": [],
+            "reason": "no_rates_available",
+        }
+
+    async with _stats_semaphore():
+        try:
+            store_db_url = decrypt(store["db_url_encrypted"])
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Cannot decrypt store database URL") from exc
+        store_db = await _get_store_db(store_db_url)
+        await _write_store_runtime_settings(store_db, settings)
+    return {
+        "store_id": store_id,
+        "store_name": store["name"],
+        "synced": True,
+        "settings": sorted(settings),
+    }
+
+
 async def sync_exchange_rates_to_active_stores() -> dict:
     rows = await exchange_rate_service.get_current_exchange_rates()
     settings = exchange_rate_service.build_store_rate_settings(rows)
@@ -533,6 +561,26 @@ async def force_exchange_rates_refresh():
     await _audit("refresh_exchange_rates", None, f"Refresh status: {result['refresh'].get('status')}")
     rows = await exchange_rate_service.get_current_exchange_rates()
     return {**result, "current": exchange_rate_service.as_public_payload(rows)}
+
+
+@router.post("/{store_id}/exchange-rates/refresh")
+async def force_store_exchange_rates_refresh(store_id: str):
+    refresh = await exchange_rate_service.refresh_exchange_rates(include_bcv=True, include_usdt=True)
+    rows = await exchange_rate_service.get_current_exchange_rates()
+    try:
+        sync = await sync_exchange_rates_to_store(store_id, rows=rows)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Could not sync refreshed exchange rates to store %s: %s", store_id, exc)
+        raise HTTPException(status_code=502, detail="Could not sync exchange rates to store") from exc
+
+    await _audit(
+        "refresh_exchange_rates",
+        store_id,
+        f"Refresh status: {refresh.get('status')}; synced: {sync.get('synced')}",
+    )
+    return {"refresh": refresh, "sync": sync, "current": exchange_rate_service.as_public_payload(rows)}
 
 
 # ── Store Stats (read from store's own DB) ───────────────────

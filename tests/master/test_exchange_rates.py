@@ -6,11 +6,11 @@ import pytest
 
 
 def _rate(rate_key="usd_bcv", rate="736.9339"):
-    from app.stores.dolarvzla import NormalizedExchangeRate
+    from app.stores.dolarvzla import BCV_CURRENT_URL, USDT_EXCHANGE_RATE_URL, NormalizedExchangeRate
 
     currency = {"usd_bcv": "USD", "eur_bcv": "EUR", "usdt_binance": "USDT"}[rate_key]
     market = "binance" if rate_key == "usdt_binance" else "bcv"
-    source = "DolarVZLA USDT Binance" if rate_key == "usdt_binance" else "DolarVZLA BCV CDN"
+    source = USDT_EXCHANGE_RATE_URL if rate_key == "usdt_binance" else BCV_CURRENT_URL
     return NormalizedExchangeRate(
         rate_key=rate_key,
         currency_code=currency,
@@ -25,7 +25,7 @@ def _rate(rate_key="usd_bcv", rate="736.9339"):
 
 
 def test_bcv_usd_and_eur_response_is_parsed_with_decimal_values():
-    from app.stores.dolarvzla import parse_bcv_response
+    from app.stores.dolarvzla import BCV_CURRENT_URL, parse_bcv_response
 
     rates = parse_bcv_response(
         {
@@ -41,6 +41,7 @@ def test_bcv_usd_and_eur_response_is_parsed_with_decimal_values():
     assert rates[1].rate == Decimal("843.19976838")
     assert rates[0].previous_rate == Decimal("732.4787")
     assert rates[1].change_percentage == Decimal("0.6126327538621817")
+    assert all(rate.source == BCV_CURRENT_URL for rate in rates)
     assert all(not isinstance(rate.rate, float) for rate in rates)
 
 
@@ -49,8 +50,8 @@ def test_usdt_response_follows_current_openapi_shape_and_uses_average():
 
     rate = parse_usdt_response(
         {
-            "current": {"buy": "779.10", "sell": "781.90", "average": "780.50", "date": "2026-07-20"},
-            "previous": {"buy": "770.00", "sell": "774.00", "average": "772.00", "date": "2026-07-19"},
+            "current": {"buy": "779.10", "sell": "781.90", "average": "780.50", "date": "2026-07-20 21:00:03.932Z"},
+            "previous": {"buy": "770.00", "sell": "774.00", "average": "772.00", "date": "2026-07-19 21:00:03.932Z"},
             "changePercentage": {"buy": "1.18", "sell": "1.02", "average": "1.10"},
         },
         fetched_at=datetime(2026, 7, 20, 12, tzinfo=UTC),
@@ -62,9 +63,34 @@ def test_usdt_response_follows_current_openapi_shape_and_uses_average():
     assert rate.currency_code == "USDT"
     assert rate.market == "binance"
     assert rate.rate == Decimal("780.50")
+    assert rate.effective_at == datetime(2026, 7, 20, 21, 0, 3, 932000, tzinfo=UTC)
     assert rate.previous_rate == Decimal("772.00")
     assert rate.change_percentage == Decimal("1.10")
+    assert rate.source == USDT_EXCHANGE_RATE_URL
     assert not isinstance(rate.rate, float)
+
+
+@pytest.mark.asyncio
+async def test_usdt_fetch_sends_trimmed_api_key_header(monkeypatch):
+    from app.stores.dolarvzla import USDT_AUTH_HEADER, USDT_EXCHANGE_RATE_URL, DolarVzlaClient
+
+    captured = {}
+
+    async def fake_get_json(self, url, *, headers=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        return {
+            "current": {"buy": "779.10", "sell": "781.90", "average": "780.50", "date": "2026-07-20 21:00:03.932Z"},
+            "previous": {"buy": "770.00", "sell": "774.00", "average": "772.00", "date": "2026-07-19 21:00:03.932Z"},
+            "changePercentage": {"buy": "1.18", "sell": "1.02", "average": "1.10"},
+        }
+
+    monkeypatch.setattr(DolarVzlaClient, "_get_json", fake_get_json)
+
+    await DolarVzlaClient(api_key="  test-key  ").fetch_usdt_rate()
+
+    assert captured["url"] == USDT_EXCHANGE_RATE_URL
+    assert captured["headers"] == {USDT_AUTH_HEADER: "test-key"}
 
 
 @pytest.mark.asyncio
@@ -149,6 +175,24 @@ async def test_api_keys_are_not_logged_or_propagated_to_store_settings(monkeypat
     ])
     assert "DOLARVZLA_API_KEY" not in settings
     assert secret not in str(settings)
+
+
+def test_store_rate_settings_include_source_and_fetch_metadata():
+    from app.stores import exchange_rates
+
+    settings = exchange_rates.build_store_rate_settings([{
+        "rate_key": "usd_bcv",
+        "rate": Decimal("736.9339"),
+        "effective_at": datetime(2026, 7, 20, tzinfo=UTC),
+        "fetched_at": datetime(2026, 7, 20, 12, 30, tzinfo=UTC),
+        "source": "https://rates.dolarvzla.com/bcv/current.json",
+    }])
+
+    assert settings["exchange_rate_usd_bcv"] == "736.9339"
+    assert settings["exchange_rate_usd_bcv_effective_at"] == "2026-07-20T00:00:00+00:00"
+    assert settings["exchange_rate_usd_bcv_fetched_at"] == "2026-07-20T12:30:00+00:00"
+    assert settings["exchange_rate_usd_bcv_source"] == "https://rates.dolarvzla.com/bcv/current.json"
+    assert settings["exchange_rates_last_synced_at"]
 
 
 def test_usdt_freshness_uses_fetched_at_threshold(monkeypatch):

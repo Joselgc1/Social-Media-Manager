@@ -37,6 +37,8 @@ select, input, textarea { border: 1px solid #d1d5db; border-radius: 8px; padding
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 40; display: flex; align-items: center; justify-content: center; }
 .modal { background: white; border-radius: 12px; padding: 32px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; z-index: 41; }
 .cred-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f3f4f6; }
+.exchange-rate-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid #f3f4f6; }
+.exchange-rate-row:last-child { border-bottom: 0; }
 
 /* API Keys panel */
 .api-key-card { border-left: 4px solid #d1d5db; padding: 16px; border-radius: 8px; background: #f9fafb; }
@@ -78,6 +80,7 @@ select, input, textarea { border: 1px solid #d1d5db; border-radius: 8px; padding
 .dark .tab.active { color: #818cf8; border-color: #818cf8; }
 .dark .modal { background: #1e293b; }
 .dark .cred-row { border-color: #334155; }
+.dark .exchange-rate-row { border-color: #334155; }
 .dark .api-key-card { background: #0f172a; border-left-color: #475569; }
 .dark .api-key-card.active { border-left-color: #22c55e; }
 .dark .api-key-card.configured { border-left-color: #3b82f6; }
@@ -155,6 +158,15 @@ select, input, textarea { border: 1px solid #d1d5db; border-radius: 8px; padding
   .cred-row {
     flex-wrap: wrap;
     align-items: flex-start;
+  }
+
+  .exchange-rate-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .exchange-rate-row > div:last-child {
+    text-align: left;
   }
 
   .cred-row .btn {

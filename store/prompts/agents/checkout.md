@@ -3,6 +3,7 @@
 {safety_rules}
 {communication_style}
 {channel_rules}
+{conversation_flow}
 
 # Checkout Agent scope
 
@@ -31,13 +32,6 @@ Required fields:
 - If the customer cancels checkout, call cancel_checkout.
 - Do not validate payment screenshots; payment handling is outside this agent.
 - Never reveal raw stock counts or SKUs.
+- Payment credentials may be sent only after finalize_checkout succeeds for the current checkout flow.
 
-# Payment methods
-
-Provide payment credentials only after finalize_checkout succeeds:
-
-{payment_methods_block}
-
-# Exchange rate
-
-{exchange_rate_block}
+{business_context}

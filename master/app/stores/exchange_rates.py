@@ -11,7 +11,12 @@ from typing import Any
 
 from app import db
 from app.config import get_config
-from app.stores.dolarvzla import DolarVzlaClient, NormalizedExchangeRate
+from app.stores.dolarvzla import (
+    DolarVzlaAuthError,
+    DolarVzlaClient,
+    DolarVzlaConfigurationError,
+    NormalizedExchangeRate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,11 +172,26 @@ def build_store_rate_settings(rows: list[dict[str, Any]], *, synced_at: datetime
     by_key = {row["rate_key"]: row for row in rows}
     settings: dict[str, str] = {}
     mapping = {
-        "usd_bcv": ("exchange_rate_usd_bcv", "exchange_rate_usd_bcv_effective_at"),
-        "eur_bcv": ("exchange_rate_eur_bcv", "exchange_rate_eur_bcv_effective_at"),
-        "usdt_binance": ("exchange_rate_usdt_binance", "exchange_rate_usdt_binance_effective_at"),
+        "usd_bcv": (
+            "exchange_rate_usd_bcv",
+            "exchange_rate_usd_bcv_effective_at",
+            "exchange_rate_usd_bcv_fetched_at",
+            "exchange_rate_usd_bcv_source",
+        ),
+        "eur_bcv": (
+            "exchange_rate_eur_bcv",
+            "exchange_rate_eur_bcv_effective_at",
+            "exchange_rate_eur_bcv_fetched_at",
+            "exchange_rate_eur_bcv_source",
+        ),
+        "usdt_binance": (
+            "exchange_rate_usdt_binance",
+            "exchange_rate_usdt_binance_effective_at",
+            "exchange_rate_usdt_binance_fetched_at",
+            "exchange_rate_usdt_binance_source",
+        ),
     }
-    for rate_key, (value_key, effective_key) in mapping.items():
+    for rate_key, (value_key, effective_key, fetched_key, source_key) in mapping.items():
         row = by_key.get(rate_key)
         if not row:
             continue
@@ -180,6 +200,8 @@ def build_store_rate_settings(rows: list[dict[str, Any]], *, synced_at: datetime
             continue
         settings[value_key] = rate
         settings[effective_key] = _serialize_datetime(row["effective_at"])
+        settings[fetched_key] = _serialize_datetime(row.get("fetched_at"))
+        settings[source_key] = str(row.get("source") or "")
     if settings:
         sync_time = synced_at or datetime.now(UTC)
         settings["exchange_rates_last_synced_at"] = sync_time.astimezone(UTC).isoformat()
@@ -218,6 +240,28 @@ async def refresh_exchange_rates(
                 usdt_rate = await client.fetch_usdt_rate()
                 changed = await upsert_exchange_rate(usdt_rate)
                 result["sources"]["usdt"] = {"ok": True, "rates": [{"rate_key": usdt_rate.rate_key, "changed": changed}]}
+            except DolarVzlaConfigurationError:
+                logger.warning(
+                    "DolarVZLA rate refresh failed",
+                    extra={
+                        "source": "DolarVZLA USDT Binance",
+                        "rate_key": "usdt_binance",
+                        "success": False,
+                        "reason": "api_key_missing",
+                    },
+                )
+                result["sources"]["usdt"] = {"ok": False, "error": "api_key_missing"}
+            except DolarVzlaAuthError:
+                logger.warning(
+                    "DolarVZLA rate refresh failed",
+                    extra={
+                        "source": "DolarVZLA USDT Binance",
+                        "rate_key": "usdt_binance",
+                        "success": False,
+                        "reason": "api_key_unauthorized",
+                    },
+                )
+                result["sources"]["usdt"] = {"ok": False, "error": "api_key_unauthorized"}
             except Exception:
                 logger.warning(
                     "DolarVZLA rate refresh failed",

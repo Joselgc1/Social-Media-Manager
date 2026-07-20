@@ -51,10 +51,33 @@ def test_specialist_prompt_composition():
     assert "# Checkout Agent scope" in checkout
     assert "update_checkout_draft" in checkout
     assert "checkout_collecting" in checkout
-    assert "Pijama satén azul" not in checkout
+    assert "Pijama satén azul" in checkout
     assert "# Support Agent scope" in support
     assert "get_customer_order_status" in support
-    assert "Pijama satén azul" not in support
+    assert "Pijama satén azul" in support
+
+
+def test_specialist_prompts_keep_legacy_business_rules():
+    required_snippets = [
+        "You ONLY discuss products listed in the PRODUCT CATALOG below",
+        "NEVER reveal stock quantities",
+        "do not restart every reply with \"hola\"",
+        "NEVER output raw JSON",
+        "NEVER assume the payment method from old tags",
+        "The payment method is the LAST checkout question",
+        "Do not call BCV rates Binance",
+        "Prices do NOT include shipping",
+        "Shipping methods: MRW or Zoom",
+        "# PRODUCT CATALOG",
+        "Pijama satén azul",
+        "**Zelle**: Correo: pagos@example.com",
+        "40,25 Bs por USD",
+    ]
+
+    for prompt_name in ("sales", "checkout", "support"):
+        prompt = prompts.build_agent_prompt(prompt_name, _context())
+        for snippet in required_snippets:
+            assert snippet in prompt, f"{prompt_name} prompt missing: {snippet}"
 
 
 def test_dynamic_context_injection():

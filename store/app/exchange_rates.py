@@ -60,10 +60,16 @@ ALLOWED_EXCHANGE_RATE_REFERENCES = set(EXCHANGE_RATE_REFERENCES)
 PROVIDER_EXCHANGE_RATE_SETTING_KEYS = {
     "exchange_rate_usd_bcv",
     "exchange_rate_usd_bcv_effective_at",
+    "exchange_rate_usd_bcv_fetched_at",
+    "exchange_rate_usd_bcv_source",
     "exchange_rate_eur_bcv",
     "exchange_rate_eur_bcv_effective_at",
+    "exchange_rate_eur_bcv_fetched_at",
+    "exchange_rate_eur_bcv_source",
     "exchange_rate_usdt_binance",
     "exchange_rate_usdt_binance_effective_at",
+    "exchange_rate_usdt_binance_fetched_at",
+    "exchange_rate_usdt_binance_source",
     "exchange_rates_last_synced_at",
 }
 

@@ -1365,9 +1365,9 @@ async function savePaymentSettings() {
 
 function exchangeRateDefinitions() {
   return [
-    { key: 'usd_bcv', label: 'Dólar BCV', setting: 'exchange_rate_usd_bcv', effective: 'exchange_rate_usd_bcv_effective_at', unit: 'USD' },
-    { key: 'eur_bcv', label: 'Euro BCV', setting: 'exchange_rate_eur_bcv', effective: 'exchange_rate_eur_bcv_effective_at', unit: 'EUR' },
-    { key: 'usdt_binance', label: 'USDT Binance', setting: 'exchange_rate_usdt_binance', effective: 'exchange_rate_usdt_binance_effective_at', unit: 'USDT' },
+    { key: 'usd_bcv', label: 'Dólar BCV', setting: 'exchange_rate_usd_bcv', effective: 'exchange_rate_usd_bcv_effective_at', fetched: 'exchange_rate_usd_bcv_fetched_at', source: 'exchange_rate_usd_bcv_source', unit: 'USD' },
+    { key: 'eur_bcv', label: 'Euro BCV', setting: 'exchange_rate_eur_bcv', effective: 'exchange_rate_eur_bcv_effective_at', fetched: 'exchange_rate_eur_bcv_fetched_at', source: 'exchange_rate_eur_bcv_source', unit: 'EUR' },
+    { key: 'usdt_binance', label: 'USDT Binance', setting: 'exchange_rate_usdt_binance', effective: 'exchange_rate_usdt_binance_effective_at', fetched: 'exchange_rate_usdt_binance_fetched_at', source: 'exchange_rate_usdt_binance_source', unit: 'USDT' },
   ];
 }
 
@@ -1413,13 +1413,15 @@ function renderExchangeRateSummary(settings) {
   const rows = exchangeRateDefinitions().map(def => {
     const rate = formatSyncedRate(settings[def.setting]);
     const available = Boolean(rate);
-    const effective = settings[def.effective] ? formatRateTimestamp(settings[def.effective]) : 'sin fecha';
-    const selectedMark = selected === def.key ? 'Seleccionada' : '';
+    const fetched = settings[def.fetched] ? formatRateTimestamp(settings[def.fetched]) : 'sin fecha';
+    const selectedMark = selected === def.key
+      ? '<span class="inline-block h-2.5 w-2.5 rounded-full bg-blue-500 align-middle ml-2" title="Seleccionada"></span>'
+      : '';
     return `
       <div class="flex items-start justify-between gap-3">
-        <span>${escapeHtml(def.label)}${selectedMark ? ` <span class="badge badge-blue">${selectedMark}</span>` : ''}</span>
+        <span>${escapeHtml(def.label)}${selectedMark}</span>
         <span class="text-right ${available ? 'text-gray-700 dark:text-gray-300' : 'text-red-600 dark:text-red-400'}">
-          ${available ? `${escapeHtml(rate)} Bs/${escapeHtml(def.unit)}<br><span class="text-gray-400">${escapeHtml(effective)}</span>` : 'No disponible'}
+          ${available ? `${escapeHtml(rate)} Bs/${escapeHtml(def.unit)}<br><span class="text-gray-400">Actualizado: ${escapeHtml(fetched)}</span>` : 'No disponible'}
         </span>
       </div>`;
   }).join('');
@@ -1436,7 +1438,7 @@ function renderExchangeRateSummary(settings) {
   container.innerHTML = `
     ${rows}
     <div class="pt-2 mt-2 border-t border-gray-200 dark:border-gray-700">
-      Última sincronización: ${escapeHtml(formatRateTimestamp(settings.exchange_rates_last_synced_at))}
+      Sincronizado en la tienda: ${escapeHtml(formatRateTimestamp(settings.exchange_rates_last_synced_at))}
     </div>
     ${unavailableNotice}`;
 }

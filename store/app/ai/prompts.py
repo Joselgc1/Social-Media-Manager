@@ -25,6 +25,8 @@ PROMPT_SHARED_FRAGMENTS = {
     "safety_rules": "shared/safety_rules.md",
     "communication_style": "shared/communication_style.md",
     "channel_rules": "shared/channel_rules.md",
+    "conversation_flow": "shared/conversation_flow.md",
+    "business_context": "shared/business_context.md",
 }
 LEGACY_SHARED_FRAGMENTS = PROMPT_SHARED_FRAGMENTS
 KNOWN_AGENT_PROMPTS = {"legacy", "sales", "checkout", "support"}

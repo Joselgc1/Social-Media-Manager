@@ -380,6 +380,19 @@ function renderStoreDetail(store, stats, creds) {
             </div>
         </div>
 
+        <div class="card mb-4" id="exchange-rates-panel">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="font-bold text-lg">Exchange Rates</h3>
+                <div class="flex gap-2">
+                    <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+                    <button id="exchange-rates-refresh-btn" onclick="refreshExchangeRates('${store.id}')" class="btn btn-primary text-xs">Update Now</button>
+                </div>
+            </div>
+            <div id="exchange-rates-content">
+                <p class="text-gray-500">Loading exchange rates...</p>
+            </div>
+        </div>
+
         <!-- Credentials (grouped) -->
         <div class="card mb-4">
             <div class="flex items-center justify-between mb-4">
@@ -699,11 +712,103 @@ async function confirmDeleteCredential(storeId, key) {
     }
 }
 
+function exchangeRateDefinitions() {
+    return [
+        { key: 'usd_bcv', label: 'Dólar BCV', setting: 'exchange_rate_usd_bcv', effective: 'exchange_rate_usd_bcv_effective_at', fetched: 'exchange_rate_usd_bcv_fetched_at', source: 'exchange_rate_usd_bcv_source', unit: 'USD' },
+        { key: 'eur_bcv', label: 'Euro BCV', setting: 'exchange_rate_eur_bcv', effective: 'exchange_rate_eur_bcv_effective_at', fetched: 'exchange_rate_eur_bcv_fetched_at', source: 'exchange_rate_eur_bcv_source', unit: 'EUR' },
+        { key: 'usdt_binance', label: 'USDT Binance', setting: 'exchange_rate_usdt_binance', effective: 'exchange_rate_usdt_binance_effective_at', fetched: 'exchange_rate_usdt_binance_fetched_at', source: 'exchange_rate_usdt_binance_source', unit: 'USDT' },
+    ];
+}
+
+function formatExchangeRateValue(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return '';
+    const numeric = Number(text.replace(',', '.'));
+    if (!Number.isFinite(numeric)) return text;
+    return new Intl.NumberFormat('es-VE', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    }).format(numeric);
+}
+
+function formatExchangeRateTimestamp(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return 'sin fecha';
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) return text;
+    return parsed.toLocaleString('es-VE', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function renderExchangeRatesSettings(s) {
+    const selected = s.exchange_rate_reference || 'usd_bcv';
+    const rows = exchangeRateDefinitions().map(def => {
+        const rate = formatExchangeRateValue(s[def.setting]);
+        const source = String(s[def.source] || '').trim() || 'source not recorded';
+        const fetched = formatExchangeRateTimestamp(s[def.fetched]);
+        const effective = formatExchangeRateTimestamp(s[def.effective]);
+        const selectedBadge = selected === def.key ? '<span class="badge badge-blue text-xs">Selected</span>' : '';
+        return `
+            <div class="exchange-rate-row">
+                <div>
+                    <div class="font-semibold flex items-center gap-2">${esc(def.label)} ${selectedBadge}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">Source: ${esc(source)}</div>
+                </div>
+                <div class="text-right">
+                    <div class="font-mono ${rate ? 'text-gray-900 dark:text-gray-100' : 'text-red-600 dark:text-red-400'}">
+                        ${rate ? `${esc(rate)} Bs/${esc(def.unit)}` : 'Not available'}
+                    </div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">Updated: ${esc(fetched)}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">Effective: ${esc(effective)}</div>
+                </div>
+            </div>`;
+    }).join('');
+
+    const manualRate = String(s.manual_exchange_rate || '').trim();
+    const manualNotice = selected === 'manual'
+        ? `<div class="mt-3 rounded-lg bg-yellow-50 dark:bg-yellow-950/30 text-yellow-800 dark:text-yellow-200 p-3 text-sm">
+            This store currently uses a manual rate${manualRate ? `: ${esc(formatExchangeRateValue(manualRate))} Bs/USD` : ', but no manual value is set'}.
+        </div>`
+        : '';
+
+    return `
+        <div class="space-y-2">${rows}</div>
+        <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 text-sm text-gray-500 dark:text-gray-400">
+            Synced to this store: ${esc(formatExchangeRateTimestamp(s.exchange_rates_last_synced_at))}
+        </div>
+        ${manualNotice}
+        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">Update Now refreshes DolarVZLA centrally and syncs the latest values into this store.</p>`;
+}
+
+async function refreshExchangeRates(storeId) {
+    const btn = document.getElementById('exchange-rates-refresh-btn');
+    const previousText = btn?.textContent;
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Updating...';
+    }
+    try {
+        const result = await apiPost(`/api/stores/${storeId}/exchange-rates/refresh`, {});
+        const status = result.refresh?.status || 'unknown';
+        const synced = result.sync?.synced ? 'synced to this store' : 'not synced';
+        const toastType = status === 'failed' || !result.sync?.synced ? 'error' : 'success';
+        toast(`Exchange rates refreshed (${status}) and ${synced}.`, toastType);
+        await loadRuntimeSettings(storeId);
+    } catch (e) {
+        toast('Error updating exchange rates: ' + e.message, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = previousText || 'Update Now';
+        }
+    }
+}
+
 // ── Runtime Settings & Usage ───────────────────────────────
 async function loadRuntimeSettings(storeId) {
     const aiContainer = document.getElementById('ai-settings-content');
     const schedulerContainer = document.getElementById('scheduler-settings-content');
-    if (!aiContainer && !schedulerContainer) return;
+    const exchangeRatesContainer = document.getElementById('exchange-rates-content');
+    if (!aiContainer && !schedulerContainer && !exchangeRatesContainer) return;
 
     try {
         const data = await api(`/api/stores/${storeId}/settings`);
@@ -827,6 +932,10 @@ async function loadRuntimeSettings(storeId) {
             </div>`;
         }
 
+        if (exchangeRatesContainer) {
+            exchangeRatesContainer.innerHTML = renderExchangeRatesSettings(s);
+        }
+
         // Store available models globally for provider change handlers
         window._llmModels = models;
     } catch (e) {
@@ -835,6 +944,9 @@ async function loadRuntimeSettings(storeId) {
         }
         if (schedulerContainer) {
             schedulerContainer.innerHTML = `<p class="text-red-500">Could not load scheduler settings: ${esc(e.message)}</p>`;
+        }
+        if (exchangeRatesContainer) {
+            exchangeRatesContainer.innerHTML = `<p class="text-red-500">Could not load exchange rates: ${esc(e.message)}</p>`;
         }
     }
 }
@@ -1046,6 +1158,7 @@ const _ACTION_LABELS = {
     update_runtime_settings: ['Runtime settings', 'badge-purple'],
     deploy_credentials: ['Deploy', 'badge-green'],
     deploy_failed: ['Deploy failed', 'badge-red'],
+    refresh_exchange_rates: ['Exchange rates', 'badge-blue'],
 };
 
 function _populateAuditStoreFilter() {

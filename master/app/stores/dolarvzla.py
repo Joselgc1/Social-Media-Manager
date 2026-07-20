@@ -35,6 +35,14 @@ class DolarVzlaClientError(RuntimeError):
     """Raised when DolarVZLA data cannot be fetched or parsed."""
 
 
+class DolarVzlaAuthError(DolarVzlaClientError):
+    """Raised when DolarVZLA rejects the configured API key."""
+
+
+class DolarVzlaConfigurationError(DolarVzlaClientError):
+    """Raised when DolarVZLA credentials are missing."""
+
+
 def _decimal(value: Any) -> Decimal:
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
@@ -50,12 +58,13 @@ def _effective_at(value: str) -> datetime:
     if not text:
         raise DolarVzlaClientError("DolarVZLA response is missing rate date")
     try:
-        if "T" in text:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-        return datetime.combine(date.fromisoformat(text), time.min, tzinfo=UTC)
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except ValueError as exc:
-        raise DolarVzlaClientError(f"Invalid DolarVZLA rate date: {text}") from exc
+        try:
+            return datetime.combine(date.fromisoformat(text), time.min, tzinfo=UTC)
+        except ValueError:
+            raise DolarVzlaClientError(f"Invalid DolarVZLA rate date: {text}") from exc
 
 
 def _fetched_at(value: datetime | None) -> datetime:
@@ -80,7 +89,7 @@ def parse_bcv_response(payload: dict[str, Any], *, fetched_at: datetime | None =
             fetched_at=fetched,
             previous_rate=_optional_decimal(previous.get("usd")),
             change_percentage=_optional_decimal(change.get("usd")),
-            source="DolarVZLA BCV CDN",
+            source=BCV_CURRENT_URL,
         ),
         NormalizedExchangeRate(
             rate_key="eur_bcv",
@@ -91,7 +100,7 @@ def parse_bcv_response(payload: dict[str, Any], *, fetched_at: datetime | None =
             fetched_at=fetched,
             previous_rate=_optional_decimal(previous.get("eur")),
             change_percentage=_optional_decimal(change.get("eur")),
-            source="DolarVZLA BCV CDN",
+            source=BCV_CURRENT_URL,
         ),
     ]
 
@@ -109,7 +118,7 @@ def parse_usdt_response(payload: dict[str, Any], *, fetched_at: datetime | None 
         fetched_at=_fetched_at(fetched_at),
         previous_rate=_optional_decimal(previous.get("average")),
         change_percentage=_optional_decimal(change.get("average")),
-        source="DolarVZLA USDT Binance",
+        source=USDT_EXCHANGE_RATE_URL,
     )
 
 
@@ -122,7 +131,7 @@ class DolarVzlaClient:
         retries: int = 2,
         retry_backoff_seconds: float = 1.0,
     ):
-        self.api_key = api_key
+        self.api_key = str(api_key or "").strip()
         self.timeout_seconds = timeout_seconds
         self.retries = max(0, retries)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
@@ -143,7 +152,7 @@ class DolarVzlaClient:
 
     async def fetch_usdt_rate(self) -> NormalizedExchangeRate:
         if not self.api_key:
-            raise DolarVzlaClientError("DolarVZLA API key is not configured")
+            raise DolarVzlaConfigurationError("DOLARVZLA_API_KEY is not configured in the master service")
         payload = await self._get_json(USDT_EXCHANGE_RATE_URL, headers={USDT_AUTH_HEADER: self.api_key})
         return parse_usdt_response(payload)
 
@@ -157,6 +166,12 @@ class DolarVzlaClient:
                     response = await client.get(url, headers=safe_headers)
                     response.raise_for_status()
                     return json.loads(response.text, parse_float=Decimal, parse_int=Decimal)
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    if exc.response.status_code in {401, 403}:
+                        raise DolarVzlaAuthError("DolarVZLA API key is missing, invalid, or expired") from exc
+                    if attempt < self.retries:
+                        await asyncio.sleep(self.retry_backoff_seconds * (2**attempt))
                 except (httpx.HTTPError, json.JSONDecodeError) as exc:
                     last_error = exc
                     if attempt < self.retries:
