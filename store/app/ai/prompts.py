@@ -111,10 +111,7 @@ def _load_template() -> str:
     if _template is None:
         from app.config import get_config
         config = get_config()
-        if config.system_prompt_override:
-            _template = config.system_prompt_override
-        else:
-            _template = load_prompt_file("system_prompt.md")
+        _template = config.system_prompt_override or load_prompt_file("system_prompt.md")
     return _template
 
 

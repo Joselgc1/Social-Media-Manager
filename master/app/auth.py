@@ -5,11 +5,13 @@ Bearer token authentication for the master dashboard.
 import hashlib
 import hmac
 
-from fastapi import Request, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from app.config import get_config
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+_bearer_dependency = Depends(_bearer_scheme)
 
 COOKIE_NAME = "master_session"
 
@@ -34,7 +36,7 @@ def is_master_cookie_valid(request: Request) -> bool:
 
 async def require_auth(
     request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = _bearer_dependency,
 ):
     """
     Dependency that validates the Bearer token against MASTER_SECRET_KEY.

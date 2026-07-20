@@ -10,8 +10,10 @@ import logging
 import re
 import time
 from urllib.parse import parse_qs, urlparse
+
 import gspread
 from google.oauth2.service_account import Credentials
+
 from app.config import get_config
 
 logger = logging.getLogger(__name__)

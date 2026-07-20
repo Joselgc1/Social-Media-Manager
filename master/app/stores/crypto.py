@@ -3,6 +3,7 @@ Encrypt/decrypt store credentials using Fernet symmetric encryption.
 """
 
 from cryptography.fernet import Fernet
+
 from app.config import get_config
 
 _fernet: Fernet | None = None

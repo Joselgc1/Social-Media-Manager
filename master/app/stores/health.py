@@ -9,6 +9,7 @@ import logging
 from urllib.parse import urlparse
 
 import httpx
+
 from app import db
 
 logger = logging.getLogger(__name__)

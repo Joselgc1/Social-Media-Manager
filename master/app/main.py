@@ -18,13 +18,13 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.config import get_config
 from app import db
-from app.stores.api import router as stores_router
+from app.config import get_config
 from app.dashboard.router import router as dashboard_router
-from app.test_endpoint import router as test_router
-from app.stores.health import check_all_stores
 from app.stores.api import cleanup_idle_pools
+from app.stores.api import router as stores_router
+from app.stores.health import check_all_stores
+from app.test_endpoint import router as test_router
 
 # ── Logging ──────────────────────────────────────────────────
 

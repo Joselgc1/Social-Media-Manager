@@ -21,16 +21,17 @@ Key constraints:
 import hashlib
 import hmac
 import logging
-from fastapi import APIRouter, Request, Response, HTTPException
 
-from app.config import get_config
+from fastapi import APIRouter, HTTPException, Request, Response
+
+from app.admin.notify import notify_owner
 from app.ai.engine import generate_response
 from app.channels.instagram_sender import (
     send_image,
     send_text,
     send_text_with_quick_replies,
 )
-from app.admin.notify import notify_owner
+from app.config import get_config
 from app.webhooks.inbound_buffer import enqueue_inbound_message
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,6 @@ async def _process_event(event: dict):
     Events can be messages, postbacks, referrals, or read receipts.
     """
     sender_id = event.get("sender", {}).get("id", "")
-    recipient_id = event.get("recipient", {}).get("id", "")
     sender = event.get("sender", {}) or {}
     sender_profile = {
         "display_name": (sender.get("name") or sender.get("username") or "").strip() or None,
@@ -252,7 +252,6 @@ async def _process_referral(sender_id: str, referral: dict, sender_profile: dict
     Send a warm welcome that acknowledges where they came from.
     """
     source = referral.get("source", "")
-    ref_type = referral.get("type", "")
     ad_title = referral.get("ads_context_data", {}).get("ad_title", "")
 
     if ad_title:

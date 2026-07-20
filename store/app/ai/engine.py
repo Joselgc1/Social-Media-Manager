@@ -11,9 +11,9 @@ import re
 import time
 from dataclasses import replace
 
-from app.ai import runner as agent_runner_module
 from app import analytics, db
 from app.admin.notify import notify_escalation, notify_incoming_message
+from app.ai import runner as agent_runner_module
 from app.ai.agents.legacy import LEGACY_TOOL_NAMES
 from app.ai.orchestrator import decide_orchestration_with_router, resolve_effective_orchestration_mode
 from app.ai.payment.responder import render_payment_response
@@ -23,8 +23,10 @@ from app.ai.prompts import PromptContext, build_agent_prompt, format_catalog_as_
 from app.ai.runner import (
     AgentRunContext,
     AgentRunner,
-    clean_assistant_reply_text as _runner_clean_assistant_reply_text,
     strip_catalog_skus_from_text,
+)
+from app.ai.runner import (
+    clean_assistant_reply_text as _runner_clean_assistant_reply_text,
 )
 from app.ai.tools import catalog as catalog_tools
 from app.ai.tools.context import ToolExecutionContext

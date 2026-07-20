@@ -6,10 +6,11 @@ Saves to app/static/catalog/catalog.pdf — served as a static file.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
+
 from app.catalog.sheets import group_catalog_products
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def generate_catalog_pdf(catalog: list[dict]) -> Path:
     pdf.output(str(PDF_PATH))
 
     META_PATH.write_text(json.dumps({
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "product_count": len(grouped_catalog),
     }, indent=2))
 

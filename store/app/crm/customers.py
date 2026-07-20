@@ -5,6 +5,7 @@ Customer lookup, creation, and tag management.
 import json
 import re
 import unicodedata
+
 from app import db
 
 

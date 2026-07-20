@@ -6,15 +6,17 @@ import asyncio
 import json
 import logging
 import time
-from datetime import date, datetime, timedelta, timezone
+from contextlib import suppress
+from datetime import date, timedelta
 
+import databases as db_lib
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db
 from app.auth import require_auth
 from app.config import get_config
-from app.stores.models import StoreCreate, StoreUpdate, CredentialSet, RuntimeSettingsUpdate, LLMSettingsUpdate
-from app.stores.crypto import encrypt, decrypt, mask
+from app.stores.crypto import decrypt, encrypt, mask
+from app.stores.models import CredentialSet, LLMSettingsUpdate, RuntimeSettingsUpdate, StoreCreate, StoreUpdate
 from app.stores.runtime_settings import DEFAULT_RUNTIME_SETTINGS, SYNCABLE_RUNTIME_SETTING_KEYS
 
 logger = logging.getLogger(__name__)
@@ -45,8 +47,6 @@ def _stats_semaphore() -> asyncio.Semaphore:
 # ── Store DB connection cache ──────────────────────────────
 # Reuse connections to store databases instead of creating/destroying per request.
 # Entries expire after _POOL_TTL_SECONDS of inactivity.
-import databases as db_lib
-
 _POOL_TTL_SECONDS = 120  # close idle connections after 2 minutes
 _store_pools: dict[str, tuple[db_lib.Database, float]] = {}  # url -> (db, last_used)
 _pool_lock = asyncio.Lock()
@@ -72,10 +72,8 @@ async def cleanup_idle_pools():
         expired = [url for url, (_, ts) in _store_pools.items() if now - ts > _POOL_TTL_SECONDS]
         for url in expired:
             pool, _ = _store_pools.pop(url)
-            try:
+            with suppress(Exception):
                 await pool.disconnect()
-            except Exception:
-                pass
 
 
 # ── Audit helper ─────────────────────────────────────────────
@@ -275,8 +273,8 @@ async def _get_store_connection(store_id: str):
     store = await _get_store_row(store_id)
     try:
         store_db_url = decrypt(store["db_url_encrypted"])
-    except Exception:
-        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL") from exc
     store_db = await _get_store_db(store_db_url)
     return store, store_db
 
@@ -476,7 +474,7 @@ async def get_store_settings(store_id: str):
             raise
         except Exception as e:
             logger.warning(f"Could not read runtime settings for store {store_id}: {e}")
-            raise HTTPException(status_code=502, detail="Could not connect to store database")
+            raise HTTPException(status_code=502, detail="Could not connect to store database") from e
 
 
 @router.put("/{store_id}/settings")
@@ -507,7 +505,7 @@ async def update_store_settings(store_id: str, update: RuntimeSettingsUpdate, re
             raise
         except Exception as e:
             logger.warning(f"Could not update runtime settings for store {store_id}: {e}")
-            raise HTTPException(status_code=502, detail="Could not write to store database")
+            raise HTTPException(status_code=502, detail="Could not write to store database") from e
 
 
 @router.get("/{store_id}/llm-settings")
@@ -549,8 +547,8 @@ async def get_llm_usage(store_id: str, days: int = 1):
 
     try:
         store_db_url = decrypt(store["db_url_encrypted"])
-    except Exception:
-        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL") from exc
 
     async with _stats_semaphore():
         try:
@@ -626,8 +624,8 @@ async def get_store_conversations(
 
     try:
         store_db_url = decrypt(store["db_url_encrypted"])
-    except Exception:
-        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Cannot decrypt store database URL") from exc
 
     limit = max(1, min(limit, 200))
 
@@ -740,7 +738,7 @@ async def get_store_conversations(
             }
         except Exception as e:
             logger.warning(f"Could not fetch conversations for store {store_id}: {e}")
-            raise HTTPException(status_code=502, detail="Could not connect to store database")
+            raise HTTPException(status_code=502, detail="Could not connect to store database") from e
 
 
 @router.get("/llm-costs/aggregate")
@@ -841,7 +839,7 @@ async def get_railway_status(store_id: str):
         return {"status": "not_linked", "message": "No Railway service ID configured for this store"}
 
     try:
-        from app.stores.railway import get_service_info, get_latest_deployment, get_environments
+        from app.stores.railway import get_environments, get_latest_deployment, get_service_info
 
         service = await get_service_info(store["railway_service_id"])
         environments = []
@@ -930,10 +928,10 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
             variables[row["key"]] = decrypt(row["value_encrypted"])
         except Exception as e:
             logger.error(f"Failed to decrypt credential {row['key']} for store {store_id}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to decrypt credential: {row['key']}")
+            raise HTTPException(status_code=500, detail=f"Failed to decrypt credential: {row['key']}") from e
 
     # Push to Railway
-    from app.stores.railway import upsert_variables, redeploy_service, get_latest_deployment
+    from app.stores.railway import get_latest_deployment, redeploy_service, upsert_variables
 
     try:
         await upsert_variables(
@@ -950,7 +948,7 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
     except Exception as e:
         logger.error(f"Railway deploy failed for store {store_id}: {e}")
         await _audit("deploy_failed", store_id, f"Railway deploy failed: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
     await _audit(
         "deploy_credentials",

@@ -36,7 +36,7 @@ from fastapi.responses import HTMLResponse
 from app import db
 from app.auth import require_auth
 from app.config import get_config
-from app.stores.crypto import encrypt, decrypt, mask
+from app.stores.crypto import decrypt, encrypt, mask
 
 logger = logging.getLogger(__name__)
 

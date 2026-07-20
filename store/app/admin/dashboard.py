@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.admin.auth import COOKIE_NAME, _make_cookie_token, is_admin_cookie_valid

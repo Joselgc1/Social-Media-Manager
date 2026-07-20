@@ -37,16 +37,16 @@ Usage:
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from app import db
 from app.ai.engine import generate_response
 from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog
 from app.config import get_config
 from app.crm.conversations import get_history
 from app.crm.customers import get_or_create_customer
-from app import db
 
 logger = logging.getLogger(__name__)
 

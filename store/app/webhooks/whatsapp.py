@@ -4,16 +4,18 @@ Receives incoming messages from the WhatsApp Cloud API,
 normalizes them, and routes them through the AI engine.
 """
 
-import time
 import hashlib
 import hmac
 import logging
-from fastapi import APIRouter, Request, Response, HTTPException
+import time
+from contextlib import suppress
 
-from app.config import get_config
-from app.ai.engine import generate_response
-from app.channels.whatsapp_sender import send_text, send_image, send_interactive_buttons, send_document, mark_as_read
+from fastapi import APIRouter, HTTPException, Request, Response
+
 from app.admin.notify import notify_owner
+from app.ai.engine import generate_response
+from app.channels.whatsapp_sender import mark_as_read, send_document, send_image, send_interactive_buttons, send_text
+from app.config import get_config
 from app.webhooks.inbound_buffer import enqueue_inbound_message
 
 logger = logging.getLogger(__name__)
@@ -178,10 +180,8 @@ async def _process_message(message: dict, value: dict):
     logger.info(f"WhatsApp message received from {_mask_sender(sender)} ({msg_type})")
 
     # Mark the message as read (blue checkmarks)
-    try:
+    with suppress(Exception):
         await mark_as_read(msg_id)
-    except Exception:
-        pass  # Non-critical
 
     await enqueue_inbound_message(
         channel="whatsapp",

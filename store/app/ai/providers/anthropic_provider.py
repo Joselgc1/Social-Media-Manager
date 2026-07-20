@@ -9,9 +9,10 @@ Key differences from OpenAI:
 - Tool results use role "user" with a tool_result content block
 """
 
-import json
 import logging
+
 from anthropic import AsyncAnthropic
+
 from app.ai.providers.base import LLMProvider, LLMResponse
 
 logger = logging.getLogger(__name__)

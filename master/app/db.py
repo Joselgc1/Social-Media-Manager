@@ -3,6 +3,7 @@ Async database wrapper for the master control plane.
 """
 
 import databases
+
 from app.config import get_config
 
 _db: databases.Database | None = None

@@ -3,9 +3,9 @@ Provider registry. Initializes both providers at startup
 and serves the active one on each request.
 """
 
+from app.ai.providers.anthropic_provider import AnthropicProvider
 from app.ai.providers.base import LLMProvider
 from app.ai.providers.openai_provider import OpenAIProvider
-from app.ai.providers.anthropic_provider import AnthropicProvider
 
 _providers: dict[str, LLMProvider] = {}
 

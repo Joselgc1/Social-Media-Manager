@@ -10,7 +10,9 @@ Docs: https://docs.railway.com/reference/public-api
 """
 
 import logging
+
 import httpx
+
 from app.config import get_config
 
 logger = logging.getLogger(__name__)

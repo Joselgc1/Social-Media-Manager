@@ -2,8 +2,9 @@
 Master control plane configuration.
 """
 
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+from pydantic_settings import BaseSettings
 
 
 class MasterSettings(BaseSettings):
@@ -29,6 +30,6 @@ class MasterSettings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
-@lru_cache()
+@lru_cache
 def get_config() -> MasterSettings:
     return MasterSettings()

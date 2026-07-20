@@ -4,7 +4,9 @@ Used for human escalation and important alerts.
 """
 
 import logging
+
 import httpx
+
 from app.config import get_config
 
 logger = logging.getLogger(__name__)

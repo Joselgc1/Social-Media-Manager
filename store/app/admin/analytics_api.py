@@ -4,9 +4,10 @@ Conversion funnels, response times, and product popularity.
 """
 
 from datetime import date, timedelta
+
 from fastapi import APIRouter, Depends
-from app import analytics
-from app import db
+
+from app import analytics, db
 from app.admin.auth import require_admin
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"], dependencies=[Depends(require_admin)])

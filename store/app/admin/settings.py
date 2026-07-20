@@ -19,8 +19,8 @@ from app.ai.providers import AVAILABLE_MODELS, get_model_costs
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
-from app.crm import orders
 from app.crm import customers as customer_crm
+from app.crm import orders
 from app.crm.customers import add_tags, normalize_tags, remove_tag
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
 from app.runtime_settings import LLM_MANAGED_KEYS, STORE_EDITABLE_SETTING_KEYS
