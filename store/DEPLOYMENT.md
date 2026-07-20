@@ -44,17 +44,16 @@ Copy this. It goes in your `.env` as `DATABASE_URL`.
 Run the migrations. Go to the SQL Editor in Supabase's dashboard:
 
 1. Paste the entire contents of `store/migrations/001_schema.sql` and click **Run**.
-2. If this store will run with `CHANNEL_BACKEND=kommo`, also run `store/migrations/002_kommo_integration.sql`.
 
 This creates all tables and seeds the runtime settings used by the store dashboard and the master control plane.
 
-Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), an empty `payment_methods` row, and an empty `accepted_exchange_rate` row.
+Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), Kommo transport formatting defaults (`kommo_emoji_mode_*`, `kommo_strip_emoji`), an empty `payment_methods` row, and an empty `accepted_exchange_rate` row.
 
 ### 1.2 OpenAI API Key
 
 Go to [platform.openai.com](https://platform.openai.com), sign in, and navigate to **API Keys**. Click **Create new secret key**, name it "vs-chatbot," and copy it. It starts with `sk-`.
 
-Add $10 of credit under Billing. At your message volume, this lasts 1–2 months with GPT-4o-mini.
+Add $10 of credit under Billing. At your message volume, this lasts 1–2 months with the default GPT-5.4 Nano model.
 
 ### 1.3 Anthropic API Key
 
@@ -256,7 +255,7 @@ You should see:
 [INFO] LLM providers initialized (OpenAI + Anthropic).
 [INFO] Catalog refreshed: 4 active products loaded.
 [INFO] Active LLM: openai/gpt-5.4-nano
-[INFO] Background scheduler started with 4 jobs.
+[INFO] Background scheduler started.
 [INFO] Chatbot is ready! Waiting for messages...
 ```
 
@@ -323,7 +322,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 Only do this when `CHANNEL_BACKEND=kommo`.
 
-1. Run `store/migrations/002_kommo_integration.sql` and `store/migrations/003_kommo_hardening.sql` in the store Supabase database.
+1. Confirm `store/migrations/001_schema.sql` has been run in the store Supabase database.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
 3. Create a Kommo Salesbot with the widget step pointing to `https://abc123.ngrok-free.app/webhooks/kommo/salesbot`.
 4. Register a Kommo general webhook at `https://abc123.ngrok-free.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`.
@@ -341,7 +340,7 @@ The complete Kommo setup is documented in [`docs/KOMMO_MIGRATION.md`](../docs/KO
 ```bash
 git init
 git add .
-git commit -m "VS Chatbot: all 4 phases complete"
+git commit -m "Deploy VS Chatbot"
 git remote add origin https://github.com/youruser/vs-chatbot.git
 git push -u origin main
 ```
@@ -531,7 +530,7 @@ Open `https://your-app.railway.app/admin/login` in any browser, sign in, and you
 **Five tabs:**
 
 - **Resumen:** Today's stats, per-channel breakdown, token usage by provider, AI on/off toggle
-- **Clientes:** Sortable customer table, inline tag management (add/remove), resolve escalations individually or all at once
+- **Clientes:** Sortable customer table, inline tag management (add/remove), inline state/channel editing, and resolve escalations individually or all at once. In Kommo mode, dashboard reactivation verifies the lead's `AI Mode=AI Active` before local history is cleared.
 - **Pedidos:** Sortable order table with status badges
 - **Broadcasts:** Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset failed broadcasts
 - **Configuracion:** Switch LLM provider/model, adjust temperature/max tokens/conversation history, configure fallback, manage store-only payment methods, and generate/download the catalog PDF. Scheduled-job timings are shown read-only here and are managed from `master/`.
@@ -610,7 +609,7 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 [ ] Subsequent visits to /admin/dashboard -> works via cookie (no password in URL)
 [ ] Toggle dark mode -> UI switches, persists on refresh
 [ ] Configuracion tab -> AI settings and payment methods visible; PDF auto-refresh shown read-only
-[ ] Send /start to Telegram bot -> 18-command menu appears
+[ ] Send /start to Telegram bot -> command menu appears
 [ ] CHANNEL_BACKEND=meta -> /webhooks/whatsapp and /webhooks/instagram are registered
 [ ] CHANNEL_BACKEND=kommo -> /webhooks/kommo/events/{secret} and /webhooks/kommo/salesbot are registered
 [ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
@@ -630,7 +629,8 @@ Works automatically. When a customer sends an image, the system downloads it, ru
 [ ] /resolve [ID] via Telegram -> AI resumes for that customer
 [ ] /ai off -> AI paused globally, incoming messages forwarded to Telegram (once per customer)
 [ ] /ai on -> AI resumes for all customers
-[ ] "Muestrame el catalogo" -> PDF catalog sent (WhatsApp)
+[ ] "Muestrame el catalogo" in Meta WhatsApp -> PDF catalog sent
+[ ] "Muestrame el catalogo" in Kommo or Instagram -> normal text catalog guidance, no PDF attachment
 [ ] Repeat order -> AI offers saved address: "¿misma dirección de la última vez?"
 [ ] Set product Stock=0 in Sheets, ask for it -> "Out of stock" + alternatives
 [ ] "Tienen zapatos?" -> Politely declines, only sells underwear/pajamas
@@ -693,7 +693,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 ### 9.5b Kommo Mode
 
 ```text
-[ ] 002_kommo_integration.sql has been run in the store DB
+[ ] 001_schema.sql has been run in the store DB
 [ ] Widget ZIP uploaded to private Kommo integration
 [ ] Salesbot contains widget step pointing to /webhooks/kommo/salesbot
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>
@@ -702,6 +702,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] Customer receives AI response through Kommo Salesbot
 [ ] Lead AI Mode=Human -> local customer becomes escalated and AI stops
 [ ] Lead AI Mode=AI Active -> AI can answer the next inbound message
+[ ] Store dashboard resolves a Kommo escalation -> Kommo AI Mode is confirmed active before local state/history changes
 ```
 
 ### 9.6 Analytics
@@ -757,6 +758,8 @@ Health (no auth):
 
 Settings (require ADMIN_PASSWORD via Bearer header or session cookie):
   GET  /admin/settings/
+  GET  /admin/settings/payment-methods
+  PUT  /admin/settings/payment-methods
   GET  /admin/settings/providers
   PUT  /admin/settings/{key}
   POST /admin/settings/switch-provider
@@ -777,6 +780,10 @@ Customers (require admin auth):
   GET  /admin/settings/customers/{id}/tags
   POST /admin/settings/customers/{id}/tags
   DELETE /admin/settings/customers/{id}/tags/{tag}
+
+Orders (require admin auth):
+  GET  /admin/settings/orders
+  GET  /admin/settings/orders/{id}
   PUT  /admin/settings/orders/{id}
   DELETE /admin/settings/orders/{id}
 
@@ -790,9 +797,7 @@ Dashboard:
   POST /admin/login
   POST /admin/logout
   GET  /admin/dashboard
-
-Orders (require admin auth):
-  GET  /admin/settings/orders
+  GET  /admin/orders/{order_id}
 
 Broadcasts (require admin auth):
   POST /admin/broadcasts/create
@@ -857,6 +862,8 @@ Testing (DEBUG=true only — disabled in production):
   The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. If this repeats, verify the uploaded widget is present in the Salesbot, the widget URL is reachable over HTTPS, and the Salesbot ID matches `KOMMO_SALESBOT_ID`.
 - **Kommo image payment screenshots are ignored**
   Direct media downloads are intentionally limited to trusted Meta/Instagram/Kommo hosts over HTTPS, with redirects disabled and a 5 MB size limit. Some Kommo media payloads may need manual production validation.
+- **Kommo catalog requests do not send PDFs**
+  This is expected. The catalog PDF is generated/downloaded from the admin dashboard and can be sent only by the direct Meta WhatsApp `send_catalog_pdf` tool. Kommo and Instagram catalog requests should produce normal text replies.
 - **WhatsApp "not registered"**  
   Number must be registered with Cloud API, not regular WhatsApp.
 - **Broadcasts send 0 messages**  
@@ -866,7 +873,7 @@ Testing (DEBUG=true only — disabled in production):
 - **Broadcast stuck in "sending"**  
   The send crashed mid-execution. Use the "Resetear" button in the dashboard or `POST /admin/broadcasts/{id}/reset` to return it to draft. Crash recovery now auto-sets failed broadcasts to "failed" status.
 - **Payment screenshots not recognized**  
-  Check active model supports vision (GPT-4o-mini and Claude Haiku 4.5 do). Check logs for errors.
+  Check the active model/provider supports vision (current OpenAI and Anthropic defaults do). Check logs for errors.
 - **Daily analytics empty**  
   Runs at 1 AM for yesterday. Manually trigger: `POST /admin/analytics/build-daily`.
 - **Scheduler not running**  

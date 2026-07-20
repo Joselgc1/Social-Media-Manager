@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 # Maximum number of tool-call rounds per message (prevent infinite loops)
 MAX_TOOL_ROUNDS = 6
 
+_INITIAL_GREETING_RE = re.compile(
+    r"^\s*(?:¡?\s*)?(?:hola|buenas|buenos dias|buenos días|buenas tardes|buenas noches)"
+    r"(?:\s+(?:bella|mi amor|hermosa|linda|corazon|corazón|\w+))?\s*[!¡.,:;-]*\s*",
+    re.IGNORECASE,
+)
+
 _HOSTILE_MESSAGE_PATTERNS = [
     (
         re.compile(r"\b(estafa|estafadores?|ladrones?|fraude|timador(?:es)?|robo)\b"),
@@ -187,16 +193,17 @@ async def generate_response(
 
     # ── 3. Load conversation history ─────────────────────────
     max_history = settings.get("max_conversation_history", 20)
-    history = await conversations.get_history(customer["id"], limit=max_history)
-
-    # Append the new message
-    history.append({"role": "user", "content": message_text})
+    stored_history = await conversations.get_history(customer["id"], limit=max_history)
+    has_previous_context = bool(stored_history)
+    history = conversations.prepare_history_for_generation(stored_history, latest_user_message=message_text)
 
     open_order = await orders.get_latest_open_order(customer["id"])
 
     # ── 4. Build system prompt with live catalog ─────────────
     catalog = get_cached_catalog()
     catalog_md = format_catalog_as_markdown(catalog)
+    catalog_pdf_supported = _catalog_pdf_supported(channel, integration_context, config)
+    available_tools = _tools_for_delivery(channel, integration_context, config)
     system_prompt = build_system_prompt(
         catalog_markdown=catalog_md,
         store_name=settings.get("store_name", config.store_name),
@@ -207,7 +214,9 @@ async def generate_response(
         accepted_exchange_rate=str(settings.get("accepted_exchange_rate", "") or ""),
         order_discount_percent=settings.get("order_discount_percent"),
         order_discount_threshold_usd=settings.get("order_discount_threshold_usd"),
+        catalog_pdf_supported=catalog_pdf_supported,
     )
+    system_prompt = _with_conversation_continuity_guidance(system_prompt, has_previous_context)
 
     # ── 5. Call the LLM ──────────────────────────────────────
     was_fallback = False
@@ -250,8 +259,7 @@ async def generate_response(
             # Inject vision analysis into the message text so the AI has context
             summary = vision_result.get("summary", "Imagen analizada")
             message_text = f"{message_text}\n\n[Análisis de imagen: {summary}]"
-            # Update the last message in history
-            history[-1] = {"role": "user", "content": message_text}
+            history = conversations.prepare_history_for_generation(stored_history, latest_user_message=message_text)
 
     if payment_proof_attempt and not open_order:
         first_name = extract_safe_first_name(customer.get("display_name"))
@@ -291,7 +299,7 @@ async def generate_response(
             model=model,
             system_prompt=system_prompt,
             messages=history,
-            tools=TOOLS,
+            tools=available_tools,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -310,7 +318,7 @@ async def generate_response(
                 model=fb_model,
                 system_prompt=system_prompt,
                 messages=history,
-                tools=TOOLS,
+                tools=available_tools,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
@@ -382,7 +390,7 @@ async def generate_response(
 
         # On the final allowed round, withhold tools so the model is forced
         # to generate a text response instead of calling another tool.
-        tools_this_round = TOOLS if rounds < MAX_TOOL_ROUNDS else None
+        tools_this_round = available_tools if rounds < MAX_TOOL_ROUNDS else None
 
         # Continue the conversation with the tool result
         response = await provider.continue_after_tool(
@@ -430,12 +438,24 @@ async def generate_response(
 
     if interactive_payload:
         interactive_payload["body_text"] = _clean_assistant_reply_text(interactive_payload.get("body_text", ""))
+        interactive_payload["body_text"] = _strip_initial_greeting_if_needed(
+            interactive_payload["body_text"],
+            has_previous_context,
+        )
 
     if catalog_pdf_payload:
         catalog_pdf_payload["caption"] = _clean_assistant_reply_text(catalog_pdf_payload.get("caption", ""))
+        catalog_pdf_payload["caption"] = _strip_initial_greeting_if_needed(
+            catalog_pdf_payload["caption"],
+            has_previous_context,
+        )
 
     if product_image_payload:
         product_image_payload["caption"] = _clean_assistant_reply_text(product_image_payload.get("caption", ""))
+        product_image_payload["caption"] = _strip_initial_greeting_if_needed(
+            product_image_payload["caption"],
+            has_previous_context,
+        )
 
     # When send_interactive_buttons was used, the model sometimes returns
     # text=None (treating buttons as the full response). Use body_text in that
@@ -447,6 +467,7 @@ async def generate_response(
     else:
         reply_text = response.text or "Lo siento, no pude generar una respuesta. ¿Puedes repetir tu pregunta?"
     reply_text = _clean_assistant_reply_text(reply_text) or "Lo siento, no pude generar una respuesta. ¿Puedes repetir tu pregunta?"
+    reply_text = _strip_initial_greeting_if_needed(reply_text, has_previous_context) or reply_text
 
     if persist_assistant_message:
         await conversations.store_message(
@@ -478,6 +499,40 @@ def _detect_hostile_customer_message(message_text: str) -> str | None:
         if pattern.search(normalized):
             return reason
     return None
+
+
+def _with_conversation_continuity_guidance(system_prompt: str, has_previous_context: bool) -> str:
+    if has_previous_context:
+        guidance = (
+            "Esta conversacion ya tiene contexto previo almacenado. "
+            "No abras con un saludo inicial y responde solo el ultimo mensaje del cliente, "
+            "sin volver a contestar preguntas anteriores ya atendidas."
+        )
+    else:
+        guidance = "No hay contexto previo almacenado. Puedes saludar brevemente al iniciar la conversacion."
+    return f"{system_prompt}\n\n# Continuidad de conversacion\n\n{guidance}"
+
+
+def _tools_for_delivery(channel: str, integration_context: dict | None, config=None) -> list[dict]:
+    if _catalog_pdf_supported(channel, integration_context, config):
+        return TOOLS
+    return [tool for tool in TOOLS if tool.get("name") != "send_catalog_pdf"]
+
+
+def _catalog_pdf_supported(channel: str, integration_context: dict | None, config=None) -> bool:
+    delivery_provider = (integration_context or {}).get("provider")
+    if not delivery_provider:
+        delivery_provider = getattr(config or get_config(), "channel_backend", "meta")
+    if not isinstance(delivery_provider, str) or delivery_provider not in {"meta", "kommo"}:
+        delivery_provider = "meta"
+    return channel == "whatsapp" and delivery_provider == "meta"
+
+
+def _strip_initial_greeting_if_needed(text: str | None, has_previous_context: bool) -> str:
+    if not has_previous_context or not text:
+        return (text or "").strip()
+    stripped = _INITIAL_GREETING_RE.sub("", text, count=1).lstrip()
+    return stripped or text.strip()
 
 
 def _normalize_text_for_moderation(text: str) -> str:
@@ -628,22 +683,21 @@ async def _execute_tool(
         }
 
     elif name == "send_catalog_pdf":
+        if not _catalog_pdf_supported(channel, integration_context):
+            return {
+                "status": "error",
+                "message": "Catalog PDF delivery is unavailable here. Describe catalog categories in text instead.",
+            }
         # Auto-generate the PDF if it doesn't exist yet, then signal the webhook handler.
-        generated_pdf = False
         if not PDF_PATH.exists():
             catalog = get_cached_catalog()
             if not catalog:
                 return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
             try:
                 generate_catalog_pdf(catalog)
-                generated_pdf = True
             except Exception as e:
                 logger.error(f"Auto-generate catalog PDF failed: {e}")
                 return {"status": "error", "message": "Could not generate catalog PDF."}
-        if generated_pdf and get_config().channel_backend == "kommo":
-            from app.integrations.kommo.files import sync_catalog_pdf_to_kommo
-
-            await sync_catalog_pdf_to_kommo(PDF_PATH)
         return {
             "type": "catalog_pdf",
             "caption": args.get("caption", "Aqui tienes nuestro catalogo de productos 📖"),

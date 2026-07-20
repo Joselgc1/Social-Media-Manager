@@ -6,14 +6,6 @@ These values are editable from dashboards and can change without redeploying.
 
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY
 
-KOMMO_CATALOG_SYNC_SETTING_KEYS = {
-    "kommo_catalog_file_uuid",
-    "kommo_catalog_version_uuid",
-    "kommo_catalog_drive_url",
-    "kommo_catalog_pdf_sha256",
-    "kommo_catalog_synced_at",
-}
-
 RUNTIME_SETTING_DEFAULTS = {
     "llm_provider": "openai",
     "llm_model": "gpt-5.4-nano",
@@ -36,11 +28,8 @@ RUNTIME_SETTING_DEFAULTS = {
     "order_discount_percent": 10.0,
     "order_discount_threshold_usd": 350.0,
     "kommo_strip_emoji": False,
-    "kommo_catalog_file_uuid": "",
-    "kommo_catalog_version_uuid": "",
-    "kommo_catalog_drive_url": "",
-    "kommo_catalog_pdf_sha256": "",
-    "kommo_catalog_synced_at": "",
+    "kommo_emoji_mode_whatsapp": "safe",
+    "kommo_emoji_mode_instagram": "safe",
     PAYMENT_METHODS_SETTING_KEY: [],
 }
 
@@ -80,7 +69,6 @@ STORE_EDITABLE_SETTING_KEYS = (
     set(RUNTIME_SETTING_DEFAULTS)
     - {PAYMENT_METHODS_SETTING_KEY}
     - MASTER_ONLY_SETTING_KEYS
-    - KOMMO_CATALOG_SYNC_SETTING_KEYS
 )
 LLM_MANAGED_KEYS = {
     "llm_provider",

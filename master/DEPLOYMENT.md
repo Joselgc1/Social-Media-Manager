@@ -61,7 +61,7 @@ Fill in the values:
 DATABASE_URL=postgresql://postgres.xxxx:password@aws-0-us-east-1.pooler.supabase.com:6543/postgres
 MASTER_SECRET_KEY=your-generated-secret-key
 ENCRYPTION_KEY=your-generated-fernet-key
-RAILWAY_API_TOKEN=             # Leave empty for now (Phase 2)
+RAILWAY_API_TOKEN=             # Optional unless using Railway deploys from master
 APP_BASE_URL=http://localhost:9000
 HEALTH_CHECK_INTERVAL_SECONDS=300
 ```
@@ -343,7 +343,7 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), plus either the Meta section 1.7 or the Kommo migration guide, but for the new store's accounts:
 
-1. **New Supabase project** (e.g., "store-maria"). Run `store/migrations/001_schema.sql`. If the store uses Kommo, also run `store/migrations/002_kommo_integration.sql` and `store/migrations/003_kommo_hardening.sql`.
+1. **New Supabase project** (e.g., "store-maria"). Run the consolidated `store/migrations/001_schema.sql`.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
 4. **Channel backend:** choose either direct Meta credentials or Kommo channel/private integration credentials for this store.
@@ -598,7 +598,7 @@ Dashboard:
   POST /logout                  -> Clear dashboard session
   GET  /dashboard               -> Master dashboard UI
 
-Store CRUD (all require Bearer token):
+Store CRUD (require Bearer token or master session cookie):
   GET    /api/stores/                           -> List all stores
   GET    /api/stores/{id}                       -> Store detail
   POST   /api/stores/                           -> Create store
@@ -616,7 +616,10 @@ Store Stats:
 Runtime Settings:
   GET    /api/stores/{id}/settings              -> Read shared AI runtime settings from the store DB
   PUT    /api/stores/{id}/settings              -> Write shared AI runtime settings to the store DB
+  GET    /api/stores/{id}/llm-settings          -> Backward-compatible alias for shared AI settings
+  PUT    /api/stores/{id}/llm-settings          -> Backward-compatible alias for shared AI settings
   GET    /api/stores/{id}/llm-usage?days=N      -> Token usage + costs (default: today)
+  GET    /api/stores/{id}/conversations         -> Recent store conversations from the store DB
   GET    /api/stores/llm-costs/aggregate?days=N -> Platform-wide costs (default: today)
 
 Railway Deployment:

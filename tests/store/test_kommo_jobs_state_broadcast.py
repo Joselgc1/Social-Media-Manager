@@ -22,6 +22,20 @@ class _DBHandle:
         return _Tx()
 
 
+def _install_ready_job_db(monkeypatch, jobs, *, settings=None, assistant_persisted_at=None):
+    mock_db = MagicMock()
+    mock_db.get_settings = AsyncMock(return_value=settings or {"ai_enabled": True})
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock(side_effect=[
+        {"conversation_state": "active"},
+        {"assistant_message_persisted_at": assistant_persisted_at},
+    ])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
+    return mock_db
+
+
 def _bind_names(query: str) -> set[str]:
     return set(re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", query))
 
@@ -493,11 +507,7 @@ async def test_ready_job_discard_continues_salesbot_before_marking_discarded(mon
 async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
     from app.integrations.kommo import jobs
 
-    mock_db = MagicMock()
-    mock_db.get_settings = AsyncMock(return_value={"ai_enabled": True})
-    mock_db.fetch_one = AsyncMock(return_value={"conversation_state": "active"})
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(jobs, "db", mock_db)
+    mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"})
     monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
     monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
     monkeypatch.setattr(
@@ -536,17 +546,86 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
     assert "Aquí" in continuation_payload["data"]["message"]
     assert "💕" in continuation_payload["data"]["message"]
     assert "attachment_type" not in continuation_payload["data"]
+    assert any("assistant_message_persisted_at" in call.args[0] for call in mock_db.execute.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_assistant_history_persisted_after_accepted_kommo_continuation(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"})
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason=None, needs_ai_mode_initialization=False),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock(return_value={"text": "**Listo** 💕", "escalated": False}))
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    stored_messages = []
+
+    async def store_message(**kwargs):
+        stored_messages.append(kwargs)
+
+    monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock(side_effect=store_message))
+
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job({
+        "id": "job",
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "combined_message": "Gracias",
+        "channel": "whatsapp",
+        "correlation_id": "corr",
+    })
+
+    assert stored_messages == [
+        {
+            "customer_id": "customer",
+            "role": "assistant",
+            "content": "*Listo* 💕",
+            "channel": "whatsapp",
+            "function_calls": None,
+        }
+    ]
+    assert "status = 'sent'" in mock_db.execute.await_args_list[-1].args[0]
+
+
+@pytest.mark.asyncio
+async def test_assistant_history_persistence_is_idempotent_per_kommo_job(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock(return_value={"assistant_message_persisted_at": "2026-01-01T00:00:00Z"})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
+
+    await jobs._store_assistant_message_after_delivery(
+        {"id": "customer", "channel": "whatsapp"},
+        {"id": "job", "channel": "whatsapp"},
+        {"function_calls": [{"name": "check_inventory"}]},
+        "Respuesta final",
+    )
+
+    jobs.conversations.store_message.assert_not_awaited()
+    mock_db.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_ready_job_formats_and_strips_emoji_when_kommo_setting_enabled(monkeypatch):
     from app.integrations.kommo import jobs
 
-    mock_db = MagicMock()
-    mock_db.get_settings = AsyncMock(return_value={"ai_enabled": True, "kommo_strip_emoji": True})
-    mock_db.fetch_one = AsyncMock(return_value={"conversation_state": "active"})
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(jobs, "db", mock_db)
+    mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "strip"})
     monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
     monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
     monkeypatch.setattr(
@@ -587,14 +666,10 @@ async def test_ready_job_formats_and_strips_emoji_when_kommo_setting_enabled(mon
 
 
 @pytest.mark.asyncio
-async def test_ready_job_catalog_reply_includes_attachment_metadata(monkeypatch):
+async def test_ready_job_catalog_payload_never_adds_attachment_metadata(monkeypatch):
     from app.integrations.kommo import jobs
 
-    mock_db = MagicMock()
-    mock_db.get_settings = AsyncMock(return_value={"ai_enabled": True})
-    mock_db.fetch_one = AsyncMock(return_value={"conversation_state": "active"})
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(jobs, "db", mock_db)
+    mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"})
     monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
     monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
     monkeypatch.setattr(
@@ -607,7 +682,7 @@ async def test_ready_job_catalog_reply_includes_attachment_metadata(monkeypatch)
         "resolve_customer_from_kommo_job",
         AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
     )
-    reply = "¡Hola Jose! Claro, aquí tienes el catálogo completo de Zona Pink 💗"
+    reply = "Tenemos pijamas, sets y lencería. ¿Qué te gustaría ver primero?"
     monkeypatch.setattr(
         jobs,
         "generate_response",
@@ -628,12 +703,11 @@ async def test_ready_job_catalog_reply_includes_attachment_metadata(monkeypatch)
     })
 
     assert client.continue_salesbot.await_args.kwargs == {
-        "data": {"status": "success", "message": reply, "attachment_type": "catalog_pdf"},
+        "data": {"status": "success", "message": reply},
     }
     continuation_payload = json.loads(mock_db.execute.await_args_list[0].args[1]["continuation_payload"])
-    assert continuation_payload == {
-        "data": {"status": "success", "message": reply, "attachment_type": "catalog_pdf"},
-    }
+    assert continuation_payload == {"data": {"status": "success", "message": reply}}
+    assert "attachment_type" not in continuation_payload["data"]
 
 
 @pytest.mark.asyncio
@@ -668,6 +742,7 @@ def test_continuation_prepared_log_is_structural_only(caplog):
     assert "emoji_present=False" in caplog.text
     assert "replacement_char_present=False" in caplog.text
     assert "literal_question_mark_present=False" in caplog.text
+    assert "kommo_emoji_mode=preserve" in caplog.text
     assert "kommo_strip_emoji_applied=False" in caplog.text
     assert "handler_count" not in caplog.text
     assert "status=success" in caplog.text

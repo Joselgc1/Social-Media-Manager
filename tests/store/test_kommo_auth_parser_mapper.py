@@ -329,9 +329,9 @@ def test_text_button_and_image_response_mapping():
     assert "Hola, aqui tienes opciones" in output.customer_text
 
 
-def test_catalog_pdf_response_uses_one_message_without_public_url():
+def test_catalog_pdf_payload_is_ignored_for_kommo_when_text_exists():
     reply = (
-        "¡Hola Jose! Claro, aquí tienes el catálogo completo de Zona Pink 💗\n"
+        "Tenemos pijamas, sets y lencería con encaje.\n"
         "¿Qué te interesa más: pijamas, sets o lencería con encaje?"
     )
     output = map_ai_response_to_salesbot({
@@ -340,12 +340,10 @@ def test_catalog_pdf_response_uses_one_message_without_public_url():
     })
 
     assert output.customer_text == reply
-    assert "https://store.example/static/catalog/catalog.pdf" not in output.customer_text
     assert "Catalogo" not in output.customer_text
-    assert output.customer_text.count("catálogo") == 1
 
 
-def test_catalog_pdf_response_falls_back_to_caption_without_url():
+def test_catalog_pdf_payload_without_text_discards_for_kommo():
     output = map_ai_response_to_salesbot({
         "text": "",
         "catalog_pdf": {
@@ -354,8 +352,8 @@ def test_catalog_pdf_response_falls_back_to_caption_without_url():
         },
     })
 
-    assert output.customer_text == "Aquí tienes nuestro catálogo"
-    assert "https://store.example/static/catalog/catalog.pdf" not in output.customer_text
+    assert output.discarded is True
+    assert output.customer_text is None
 
 
 def test_plain_ai_text_maps_to_salesbot_message():

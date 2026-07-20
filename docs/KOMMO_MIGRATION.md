@@ -123,15 +123,7 @@ KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
 
 ## Database Migration
 
-Run migrations manually in Supabase SQL Editor:
-
-1. `store/migrations/001_schema.sql` for fresh databases.
-2. `store/migrations/002_kommo_integration.sql` for Kommo tables and indexes.
-3. `store/migrations/003_kommo_hardening.sql` for callback claim storage, continuation tracking, `delivery_unknown`, and lead-safe contact mappings.
-
-`002_kommo_integration.sql` adds `customer_channel_mappings` and `kommo_message_jobs` without changing existing customer, order, conversation, usage, or broadcast rows. It also adds indexes that keep one pending debounce job per Kommo conversation and one active Salesbot job per conversation.
-
-`003_kommo_hardening.sql` is non-destructive. It drops the old contact-only unique index so one Kommo contact can have multiple lead mappings, expands job statuses, and adds JSONB fields for the last Salesbot callback/continuation metadata.
+Run `store/migrations/001_schema.sql` manually in Supabase SQL Editor. The consolidated schema includes `customer_channel_mappings`, `kommo_message_jobs`, `kommo_message_receipts`, callback claim storage, continuation tracking, `delivery_unknown`, assistant-history idempotency, and lead-safe contact mappings.
 
 ## Widget Build
 
@@ -208,7 +200,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ## Kommo Mode Activation
 
-1. Run `002_kommo_integration.sql` and `003_kommo_hardening.sql`.
+1. Run the consolidated `store/migrations/001_schema.sql`.
 2. Upload the widget.
 3. Create and test the Salesbot.
 4. Register the general webhook.
@@ -221,8 +213,6 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 ```text
 [ ] Store Railway root directory is store/
 [ ] 001_schema.sql has already been run
-[ ] 002_kommo_integration.sql has been run once for this store DB
-[ ] 003_kommo_hardening.sql has been run once for this store DB
 [ ] CHANNEL_BACKEND=kommo is set in the store environment
 [ ] All required KOMMO_* variables are set
 [ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL
@@ -256,6 +246,8 @@ Set the lead `AI Mode` field to `Human` before replying manually. The app syncs 
 
 Set `AI Mode` back to `AI Active`. The next inbound customer message may be handled by AI. The app does not automatically send a reply merely because the field changed.
 
+If you reactivate from the store dashboard instead, the backend first sets the Kommo lead `AI Mode` to `AI Active`, re-reads the lead, verifies the enum, and only then sets local `conversation_state` to `active` and clears local conversation history. If Kommo cannot confirm the update, single-customer reactivation returns `502` and the customer stays locally escalated. Bulk reactivation reports each customer independently as `activated`, `local_only`, or `failed`.
+
 ## Race-Condition Test
 
 During a slow AI generation, switch `AI Mode` to `Human`. The job rechecks state before delivery and discards non-escalation AI output if the lead is no longer active.
@@ -273,7 +265,11 @@ The existing `escalate_to_human` tool now also attempts to:
 
 ## Rich-Media Limitations
 
-The first release is text-first. Product images become caption plus public image URL. Catalog PDFs become text plus the public `/static/catalog/catalog.pdf` URL. Unsupported buttons degrade to numbered text choices.
+The first release is text-first. Product images become caption plus public image URL when the Kommo channel cannot carry native rich media. Catalog PDF delivery is intentionally not offered through Kommo: `send_catalog_pdf` is excluded from Kommo tool availability, and catalog requests are answered as normal text from the loaded catalog. Unsupported buttons degrade to numbered text choices.
+
+Kommo Salesbot continuations are data-only payloads shaped as `{"data":{"status":"success","message":"..."}}` or `{"data":{"status":"fail","message":""}}`. They do not include `execute_handlers`, `attachment_type`, or public catalog PDF URLs.
+
+Emoji and markdown formatting are normalized before Kommo continuation. Per-channel settings `kommo_emoji_mode_whatsapp` and `kommo_emoji_mode_instagram` accept `preserve`, `safe`, or `strip`; the default is `safe`. The legacy `kommo_strip_emoji=true` setting still forces stripping.
 
 ## Payment-Image Limitations
 

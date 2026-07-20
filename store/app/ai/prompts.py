@@ -46,6 +46,7 @@ def build_system_prompt(
     accepted_exchange_rate: str | None = None,
     order_discount_percent: float | int | str | None = None,
     order_discount_threshold_usd: float | int | str | None = None,
+    catalog_pdf_supported: bool | None = None,
 ) -> str:
     """
     Assemble the final system prompt by injecting the live product catalog,
@@ -70,7 +71,7 @@ def build_system_prompt(
     )
 
     # Append channel-specific instructions
-    channel_note = _build_channel_context(channel)
+    channel_note = _build_channel_context(channel, catalog_pdf_supported=catalog_pdf_supported)
     if channel_note:
         prompt += f"\n\n# Canal actual\n\n{channel_note}"
 
@@ -132,14 +133,25 @@ def _build_order_discount_block(
     )
 
 
-def _build_channel_context(channel: str) -> str:
+def _build_channel_context(channel: str, catalog_pdf_supported: bool | None = None) -> str:
     """Return channel-specific instructions for the AI."""
+    pdf_supported = channel == "whatsapp" if catalog_pdf_supported is None else catalog_pdf_supported
+    pdf_note = (
+        "Si el cliente pide el catálogo completo, puedes usar send_catalog_pdf para enviar el PDF."
+        if pdf_supported
+        else (
+            "No puedes enviar ni prometer un PDF del catálogo en este canal. "
+            "Si el cliente pide catálogo, responde en texto con las categorías disponibles, "
+            "recomienda opciones relevantes si aplica y haz una pregunta útil para continuar."
+        )
+    )
     if channel == "whatsapp":
         return (
             "Estás hablando por WhatsApp. "
             "Puedes usar send_interactive_buttons para mostrar opciones con botones. "
             "Úsalos solo cuando el cliente todavía no haya escogido una opción por texto. "
-            "Los mensajes pueden ser más largos que en Instagram."
+            "Los mensajes pueden ser más largos que en Instagram. "
+            f"{pdf_note}"
         )
     elif channel == "instagram":
         return (
@@ -148,7 +160,8 @@ def _build_channel_context(channel: str) -> str:
             "se convertirá automáticamente a Quick Replies). "
             "Mantén los mensajes más cortos (máximo 1000 bytes). "
             "NO puedes enviar mensajes proactivos: solo puedes responder dentro de "
-            "las 24 horas después del último mensaje del cliente."
+            "las 24 horas después del último mensaje del cliente. "
+            f"{pdf_note}"
         )
     return ""
 

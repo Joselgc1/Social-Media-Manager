@@ -13,12 +13,13 @@ from pydantic import BaseModel
 
 from app import db
 from app.admin.auth import require_admin
+from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
 from app.admin.telegram_bot import setup_telegram_webhook
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
-from app.crm import conversations, orders
+from app.crm import orders
 from app.crm import customers as customer_crm
 from app.crm.customers import add_tags, normalize_tags, remove_tag
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
@@ -63,6 +64,7 @@ class CustomerUpdate(BaseModel):
 
 VALID_CUSTOMER_CHANNELS = {"whatsapp", "instagram"}
 VALID_CUSTOMER_STATES = {"active", "escalated", "blocked"}
+VALID_KOMMO_EMOJI_MODES = {"preserve", "safe", "strip"}
 
 
 def _coerce_setting_bool(value) -> bool:
@@ -146,6 +148,12 @@ def _validate_setting_value(key: str, value, current_settings: dict):
 
     if key in ("auto_fallback", "ai_enabled", "escalation_telegram_enabled", "kommo_strip_emoji"):
         return _coerce_setting_bool(value)
+
+    if key in ("kommo_emoji_mode_whatsapp", "kommo_emoji_mode_instagram"):
+        mode = str(value).strip().lower()
+        if mode not in VALID_KOMMO_EMOJI_MODES:
+            raise HTTPException(status_code=400, detail="Kommo emoji mode must be preserve, safe, or strip.")
+        return mode
 
     if key == "catalog_refresh_minutes":
         minutes = int(value)
@@ -596,39 +604,50 @@ async def list_customers(tag: str | None = None, limit: int = 200):
 async def resolve_customer(customer_id: str):
     """Resolve an escalated customer back to active (AI resumes)."""
     row = await db.fetch_one(
-        "SELECT id, display_name FROM customers WHERE id::text = :cid AND conversation_state = 'escalated'",
+        """
+        SELECT id, display_name, channel, platform_id, conversation_state
+        FROM customers
+        WHERE id::text = :cid AND conversation_state = 'escalated'
+        """,
         {"cid": customer_id},
     )
     if not row:
         raise HTTPException(status_code=404, detail="Customer not found or not escalated")
 
-    await conversations.clear_history(str(row["id"]))
-    await db.execute(
-        "UPDATE customers SET conversation_state = 'active' WHERE id = :id",
-        {"id": row["id"]},
-    )
-    return {"status": "resolved", "customer_id": str(row["id"])}
+    try:
+        result = await activate_customer_for_admin(dict(row))
+    except ManualActivationError as e:
+        raise HTTPException(status_code=502, detail=e.safe_detail) from e
+
+    return {"status": "resolved", "customer_id": result.customer_id, "activation_status": result.status}
 
 
 @router.post("/customers/resolve-all")
 async def resolve_all_customers():
     """Resolve all escalated customers back to active."""
-    result = await db.fetch_one(
-        "SELECT COUNT(*) as cnt FROM customers WHERE conversation_state = 'escalated'"
-    )
-    count = result["cnt"] if result else 0
-
-    if count == 0:
-        return {"status": "ok", "resolved": 0}
-
     rows = await db.fetch_all(
-        "SELECT id FROM customers WHERE conversation_state = 'escalated'"
+        """
+        SELECT id, display_name, channel, platform_id, conversation_state
+        FROM customers
+        WHERE conversation_state = 'escalated'
+        """
     )
-    await conversations.clear_history_for_customers([str(row["id"]) for row in rows])
-    await db.execute(
-        "UPDATE customers SET conversation_state = 'active' WHERE conversation_state = 'escalated'"
-    )
-    return {"status": "resolved", "resolved": count}
+    if not rows:
+        return {"status": "ok", "resolved": 0, "failed": 0, "results": []}
+
+    results = []
+    for row in rows:
+        customer_id = str(row["id"])
+        try:
+            result = await activate_customer_for_admin(dict(row))
+            results.append({"customer_id": result.customer_id, "status": result.status})
+        except ManualActivationError as e:
+            results.append({"customer_id": customer_id, "status": "failed", "detail": e.safe_detail})
+
+    resolved = sum(1 for result in results if result["status"] in {"activated", "local_only"})
+    failed = sum(1 for result in results if result["status"] == "failed")
+    status = "resolved" if failed == 0 else "partial" if resolved else "failed"
+    return {"status": status, "resolved": resolved, "failed": failed, "results": results}
 
 
 class TagsPayload(BaseModel):
@@ -758,7 +777,11 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
         return {"status": "unchanged", "customer": dict(existing) if existing else None}
 
     if updates.get("conversation_state") == "active" and row["conversation_state"] != "active":
-        await conversations.clear_history(str(row["id"]))
+        try:
+            result = await activate_customer_for_admin(dict(row), channel=updates.get("channel"))
+        except ManualActivationError as e:
+            raise HTTPException(status_code=502, detail=e.safe_detail) from e
+        return {"status": "updated", "customer": result.customer, "activation_status": result.status}
 
     updated = await customer_crm.update_customer(
         customer_id=str(row["id"]),
@@ -840,10 +863,6 @@ async def generate_catalog_pdf_endpoint():
         raise HTTPException(status_code=400, detail="Catalog is empty. Check Google Sheets connection.")
 
     generate_catalog_pdf(catalog)
-    if get_config().channel_backend == "kommo":
-        from app.integrations.kommo.files import sync_catalog_pdf_to_kommo
-
-        await sync_catalog_pdf_to_kommo(PDF_PATH)
     meta = get_pdf_metadata()
 
     return {

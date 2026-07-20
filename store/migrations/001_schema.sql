@@ -1,9 +1,17 @@
 -- Full store schema
--- Consolidated base schema for fresh installs (includes launch hardening changes)
+-- Consolidated schema for fresh installs, including Kommo integration tables and hardening.
 -- Run this against your Supabase PostgreSQL instance
 
 -- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================
 -- Customers
@@ -120,12 +128,10 @@ INSERT INTO settings (key, value) VALUES
     ('daily_analytics_minute',     '0'),
     ('accepted_exchange_rate',     '""'),
     ('kommo_strip_emoji',          'false'),
-    ('kommo_catalog_file_uuid',     '""'),
-    ('kommo_catalog_version_uuid',  '""'),
-    ('kommo_catalog_drive_url',     '""'),
-    ('kommo_catalog_pdf_sha256',    '""'),
-    ('kommo_catalog_synced_at',     '""'),
-    ('payment_methods',            '[]');
+    ('kommo_emoji_mode_whatsapp',  '"safe"'),
+    ('kommo_emoji_mode_instagram', '"safe"'),
+    ('payment_methods',            '[]')
+ON CONFLICT (key) DO NOTHING;
 
 -- ============================================================
 -- Usage tracking (for cost monitoring)
@@ -185,3 +191,198 @@ CREATE TABLE IF NOT EXISTS product_analytics (
 );
 
 CREATE INDEX IF NOT EXISTS idx_product_analytics_date ON product_analytics(date DESC);
+
+-- ============================================================
+-- Kommo customer/channel mappings
+-- ============================================================
+CREATE TABLE IF NOT EXISTS customer_channel_mappings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    provider VARCHAR NOT NULL,
+    channel VARCHAR NOT NULL,
+    external_contact_id VARCHAR,
+    external_lead_id VARCHAR,
+    external_chat_id VARCHAR,
+    external_talk_id VARCHAR,
+    external_origin VARCHAR,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT customer_channel_mappings_any_external_id CHECK (
+        external_contact_id IS NOT NULL
+        OR external_lead_id IS NOT NULL
+        OR external_chat_id IS NOT NULL
+        OR external_talk_id IS NOT NULL
+    )
+);
+
+DROP INDEX IF EXISTS uq_customer_channel_mappings_contact;
+CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_contact
+    ON customer_channel_mappings(provider, channel, external_contact_id, updated_at DESC)
+    WHERE external_contact_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_lead
+    ON customer_channel_mappings(provider, channel, external_lead_id)
+    WHERE external_lead_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_chat
+    ON customer_channel_mappings(provider, channel, external_chat_id)
+    WHERE external_chat_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_talk
+    ON customer_channel_mappings(provider, channel, external_talk_id)
+    WHERE external_talk_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_customer
+    ON customer_channel_mappings(customer_id, provider, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_lookup
+    ON customer_channel_mappings(provider, channel, updated_at DESC);
+
+DROP TRIGGER IF EXISTS trg_customer_channel_mappings_updated_at ON customer_channel_mappings;
+CREATE TRIGGER trg_customer_channel_mappings_updated_at
+    BEFORE UPDATE ON customer_channel_mappings
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ============================================================
+-- Kommo durable message jobs
+-- ============================================================
+CREATE TABLE IF NOT EXISTS kommo_message_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    correlation_id TEXT NOT NULL,
+    external_message_id TEXT,
+    lead_id TEXT,
+    contact_id TEXT,
+    chat_id TEXT,
+    talk_id TEXT,
+    origin TEXT,
+    channel TEXT,
+    combined_message TEXT NOT NULL,
+    media_url TEXT,
+    return_url TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    buffer_expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    salesbot_launched_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processing_started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    callback_claims JSONB,
+    salesbot_token_jti TEXT,
+    salesbot_account_id TEXT,
+    salesbot_user_id TEXT,
+    salesbot_client_uuid TEXT,
+    continuation_payload JSONB,
+    continuation_response JSONB,
+    assistant_message_persisted_at TIMESTAMPTZ
+);
+
+ALTER TABLE kommo_message_jobs
+    ADD COLUMN IF NOT EXISTS callback_claims JSONB,
+    ADD COLUMN IF NOT EXISTS salesbot_token_jti TEXT,
+    ADD COLUMN IF NOT EXISTS salesbot_account_id TEXT,
+    ADD COLUMN IF NOT EXISTS salesbot_user_id TEXT,
+    ADD COLUMN IF NOT EXISTS salesbot_client_uuid TEXT,
+    ADD COLUMN IF NOT EXISTS continuation_payload JSONB,
+    ADD COLUMN IF NOT EXISTS continuation_response JSONB,
+    ADD COLUMN IF NOT EXISTS assistant_message_persisted_at TIMESTAMPTZ;
+
+ALTER TABLE kommo_message_jobs
+    DROP CONSTRAINT IF EXISTS kommo_message_jobs_status_check;
+
+ALTER TABLE kommo_message_jobs
+    ADD CONSTRAINT kommo_message_jobs_status_check CHECK (
+        status IN (
+            'pending',
+            'prepared',
+            'waiting_for_salesbot',
+            'ready',
+            'processing',
+            'continuing',
+            'sent',
+            'discarded',
+            'delivery_unknown',
+            'failed'
+        )
+    );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_external_message
+    ON kommo_message_jobs(external_message_id)
+    WHERE external_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_status_due
+    ON kommo_message_jobs(status, buffer_expires_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_correlation
+    ON kommo_message_jobs(correlation_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_lead_status
+    ON kommo_message_jobs(lead_id, status, updated_at DESC)
+    WHERE lead_id IS NOT NULL;
+DROP INDEX IF EXISTS uq_kommo_message_jobs_active_salesbot;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_active_salesbot
+    ON kommo_message_jobs(correlation_id)
+    WHERE status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing');
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_pending_correlation
+    ON kommo_message_jobs(correlation_id)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_delivery_unknown
+    ON kommo_message_jobs(status, updated_at DESC)
+    WHERE status = 'delivery_unknown';
+CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_salesbot_token_jti
+    ON kommo_message_jobs(salesbot_token_jti)
+    WHERE salesbot_token_jti IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_kommo_message_jobs_updated_at ON kommo_message_jobs;
+CREATE TRIGGER trg_kommo_message_jobs_updated_at
+    BEFORE UPDATE ON kommo_message_jobs
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+COMMENT ON TABLE kommo_message_jobs IS 'Durable Kommo inbound jobs. Failed jobs are safe to retry only after confirming no sent job exists for the same external_message_id/correlation_id.';
+COMMENT ON COLUMN kommo_message_jobs.continuation_payload IS 'Last Salesbot continuation payload attempted for this job.';
+COMMENT ON COLUMN kommo_message_jobs.continuation_response IS 'Sanitized Salesbot continuation response when Kommo accepted the request.';
+COMMENT ON COLUMN kommo_message_jobs.assistant_message_persisted_at IS 'Set after the delivered Kommo continuation has been persisted as assistant conversation history. Used to make retries idempotent.';
+
+-- ============================================================
+-- Kommo inbound message receipts
+-- ============================================================
+CREATE TABLE IF NOT EXISTS kommo_message_receipts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    external_message_id TEXT NOT NULL,
+    job_id UUID REFERENCES kommo_message_jobs(id) ON DELETE SET NULL,
+    correlation_id TEXT NOT NULL,
+    lead_id TEXT,
+    contact_id TEXT,
+    chat_id TEXT,
+    talk_id TEXT,
+    origin TEXT,
+    channel TEXT,
+    receipt_status TEXT NOT NULL DEFAULT 'created',
+    received_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT kommo_message_receipts_status_check CHECK (receipt_status IN ('created', 'merged'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_receipts_external_message
+    ON kommo_message_receipts(external_message_id);
+CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_job
+    ON kommo_message_receipts(job_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_correlation
+    ON kommo_message_receipts(correlation_id, created_at DESC);
+
+INSERT INTO kommo_message_receipts (
+    external_message_id, job_id, correlation_id, lead_id, contact_id, chat_id,
+    talk_id, origin, channel, receipt_status, received_at, created_at
+)
+SELECT
+    external_message_id,
+    id,
+    correlation_id,
+    lead_id,
+    contact_id,
+    chat_id,
+    talk_id,
+    origin,
+    channel,
+    CASE WHEN status = 'discarded' AND COALESCE(last_error, '') LIKE 'Merged into %' THEN 'merged' ELSE 'created' END,
+    created_at,
+    created_at
+FROM kommo_message_jobs
+WHERE external_message_id IS NOT NULL
+ON CONFLICT (external_message_id) DO NOTHING;
+
+COMMENT ON TABLE kommo_message_receipts IS 'Durable Kommo inbound message receipts keyed by external_message_id. Rapid messages can merge into one buffered job without creating fake discarded jobs.';
+COMMENT ON COLUMN kommo_message_receipts.receipt_status IS 'created when the receipt opened a new job, merged when it was appended to an existing buffered job.';

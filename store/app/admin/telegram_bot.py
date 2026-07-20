@@ -28,7 +28,7 @@ from app import db
 from app.admin.notify import notify_owner
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs
 from app.analytics import get_conversion_funnel, get_response_time_stats, get_popular_products
-from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf, get_pdf_metadata
+from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
 from app.crm.customers import set_conversation_state, add_tags, remove_tag
 from app.crm import conversations, orders
@@ -555,10 +555,6 @@ async def _cmd_generate_catalog_pdf() -> str:
 
     try:
         generate_catalog_pdf(catalog)
-        if get_config().channel_backend == "kommo":
-            from app.integrations.kommo.files import sync_catalog_pdf_to_kommo
-
-            await sync_catalog_pdf_to_kommo(PDF_PATH)
         meta = get_pdf_metadata()
         config = get_config()
         pdf_url = f"{config.app_base_url}/static/catalog/catalog.pdf"

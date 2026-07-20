@@ -84,7 +84,7 @@ Notes:
 - At least one LLM key is required. `OPENAI_API_KEY` alone is enough.
 - Google Sheets credentials and sheet ID must be valid if you want the catalog to load correctly.
 - Meta, Instagram, and Telegram values can stay empty for the local demo.
-- Kommo values can stay empty for the local test UI demo. If you set `CHANNEL_BACKEND=kommo`, you need real Kommo credentials, `002_kommo_integration.sql`, `003_kommo_hardening.sql`, a Salesbot widget, and public HTTPS webhooks.
+- Kommo values can stay empty for the local test UI demo. If you set `CHANNEL_BACKEND=kommo`, you need real Kommo credentials, the consolidated `001_schema.sql`, a Salesbot widget, and public HTTPS webhooks.
 
 Optional store env vars you may add manually if needed:
 
@@ -136,8 +136,6 @@ unless you are absolutely sure Pydantic will parse them the way you expect.
 Run the consolidated store schema:
 
 1. `store/migrations/001_schema.sql`
-2. `store/migrations/002_kommo_integration.sql` only if you will demo or test `CHANNEL_BACKEND=kommo`
-3. `store/migrations/003_kommo_hardening.sql` only if you will demo or test `CHANNEL_BACKEND=kommo`
 
 After that, verify the `settings` table contains at least:
 
@@ -151,6 +149,8 @@ After that, verify the `settings` table contains at least:
 - `max_conversation_history`
 - `ai_enabled`
 - `catalog_pdf_interval_hours`
+- `kommo_emoji_mode_whatsapp`
+- `kommo_emoji_mode_instagram`
 - `payment_methods`
 - `accepted_exchange_rate`
 

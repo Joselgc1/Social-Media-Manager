@@ -683,15 +683,30 @@ function promptAddTag(customerId) {
 
 async function resolveCustomer(id) {
   if (!confirm('¿Resolver esta escalación? El AI volverá a responder a este cliente.')) return;
-  await apiFetch(API + '/customers/' + id + '/resolve', {method: 'POST'});
+  const resp = await apiFetch(API + '/customers/' + id + '/resolve', {method: 'POST'});
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    toast(data.detail || 'Error resolviendo escalación', '#dc2626');
+    return;
+  }
   toast('Escalación resuelta');
   loadCustomers();
 }
 
 async function resolveAllCustomers() {
   if (!confirm('¿Resolver TODAS las escalaciones? El AI volverá a responder a todos los clientes.')) return;
-  const resp = await apiFetch(API + '/customers/resolve-all', {method: 'POST'}).then(r => r.json());
-  toast(`${resp.resolved} escalación(es) resuelta(s)`);
+  const response = await apiFetch(API + '/customers/resolve-all', {method: 'POST'});
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    toast(data.detail || 'Error resolviendo escalaciones', '#dc2626');
+    return;
+  }
+  const resp = await response.json();
+  if (resp.failed) {
+    toast(`${resp.resolved} resuelta(s), ${resp.failed} fallida(s)`, '#d97706');
+  } else {
+    toast(`${resp.resolved} escalación(es) resuelta(s)`);
+  }
   loadCustomers();
 }
 

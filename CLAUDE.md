@@ -147,14 +147,14 @@ In Kommo mode, Kommo sends general webhooks to `store/app/webhooks/kommo.py`; th
 - `store/app/catalog/sheets.py` — Google Sheets product catalog with in-memory cache and periodic refresh
 - `store/app/broadcast/` — Campaign system: `api.py` (CRUD + reset endpoints), `sender.py` (WhatsApp template messages with crash recovery), `scheduler.py` (APScheduler jobs for scheduled sends + catalog refresh)
 - `store/app/catalog/pdf_generator.py` — Generates a branded PDF product catalog from the Google Sheets data using fpdf2
-- `store/app/admin/` — Settings API, web dashboard with dark mode (HTML served from `dashboard.py`, CSS in `store/app/static/css/dashboard.css`, JS in `store/app/static/js/dashboard.js`), Telegram bot (`telegram_bot.py` with 22 commands), notification helpers (`notify.py`), analytics API
+- `store/app/admin/` — Settings API, web dashboard with dark mode (HTML served from `dashboard.py`, CSS in `store/app/static/css/dashboard.css`, JS in `store/app/static/js/dashboard.js`), Telegram bot (`telegram_bot.py`), notification helpers (`notify.py`), analytics API
 - `store/app/analytics.py` — Tracks response times, fallback usage, conversion funnels, product popularity
 - `store/app/db.py` — Async DB wrapper using `databases` library with version-aware settings cache invalidation
 - `store/app/test_endpoint.py` — `/test/ui` chat UI + `/test/chat` API for local testing without Meta APIs
 
 **Background scheduler** (`store/app/broadcast/scheduler.py`): 5 business jobs — catalog refresh, broadcast execution, daily analytics aggregation, token usage reminders, catalog PDF auto-refresh — plus an internal sync job that keeps APScheduler timings aligned with DB settings from `master/`. In Kommo mode it also runs durable Kommo job processing and stale-job recovery.
 
-**Database:** Supabase PostgreSQL. Fresh installs use the consolidated schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor). Kommo mode also requires `store/migrations/002_kommo_integration.sql` and `store/migrations/003_kommo_hardening.sql`. Tables: customers, conversations, orders, broadcasts, settings, usage_log, daily_analytics, product_analytics, customer_channel_mappings, kommo_message_jobs.
+**Database:** Supabase PostgreSQL. Fresh installs use the consolidated schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor). This single store schema includes the Kommo tables and hardening. Tables: customers, conversations, orders, broadcasts, settings, usage_log, daily_analytics, product_analytics, customer_channel_mappings, kommo_message_jobs, kommo_message_receipts.
 
 **Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Multi-store fields: `admin_password` (protects store dashboard), `system_prompt_override` (replaces prompt template file), and `llm_managed_externally` (when True, locks LLM controls in store dashboard/Telegram/API — managed from master instead). Kommo env vars are exactly: `CHANNEL_BACKEND`, `KOMMO_SUBDOMAIN`, `KOMMO_ACCESS_TOKEN`, `KOMMO_INTEGRATION_ID`, `KOMMO_INTEGRATION_SECRET`, `KOMMO_SALESBOT_ID`, `KOMMO_WEBHOOK_SECRET`, `KOMMO_AI_MODE_FIELD_ID`, `KOMMO_AI_ACTIVE_ENUM_ID`, `KOMMO_AI_HUMAN_ENUM_ID`, `KOMMO_AI_PAUSED_ENUM_ID`, `KOMMO_DEFAULT_RESPONSIBLE_USER_ID`.
 
@@ -200,19 +200,20 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - Dashboard-managed AI runtime settings (provider, model, temperature, fallback, ai_enabled) are stored in the store DB `settings` table. Scheduler settings (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`) live there too. The store app uses version-aware cache invalidation, and `master/` reads/writes those rows through `GET/PUT /api/stores/{id}/settings`, so AI settings stay in sync after refresh or save and scheduler timings are applied automatically by the store within about a minute.
 - Store payment methods are persisted separately in the same `settings` table under `payment_methods`. They are edited only from the store dashboard via `GET/PUT /admin/settings/payment-methods`, not from `master/`.
 - The store-only `accepted_exchange_rate` setting also lives in the store `settings` table and is edited only from the store dashboard. Eva uses it to answer rate questions like `¿a qué tasa recibes?`.
-- Tool calls are provider-agnostic: defined once in `store/app/ai/functions.py`, converted per-provider. Adding a new tool means adding it there and handling it in `store/app/ai/engine.py`. Current tools: `check_inventory`, `tag_customer`, `create_order`, `update_payment_status`, `escalate_to_human`, `send_interactive_buttons`, `send_catalog_pdf`.
+- Tool calls are provider-agnostic: defined once in `store/app/ai/functions.py`, converted per-provider. Adding a new tool means adding it there and handling it in `store/app/ai/engine.py`. Current tools: `check_inventory`, `tag_customer`, `create_order`, `update_payment_status`, `escalate_to_human`, `send_interactive_buttons`, `send_catalog_pdf`. `send_catalog_pdf` is only available for direct Meta WhatsApp; Kommo and Instagram catalog requests use normal text responses.
 - Rapid inbound messages are buffered briefly in `store/app/webhooks/inbound_buffer.py` and merged into a single AI turn per customer/channel. This reduces double replies when the customer sends two messages back-to-back.
 - **Tool call loop** (`store/app/ai/engine.py`): `MAX_TOOL_ROUNDS = 6`. The loop processes **one tool call per iteration** — if the LLM returns multiple tool calls in one response, only the first is executed and the while loop re-evaluates afterward. This prevents stale history from being passed to subsequent `continue_after_tool` calls. On the final round (`rounds == MAX_TOOL_ROUNDS`), tools are withheld (`tools=None`) so the model is forced to produce a text response instead of another tool call. If `send_interactive_buttons` was called and the model returned no text, the `body_text` of the interactive payload is used as the reply.
 - **Inventory privacy:** `_tool_check_inventory` returns `in_stock` (boolean) only — never the raw `stock` count. This prevents the LLM from revealing exact inventory levels to customers. System prompt rule 13 also explicitly prohibits outputting raw JSON, tool results, or technical metadata.
 - WhatsApp supports interactive buttons; Instagram uses quick replies. The engine returns an `interactive` dict that the channel sender interprets.
 - Global AI pause (`ai_enabled` setting) and per-customer escalation (`conversation_state = 'escalated'`) both suppress auto-replies. Messages are stored and the owner is notified via Telegram only once (first unanswered message), not on every subsequent message.
 - In Kommo mode, per-conversation automation source of truth is the Kommo lead `AI Mode` field. `AI Active` maps to local `active`; `Human` and `Paused` map to local `escalated`. Empty AI Mode must be initialized to `AI Active` successfully before automatic replies are sent. Never overwrite existing Human/Paused automatically.
+- Store-dashboard manual reactivation in Kommo mode must sync Kommo first: set lead `AI Mode` to `AI Active`, re-read and verify the enum, then set local `conversation_state='active'` and clear local history. Single-customer failures return sanitized `502`; resolve-all reports per-customer `activated`, `local_only`, or `failed`.
 - Kommo Salesbot callbacks include a JWT and `return_url`. Validate HS256 with `KOMMO_INTEGRATION_SECRET`, expiration, issuer/subdomain, and `client_uid`/`client_uuid` when present. Validate `return_url` strictly against `https://{KOMMO_SUBDOMAIN}.kommo.com` with no userinfo, IPs, localhost, deceptive suffixes, redirects, or unexpected ports before posting the Salesbot continuation.
 - Kommo jobs are durable in `kommo_message_jobs`. Do not depend only on `BackgroundTasks`, `asyncio.create_task`, or in-memory buffers. The in-process task may accelerate handling after DB commit, but PostgreSQL is the source of truth. Ready jobs should attempt a Salesbot continuation even on discard/error paths; `delivery_unknown` means a continuation was attempted but Kommo acceptance could not be confirmed and must be manually reconciled before retrying.
 - Customer shipping addresses are saved on the customer record after order creation (`last_shipping_address`, `last_shipping_city`, `last_shipping_method`). The AI offers to reuse the saved address for returning customers.
 - OpenAI newer models require `max_completion_tokens` instead of `max_tokens` (changed in `openai_provider.py`).
 - Dashboard dark mode uses Tailwind CDN with `darkMode: 'class'` config. The `tailwind.config` must be set after the CDN `<script>` loads (not before, or `tailwind` is undefined). Custom component dark styles (`.dark .card`, etc.) live in `store/app/static/css/dashboard.css`. The `dark` class is toggled on `<html>` via `toggleDarkMode()` in `store/app/static/js/dashboard.js`.
-- Store dashboard settings tab exposes the locally configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, fallback provider/model/auto-enable, dynamic payment methods, and AI pause. Most settings map to `PUT /admin/settings/{key}` calls; payment methods use `GET/PUT /admin/settings/payment-methods`. Scheduler timings are master-only.
+- Store dashboard settings tab exposes the locally configurable settings: LLM provider/model/temperature/max_tokens/conversation_history, fallback provider/model/auto-enable, dynamic payment methods, accepted exchange rate, catalog PDF generation/download, and AI pause. Most settings map to `PUT /admin/settings/{key}` calls; payment methods use `GET/PUT /admin/settings/payment-methods`. Scheduler timings are master-only.
 - Broadcast execution wraps the send loop in try/except — if it crashes after setting status to `'sending'`, it auto-sets status to `'failed'`. A `POST /{id}/reset` endpoint resets stuck broadcasts back to `'draft'`. The dashboard shows a "Resetear" button for broadcasts in `sending` or `failed` status.
 - In `CHANNEL_BACKEND=kommo`, direct WhatsApp broadcast delivery is rejected before marking the broadcast as sending. Use Kommo broadcasts or approved Kommo WhatsApp template flows. Meta-mode broadcast behavior is preserved.
 - The `databases` library returns record objects that support `[]` bracket access but not `.get()`. Use `record["key"]` with a conditional fallback, not `record.get("key", default)`.
@@ -244,13 +245,15 @@ Customers:      GET /admin/settings/customers, PUT /admin/settings/customers/{id
                 POST /admin/settings/customers/{id}/resolve, POST /admin/settings/customers/resolve-all
                 GET /admin/settings/customers/{id}/tags, POST /admin/settings/customers/{id}/tags
                 DELETE /admin/settings/customers/{id}/tags/{tag}
-Orders:         GET /admin/settings/orders, PUT /admin/settings/orders/{id}
-                DELETE /admin/settings/orders/{id}
+Orders:         GET /admin/settings/orders, GET /admin/settings/orders/{id}
+                PUT /admin/settings/orders/{id}, DELETE /admin/settings/orders/{id}
 Dashboard:      GET /admin/login, POST /admin/login, POST /admin/logout, GET /admin/dashboard
+                GET /admin/orders/{order_id}
 Broadcasts:     POST /admin/broadcasts/create, /preview, GET /list, POST /{id}/send, POST /{id}/reset
 Analytics:      GET /admin/analytics/conversion, /response-times, /popular-products, /daily
                 POST /admin/analytics/build-daily
 Testing:        GET /test/ui, POST /test/chat, GET /test/catalog
+                GET /test/history, DELETE /test/reset
 ```
 
 ### Master control plane (port 9000)
@@ -262,6 +265,7 @@ Stores:         GET/POST /api/stores/, GET/PUT/DELETE /api/stores/{id}
 Credentials:    GET/POST /api/stores/{id}/credentials, DELETE /api/stores/{id}/credentials/{key}
 Stats:          GET /api/stores/{id}/stats
 Runtime:        GET/PUT /api/stores/{id}/settings, GET /api/stores/{id}/llm-usage?days=N
+                GET/PUT /api/stores/{id}/llm-settings, GET /api/stores/{id}/conversations
                 GET /api/stores/llm-costs/aggregate?days=N
 Railway:        GET /api/stores/{id}/railway/status, POST /api/stores/{id}/deploy
 Audit:          GET /api/stores/audit/log

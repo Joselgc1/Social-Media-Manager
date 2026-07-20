@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from urllib.parse import urlparse
 
 from app.ai.safety import sanitize_customer_facing_text
@@ -13,12 +12,6 @@ _MAX_BUTTONS = 25
 
 def _clean_text(text: str | None) -> str:
     return sanitize_customer_facing_text(text or "").strip()
-
-
-def _clean_catalog_text(text: str | None) -> str:
-    cleaned = _clean_text(text)
-    cleaned = re.sub(r"\s*https://[^\s]+/static/catalog/catalog\.pdf\S*\s*", "\n", cleaned)
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _is_public_url(value: str | None) -> bool:
@@ -45,15 +38,6 @@ def _buttons_as_numbered_text(body_text: str, buttons: list[str]) -> str:
 
 def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
     customer_parts: list[str] = []
-
-    catalog_pdf = result.get("catalog_pdf") or {}
-    if catalog_pdf.get("type") == "catalog_pdf":
-        reply_text = _clean_catalog_text(result.get("text"))
-        catalog_caption = _clean_catalog_text(catalog_pdf.get("caption"))
-        customer_text = reply_text or catalog_caption
-        if not customer_text:
-            return NormalizedResponseOutput(discarded=True, reason="empty_response")
-        return NormalizedResponseOutput(customer_text=customer_text)
 
     interactive = result.get("interactive") or {}
     if interactive.get("type") == "interactive_buttons":

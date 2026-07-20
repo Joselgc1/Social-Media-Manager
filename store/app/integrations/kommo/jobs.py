@@ -628,8 +628,6 @@ async def _process_ready_job(job: dict) -> None:
             await _continue_and_discard_job(client, job, "empty_after_sanitization")
             return
         continuation_data = {"status": "success", "message": customer_text}
-        if (result.get("catalog_pdf") or {}).get("type") == "catalog_pdf":
-            continuation_data["attachment_type"] = "catalog_pdf"
         await _mark_job_continuing(job["id"], continuation_data)
         continuation_started = True
         _log_continuation_prepared(job["id"], continuation_data, message_diagnostics)
@@ -637,6 +635,7 @@ async def _process_ready_job(job: dict) -> None:
             job["return_url"],
             data=continuation_data,
         )
+        await _store_assistant_message_after_delivery(customer, job, result, customer_text)
         await _mark_job_sent(job["id"], response_payload)
     except KommoAPIError as e:
         logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
@@ -710,7 +709,7 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
         _log_continuation_prepared(
             job["id"],
             continuation_data,
-            build_kommo_message_diagnostics("", job.get("channel") or "whatsapp", False),
+            build_kommo_message_diagnostics("", job.get("channel") or "whatsapp", "preserve"),
         )
         response_payload = await client.continue_salesbot(
             job["return_url"],
@@ -769,7 +768,7 @@ def _log_continuation_prepared(
     message = str(continuation_data.get("message") or "")
     diagnostics = message_diagnostics or build_kommo_message_diagnostics(message, None, False)
     logger.info(
-        "Kommo continuation prepared: job_id=%s status=%s channel=%s message_present=%s message_length=%s newline_count=%s non_ascii_present=%s emoji_present=%s replacement_char_present=%s literal_question_mark_present=%s kommo_strip_emoji_applied=%s",
+        "Kommo continuation prepared: job_id=%s status=%s channel=%s message_present=%s message_length=%s newline_count=%s non_ascii_present=%s emoji_present=%s replacement_char_present=%s literal_question_mark_present=%s kommo_emoji_mode=%s kommo_strip_emoji_applied=%s",
         job_id,
         continuation_data.get("status"),
         diagnostics["channel"],
@@ -780,6 +779,7 @@ def _log_continuation_prepared(
         diagnostics["emoji_present"],
         diagnostics["replacement_char_present"],
         diagnostics["literal_question_mark_present"],
+        diagnostics["kommo_emoji_mode"],
         diagnostics["kommo_strip_emoji_applied"],
     )
 
@@ -809,7 +809,19 @@ async def _store_assistant_message_after_delivery(customer: dict, job: dict, res
     content = customer_text or result.get("text")
     if not content:
         return
-    try:
+    async with db.get_db().transaction():
+        existing = await db.fetch_one(
+            """
+            SELECT assistant_message_persisted_at
+            FROM kommo_message_jobs
+            WHERE id = :id
+            FOR UPDATE
+            """,
+            {"id": job["id"]},
+        )
+        if existing and existing["assistant_message_persisted_at"]:
+            logger.info("Kommo assistant history already persisted: job_id=%s", job["id"])
+            return
         await conversations.store_message(
             customer_id=customer["id"],
             role="assistant",
@@ -817,8 +829,17 @@ async def _store_assistant_message_after_delivery(customer: dict, job: dict, res
             channel=job.get("channel") or customer.get("channel") or "whatsapp",
             function_calls=result.get("function_calls"),
         )
-    except Exception as e:
-        logger.warning("Failed to persist delivered Kommo assistant message: %s", sanitize_job_error(e))
+        await db.execute(
+            """
+            UPDATE kommo_message_jobs
+            SET assistant_message_persisted_at = NOW(),
+                updated_at = NOW()
+            WHERE id = :id
+              AND assistant_message_persisted_at IS NULL
+            """,
+            {"id": job["id"]},
+        )
+    logger.info("Kommo assistant history persisted: job_id=%s", job["id"])
 
 
 def _status_after_continuation_error(error: KommoAPIError, continuation_started: bool) -> str:

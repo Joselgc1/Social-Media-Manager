@@ -25,9 +25,6 @@ cp store/.env.example store/.env
 # 3. Set up the database
 # Run this SQL file manually against your Supabase PostgreSQL instance:
 #   store/migrations/001_schema.sql
-# For Kommo mode also run:
-#   store/migrations/002_kommo_integration.sql
-#   store/migrations/003_kommo_hardening.sql
 
 # 4. Run locally
 cd store
@@ -101,6 +98,8 @@ Kommo mode:
 | POST   | `/admin/login`                                    | Create store admin session cookie               |
 | POST   | `/admin/logout`                                   | Clear store admin session cookie                |
 | GET    | `/admin/settings/`                                | View all settings                               |
+| GET    | `/admin/settings/payment-methods`                  | View store payment methods                      |
+| PUT    | `/admin/settings/payment-methods`                  | Update store payment methods                    |
 | GET    | `/admin/settings/providers`                       | List available LLM providers and models         |
 | GET    | `/admin/settings/kommo/status`                    | Safe Kommo configuration/job diagnostics         |
 | POST   | `/admin/settings/kommo/test`                      | Safe read-only Kommo API checks                  |
@@ -108,6 +107,7 @@ Kommo mode:
 | POST   | `/admin/settings/switch-provider`                 | Quick provider switch                           |
 | GET    | `/admin/settings/usage-summary`                   | Today's token usage and cost estimate           |
 | GET    | `/admin/settings/stats/conversations`             | Today's conversation and order stats            |
+| POST   | `/admin/settings/telegram/setup-webhook`           | Register Telegram webhook                       |
 | POST   | `/admin/settings/instagram/setup-ice-breakers`    | Configure Instagram Ice Breakers                |
 | POST   | `/admin/settings/instagram/subscribe-page`        | Subscribe FB Page to webhooks                   |
 | PUT    | `/admin/settings/ai_enabled`                      | Toggle AI on/off globally                       |
@@ -115,6 +115,7 @@ Kommo mode:
 | GET    | `/admin/settings/catalog/pdf-status`              | Check PDF status                                |
 | GET    | `/admin/settings/catalog/download-pdf`            | Download catalog PDF                            |
 | GET    | `/admin/settings/orders`                          | List recent orders                              |
+| GET    | `/admin/settings/orders/{id}`                     | Get order detail                                |
 | PUT    | `/admin/settings/orders/{id}`                     | Update order payment/shipping state             |
 | DELETE | `/admin/settings/orders/{id}`                     | Delete order                                    |
 | GET    | `/admin/settings/customers`                       | List customers                                  |
@@ -133,7 +134,7 @@ Kommo mode:
 curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=anthropic" \
   -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 
-# Switch to OpenAI GPT-4o-mini
+# Switch to OpenAI GPT-5.4 Nano
 curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=openai" \
   -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 
@@ -183,7 +184,8 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 
 - Text-first WhatsApp and Instagram DM handling through Kommo Salesbot.
 - Salesbot buttons when supported, otherwise numbered text choices.
-- Product images and catalog PDF links degraded to text plus public URLs.
+- Product images degrade to caption plus public image URL when rich media is not supported by the Kommo channel.
+- Catalog PDF delivery is not offered through Kommo; catalog requests are answered as normal text from the loaded catalog.
 - Durable Salesbot jobs track `delivery_unknown` when continuation delivery cannot be confirmed; inspect Kommo before manual retry.
 - Instagram public comments are handled by native Kommo comment automations that lead to a private DM; this app handles the resulting DM only.
 
@@ -221,7 +223,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 Open `/admin/login` in a browser, sign in with `ADMIN_PASSWORD`, and the app will set an HTTP-only session cookie before redirecting to `/admin/dashboard`. Five tabs:
 
 - **Resumen**: Stats cards, per-channel breakdown, LLM usage by provider, AI on/off toggle
-- **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once
+- **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once. In Kommo mode, manual reactivation first sets the Kommo lead `AI Mode` to `AI Active` and verifies it before clearing local history.
 - **Pedidos**: Sortable order table with status badges
 - **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset stuck broadcasts
 - **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, fallback settings, daily exchange rate, dynamic payment methods, and catalog PDF generation/download
@@ -237,12 +239,13 @@ These values are stored in the store database and can be changed without redeplo
 - `max_conversation_history`, `ai_enabled`
 - `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`
 - `token_reminder_hour`, `token_reminder_minute`, `daily_analytics_hour`, `daily_analytics_minute`
+- `kommo_emoji_mode_whatsapp`, `kommo_emoji_mode_instagram`, `kommo_strip_emoji`
 
 Store-only payment methods are persisted separately under `payment_methods` in the same `settings` table. They are edited only from the store dashboard through `GET/PUT /admin/settings/payment-methods`, and the bot uses the configured method names plus their stored instructions at checkout. Scheduler timings are edited only from the master dashboard.
 
 The store-only `accepted_exchange_rate` setting is also stored in the same `settings` table. It is edited only from the store dashboard and is used when customers ask things like `¿a qué tasa recibes?`.
 
-The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information. The Google Sheets catalog can be modeled as one row per size variant with `SKU`, `Parent SKU`, and a singular `Size` column; see [store/DEPLOYMENT.md](store/DEPLOYMENT.md) for the exact sheet format.
+The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information. The `send_catalog_pdf` AI tool is available only for direct Meta WhatsApp delivery; Kommo WhatsApp/Instagram and direct Instagram answer catalog requests with normal text. The Google Sheets catalog can be modeled as one row per size variant with `SKU`, `Parent SKU`, and a singular `Size` column; see [store/DEPLOYMENT.md](store/DEPLOYMENT.md) for the exact sheet format.
 
 If `LLM_MANAGED_EXTERNALLY=true` is enabled for a store, the store dashboard/API/Telegram commands stop allowing LLM-setting writes locally, but payment methods and other non-LLM store settings remain editable in the store dashboard.
 
