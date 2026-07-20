@@ -35,8 +35,26 @@ CREATE TABLE IF NOT EXISTS master_audit_log (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Latest normalized Venezuela exchange rates fetched centrally from DolarVZLA
+CREATE TABLE IF NOT EXISTS exchange_rates (
+    rate_key          TEXT PRIMARY KEY,
+    currency_code     TEXT NOT NULL,
+    market            TEXT NOT NULL,
+    rate              NUMERIC(18, 8) NOT NULL,
+    effective_at      TIMESTAMPTZ NOT NULL,
+    fetched_at        TIMESTAMPTZ NOT NULL,
+    previous_rate     NUMERIC(18, 8),
+    change_percentage NUMERIC(12, 6),
+    source            TEXT NOT NULL,
+    updated_at        TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(rate_key)
+);
+
 -- Index for faster credential lookups
 CREATE INDEX IF NOT EXISTS idx_store_credentials_store_id ON store_credentials(store_id);
 
 -- Index for audit log queries
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON master_audit_log(created_at DESC);
+
+-- Index for exchange-rate freshness checks
+CREATE INDEX IF NOT EXISTS idx_exchange_rates_fetched_at ON exchange_rates(fetched_at DESC);

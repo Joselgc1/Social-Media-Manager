@@ -6,6 +6,7 @@ Central registry for managing multiple store deployments.
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app import db
 from app.config import get_config
 from app.dashboard.router import router as dashboard_router
-from app.stores.api import cleanup_idle_pools
+from app.stores.api import cleanup_idle_pools, refresh_and_sync_exchange_rates
 from app.stores.api import router as stores_router
 from app.stores.health import check_all_stores
 from app.test_endpoint import router as test_router
@@ -46,6 +47,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
 
 _health_task: asyncio.Task | None = None
 _pool_cleanup_task: asyncio.Task | None = None
+_exchange_rate_task: asyncio.Task | None = None
 
 
 async def _health_check_loop():
@@ -70,11 +72,32 @@ async def _pool_cleanup_loop():
             logger.error(f"Pool cleanup error: {e}")
 
 
+async def _exchange_rate_refresh_loop():
+    """Refresh DolarVZLA rates centrally and sync normalized values to active stores."""
+    next_bcv_at = 0.0
+    next_usdt_at = 0.0
+    while True:
+        config = get_config()
+        now = time.monotonic()
+        include_bcv = now >= next_bcv_at
+        include_usdt = now >= next_usdt_at
+        if include_bcv or include_usdt:
+            try:
+                await refresh_and_sync_exchange_rates(include_bcv=include_bcv, include_usdt=include_usdt)
+            except Exception as e:
+                logger.error("Exchange-rate refresh loop error: %s", e)
+            if include_bcv:
+                next_bcv_at = now + min(60, max(30, config.dolarvzla_bcv_refresh_minutes)) * 60
+            if include_usdt:
+                next_usdt_at = now + max(1, config.dolarvzla_usdt_refresh_minutes) * 60
+        await asyncio.sleep(60)
+
+
 # ── Lifespan ─────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _health_task
+    global _exchange_rate_task, _health_task, _pool_cleanup_task
 
     logger.info("Starting Master Control Plane...")
 
@@ -85,7 +108,8 @@ async def lifespan(app: FastAPI):
     # Start background tasks
     _health_task = asyncio.create_task(_health_check_loop())
     _pool_cleanup_task = asyncio.create_task(_pool_cleanup_loop())
-    logger.info("Background tasks started (health checks, pool cleanup).")
+    _exchange_rate_task = asyncio.create_task(_exchange_rate_refresh_loop())
+    logger.info("Background tasks started (health checks, pool cleanup, exchange rates).")
 
     logger.info("Master Control Plane is ready.")
     yield
@@ -96,6 +120,8 @@ async def lifespan(app: FastAPI):
         _health_task.cancel()
     if _pool_cleanup_task:
         _pool_cleanup_task.cancel()
+    if _exchange_rate_task:
+        _exchange_rate_task.cancel()
     await cleanup_idle_pools()
     await db.disconnect()
     logger.info("Goodbye!")

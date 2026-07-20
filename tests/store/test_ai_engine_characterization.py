@@ -55,6 +55,8 @@ def _sample_settings(**overrides) -> dict:
             }
         ],
         "accepted_exchange_rate": "40,25 Bs/USD",
+        "exchange_rate_reference": "manual",
+        "manual_exchange_rate": "40.25",
         "order_discount_percent": 10,
         "order_discount_threshold_usd": 350,
     }
@@ -268,7 +270,7 @@ def test_prompt_includes_dynamic_store_catalog_channel_customer_order_payment_an
     assert "Resumen pedido pendiente: Pijama satén azul x2" in prompt
     assert "**Zelle**: Correo: pagos@example.com" in prompt
     assert "Zelle" in prompt
-    assert "40,25 Bs/USD" in prompt
+    assert "40,25 Bs por USD" in prompt
     assert "10%" in prompt
     assert "$350" in prompt
 
@@ -293,7 +295,7 @@ async def test_exchange_rate_question_is_answered_without_llm(engine_harness):
     response = await engine.generate_response("whatsapp", "584121234567", "¿A qué tasa reciben?")
 
     _assert_active_response_contract(response)
-    assert response["text"] == "La tasa Binance del día que usamos de referencia es 40,25 Bs/USD."
+    assert response["text"] == "La tasa que usamos actualmente es 40,25 Bs por USD."
     engine_harness.provider.chat.assert_not_awaited()
     engine.analytics.log_response.assert_not_awaited()
     engine.analytics.log_ai_run.assert_awaited_once()

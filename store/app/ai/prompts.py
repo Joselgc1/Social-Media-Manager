@@ -11,6 +11,7 @@ from typing import Any
 
 from app.catalog.sheets import group_catalog_products
 from app.customer_identity import extract_safe_first_name
+from app.exchange_rates import build_exchange_rate_prompt_block
 from app.payment_methods import payment_method_information_block, payment_method_names_text
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
@@ -56,6 +57,7 @@ class PromptContext:
     open_order: dict[str, Any] | None = None
     payment_methods: list[dict[str, Any]] | None = None
     accepted_exchange_rate: str | None = None
+    exchange_rate_settings: dict[str, Any] | None = None
     order_discount_percent: float | int | str | None = None
     order_discount_threshold_usd: float | int | str | None = None
     catalog_pdf_supported: bool | None = None
@@ -177,6 +179,7 @@ def build_system_prompt(
     open_order: dict | None = None,
     payment_methods: list[dict] | None = None,
     accepted_exchange_rate: str | None = None,
+    exchange_rate_settings: dict[str, Any] | None = None,
     order_discount_percent: float | int | str | None = None,
     order_discount_threshold_usd: float | int | str | None = None,
     workflow_state: dict[str, Any] | str | None = None,
@@ -195,6 +198,7 @@ def build_system_prompt(
             open_order=open_order,
             payment_methods=payment_methods,
             accepted_exchange_rate=accepted_exchange_rate,
+            exchange_rate_settings=exchange_rate_settings,
             order_discount_percent=order_discount_percent,
             order_discount_threshold_usd=order_discount_threshold_usd,
             catalog_pdf_supported=catalog_pdf_supported,
@@ -206,7 +210,10 @@ def build_system_prompt(
 def _build_template_values(context: PromptContext) -> dict[str, Any]:
     payment_methods_block = payment_method_information_block(context.payment_methods)
     payment_method_names = payment_method_names_text(context.payment_methods)
-    exchange_rate_block = _build_exchange_rate_block(context.accepted_exchange_rate)
+    exchange_rate_block = _build_exchange_rate_block(
+        context.exchange_rate_settings,
+        context.accepted_exchange_rate,
+    )
     order_discount_block = _build_order_discount_block(
         order_discount_percent=context.order_discount_percent,
         order_discount_threshold_usd=context.order_discount_threshold_usd,
@@ -231,19 +238,17 @@ def _render_template(template: str, values: dict[str, Any], *, template_name: st
         raise PromptRenderError(f"Invalid template placeholders while rendering {template_name}: {exc}") from exc
 
 
-def _build_exchange_rate_block(accepted_exchange_rate: str | None) -> str:
-    rate_text = (accepted_exchange_rate or "").strip()
-    if not rate_text:
-        return (
-            "No hay una tasa Binance del día configurada en este momento. "
-            "Si el cliente pregunta por la tasa, explica que la tienda confirma "
-            "la tasa Binance del día manualmente antes del pago y NO inventes un valor."
-        )
-    return (
-        "La tienda usa como referencia la tasa Binance del día. "
-        f"Valor configurado actualmente: {rate_text}. "
-        "Si el cliente pregunta por la tasa, responde con este valor de forma directa y no digas que luego la vas a confirmar."
-    )
+def _build_exchange_rate_block(
+    exchange_rate_settings: dict[str, Any] | None,
+    accepted_exchange_rate: str | None,
+) -> str:
+    settings = exchange_rate_settings
+    if settings is None and accepted_exchange_rate:
+        settings = {
+            "exchange_rate_reference": "manual",
+            "manual_exchange_rate": accepted_exchange_rate,
+        }
+    return build_exchange_rate_prompt_block(settings, accepted_exchange_rate)
 
 
 def _build_order_discount_block(

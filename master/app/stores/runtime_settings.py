@@ -4,7 +4,24 @@ Runtime settings that master can read/write directly in each store database.
 This must stay aligned with store/app/runtime_settings.py.
 """
 
-SYNCABLE_RUNTIME_SETTING_KEYS = {
+DEFAULT_EXCHANGE_RATE_REFERENCE = "usd_bcv"
+
+PROVIDER_EXCHANGE_RATE_SETTING_KEYS = {
+    "exchange_rate_usd_bcv",
+    "exchange_rate_usd_bcv_effective_at",
+    "exchange_rate_eur_bcv",
+    "exchange_rate_eur_bcv_effective_at",
+    "exchange_rate_usdt_binance",
+    "exchange_rate_usdt_binance_effective_at",
+    "exchange_rates_last_synced_at",
+}
+
+STORE_EXCHANGE_RATE_SETTING_KEYS = {
+    "exchange_rate_reference",
+    "manual_exchange_rate",
+}
+
+MASTER_EDITABLE_RUNTIME_SETTING_KEYS = {
     "llm_provider",
     "llm_model",
     "llm_temperature",
@@ -22,7 +39,9 @@ SYNCABLE_RUNTIME_SETTING_KEYS = {
     "token_reminder_minute",
     "daily_analytics_hour",
     "daily_analytics_minute",
-}
+} | STORE_EXCHANGE_RATE_SETTING_KEYS
+
+SYNCABLE_RUNTIME_SETTING_KEYS = MASTER_EDITABLE_RUNTIME_SETTING_KEYS | PROVIDER_EXCHANGE_RATE_SETTING_KEYS
 
 
 DEFAULT_RUNTIME_SETTINGS = {
@@ -43,4 +62,13 @@ DEFAULT_RUNTIME_SETTINGS = {
     "token_reminder_minute": 0,
     "daily_analytics_hour": 1,
     "daily_analytics_minute": 0,
+    "exchange_rate_reference": DEFAULT_EXCHANGE_RATE_REFERENCE,
+    "manual_exchange_rate": "",
+    "exchange_rate_usd_bcv": "",
+    "exchange_rate_usd_bcv_effective_at": "",
+    "exchange_rate_eur_bcv": "",
+    "exchange_rate_eur_bcv_effective_at": "",
+    "exchange_rate_usdt_binance": "",
+    "exchange_rate_usdt_binance_effective_at": "",
+    "exchange_rates_last_synced_at": "",
 }

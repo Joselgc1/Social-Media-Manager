@@ -1363,14 +1363,111 @@ async function savePaymentSettings() {
   await loadSettings();
 }
 
+function exchangeRateDefinitions() {
+  return [
+    { key: 'usd_bcv', label: 'Dólar BCV', setting: 'exchange_rate_usd_bcv', effective: 'exchange_rate_usd_bcv_effective_at', unit: 'USD' },
+    { key: 'eur_bcv', label: 'Euro BCV', setting: 'exchange_rate_eur_bcv', effective: 'exchange_rate_eur_bcv_effective_at', unit: 'EUR' },
+    { key: 'usdt_binance', label: 'USDT Binance', setting: 'exchange_rate_usdt_binance', effective: 'exchange_rate_usdt_binance_effective_at', unit: 'USDT' },
+  ];
+}
+
+function formatSyncedRate(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const numeric = Number(text.replace(',', '.'));
+  if (!Number.isFinite(numeric)) return text;
+  return new Intl.NumberFormat('es-VE', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(numeric);
+}
+
+function rateInputValue(value) {
+  const text = String(value ?? '').trim();
+  const match = text.match(/\d[\d.,]*/);
+  if (!match) return '';
+  return match[0].replace(',', '.');
+}
+
+function formatRateTimestamp(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return 'sin fecha';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return text;
+  return parsed.toLocaleString('es-VE', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function toggleManualExchangeRateInput() {
+  const selected = document.getElementById('set-exchange-rate-reference')?.value || 'usd_bcv';
+  const wrap = document.getElementById('manual-exchange-rate-wrap');
+  if (wrap) {
+    wrap.style.display = selected === 'manual' ? 'block' : 'none';
+  }
+}
+
+function renderExchangeRateSummary(settings) {
+  const container = document.getElementById('exchange-rate-summary');
+  if (!container) return;
+
+  const selected = settings.exchange_rate_reference || 'usd_bcv';
+  const rows = exchangeRateDefinitions().map(def => {
+    const rate = formatSyncedRate(settings[def.setting]);
+    const available = Boolean(rate);
+    const effective = settings[def.effective] ? formatRateTimestamp(settings[def.effective]) : 'sin fecha';
+    const selectedMark = selected === def.key ? 'Seleccionada' : '';
+    return `
+      <div class="flex items-start justify-between gap-3">
+        <span>${escapeHtml(def.label)}${selectedMark ? ` <span class="badge badge-blue">${selectedMark}</span>` : ''}</span>
+        <span class="text-right ${available ? 'text-gray-700 dark:text-gray-300' : 'text-red-600 dark:text-red-400'}">
+          ${available ? `${escapeHtml(rate)} Bs/${escapeHtml(def.unit)}<br><span class="text-gray-400">${escapeHtml(effective)}</span>` : 'No disponible'}
+        </span>
+      </div>`;
+  }).join('');
+
+  const selectedDef = exchangeRateDefinitions().find(def => def.key === selected);
+  const selectedAvailable = selected === 'manual'
+    ? Boolean(String(settings.manual_exchange_rate || '').trim())
+    : Boolean(selectedDef && String(settings[selectedDef.setting] || '').trim());
+  const unavailableNotice = selectedAvailable ? '' : `
+    <div class="mt-2 rounded-md bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 p-2">
+      La referencia seleccionada no tiene un valor disponible.
+    </div>`;
+
+  container.innerHTML = `
+    ${rows}
+    <div class="pt-2 mt-2 border-t border-gray-200 dark:border-gray-700">
+      Última sincronización: ${escapeHtml(formatRateTimestamp(settings.exchange_rates_last_synced_at))}
+    </div>
+    ${unavailableNotice}`;
+}
+
 async function saveExchangeRateSetting() {
-  const value = document.getElementById('set-exchange-rate')?.value?.trim() || '';
-  await apiFetch(API + '/accepted_exchange_rate', {
+  const reference = document.getElementById('set-exchange-rate-reference')?.value || 'usd_bcv';
+  const manualValue = document.getElementById('set-manual-exchange-rate')?.value?.trim() || '';
+
+  if (reference === 'manual' && manualValue) {
+    const numeric = Number(manualValue.replace(',', '.'));
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      toast('La tasa manual debe ser mayor a 0', '#dc2626');
+      return;
+    }
+  }
+
+  await apiFetch(API + '/exchange_rate_reference', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({value}),
+    body: JSON.stringify({value: reference}),
   });
-  toast('Tasa guardada');
+
+  if (reference === 'manual') {
+    await apiFetch(API + '/manual_exchange_rate', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: manualValue}),
+    });
+  }
+
+  toast('Referencia de tasa guardada');
   await loadSettings();
 }
 
@@ -1417,10 +1514,16 @@ async function loadSettings() {
   if (pdfIntervalDisplay) {
     pdfIntervalDisplay.textContent = `${pdfInterval} horas`;
   }
-  const exchangeRateInput = document.getElementById('set-exchange-rate');
-  if (exchangeRateInput) {
-    exchangeRateInput.value = settings.accepted_exchange_rate || '';
+  const exchangeRateReference = document.getElementById('set-exchange-rate-reference');
+  if (exchangeRateReference) {
+    exchangeRateReference.value = settings.exchange_rate_reference || 'usd_bcv';
   }
+  const manualExchangeRateInput = document.getElementById('set-manual-exchange-rate');
+  if (manualExchangeRateInput) {
+    manualExchangeRateInput.value = rateInputValue(settings.manual_exchange_rate || settings.accepted_exchange_rate || '');
+  }
+  toggleManualExchangeRateInput();
+  renderExchangeRateSummary(settings);
   const discountPercentInput = document.getElementById('set-order-discount-percent');
   if (discountPercentInput) {
     discountPercentInput.value = settings.order_discount_percent ?? 10;

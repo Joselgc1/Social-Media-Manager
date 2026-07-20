@@ -25,6 +25,8 @@ def _settings(**overrides) -> dict:
         "store_name": "Tienda Rosa",
         "payment_methods": [{"id": "pm-zelle", "name": "Zelle", "information": "Correo: pagos@example.com"}],
         "accepted_exchange_rate": "40 Bs/USD",
+        "exchange_rate_reference": "manual",
+        "manual_exchange_rate": "40",
         "order_discount_percent": 10,
         "order_discount_threshold_usd": 350,
     }

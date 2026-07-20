@@ -236,13 +236,26 @@
               <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Tasa del día</h3>
               <div class="space-y-3">
                 <div>
-                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tasa aceptada</label>
-                  <input id="set-exchange-rate" class="w-full" placeholder="Ej. BCV del día, 128 Bs/USD, 130">
+                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Referencia usada por Eva</label>
+                  <select id="set-exchange-rate-reference" class="w-full" onchange="toggleManualExchangeRateInput()">
+                    <option value="usd_bcv">Dólar BCV</option>
+                    <option value="eur_bcv">Euro BCV</option>
+                    <option value="usdt_binance">USDT Binance</option>
+                    <option value="manual">Tasa manual</option>
+                  </select>
+                </div>
+                <div id="manual-exchange-rate-wrap" style="display:none">
+                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tasa manual</label>
+                  <input id="set-manual-exchange-rate" type="number" step="0.01" min="0" class="w-full" placeholder="760">
+                  <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">Solo se usa cuando seleccionas “Tasa manual”.</p>
+                </div>
+                <div id="exchange-rate-summary" class="text-xs text-gray-600 dark:text-gray-400 space-y-1 rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+                  Cargando tasas...
                 </div>
                 <p class="text-xs text-gray-500 dark:text-gray-500">
-                  Eva usará este valor cuando pregunten “¿a qué tasa recibes?” o algo similar.
+                  Eva usará la referencia seleccionada cuando pregunten “¿a qué tasa recibes?” o algo similar.
                 </p>
-                <button class="btn btn-primary w-full" onclick="saveExchangeRateSetting()">Guardar tasa</button>
+                <button class="btn btn-primary w-full" onclick="saveExchangeRateSetting()">Guardar referencia</button>
               </div>
             </div>
             <div class="card h-full">

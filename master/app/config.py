@@ -27,6 +27,15 @@ class MasterSettings(BaseSettings):
     # Cap parallel /stats connections to each store DB (Supabase session pooler limits)
     store_stats_max_concurrent: int = 5
 
+    # DolarVZLA exchange-rate refresh (master-only credential)
+    dolarvzla_api_key: str = ""
+    dolarvzla_bcv_refresh_minutes: int = 45
+    dolarvzla_usdt_refresh_minutes: int = 60
+    dolarvzla_usdt_stale_minutes: int = 120
+    dolarvzla_http_timeout_seconds: float = 10.0
+    dolarvzla_http_retries: int = 2
+    dolarvzla_retry_backoff_seconds: float = 1.0
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

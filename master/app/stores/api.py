@@ -15,9 +15,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app import db
 from app.auth import require_auth
 from app.config import get_config
+from app.stores import exchange_rates as exchange_rate_service
 from app.stores.crypto import decrypt, encrypt, mask
 from app.stores.models import CredentialSet, LLMSettingsUpdate, RuntimeSettingsUpdate, StoreCreate, StoreUpdate
-from app.stores.runtime_settings import DEFAULT_RUNTIME_SETTINGS, SYNCABLE_RUNTIME_SETTING_KEYS
+from app.stores.runtime_settings import (
+    DEFAULT_RUNTIME_SETTINGS,
+    MASTER_EDITABLE_RUNTIME_SETTING_KEYS,
+    PROVIDER_EXCHANGE_RATE_SETTING_KEYS,
+    SYNCABLE_RUNTIME_SETTING_KEYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +255,7 @@ AVAILABLE_MODELS = {
     "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-6"],
 }
 VALID_ORCHESTRATION_MODES = {"legacy", "shadow", "multi_agent"}
+VALID_EXCHANGE_RATE_REFERENCES = {"usd_bcv", "eur_bcv", "usdt_binance", "manual"}
 
 
 def _decode_setting_value(value):
@@ -280,12 +287,51 @@ async def _get_store_connection(store_id: str):
 
 
 async def _ensure_store_runtime_defaults(store_db: db_lib.Database):
+    await _ensure_store_exchange_rate_migration(store_db)
     query = (
         "INSERT INTO settings (key, value) VALUES (:key, :val) "
         "ON CONFLICT (key) DO NOTHING"
     )
     for key, value in DEFAULT_RUNTIME_SETTINGS.items():
         await store_db.execute(query, {"key": key, "val": json.dumps(value)})
+
+
+async def _ensure_store_exchange_rate_migration(store_db: db_lib.Database):
+    legacy_row = await store_db.fetch_one(
+        "SELECT value FROM settings WHERE key = 'accepted_exchange_rate'"
+    )
+    if not legacy_row:
+        return
+    legacy_value = _decode_setting_value(legacy_row["value"])
+    if not str(legacy_value or "").strip():
+        return
+
+    manual_row = await store_db.fetch_one(
+        "SELECT value FROM settings WHERE key = 'manual_exchange_rate'"
+    )
+    manual_value = _decode_setting_value(manual_row["value"]) if manual_row else ""
+    if not str(manual_value or "").strip():
+        await store_db.execute(
+            """
+            INSERT INTO settings (key, value)
+            VALUES ('manual_exchange_rate', :val)
+            ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()
+            """,
+            {"val": json.dumps(legacy_value)},
+        )
+
+    reference_row = await store_db.fetch_one(
+        "SELECT value FROM settings WHERE key = 'exchange_rate_reference'"
+    )
+    if not reference_row:
+        await store_db.execute(
+            """
+            INSERT INTO settings (key, value)
+            VALUES ('exchange_rate_reference', :val)
+            ON CONFLICT (key) DO NOTHING
+            """,
+            {"val": json.dumps("manual")},
+        )
 
 
 async def _read_store_runtime_settings(store_db: db_lib.Database) -> dict:
@@ -301,7 +347,7 @@ async def _read_store_runtime_settings(store_db: db_lib.Database) -> dict:
 
 
 def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
-    invalid = set(fields) - SYNCABLE_RUNTIME_SETTING_KEYS
+    invalid = set(fields) - MASTER_EDITABLE_RUNTIME_SETTING_KEYS
     if invalid:
         raise HTTPException(status_code=400, detail=f"Invalid settings: {sorted(invalid)}")
 
@@ -333,6 +379,27 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
                 detail=f"Invalid orchestration mode '{normalized['ai_orchestration_mode']}'",
             )
         normalized["ai_orchestration_mode"] = mode
+
+    if "exchange_rate_reference" in normalized:
+        reference = str(normalized["exchange_rate_reference"] or "").strip().lower()
+        if reference not in VALID_EXCHANGE_RATE_REFERENCES:
+            raise HTTPException(status_code=400, detail=f"Invalid exchange rate reference: {reference}")
+        normalized["exchange_rate_reference"] = reference
+
+    if "manual_exchange_rate" in normalized:
+        manual_rate = str(normalized["manual_exchange_rate"] or "").strip()
+        if manual_rate:
+            from decimal import Decimal, InvalidOperation
+
+            try:
+                rate = Decimal(manual_rate.replace(",", "."))
+            except InvalidOperation as exc:
+                raise HTTPException(status_code=400, detail="Manual exchange rate must be numeric") from exc
+            if rate <= 0:
+                raise HTTPException(status_code=400, detail="Manual exchange rate must be greater than 0")
+            normalized["manual_exchange_rate"] = format(rate.normalize(), "f")
+        else:
+            normalized["manual_exchange_rate"] = ""
 
     if "catalog_pdf_interval_hours" in normalized:
         hours = int(normalized["catalog_pdf_interval_hours"])
@@ -413,6 +480,61 @@ async def _write_store_runtime_settings(store_db: db_lib.Database, fields: dict)
         )
 
 
+async def sync_exchange_rates_to_active_stores() -> dict:
+    rows = await exchange_rate_service.get_current_exchange_rates()
+    settings = exchange_rate_service.build_store_rate_settings(rows)
+    if not settings:
+        return {"stores_synced": 0, "settings": [], "errors": []}
+
+    stores = await db.fetch_all(
+        "SELECT id, name, db_url_encrypted FROM stores WHERE status = 'active' ORDER BY created_at"
+    )
+    errors = []
+    synced = 0
+
+    async def _sync_store(store):
+        store_id = str(store["id"])
+        try:
+            async with _stats_semaphore():
+                store_db_url = decrypt(store["db_url_encrypted"])
+                store_db = await _get_store_db(store_db_url)
+                await _write_store_runtime_settings(store_db, settings)
+            return {"ok": True, "store_id": store_id}
+        except Exception as exc:
+            logger.warning("Could not sync exchange rates to store %s: %s", store_id, exc)
+            return {"ok": False, "store_id": store_id, "error": "Could not sync store"}
+
+    results = await asyncio.gather(*[_sync_store(store) for store in stores])
+    for result in results:
+        if result["ok"]:
+            synced += 1
+        else:
+            errors.append(result)
+    return {"stores_synced": synced, "settings": sorted(settings), "errors": errors}
+
+
+async def refresh_and_sync_exchange_rates(*, include_bcv: bool = True, include_usdt: bool = True) -> dict:
+    refresh = await exchange_rate_service.refresh_exchange_rates(include_bcv=include_bcv, include_usdt=include_usdt)
+    sync = await sync_exchange_rates_to_active_stores()
+    return {"refresh": refresh, "sync": sync}
+
+
+# ── Exchange Rates ───────────────────────────────────────────
+
+@router.get("/exchange-rates/current")
+async def get_exchange_rates_current():
+    rows = await exchange_rate_service.get_current_exchange_rates()
+    return exchange_rate_service.as_public_payload(rows)
+
+
+@router.post("/exchange-rates/refresh")
+async def force_exchange_rates_refresh():
+    result = await refresh_and_sync_exchange_rates(include_bcv=True, include_usdt=True)
+    await _audit("refresh_exchange_rates", None, f"Refresh status: {result['refresh'].get('status')}")
+    rows = await exchange_rate_service.get_current_exchange_rates()
+    return {**result, "current": exchange_rate_service.as_public_payload(rows)}
+
+
 # ── Store Stats (read from store's own DB) ───────────────────
 
 @router.get("/{store_id}/stats")
@@ -487,6 +609,12 @@ async def update_store_settings(store_id: str, update: RuntimeSettingsUpdate, re
             raise HTTPException(
                 status_code=403,
                 detail="Payment methods are managed only from the store dashboard.",
+            )
+        rate_fields = set(raw_fields) & PROVIDER_EXCHANGE_RATE_SETTING_KEYS
+        if rate_fields:
+            raise HTTPException(
+                status_code=403,
+                detail="Provider exchange rates are synchronized by the master refresh job.",
             )
 
     fields = {k: v for k, v in update.model_dump().items() if v is not None}

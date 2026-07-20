@@ -83,6 +83,8 @@ class RuntimeSettingsUpdate(BaseModel):
     token_reminder_minute: int | None = None
     daily_analytics_hour: int | None = None
     daily_analytics_minute: int | None = None
+    exchange_rate_reference: str | None = None
+    manual_exchange_rate: str | None = None
 
 
 class LLMSettingsUpdate(RuntimeSettingsUpdate):

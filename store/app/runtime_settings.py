@@ -4,6 +4,11 @@ Runtime settings stored in the store database.
 These values are editable from dashboards and can change without redeploying.
 """
 
+from app.exchange_rates import (
+    DEFAULT_EXCHANGE_RATE_REFERENCE,
+    MANUAL_EXCHANGE_RATE_KEY,
+    PROVIDER_EXCHANGE_RATE_SETTING_KEYS,
+)
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY
 
 RUNTIME_SETTING_DEFAULTS = {
@@ -25,7 +30,15 @@ RUNTIME_SETTING_DEFAULTS = {
     "daily_analytics_hour": 1,
     "daily_analytics_minute": 0,
     "escalation_telegram_enabled": True,
-    "accepted_exchange_rate": "",
+    "exchange_rate_reference": DEFAULT_EXCHANGE_RATE_REFERENCE,
+    MANUAL_EXCHANGE_RATE_KEY: "",
+    "exchange_rate_usd_bcv": "",
+    "exchange_rate_usd_bcv_effective_at": "",
+    "exchange_rate_eur_bcv": "",
+    "exchange_rate_eur_bcv_effective_at": "",
+    "exchange_rate_usdt_binance": "",
+    "exchange_rate_usdt_binance_effective_at": "",
+    "exchange_rates_last_synced_at": "",
     "order_discount_percent": 10.0,
     "order_discount_threshold_usd": 350.0,
     "kommo_strip_emoji": False,
@@ -53,6 +66,9 @@ SYNCABLE_RUNTIME_SETTING_KEYS = {
     "token_reminder_minute",
     "daily_analytics_hour",
     "daily_analytics_minute",
+    "exchange_rate_reference",
+    MANUAL_EXCHANGE_RATE_KEY,
+    *PROVIDER_EXCHANGE_RATE_SETTING_KEYS,
 }
 
 
@@ -71,6 +87,7 @@ STORE_EDITABLE_SETTING_KEYS = (
     set(RUNTIME_SETTING_DEFAULTS)
     - {PAYMENT_METHODS_SETTING_KEY}
     - MASTER_ONLY_SETTING_KEYS
+    - PROVIDER_EXCHANGE_RATE_SETTING_KEYS
 )
 LLM_MANAGED_KEYS = {
     "llm_provider",

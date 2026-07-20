@@ -13,6 +13,7 @@ def _context(**overrides) -> prompts.PromptContext:
         "open_order": None,
         "payment_methods": [{"id": "pm-zelle", "name": "Zelle", "information": "Correo: pagos@example.com"}],
         "accepted_exchange_rate": "40,25 Bs/USD",
+        "exchange_rate_settings": None,
         "order_discount_percent": 10,
         "order_discount_threshold_usd": 350,
     }
@@ -79,7 +80,7 @@ def test_dynamic_context_injection():
     assert "Tienda Rosa" in prompt
     assert "Pijama satén azul" in prompt
     assert "**Zelle**: Correo: pagos@example.com" in prompt
-    assert "40,25 Bs/USD" in prompt
+    assert "40,25 Bs por USD" in prompt
     assert "10%" in prompt
     assert "Nombre confirmado para saludar: Luisana" in prompt
     assert "Pedido pendiente abierto" in prompt
@@ -96,7 +97,7 @@ def test_legacy_override_behavior(monkeypatch):
 
     assert prompt.startswith("OVERRIDE Tienda Rosa | Producto")
     assert "Correo: pagos@example.com" in prompt
-    assert "40,25 Bs/USD" in prompt
+    assert "40,25 Bs por USD" in prompt
     assert "# Canal actual" in prompt
     assert "Instagram DM" in prompt
 

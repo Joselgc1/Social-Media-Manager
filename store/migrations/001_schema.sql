@@ -149,7 +149,15 @@ INSERT INTO settings (key, value) VALUES
     ('token_reminder_minute',      '0'),
     ('daily_analytics_hour',       '1'),
     ('daily_analytics_minute',     '0'),
-    ('accepted_exchange_rate',     '""'),
+    ('exchange_rate_reference',    '"usd_bcv"'),
+    ('manual_exchange_rate',       '""'),
+    ('exchange_rate_usd_bcv',      '""'),
+    ('exchange_rate_usd_bcv_effective_at', '""'),
+    ('exchange_rate_eur_bcv',      '""'),
+    ('exchange_rate_eur_bcv_effective_at', '""'),
+    ('exchange_rate_usdt_binance', '""'),
+    ('exchange_rate_usdt_binance_effective_at', '""'),
+    ('exchange_rates_last_synced_at', '""'),
     ('order_discount_percent',     '10.0'),
     ('order_discount_threshold_usd','350.0'),
     ('kommo_strip_emoji',          'false'),
@@ -157,6 +165,41 @@ INSERT INTO settings (key, value) VALUES
     ('kommo_emoji_mode_instagram', '"safe"'),
     ('payment_methods',            '[]')
 ON CONFLICT (key) DO NOTHING;
+
+DO $$
+DECLARE
+    legacy_exchange_rate JSONB;
+BEGIN
+    SELECT value INTO legacy_exchange_rate
+    FROM settings
+    WHERE key = 'accepted_exchange_rate';
+
+    IF legacy_exchange_rate IS NOT NULL AND BTRIM(legacy_exchange_rate #>> '{}') <> '' THEN
+        INSERT INTO settings (key, value)
+        VALUES ('manual_exchange_rate', legacy_exchange_rate)
+        ON CONFLICT (key) DO UPDATE
+        SET value = CASE
+            WHEN BTRIM(settings.value #>> '{}') = '' THEN EXCLUDED.value
+            ELSE settings.value
+        END,
+        updated_at = CASE
+            WHEN BTRIM(settings.value #>> '{}') = '' THEN NOW()
+            ELSE settings.updated_at
+        END;
+
+        INSERT INTO settings (key, value)
+        VALUES ('exchange_rate_reference', '"manual"')
+        ON CONFLICT (key) DO UPDATE
+        SET value = CASE
+            WHEN BTRIM(settings.value #>> '{}') IN ('', 'usd_bcv') THEN EXCLUDED.value
+            ELSE settings.value
+        END,
+        updated_at = CASE
+            WHEN BTRIM(settings.value #>> '{}') IN ('', 'usd_bcv') THEN NOW()
+            ELSE settings.updated_at
+        END;
+    END IF;
+END $$;
 
 -- ============================================================
 -- Usage tracking (for cost monitoring)

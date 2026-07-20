@@ -22,6 +22,7 @@ from app.config import get_config
 from app.crm import customers as customer_crm
 from app.crm import orders
 from app.crm.customers import add_tags, normalize_tags, remove_tag
+from app.exchange_rates import ALLOWED_EXCHANGE_RATE_REFERENCES, normalize_rate_setting_value
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
 from app.runtime_settings import LLM_MANAGED_KEYS, STORE_EDITABLE_SETTING_KEYS
 
@@ -146,6 +147,21 @@ def _validate_setting_value(key: str, value, current_settings: dict):
                 detail=f"Invalid orchestration mode '{value}'. Choose from: {sorted(VALID_ORCHESTRATION_MODES)}",
             )
         return mode
+
+    if key == "exchange_rate_reference":
+        reference = str(value or "").strip().lower()
+        if reference not in ALLOWED_EXCHANGE_RATE_REFERENCES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid exchange rate reference '{value}'. Choose from: {sorted(ALLOWED_EXCHANGE_RATE_REFERENCES)}",
+            )
+        return reference
+
+    if key == "manual_exchange_rate":
+        try:
+            return normalize_rate_setting_value(value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if key == "catalog_pdf_interval_hours":
         hours = int(value)

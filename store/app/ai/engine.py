@@ -37,6 +37,7 @@ from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
 from app.crm import conversations, customers, orders, sessions
+from app.exchange_rates import build_customer_exchange_rate_reply
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +391,7 @@ async def generate_response(
             customer=customer,
             open_order=open_order,
             payment_methods=payment_methods,
-            accepted_exchange_rate=str(settings.get("accepted_exchange_rate", "") or ""),
+            exchange_rate_settings=settings,
             order_discount_percent=settings.get("order_discount_percent"),
             order_discount_threshold_usd=settings.get("order_discount_threshold_usd"),
             catalog_pdf_supported=catalog_pdf_supported,
@@ -617,7 +618,7 @@ async def _handle_exchange_rate_question(
         channel=channel,
         media_url=media_url,
     )
-    reply_text = _exchange_rate_reply(settings.get("accepted_exchange_rate"))
+    reply_text = _exchange_rate_reply(settings, message_text)
     response_time_ms = int((time.monotonic() - t_start) * 1000)
     await analytics.log_ai_run(
         customer_id=customer["id"],
@@ -709,11 +710,8 @@ def _looks_like_exchange_rate_question(normalized: str) -> bool:
     )
 
 
-def _exchange_rate_reply(accepted_exchange_rate) -> str:
-    rate_text = str(accepted_exchange_rate or "").strip()
-    if rate_text:
-        return f"La tasa Binance del día que usamos de referencia es {rate_text}."
-    return "Ahorita no tengo una tasa configurada. La tienda confirma la tasa Binance del día antes del pago."
+def _exchange_rate_reply(settings: dict, message_text: str = "") -> str:
+    return build_customer_exchange_rate_reply(settings, message_text)
 
 
 def _with_conversation_continuity_guidance(system_prompt: str, has_previous_context: bool) -> str:

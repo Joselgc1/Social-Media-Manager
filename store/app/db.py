@@ -10,6 +10,10 @@ import time
 import databases
 
 from app.config import get_config
+from app.exchange_rates import (
+    LEGACY_ACCEPTED_EXCHANGE_RATE_KEY,
+    MANUAL_EXCHANGE_RATE_KEY,
+)
 from app.payment_methods import (
     LEGACY_PAYMENT_SETTING_KEYS,
     PAYMENT_METHODS_SETTING_KEY,
@@ -91,6 +95,7 @@ _settings_version: str | None = None
 
 async def ensure_default_settings():
     """Insert any missing runtime settings without overwriting existing values."""
+    await _ensure_exchange_rate_settings()
     rows = [
         {"key": key, "val": json.dumps(value)}
         for key, value in RUNTIME_SETTING_DEFAULTS.items()
@@ -106,6 +111,47 @@ async def ensure_default_settings():
 
     await _ensure_payment_methods_setting()
     invalidate_settings_cache()
+
+
+async def _ensure_exchange_rate_settings():
+    legacy_row = await fetch_one(
+        "SELECT value FROM settings WHERE key = :key",
+        {"key": LEGACY_ACCEPTED_EXCHANGE_RATE_KEY},
+    )
+    if not legacy_row:
+        return
+
+    legacy_value = _decode_setting_value(legacy_row["value"])
+    if not str(legacy_value or "").strip():
+        return
+
+    manual_row = await fetch_one(
+        "SELECT value FROM settings WHERE key = :key",
+        {"key": MANUAL_EXCHANGE_RATE_KEY},
+    )
+    manual_value = _decode_setting_value(manual_row["value"]) if manual_row else ""
+    if not str(manual_value or "").strip():
+        await execute(
+            """
+            INSERT INTO settings (key, value)
+            VALUES (:key, :val)
+            ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()
+            """,
+            {"key": MANUAL_EXCHANGE_RATE_KEY, "val": json.dumps(legacy_value)},
+        )
+
+    reference_row = await fetch_one(
+        "SELECT value FROM settings WHERE key = 'exchange_rate_reference'"
+    )
+    if not reference_row:
+        await execute(
+            """
+            INSERT INTO settings (key, value)
+            VALUES ('exchange_rate_reference', :val)
+            ON CONFLICT (key) DO NOTHING
+            """,
+            {"val": json.dumps("manual")},
+        )
 
 
 async def _ensure_payment_methods_setting():

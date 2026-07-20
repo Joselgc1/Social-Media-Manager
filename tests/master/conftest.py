@@ -5,13 +5,39 @@ Provides mock database, mock config, and FastAPI test client
 so tests run without real external services.
 """
 
-import pytest
+import os
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import os
+import pytest
+
 os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/master_test")
 os.environ.setdefault("MASTER_SECRET_KEY", "test-master-secret")
 os.environ.setdefault("ENCRYPTION_KEY", "dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3ODkwMTI=")
+
+
+@pytest.fixture(autouse=True)
+def master_app_import_path():
+    """Use master/app for app.* imports inside master tests, then restore store imports."""
+    master_root = str(Path(__file__).resolve().parents[2] / "master")
+    saved_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
+    for name in list(saved_modules):
+        sys.modules.pop(name, None)
+    sys.path.insert(0, master_root)
+    try:
+        yield
+    finally:
+        with_master_root = [entry for entry in sys.path if entry == master_root]
+        for _ in with_master_root:
+            sys.path.remove(master_root)
+        for name in [name for name in sys.modules if name == "app" or name.startswith("app.")]:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved_modules)
 
 
 class MockRecord(dict):
@@ -58,7 +84,7 @@ def auth_headers():
 @pytest.fixture
 async def client(mock_db, mock_config):
     """FastAPI test client with mocked dependencies."""
-    from httpx import AsyncClient, ASGITransport
+    from httpx import ASGITransport, AsyncClient
 
     with patch("app.db.database", mock_db), \
          patch("app.config.get_config", return_value=mock_config):
