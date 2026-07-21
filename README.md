@@ -192,7 +192,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 - Product images degrade to caption plus public image URL when rich media is not supported by the Kommo channel.
 - Catalog PDF delivery is not offered through Kommo; catalog requests are answered as normal text from the loaded catalog.
 - Durable Salesbot jobs track `delivery_unknown` when continuation delivery cannot be confirmed; inspect Kommo before manual retry.
-- The repository does not include a confirmed native Kommo comment webhook sample yet, so comments are not inferred from `origin=instagram`; capture and verify a real comment payload before mapping native Kommo fields automatically.
+- General Kommo webhooks with the confirmed native comment shape (`origin=instagram`, `message_type=comment`) are logged and ignored so they do not launch the private-message Salesbot.
 
 ## Telegram Admin Commands
 

@@ -362,30 +362,31 @@ async def test_comment_salesbot_callback_matches_existing_waiting_comment_job(mo
 
 
 @pytest.mark.asyncio
-async def test_native_comment_callback_creates_ready_job_from_signed_identity(monkeypatch):
+async def test_native_comment_callback_creates_ready_job_from_signed_identity(monkeypatch, caplog):
     from app.integrations.kommo import jobs
 
     create_db = _CallbackCreateDB()
     monkeypatch.setattr(jobs, "db", create_db)
 
-    result = await jobs.persist_salesbot_callback(
-        SalesbotWidgetData(
-            message="Precio?",
-            lead_id="100",
-            contact_id="spoofed-contact",
-            origin="instagram",
-            interaction_type="instagram_comment",
-        ),
-        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        {
-            "jti": "token-id",
-            "account_id": 123,
-            "user_id": 456,
-            "client_uid": "client-uuid",
-            "entity_type": "leads",
-            "entity_id": "100",
-        },
-    )
+    with caplog.at_level("INFO", logger="app.integrations.kommo.jobs"):
+        result = await jobs.persist_salesbot_callback(
+            SalesbotWidgetData(
+                message="Precio?",
+                lead_id="100",
+                contact_id="spoofed-contact",
+                origin="instagram",
+                interaction_type="instagram_comment",
+            ),
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            {
+                "jti": "token-id",
+                "account_id": 123,
+                "user_id": 456,
+                "client_uid": "client-uuid",
+                "entity_type": "leads",
+                "entity_id": "100",
+            },
+        )
 
     assert result == {"status": "ready", "job_id": "comment-job"}
     update_query, update_values = create_db.fetch_one_calls[0]
@@ -406,6 +407,12 @@ async def test_native_comment_callback_creates_ready_job_from_signed_identity(mo
     assert create_db.execute_calls[0][0] == "SELECT pg_advisory_xact_lock(hashtext(:dedupe_key))"
     assert "INSERT INTO kommo_message_receipts" in create_db.execute_calls[1][0]
     assert create_db.execute_calls[1][1]["job_id"] == "comment-job"
+    assert "ready job creation started" in caplog.text
+    assert "message_text_resolved=True" in caplog.text
+    assert "signed_entity_type=leads" in caplog.text
+    assert "signed_entity_id=100" in caplog.text
+    assert "created ready comment job" in caplog.text
+    assert "Precio?" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -722,7 +729,7 @@ async def test_ready_job_discard_continues_salesbot_before_marking_discarded(mon
 
 
 @pytest.mark.asyncio
-async def test_ready_job_discard_marks_unauthorized_continuation_failed(monkeypatch):
+async def test_ready_job_discard_marks_unauthorized_continuation_failed(monkeypatch, caplog):
     from app.integrations.kommo import jobs
     from app.integrations.kommo.client import KommoAPIError
 
@@ -734,16 +741,20 @@ async def test_ready_job_discard_marks_unauthorized_continuation_failed(monkeypa
     client.continue_salesbot = AsyncMock(side_effect=KommoAPIError("Kommo API returned HTTP 401", status_code=401))
     job = {"id": "job", "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2"}
 
-    await jobs._continue_and_discard_job(client, job, "ai_run_error")
+    with caplog.at_level("WARNING", logger="app.integrations.kommo.jobs"):
+        await jobs._continue_and_discard_job(client, job, "ai_run_error")
 
     client.continue_salesbot.assert_awaited_once()
     values = mock_db.execute.await_args_list[-1].args[1]
     assert values["status"] == "failed"
     assert values["last_error"] == "Kommo API returned HTTP 401"
+    assert "Kommo failure continuation failed" in caplog.text
+    assert "interaction_type=private_message" in caplog.text
+    assert "Kommo API returned HTTP 401" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
+async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch, caplog):
     from app.integrations.kommo import jobs
 
     mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"})
@@ -767,13 +778,14 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
-    await jobs._process_ready_job({
-        "id": "job",
-        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        "combined_message": "Catalogo",
-        "channel": "whatsapp",
-        "correlation_id": "corr",
-    })
+    with caplog.at_level("INFO", logger="app.integrations.kommo.jobs"):
+        await jobs._process_ready_job({
+            "id": "job",
+            "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            "combined_message": "Catalogo",
+            "channel": "whatsapp",
+            "correlation_id": "corr",
+        })
 
     client.continue_salesbot.assert_awaited_once()
     assert jobs.generate_response.await_args.kwargs["integration_context"]["interaction_type"] == "private_message"
@@ -787,10 +799,11 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch):
     assert "💕" in continuation_payload["data"]["message"]
     assert "attachment_type" not in continuation_payload["data"]
     assert any("assistant_message_persisted_at" in call.args[0] for call in mock_db.execute.await_args_list)
+    assert "Kommo Salesbot continuation succeeded: job_id=job interaction_type=private_message" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_formatter(monkeypatch):
+async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_formatter(monkeypatch, caplog):
     from app.integrations.kommo import jobs
 
     mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_instagram": "preserve"})
@@ -814,14 +827,15 @@ async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_format
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
-    await jobs._process_ready_job({
-        "id": "job",
-        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        "combined_message": "Precio?",
-        "channel": "instagram",
-        "interaction_type": "instagram_comment",
-        "correlation_id": "corr",
-    })
+    with caplog.at_level("INFO", logger="app.integrations.kommo.jobs"):
+        await jobs._process_ready_job({
+            "id": "job",
+            "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            "combined_message": "Precio?",
+            "channel": "instagram",
+            "interaction_type": "instagram_comment",
+            "correlation_id": "corr",
+        })
 
     assert jobs.generate_response.await_args.kwargs["integration_context"]["interaction_type"] == "instagram_comment"
     message = client.continue_salesbot.await_args.kwargs["data"]["message"]
@@ -830,6 +844,7 @@ async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_format
     assert len(message) <= 300
     continuation_payload = json.loads(mock_db.execute.await_args_list[0].args[1]["continuation_payload"])
     assert continuation_payload["data"]["message"] == message
+    assert "Kommo Salesbot continuation succeeded: job_id=job interaction_type=instagram_comment" in caplog.text
 
 
 @pytest.mark.asyncio

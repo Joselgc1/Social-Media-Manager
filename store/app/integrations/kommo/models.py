@@ -64,6 +64,12 @@ class NormalizedKommoEvent(BaseModel):
     ai_mode_enum_id: int | None = None
     media_url: str | None = None
     interaction_type: KommoInteractionType = "private_message"
+    post_id: str | None = None
+    comment_id: str | None = None
+    parent_comment_id: str | None = None
+    media_id: str | None = None
+    post_url: str | None = None
+    comment_url: str | None = None
 
     @property
     def stable_entity_id(self) -> str | None:

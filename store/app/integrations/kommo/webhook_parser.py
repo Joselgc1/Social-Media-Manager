@@ -65,13 +65,6 @@ def origin_to_channel(origin: str | None) -> str | None:
 
 
 def normalize_interaction_type(value: Any) -> str | None:
-    """
-    Normalize only an explicit app-level interaction marker.
-
-    The repository does not include a confirmed native Kommo Instagram-comment
-    payload, so comment detection deliberately does not infer from origin,
-    message_type, or other speculative values.
-    """
     text = str(value or "").strip().lower()
     return text if text in {"private_message", "instagram_comment"} else None
 
@@ -85,9 +78,13 @@ def _message_event(
     author = item.get("author") if isinstance(item.get("author"), dict) else {}
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else {}
     origin = _string_or_none(item.get("origin"))
+    message_type = _string_or_none(item.get("message_type") or attachment.get("type"))
+    channel = origin_to_channel(origin)
     media_url = None
     if attachment.get("type") in {"picture", "image"}:
         media_url = _string_or_none(attachment.get("link"))
+    explicit_interaction_type = normalize_interaction_type(item.get("interaction_type")) or default_interaction_type
+    comment_fields = _comment_fields(item)
     return NormalizedKommoEvent(
         event_type=event_type,
         message_id=_string_or_none(item.get("id")),
@@ -98,16 +95,49 @@ def _message_event(
         entity_id=_string_or_none(item.get("entity_id") or item.get("element_id")),
         entity_type=_string_or_none(item.get("entity_type") or item.get("element_type")),
         text=_string_or_none(item.get("text")),
-        message_type=_string_or_none(item.get("message_type") or attachment.get("type")),
+        message_type=message_type,
         origin=origin,
-        channel=origin_to_channel(origin),
-        interaction_type=normalize_interaction_type(item.get("interaction_type")) or default_interaction_type or "private_message",
+        channel=channel,
+        interaction_type=explicit_interaction_type or _infer_interaction_type(channel, message_type),
         author_id=_string_or_none(author.get("id") or author.get("user_id")),
         author_name=_string_or_none(author.get("name")),
         author_type=_string_or_none(author.get("type")),
         created_at=_timestamp(item.get("created_at")),
         media_url=media_url,
+        **comment_fields,
     )
+
+
+def _infer_interaction_type(channel: str | None, message_type: str | None) -> str:
+    if channel == "instagram" and str(message_type or "").strip().lower() == "comment":
+        return "instagram_comment"
+    return "private_message"
+
+
+def _comment_fields(item: dict[str, Any]) -> dict[str, str | None]:
+    comment = item.get("comment") if isinstance(item.get("comment"), dict) else {}
+    post = item.get("post") if isinstance(item.get("post"), dict) else {}
+    media = item.get("media") if isinstance(item.get("media"), dict) else {}
+    return {
+        "post_id": _first_string(item.get("post_id"), post.get("id"), post.get("post_id")),
+        "comment_id": _first_string(item.get("comment_id"), comment.get("id"), comment.get("comment_id")),
+        "parent_comment_id": _first_string(
+            item.get("parent_comment_id"),
+            comment.get("parent_id"),
+            comment.get("parent_comment_id"),
+        ),
+        "media_id": _first_string(item.get("media_id"), media.get("id"), post.get("media_id")),
+        "post_url": _first_string(item.get("post_url"), post.get("url"), post.get("link"), media.get("permalink")),
+        "comment_url": _first_string(item.get("comment_url"), comment.get("url"), comment.get("link")),
+    }
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        text = _string_or_none(value)
+        if text:
+            return text
+    return None
 
 
 def _message_items(value: Any) -> list[dict[str, Any]]:

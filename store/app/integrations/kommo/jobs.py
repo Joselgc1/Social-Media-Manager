@@ -699,9 +699,31 @@ async def _process_ready_job(job: dict) -> None:
         await _mark_job_continuing(job["id"], continuation_data)
         continuation_started = True
         _log_continuation_prepared(job["id"], continuation_data, message_diagnostics)
-        response_payload = await client.continue_salesbot(
-            job["return_url"],
-            data=continuation_data,
+        try:
+            response_payload = await client.continue_salesbot(
+                job["return_url"],
+                data=continuation_data,
+            )
+        except KommoAPIError as e:
+            logger.warning(
+                "Kommo Salesbot continuation failed: job_id=%s interaction_type=%s error=%s",
+                job["id"],
+                _job_interaction_type(job),
+                sanitize_job_error(e),
+            )
+            raise
+        except Exception as e:
+            logger.warning(
+                "Kommo Salesbot continuation failed: job_id=%s interaction_type=%s error=%s",
+                job["id"],
+                _job_interaction_type(job),
+                sanitize_job_error(e),
+            )
+            raise
+        logger.info(
+            "Kommo Salesbot continuation succeeded: job_id=%s interaction_type=%s",
+            job["id"],
+            _job_interaction_type(job),
         )
         await _store_assistant_message_after_delivery(customer, job, result, customer_text)
         await _mark_job_sent(job["id"], response_payload)
@@ -763,6 +785,13 @@ async def _find_latest_job_for_callback(values: dict):
 
 async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, values: dict) -> dict:
     message = _callback_comment_text(data)
+    logger.info(
+        "Kommo native comment callback ready job creation started: interaction_type=instagram_comment "
+        "message_text_resolved=%s signed_entity_type=%s signed_entity_id=%s",
+        True,
+        values["entity_type"],
+        values["entity_id"],
+    )
     external_message_id, correlation_id = _comment_callback_ids(values, message)
     job_values = {
         "correlation_id": correlation_id,
@@ -815,7 +844,7 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
             raise RuntimeError("comment_callback_job_insert_failed")
         await _record_callback_receipt(job_values, str(job["id"]))
 
-    logger.info("Kommo native comment callback created ready job: %s", _job_log_context(dict(job)))
+    logger.info("Kommo native comment callback created ready comment job: %s", _job_log_context(dict(job)))
     return {"status": "ready", "job_id": str(job["id"])}
 
 
@@ -967,9 +996,31 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
                 interaction_type=_job_interaction_type(job),
             ),
         )
-        response_payload = await client.continue_salesbot(
-            job["return_url"],
-            data=continuation_data,
+        try:
+            response_payload = await client.continue_salesbot(
+                job["return_url"],
+                data=continuation_data,
+            )
+        except KommoAPIError as e:
+            logger.warning(
+                "Kommo failure continuation failed: job_id=%s interaction_type=%s error=%s",
+                job["id"],
+                _job_interaction_type(job),
+                sanitize_job_error(e),
+            )
+            raise
+        except Exception as e:
+            logger.warning(
+                "Kommo failure continuation failed: job_id=%s interaction_type=%s error=%s",
+                job["id"],
+                _job_interaction_type(job),
+                sanitize_job_error(e),
+            )
+            raise
+        logger.info(
+            "Kommo failure continuation succeeded: job_id=%s interaction_type=%s",
+            job["id"],
+            _job_interaction_type(job),
         )
         await _mark_job_discarded(job["id"], reason, response_payload)
     except KommoAPIError as e:

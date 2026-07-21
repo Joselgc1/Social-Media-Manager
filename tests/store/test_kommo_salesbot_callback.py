@@ -18,6 +18,7 @@ def _config(**overrides):
         "kommo_subdomain": "acme",
         "kommo_integration_secret": "secret",
         "kommo_integration_id": "client-uuid",
+        "kommo_webhook_secret": "secret-path",
     }
     data.update(overrides)
     return SimpleNamespace(**data)
@@ -120,6 +121,48 @@ async def test_salesbot_callback_accepts_comment_interaction_type(client):
     response = await _post(client, json=_json_body(data={"lead_id": "100", "origin": "instagram", "interaction_type": "instagram_comment"}))
     assert response.status_code == 200
     assert kommo.persist_salesbot_callback.await_args.args[0].interaction_type == "instagram_comment"
+
+
+@pytest.mark.asyncio
+async def test_salesbot_callback_logs_interaction_message_and_signed_entity(client, caplog):
+    with caplog.at_level("INFO", logger="app.webhooks.kommo"):
+        response = await _post(
+            client,
+            json=_json_body(data={"message": "Precio?", "lead_id": "100", "origin": "instagram", "interaction_type": "instagram_comment"}),
+        )
+
+    assert response.status_code == 200
+    assert "interaction_type=instagram_comment" in caplog.text
+    assert "message_text_resolved=True" in caplog.text
+    assert "signed_entity_type=leads" in caplog.text
+    assert "signed_entity_id=100" in caplog.text
+    assert "Precio?" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_native_comment_general_webhook_is_ignored_by_private_message_path(
+    client,
+    monkeypatch,
+    caplog,
+    sanitized_a105_native_instagram_comment_payload,
+):
+    record = AsyncMock()
+    scheduled = AsyncMock()
+    monkeypatch.setattr(kommo, "record_incoming_event", record)
+    monkeypatch.setattr(kommo, "schedule_due_job_processing", scheduled)
+
+    with caplog.at_level("INFO", logger="app.webhooks.kommo"):
+        response = await client.post("/webhooks/kommo/events/secret-path", json=sanitized_a105_native_instagram_comment_payload)
+
+    assert response.status_code == 200
+    record.assert_not_awaited()
+    scheduled.assert_not_called()
+    assert "Kommo native Instagram comment ignored by private-message webhook path" in caplog.text
+    assert "interaction_type': 'instagram_comment'" in caplog.text
+    assert "post_id': 'ig-post-a105'" in caplog.text
+    assert "comment_id': 'ig-comment-a105'" in caplog.text
+    assert "has_post_url': True" in caplog.text
+    assert "Precio?" not in caplog.text
 
 
 @pytest.mark.asyncio

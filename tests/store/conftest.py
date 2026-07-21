@@ -27,6 +27,34 @@ def make_record(**kwargs) -> MockRecord:
 
 
 @pytest.fixture
+def sanitized_a105_native_instagram_comment_payload():
+    """Sanitized Kommo A105 native Instagram comment general-webhook payload."""
+    return {
+        "account[id]": "1000001",
+        "account[subdomain]": "acme",
+        "message[add][0][id]": "A105",
+        "message[add][0][chat_id]": "chat-a105",
+        "message[add][0][talk_id]": "talk-a105",
+        "message[add][0][contact_id]": "420105",
+        "message[add][0][entity_id]": "105105",
+        "message[add][0][entity_type]": "lead",
+        "message[add][0][text]": "Precio?",
+        "message[add][0][message_type]": "comment",
+        "message[add][0][origin]": "instagram",
+        "message[add][0][type]": "incoming",
+        "message[add][0][author][id]": "ig-author-a105",
+        "message[add][0][author][name]": "Cliente Instagram",
+        "message[add][0][author][type]": "external",
+        "message[add][0][post_id]": "ig-post-a105",
+        "message[add][0][comment_id]": "ig-comment-a105",
+        "message[add][0][parent_comment_id]": "ig-parent-a105",
+        "message[add][0][media_id]": "ig-media-a105",
+        "message[add][0][post_url]": "https://www.instagram.com/p/sanitized-a105/",
+        "message[add][0][comment_url]": "https://www.instagram.com/p/sanitized-a105/c/ig-comment-a105/",
+    }
+
+
+@pytest.fixture
 def mock_db():
     """Mock database with common async methods."""
     db = MagicMock()

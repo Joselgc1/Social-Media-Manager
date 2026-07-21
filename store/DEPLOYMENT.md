@@ -348,7 +348,7 @@ Only do this when `CHANNEL_BACKEND=kommo`.
 6. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
 7. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
 
-Instagram public comments should use the native comment-triggered Salesbot. General webhook comment routing still requires an explicit `interaction_type=instagram_comment` classification; do not infer comments from `origin=instagram` alone.
+Instagram public comments should use the native comment-triggered Salesbot. The general webhook path classifies confirmed native comment events (`origin=instagram`, `message_type=comment`) and ignores them so the private-message Salesbot is not launched.
 
 The complete Kommo setup is documented in [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md).
 

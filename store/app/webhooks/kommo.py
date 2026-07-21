@@ -62,6 +62,12 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
     for event in events:
         logger.info("Kommo event received: %s", _event_log_context(event))
         if event.event_type == "incoming_message":
+            if event.interaction_type == "instagram_comment":
+                logger.info(
+                    "Kommo native Instagram comment ignored by private-message webhook path: %s",
+                    _event_log_context(event),
+                )
+                continue
             if event.author_type and event.author_type != "external":
                 logger.info("Kommo incoming message ignored because author is not external: %s", _event_log_context(event))
                 continue
@@ -100,6 +106,13 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
     except KommoAuthError as e:
         logger.warning("Rejected Kommo Salesbot callback: reason=%s", e.reason_code)
         raise HTTPException(status_code=401, detail="Invalid Salesbot callback") from e
+    logger.info(
+        "Kommo Salesbot callback validated: interaction_type=%s message_text_resolved=%s signed_entity_type=%s signed_entity_id=%s",
+        callback.data.interaction_type or "private_message",
+        _has_resolved_message_text(callback.data.message),
+        claims.get("entity_type"),
+        claims.get("entity_id"),
+    )
 
     try:
         result = await persist_salesbot_callback(callback.data, return_url, claims)
@@ -218,6 +231,12 @@ def _event_log_context(event) -> dict:
         "interaction_type": event.interaction_type,
         "origin": event.origin,
         "message_type": event.message_type,
+        "post_id": event.post_id,
+        "comment_id": event.comment_id,
+        "parent_comment_id": event.parent_comment_id,
+        "media_id": event.media_id,
+        "has_post_url": bool(event.post_url),
+        "has_comment_url": bool(event.comment_url),
         "author_id": event.author_id,
         "has_author_name": bool(event.author_name),
         "author_type": event.author_type,
@@ -231,6 +250,11 @@ def _event_log_context(event) -> dict:
         "entity_id": event.entity_id,
         "entity_type": event.entity_type,
     }
+
+
+def _has_resolved_message_text(value: str | None) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and not (text.startswith("{{") and text.endswith("}}"))
 
 
 def _safe_job_result(result: dict) -> dict:
