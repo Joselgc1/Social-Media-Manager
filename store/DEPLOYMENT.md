@@ -50,7 +50,7 @@ Run the migrations. Go to the SQL Editor in Supabase's dashboard:
 
 This creates all tables and seeds the runtime settings used by the store dashboard and the master control plane.
 
-Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, `ai_orchestration_mode=legacy`, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), Kommo transport formatting defaults (`kommo_emoji_mode_*`, `kommo_strip_emoji`), an empty `payment_methods` row, an empty `accepted_exchange_rate` row, and automatic order discount defaults. The same consolidated schema also creates the multi-agent workflow and AI observability tables. For existing stores created from an older schema, re-run this consolidated file in a maintenance window to create any missing tables and default settings before enabling multi-agent mode.
+Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, `ai_orchestration_mode=legacy`, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), Kommo transport formatting defaults (`kommo_emoji_mode_*`, `kommo_strip_emoji`), an empty `payment_methods` row, exchange-rate defaults, an empty `store_phone_number` row, and automatic order discount defaults. The same consolidated schema also creates the multi-agent workflow and AI observability tables. For existing stores created from an older schema, re-run this consolidated file in a maintenance window to create any missing tables and default settings before enabling multi-agent mode.
 
 ### 1.2 OpenAI API Key
 

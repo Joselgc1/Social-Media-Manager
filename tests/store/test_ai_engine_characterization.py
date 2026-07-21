@@ -57,6 +57,7 @@ def _sample_settings(**overrides) -> dict:
         "accepted_exchange_rate": "40,25 Bs/USD",
         "exchange_rate_reference": "manual",
         "manual_exchange_rate": "40.25",
+        "store_phone_number": "+58 412-1234567",
         "order_discount_percent": 10,
         "order_discount_threshold_usd": 350,
     }
@@ -452,6 +453,111 @@ async def test_hostile_message_escalates_before_normal_llm_flow(engine_harness):
     engine_harness.provider.chat.assert_not_awaited()
     engine.conversations.get_history.assert_not_awaited()
     engine.orders.get_latest_open_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_public_instagram_comment_price_uses_post_context_without_llm(engine_harness):
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Precio?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {"product_sku": "PJ-001"},
+        },
+    )
+
+    assert response["text"] == "Pijama satén azul cuesta $28."
+    assert response["interactive"] is None
+    assert response["catalog_pdf"] is None
+    assert response["product_image"] is None
+    engine_harness.provider.chat.assert_not_awaited()
+    engine.conversations.get_history.assert_not_awaited()
+    engine.orders.get_latest_open_order.assert_not_awaited()
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_price"
+
+
+@pytest.mark.asyncio
+async def test_public_instagram_comment_stock_uses_post_caption_context_without_stock_count(engine_harness):
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Disponible?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {"post_caption": "Nueva Pijama satén azul disponible"},
+        },
+    )
+
+    assert response["text"] == "Sí, Pijama satén azul está disponible."
+    assert "4" not in response["text"]
+    engine_harness.provider.chat.assert_not_awaited()
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_stock"
+
+
+@pytest.mark.asyncio
+async def test_public_instagram_comment_other_uses_exact_phone_fallback(engine_harness):
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Talla M?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {"product_sku": "PJ-001"},
+        },
+    )
+
+    assert response["text"] == "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
+    engine_harness.provider.chat.assert_not_awaited()
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_private_invite"
+
+
+@pytest.mark.asyncio
+async def test_public_instagram_comment_price_without_context_uses_dm_only_fallback(engine_harness):
+    engine_harness.settings["store_phone_number"] = ""
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Cuánto cuesta?",
+        integration_context={"provider": "kommo", "interaction_type": "instagram_comment"},
+    )
+
+    assert response["text"] == "Hola! Para más info escríbenos al DM! :)"
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_public_instagram_comment_ambiguous_post_context_falls_back(engine_harness):
+    engine_harness.catalog.append({
+        "sku": "PJ-002-S",
+        "parent_sku": "PJ-002",
+        "product_name": "Pijama satén rosada",
+        "category": "Pijamas",
+        "description": "Pijama suave rosada",
+        "size": "S",
+        "sizes": "S",
+        "price_usd": 30,
+        "stock": 2,
+        "image_url": "https://example.com/pijama-rosada.jpg",
+    })
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Precio?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {"post_caption": "Nuevas pijamas de satén"},
+        },
+    )
+
+    assert response["text"] == "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
+    engine_harness.provider.chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -37,6 +37,24 @@ STALE_WAITING_MINUTES = 3
 _TERMINAL_STATUSES = {"sent", "discarded", "failed", "delivery_unknown"}
 _ACTIVE_SALESBOT_STATUSES = {"prepared", "waiting_for_salesbot", "ready", "processing", "continuing"}
 _TRANSIENT_CONTINUATION_STATUSES = {429, 500, 502, 503, 504}
+_PUBLIC_COMMENT_CONTEXT_FIELDS = {
+    "post_id",
+    "comment_id",
+    "parent_comment_id",
+    "media_id",
+    "post_url",
+    "comment_url",
+    "post_caption",
+    "post_text",
+    "media_caption",
+    "product_name",
+    "post_product_name",
+    "product_sku",
+    "parent_sku",
+    "image_url",
+    "post_image_url",
+    "post_media_url",
+}
 
 
 def sanitize_job_error(error: Exception | str) -> str:
@@ -640,6 +658,7 @@ async def _process_ready_job(job: dict) -> None:
                 "author_id": job.get("author_id"),
                 "interaction_type": _job_interaction_type(job),
                 "media_url_is_direct": bool(job.get("media_url")),
+                "public_comment_context": _job_public_comment_context(job),
             },
             persist_assistant_message=False,
         )
@@ -785,10 +804,12 @@ async def _find_latest_job_for_callback(values: dict):
 
 async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, values: dict) -> dict:
     message = _callback_comment_text(data)
+    public_comment_context = _public_comment_context_from_callback(data)
     logger.info(
         "Kommo native comment callback ready job creation started: interaction_type=instagram_comment "
-        "message_text_resolved=%s signed_entity_type=%s signed_entity_id=%s",
+        "message_text_resolved=%s context_keys=%s signed_entity_type=%s signed_entity_id=%s",
         True,
+        sorted(public_comment_context.keys()),
         values["entity_type"],
         values["entity_id"],
     )
@@ -804,6 +825,7 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
         "combined_message": message,
         "return_url": values["return_url"],
         "callback_claims": values["callback_claims"],
+        "public_comment_context": json.dumps(public_comment_context, ensure_ascii=False) if public_comment_context else None,
         "salesbot_token_jti": values["salesbot_token_jti"],
         "salesbot_account_id": values["salesbot_account_id"],
         "salesbot_user_id": values["salesbot_user_id"],
@@ -828,12 +850,12 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
             INSERT INTO kommo_message_jobs (
                 correlation_id, external_message_id, lead_id, contact_id, origin, channel,
                 interaction_type, combined_message, return_url, status, buffer_expires_at,
-                callback_claims, salesbot_token_jti, salesbot_account_id,
+                callback_claims, public_comment_context, salesbot_token_jti, salesbot_account_id,
                 salesbot_user_id, salesbot_client_uuid
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :origin, :channel,
                 :interaction_type, :combined_message, :return_url, 'ready', NOW(),
-                CAST(:callback_claims AS jsonb), :salesbot_token_jti, :salesbot_account_id,
+                CAST(:callback_claims AS jsonb), CAST(:public_comment_context AS jsonb), :salesbot_token_jti, :salesbot_account_id,
                 :salesbot_user_id, :salesbot_client_uuid
             )
             RETURNING *
@@ -940,6 +962,23 @@ def _callback_comment_text(data: SalesbotWidgetData) -> str:
     if not text or (text.startswith("{{") and text.endswith("}}")):
         raise ValueError("missing_comment_message")
     return text
+
+
+def _public_comment_context_from_callback(data: SalesbotWidgetData) -> dict:
+    raw = data.model_dump(exclude_none=True)
+    return {
+        key: cleaned
+        for key, value in raw.items()
+        if key in _PUBLIC_COMMENT_CONTEXT_FIELDS
+        if (cleaned := _clean_public_comment_context_value(value))
+    }
+
+
+def _clean_public_comment_context_value(value) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text or (text.startswith("{{") and text.endswith("}}")):
+        return ""
+    return text[:1000]
 
 
 def _comment_callback_ids(values: dict, message: str) -> tuple[str, str]:
@@ -1272,6 +1311,7 @@ def _job_log_context(job: dict) -> dict:
         "has_message": bool(job.get("combined_message")),
         "has_media": bool(job.get("media_url")),
         "has_return_url": bool(job.get("return_url")),
+        "has_public_comment_context": bool(_job_public_comment_context(job)),
         "attempt_count": job.get("attempt_count"),
         "seconds_until_due": float(job["seconds_until_due"]) if job.get("seconds_until_due") is not None else None,
         "salesbot_launched_at": _timestamp_for_log(job.get("salesbot_launched_at")),
@@ -1284,6 +1324,19 @@ def _job_log_context(job: dict) -> dict:
 def _job_interaction_type(job: dict) -> str:
     interaction_type = str(job.get("interaction_type") or "private_message").strip().lower()
     return interaction_type if interaction_type in {"private_message", "instagram_comment"} else "private_message"
+
+
+def _job_public_comment_context(job: dict) -> dict:
+    context = job.get("public_comment_context")
+    if isinstance(context, dict):
+        return context
+    if isinstance(context, str) and context.strip():
+        try:
+            loaded = json.loads(context)
+        except json.JSONDecodeError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+    return {}
 
 
 def _timestamp_for_log(value) -> str | None:

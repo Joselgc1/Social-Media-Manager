@@ -46,6 +46,7 @@ RUNTIME_SETTING_DEFAULTS = {
     "exchange_rate_usdt_binance_fetched_at": "",
     "exchange_rate_usdt_binance_source": "",
     "exchange_rates_last_synced_at": "",
+    "store_phone_number": "",
     "order_discount_percent": 10.0,
     "order_discount_threshold_usd": 350.0,
     "kommo_strip_emoji": False,
@@ -75,6 +76,7 @@ SYNCABLE_RUNTIME_SETTING_KEYS = {
     "daily_analytics_minute",
     "exchange_rate_reference",
     MANUAL_EXCHANGE_RATE_KEY,
+    "store_phone_number",
     *PROVIDER_EXCHANGE_RATE_SETTING_KEYS,
 }
 

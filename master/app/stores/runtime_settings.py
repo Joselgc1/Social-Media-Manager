@@ -27,6 +27,10 @@ STORE_EXCHANGE_RATE_SETTING_KEYS = {
     "manual_exchange_rate",
 }
 
+STORE_PROFILE_SETTING_KEYS = {
+    "store_phone_number",
+}
+
 MASTER_EDITABLE_RUNTIME_SETTING_KEYS = {
     "llm_provider",
     "llm_model",
@@ -45,7 +49,7 @@ MASTER_EDITABLE_RUNTIME_SETTING_KEYS = {
     "token_reminder_minute",
     "daily_analytics_hour",
     "daily_analytics_minute",
-} | STORE_EXCHANGE_RATE_SETTING_KEYS
+} | STORE_EXCHANGE_RATE_SETTING_KEYS | STORE_PROFILE_SETTING_KEYS
 
 SYNCABLE_RUNTIME_SETTING_KEYS = MASTER_EDITABLE_RUNTIME_SETTING_KEYS | PROVIDER_EXCHANGE_RATE_SETTING_KEYS
 
@@ -83,4 +87,5 @@ DEFAULT_RUNTIME_SETTINGS = {
     "exchange_rate_usdt_binance_fetched_at": "",
     "exchange_rate_usdt_binance_source": "",
     "exchange_rates_last_synced_at": "",
+    "store_phone_number": "",
 }

@@ -2,7 +2,7 @@
 
 This widget must be installed at the Kommo account level before it appears as an installed widget inside Salesbot.
 
-The widget version is currently `1.2.5`. Increment `widget.version` in `manifest.json` every time a new archive is uploaded so Kommo refreshes the widget files.
+The widget version is currently `1.2.6`. Increment `widget.version` in `manifest.json` every time a new archive is uploaded so Kommo refreshes the widget files.
 
 Build:
 
@@ -36,6 +36,8 @@ The widget uses `installation=true`, has both `settings` and `salesbot_designer`
 The Salesbot source uses `widget_request` followed by `goto` question step `1`. The backend resumes the flow by calling Kommo's continuation URL. The widget exposes two documented Salesbot exits: `success` for completed AI responses and `fail` for errors.
 
 The same installed widget is used by both Kommo Salesbot flows. The private-message Salesbot should end with a Kommo Message step using `{{json.message}}`; its Salesbot ID is configured as `KOMMO_SALESBOT_ID` and launched by the backend after an inbound DM webhook. The public-comment Salesbot should use Kommo's native `When a comment is received` trigger, select the Instagram-comment widget block, and end with a Kommo Comment step using `{{json.message}}`; the backend does not launch this Salesbot and does not need its ID.
+
+The Instagram-comment widget block sends optional post/product placeholders such as post caption, product SKU, product name, and media URL. The backend ignores unresolved placeholders and only answers price/availability when those resolved fields identify exactly one catalog product.
 
 If invalid manifests were previously uploaded first and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive, following Kommo's widget update behavior.
 

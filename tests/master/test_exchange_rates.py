@@ -195,6 +195,17 @@ def test_store_rate_settings_include_source_and_fetch_metadata():
     assert settings["exchange_rates_last_synced_at"]
 
 
+def test_master_runtime_normalizes_store_phone_number():
+    from app.stores.api import _normalize_runtime_fields
+
+    normalized = _normalize_runtime_fields(
+        {"store_phone_number": "  +58   412-1234567  "},
+        {"llm_provider": "openai", "fallback_provider": "anthropic"},
+    )
+
+    assert normalized["store_phone_number"] == "+58 412-1234567"
+
+
 def test_usdt_freshness_uses_fetched_at_threshold(monkeypatch):
     from app.stores import exchange_rates
 

@@ -34,7 +34,7 @@ from app.ai.tools.executor import execute_tool
 from app.ai.tools.registry import get_tool_schemas
 from app.ai.vision import analyze_payment_screenshot
 from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
-from app.catalog.sheets import get_cached_catalog
+from app.catalog.sheets import get_cached_catalog, group_catalog_products
 from app.config import get_config
 from app.crm import conversations, customers, escalations, orders, sessions
 from app.exchange_rates import build_customer_exchange_rate_reply
@@ -49,6 +49,52 @@ _INITIAL_GREETING_RE = re.compile(
     r"(?:\s+(?:bella|mi amor|hermosa|linda|corazon|corazón|\w+))?\s*[!¡.,:;-]*\s*",
     re.IGNORECASE,
 )
+_PUBLIC_COMMENT_PRIVATE_DETAIL_RE = re.compile(
+    r"\b(talla|tallas|medida|medidas|size|envio|envios|delivery|shipping|domicilio|"
+    r"pago|pagos|pagar|transferencia|zelle|binance|zinli|compr\w*|pedido|orden|"
+    r"apart\w*|reserv\w*|recomienda|recomiendas|recomendacion|recomendaciones|asesor|humano|dm|"
+    r"whatsapp|wsp|telefono|direccion|ubicacion)\b"
+)
+_PUBLIC_COMMENT_PRICE_RE = re.compile(r"\b(precio|precios|costo|costos|cuesta|vale|valor|sale|cuanto|cuanta|cuantos|cuantas)\b")
+_PUBLIC_COMMENT_STOCK_RE = re.compile(r"\b(disponible|disponibles|disponibilidad|stock|hay|tienen|queda|quedan|agotado|agotada)\b")
+_PUBLIC_COMMENT_CONTEXT_KEYS = {
+    "product_sku",
+    "parent_sku",
+    "sku",
+    "product_name",
+    "post_product_name",
+    "post_caption",
+    "post_text",
+    "caption",
+    "media_caption",
+    "image_url",
+    "post_image_url",
+    "post_media_url",
+    "media_url",
+    "permalink",
+    "post_id",
+    "comment_id",
+    "parent_comment_id",
+    "media_id",
+    "post_url",
+    "comment_url",
+}
+_PUBLIC_COMMENT_STOPWORDS = {
+    "con",
+    "del",
+    "para",
+    "por",
+    "una",
+    "uno",
+    "las",
+    "los",
+    "que",
+    "new",
+    "nueva",
+    "nuevo",
+    "disponible",
+    "disponibles",
+}
 
 
 def _list_providers():
@@ -160,6 +206,7 @@ async def generate_response(
                 channel=channel,
                 media_url=media_url,
                 message_text=message_text,
+                settings=settings,
                 orchestration_mode=orchestration_mode,
                 route_intent="hostile_message",
                 persist_assistant_message=persist_assistant_message,
@@ -250,6 +297,7 @@ async def generate_response(
                 channel=channel,
                 media_url=media_url,
                 message_text=message_text,
+                settings=settings,
                 orchestration_mode=orchestration_mode,
                 route_intent="human_request",
                 persist_assistant_message=persist_assistant_message,
@@ -317,6 +365,18 @@ async def generate_response(
             "escalated": True,
             "paused": False,
         }
+
+    if is_public_comment:
+        return await _handle_public_instagram_comment(
+            customer=customer,
+            channel=channel,
+            media_url=media_url,
+            message_text=message_text,
+            settings=settings,
+            integration_context=integration_context,
+            orchestration_mode=orchestration_mode,
+            persist_assistant_message=persist_assistant_message,
+        )
 
     # ── 3. Load conversation history ─────────────────────────
     max_history = settings.get("max_conversation_history", 20)
@@ -697,6 +757,7 @@ async def _handle_public_comment_private_invite(
     channel: str,
     media_url: str | None,
     message_text: str,
+    settings: dict,
     orchestration_mode: str,
     route_intent: str,
     persist_assistant_message: bool = True,
@@ -710,7 +771,7 @@ async def _handle_public_comment_private_invite(
         channel=channel,
         media_url=media_url,
     )
-    reply_text = _sanitize_public_comment_reply("Escríbenos por DM y con gusto te ayudamos por privado.")
+    reply_text = _public_comment_private_invite_text(settings)
     response_time_ms = int((time.monotonic() - t_start) * 1000)
     await analytics.log_ai_run(
         customer_id=customer["id"],
@@ -747,6 +808,281 @@ async def _handle_public_comment_private_invite(
         "customer_id": customer["id"],
         "escalated": False,
     }
+
+
+async def _handle_public_instagram_comment(
+    *,
+    customer: dict,
+    channel: str,
+    media_url: str | None,
+    message_text: str,
+    settings: dict,
+    integration_context: dict | None,
+    orchestration_mode: str,
+    persist_assistant_message: bool = True,
+) -> dict:
+    """Deterministically answer safe public Instagram comment intents."""
+    t_start = time.monotonic()
+    await conversations.store_message(
+        customer_id=customer["id"],
+        role="user",
+        content=message_text,
+        channel=channel,
+        media_url=media_url,
+    )
+
+    request_kind = _classify_public_comment_request(message_text)
+    reply_text = None
+    route_intent = f"public_comment_{request_kind}"
+    if request_kind in {"price", "stock"}:
+        product = _resolve_public_comment_product(integration_context)
+        if product:
+            reply_text = (
+                _public_comment_price_reply(product)
+                if request_kind == "price"
+                else _public_comment_stock_reply(product)
+            )
+
+    if not reply_text:
+        route_intent = "public_comment_private_invite"
+        reply_text = _public_comment_private_invite_text(settings)
+
+    response_time_ms = int((time.monotonic() - t_start) * 1000)
+    await analytics.log_ai_run(
+        customer_id=customer["id"],
+        channel=channel,
+        orchestration_mode=orchestration_mode,
+        selected_agent="direct",
+        route_intent=route_intent,
+        route_source="public_comment_guard",
+        route_confidence=1.0,
+        provider=None,
+        model=None,
+        usage={},
+        response_time_ms=response_time_ms,
+        tool_names=[],
+        tool_rounds=0,
+        handoff_occurred=False,
+        fallback_occurred=False,
+        escalation_occurred=False,
+        shadow_evaluation=False,
+        legacy_fallback=False,
+    )
+    if persist_assistant_message:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="assistant",
+            content=reply_text,
+            channel=channel,
+        )
+    return {
+        "text": reply_text,
+        "interactive": None,
+        "catalog_pdf": None,
+        "product_image": None,
+        "customer_id": customer["id"],
+        "escalated": False,
+    }
+
+
+def _classify_public_comment_request(message_text: str) -> str:
+    normalized = guards.normalize_text_for_moderation(_INITIAL_GREETING_RE.sub("", message_text or ""))
+    if not normalized:
+        return "other"
+    if _PUBLIC_COMMENT_PRIVATE_DETAIL_RE.search(normalized):
+        return "other"
+    has_price = bool(_PUBLIC_COMMENT_PRICE_RE.search(normalized))
+    has_stock = bool(_PUBLIC_COMMENT_STOCK_RE.search(normalized))
+    if has_price:
+        return "price"
+    if has_stock:
+        return "stock"
+    return "other"
+
+
+def _public_comment_private_invite_text(settings: dict) -> str:
+    phone = _normalize_public_store_phone(settings.get("store_phone_number"))
+    if phone:
+        return f"Hola! Para más info escríbenos al DM o por WhatsApp al {phone}! :)"
+    return "Hola! Para más info escríbenos al DM! :)"
+
+
+def _normalize_public_store_phone(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _resolve_public_comment_product(integration_context: dict | None) -> dict | None:
+    context = _public_comment_context(integration_context)
+    if not context:
+        return None
+
+    grouped_products = group_catalog_products(get_cached_catalog())
+    if not grouped_products:
+        return None
+
+    for key in ("product_sku", "parent_sku", "sku"):
+        product = _single_public_comment_match(_match_public_comment_product_by_sku(context.get(key), grouped_products))
+        if product:
+            return product
+
+    for key in ("image_url", "post_image_url", "post_media_url", "media_url", "permalink"):
+        product = _single_public_comment_match(_match_public_comment_product_by_image(context.get(key), grouped_products))
+        if product:
+            return product
+
+    text_matches = []
+    for key in ("product_name", "post_product_name", "post_caption", "post_text", "caption", "media_caption"):
+        text_matches.extend(_match_public_comment_product_by_text(context.get(key), grouped_products))
+    return _single_public_comment_match(text_matches)
+
+
+def _public_comment_context(integration_context: dict | None) -> dict:
+    raw_context = {}
+    source = integration_context or {}
+    nested = source.get("public_comment_context")
+    if isinstance(nested, dict):
+        raw_context.update(nested)
+    raw_context.update({key: source.get(key) for key in _PUBLIC_COMMENT_CONTEXT_KEYS if key in source})
+    return {
+        key: cleaned
+        for key, value in raw_context.items()
+        if key in _PUBLIC_COMMENT_CONTEXT_KEYS
+        if (cleaned := _clean_public_comment_context_value(value))
+    }
+
+
+def _clean_public_comment_context_value(value) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or (text.startswith("{{") and text.endswith("}}")):
+        return ""
+    return text[:1000]
+
+
+def _match_public_comment_product_by_sku(value: str | None, grouped_products: list[dict]) -> list[dict]:
+    target = _normalize_catalog_text(value or "")
+    if not target:
+        return []
+    matches = []
+    for product in grouped_products:
+        skus = {
+            _normalize_catalog_text(product.get("sku", "")),
+            _normalize_catalog_text(product.get("parent_sku", "")),
+        }
+        for variant in product.get("variants", []) or []:
+            skus.add(_normalize_catalog_text(variant.get("sku", "")))
+            skus.add(_normalize_catalog_text(variant.get("parent_sku", "")))
+        if target in {sku for sku in skus if sku}:
+            matches.append(product)
+    return matches
+
+
+def _match_public_comment_product_by_image(value: str | None, grouped_products: list[dict]) -> list[dict]:
+    target = str(value or "").strip()
+    if not target.startswith(("http://", "https://")):
+        return []
+    matches = []
+    for product in grouped_products:
+        urls = {str(product.get("image_url") or "").strip()}
+        urls.update(str(variant.get("image_url") or "").strip() for variant in product.get("variants", []) or [])
+        if target in {url for url in urls if url}:
+            matches.append(product)
+    return matches
+
+
+def _match_public_comment_product_by_text(value: str | None, grouped_products: list[dict]) -> list[dict]:
+    text = _normalize_catalog_text(value or "")
+    if not text:
+        return []
+    matches = []
+    for product in grouped_products:
+        product_name = _normalize_catalog_text(product.get("product_name", ""))
+        if not product_name:
+            continue
+        terms = [
+            term for term in product_name.split()
+            if len(term) > 2 and term not in _PUBLIC_COMMENT_STOPWORDS
+        ]
+        sku_matches = any(
+            sku and re.search(rf"(?<!\w){re.escape(sku)}(?!\w)", text)
+            for sku in {
+                _normalize_catalog_text(product.get("sku", "")),
+                _normalize_catalog_text(product.get("parent_sku", "")),
+            }
+        )
+        name_matches = product_name == text or product_name in text or (len(terms) >= 2 and all(term in text for term in terms))
+        if sku_matches or name_matches:
+            matches.append(product)
+    return matches
+
+
+def _single_public_comment_match(matches: list[dict]) -> dict | None:
+    unique = {}
+    for product in matches:
+        identity = _public_comment_product_identity(product)
+        if identity:
+            unique[identity] = product
+    return next(iter(unique.values())) if len(unique) == 1 else None
+
+
+def _public_comment_product_identity(product: dict) -> str:
+    return _normalize_catalog_text(
+        product.get("parent_sku")
+        or product.get("sku")
+        or f"{product.get('product_name', '')}|{product.get('category', '')}"
+    )
+
+
+def _public_comment_price_reply(product: dict) -> str | None:
+    price = _single_public_comment_price(product)
+    name = str(product.get("product_name") or "").strip()
+    if price is None or not name:
+        return None
+    return _sanitize_public_comment_reply(f"{name} cuesta {_format_usd_price(price)}.")
+
+
+def _public_comment_stock_reply(product: dict) -> str | None:
+    name = str(product.get("product_name") or "").strip()
+    if not name:
+        return None
+    stock = _safe_public_comment_stock(product)
+    if stock is None:
+        return None
+    if stock > 0:
+        return _sanitize_public_comment_reply(f"Sí, {name} está disponible.")
+    return _sanitize_public_comment_reply(f"Por ahora {name} no está disponible.")
+
+
+def _single_public_comment_price(product: dict) -> float | None:
+    prices = set()
+    for variant in product.get("variants", []) or []:
+        price = _safe_public_comment_float(variant.get("price_usd"))
+        if price and price > 0:
+            prices.add(round(price, 2))
+    if not prices:
+        price = _safe_public_comment_float(product.get("price_usd"))
+        if price and price > 0:
+            prices.add(round(price, 2))
+    return next(iter(prices)) if len(prices) == 1 else None
+
+
+def _safe_public_comment_stock(product: dict) -> int | None:
+    try:
+        return int(product.get("stock", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_public_comment_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_usd_price(value: float) -> str:
+    if float(value).is_integer():
+        return f"${int(value)}"
+    return f"${value:.2f}".rstrip("0").rstrip(".")
 
 
 def _detect_exchange_rate_question(message_text: str, stored_history: list[dict] | None = None) -> bool:

@@ -380,6 +380,16 @@ function renderStoreDetail(store, stats, creds) {
             </div>
         </div>
 
+        <div class="card mb-4" id="store-profile-settings-panel">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="font-bold text-lg">Store Profile</h3>
+                <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+            </div>
+            <div id="store-profile-settings-content">
+                <p class="text-gray-500">Loading store profile settings...</p>
+            </div>
+        </div>
+
         <div class="card mb-4" id="exchange-rates-panel">
             <div class="flex items-center justify-between mb-3">
                 <h3 class="font-bold text-lg">Exchange Rates</h3>
@@ -807,8 +817,9 @@ async function refreshExchangeRates(storeId) {
 async function loadRuntimeSettings(storeId) {
     const aiContainer = document.getElementById('ai-settings-content');
     const schedulerContainer = document.getElementById('scheduler-settings-content');
+    const storeProfileContainer = document.getElementById('store-profile-settings-content');
     const exchangeRatesContainer = document.getElementById('exchange-rates-content');
-    if (!aiContainer && !schedulerContainer && !exchangeRatesContainer) return;
+    if (!aiContainer && !schedulerContainer && !storeProfileContainer && !exchangeRatesContainer) return;
 
     try {
         const data = await api(`/api/stores/${storeId}/settings`);
@@ -932,6 +943,18 @@ async function loadRuntimeSettings(storeId) {
             </div>`;
         }
 
+        if (storeProfileContainer) {
+            storeProfileContainer.innerHTML = `
+            <div class="space-y-3">
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">Public WhatsApp Number</label>
+                    <input id="store-phone-number" type="text" value="${esc(s.store_phone_number || '')}" class="w-full" placeholder="+58 412-1234567">
+                    <p class="text-xs text-gray-500 mt-1">Used in public Instagram comment fallback replies. Leave empty to invite only to DM.</p>
+                </div>
+                <button onclick="saveStoreProfileSettings('${storeId}')" class="btn btn-primary w-full">Save Store Profile</button>
+            </div>`;
+        }
+
         if (exchangeRatesContainer) {
             exchangeRatesContainer.innerHTML = renderExchangeRatesSettings(s);
         }
@@ -945,9 +968,28 @@ async function loadRuntimeSettings(storeId) {
         if (schedulerContainer) {
             schedulerContainer.innerHTML = `<p class="text-red-500">Could not load scheduler settings: ${esc(e.message)}</p>`;
         }
+        if (storeProfileContainer) {
+            storeProfileContainer.innerHTML = `<p class="text-red-500">Could not load store profile settings: ${esc(e.message)}</p>`;
+        }
         if (exchangeRatesContainer) {
             exchangeRatesContainer.innerHTML = `<p class="text-red-500">Could not load exchange rates: ${esc(e.message)}</p>`;
         }
+    }
+}
+
+async function saveStoreProfileSettings(storeId) {
+    const phone = String(document.getElementById('store-phone-number')?.value || '').replace(/\s+/g, ' ').trim();
+    if (phone && (!/[0-9]/.test(phone) || !/^[+0-9 ().-]+$/.test(phone) || phone.length > 40)) {
+        toast('Public WhatsApp number must be a valid phone number', 'error');
+        return;
+    }
+
+    try {
+        await apiPut(`/api/stores/${storeId}/settings`, { store_phone_number: phone });
+        toast('Store profile saved!');
+        await loadStoreDetail();
+    } catch (e) {
+        toast('Error saving store profile: ' + e.message, 'error');
     }
 }
 

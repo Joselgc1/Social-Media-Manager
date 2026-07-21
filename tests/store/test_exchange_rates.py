@@ -108,6 +108,13 @@ def test_exchange_rate_reference_and_manual_rate_are_store_editable():
     assert _validate_setting_value("manual_exchange_rate", "760,50", {}) == "760.5"
 
 
+def test_store_phone_number_is_store_editable_and_normalized():
+    assert _validate_setting_value("store_phone_number", "  +58   412-1234567  ", {}) == "+58 412-1234567"
+    assert _validate_setting_value("store_phone_number", "", {}) == ""
+    with pytest.raises(HTTPException):
+        _validate_setting_value("store_phone_number", "WhatsApp me", {})
+
+
 def test_master_and_store_runtime_settings_remain_aligned():
     master_runtime_path = Path(__file__).resolve().parents[2] / "master" / "app" / "stores" / "runtime_settings.py"
     spec = importlib.util.spec_from_file_location("master_runtime_settings_for_test", master_runtime_path)

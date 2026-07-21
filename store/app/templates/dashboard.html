@@ -233,6 +233,17 @@
         <div class="settings-mobile-stack grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-4 mb-4 items-start">
           <div class="space-y-4">
             <div class="card h-full">
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Contacto público</h3>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">WhatsApp para comentarios públicos</label>
+                  <input id="set-store-phone-number" type="text" class="w-full" placeholder="+58 412-1234567">
+                  <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">Eva lo usa solo para invitar desde comentarios públicos de Instagram al DM o WhatsApp.</p>
+                </div>
+                <button class="btn btn-primary w-full" onclick="saveStorePhoneSetting()">Guardar contacto</button>
+              </div>
+            </div>
+            <div class="card h-full">
               <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Tasa del día</h3>
               <div class="space-y-3">
                 <div>

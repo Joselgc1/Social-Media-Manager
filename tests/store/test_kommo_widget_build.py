@@ -133,7 +133,7 @@ def _flow_exit_codes(flow: list[dict]) -> set[str]:
 def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     manifest = _source_manifest()
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.5"
+    assert manifest["widget"]["version"] == "1.2.6"
     assert manifest["locations"] == ["settings", "salesbot_designer"]
     assert manifest["settings"]["backend_url"] == {
         "name": "settings.backend_url",
@@ -202,7 +202,7 @@ def test_widget_build_substitutes_widget_code_and_includes_expected_archive_cont
     assert "manifest.json" in names
     assert "__WIDGET_CODE__" not in json.dumps(manifest)
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.5"
+    assert manifest["widget"]["version"] == "1.2.6"
     assert "settings" in manifest
     assert {"settings", "salesbot_designer"}.issubset(set(manifest["locations"]))
     assert manifest["salesbot_designer"]["logo"] == "/widgets/social_media_manager_kommo_v2/images/logo_small.png"
@@ -291,5 +291,8 @@ def test_salesbot_script_uses_documented_widget_request_flow_and_matching_exits(
     assert flow[1]["question"][0]["params"]["result"] == [{"handler": "exits", "params": {"value": "success"}}]
     assert flow[1]["question"][1] == {"handler": "exits", "params": {"value": "fail"}}
     assert _flow_exit_codes(flow) == {exit_["code"] for exit_ in result["designerSettings"]["exits"]}
-    assert result["commentBlockFlow"][0]["question"][0]["params"]["data"]["interaction_type"] == "instagram_comment"
+    comment_data = result["commentBlockFlow"][0]["question"][0]["params"]["data"]
+    assert comment_data["interaction_type"] == "instagram_comment"
+    assert comment_data["post_caption"] == "{{post.caption}}"
+    assert comment_data["product_sku"] == "{{product.sku}}"
     assert "{{lead.responsible.id}}" not in (WIDGET_ROOT / "script.js").read_text(encoding="utf-8")

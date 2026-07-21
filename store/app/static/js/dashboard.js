@@ -1505,6 +1505,25 @@ async function saveDiscountSettings() {
   await loadSettings();
 }
 
+async function saveStorePhoneSetting() {
+  const phoneInput = document.getElementById('set-store-phone-number');
+  const phone = phoneInput?.value?.replace(/\s+/g, ' ').trim() || '';
+
+  if (phone && (!/[0-9]/.test(phone) || !/^[+0-9 ().-]+$/.test(phone) || phone.length > 40)) {
+    toast('El WhatsApp debe ser un número público válido', '#dc2626');
+    return;
+  }
+
+  await apiFetch(API + '/store_phone_number', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: phone}),
+  });
+
+  toast('Contacto público guardado');
+  await loadSettings();
+}
+
 async function saveEscalationTimeoutSetting() {
   const timeoutInput = document.getElementById('set-automatic-escalation-timeout');
   const minutes = Number(timeoutInput?.value ?? 180);
@@ -1556,6 +1575,10 @@ async function loadSettings() {
   const escalationTimeoutInput = document.getElementById('set-automatic-escalation-timeout');
   if (escalationTimeoutInput) {
     escalationTimeoutInput.value = settings.automatic_escalation_timeout_minutes ?? 180;
+  }
+  const storePhoneInput = document.getElementById('set-store-phone-number');
+  if (storePhoneInput) {
+    storePhoneInput.value = settings.store_phone_number || '';
   }
   renderPaymentMethods(paymentData.payment_methods || []);
   loadCatalogPdfStatus();

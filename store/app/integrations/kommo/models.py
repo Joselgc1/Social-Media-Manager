@@ -106,8 +106,47 @@ class SalesbotWidgetData(BaseModel):
     chat_id: str | None = None
     talk_id: str | None = None
     interaction_type: KommoInteractionType | None = None
+    post_id: str | None = None
+    comment_id: str | None = None
+    parent_comment_id: str | None = None
+    media_id: str | None = None
+    post_url: str | None = None
+    comment_url: str | None = None
+    post_caption: str | None = None
+    post_text: str | None = None
+    media_caption: str | None = None
+    product_name: str | None = None
+    post_product_name: str | None = None
+    product_sku: str | None = None
+    parent_sku: str | None = None
+    image_url: str | None = None
+    post_image_url: str | None = None
+    post_media_url: str | None = None
 
-    @field_validator("lead_id", "contact_id", "responsible_user_id", "chat_id", "talk_id", mode="before")
+    @field_validator(
+        "lead_id",
+        "contact_id",
+        "responsible_user_id",
+        "chat_id",
+        "talk_id",
+        "post_id",
+        "comment_id",
+        "parent_comment_id",
+        "media_id",
+        "post_url",
+        "comment_url",
+        "post_caption",
+        "post_text",
+        "media_caption",
+        "product_name",
+        "post_product_name",
+        "product_sku",
+        "parent_sku",
+        "image_url",
+        "post_image_url",
+        "post_media_url",
+        mode="before",
+    )
     @classmethod
     def _blank_to_none(cls, value):
         if value in ("", None):
@@ -152,6 +191,7 @@ class PersistentKommoJob(BaseModel):
     combined_message: str
     media_url: str | None = None
     return_url: str | None = None
+    public_comment_context: dict | None = None
     status: KommoJobStatus
     attempt_count: int = 0
     last_error: str | None = None

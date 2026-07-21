@@ -39,7 +39,7 @@ INCLUDE = [
 ]
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_IMAGE_BYTES = 300 * 1024
-EXPECTED_WIDGET_VERSION = "1.2.5"
+EXPECTED_WIDGET_VERSION = "1.2.6"
 REQUIRED_I18N_KEYS = {
     "widget": {"name", "short_description", "description", "tour_description"},
     "settings": {"backend_url"},

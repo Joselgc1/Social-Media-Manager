@@ -376,6 +376,9 @@ async def test_native_comment_callback_creates_ready_job_from_signed_identity(mo
                 contact_id="spoofed-contact",
                 origin="instagram",
                 interaction_type="instagram_comment",
+                post_id="{{post.id}}",
+                post_caption="Nueva Pijama satén azul disponible",
+                product_sku="PJ-001",
             ),
             "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
             {
@@ -401,6 +404,10 @@ async def test_native_comment_callback_creates_ready_job_from_signed_identity(mo
     assert insert_values["channel"] == "instagram"
     assert insert_values["interaction_type"] == "instagram_comment"
     assert insert_values["combined_message"] == "Precio?"
+    assert json.loads(insert_values["public_comment_context"]) == {
+        "post_caption": "Nueva Pijama satén azul disponible",
+        "product_sku": "PJ-001",
+    }
     assert insert_values["salesbot_token_jti"] == "token-id"
     assert insert_values["external_message_id"].startswith("kommo:instagram_comment_callback:")
     assert insert_values["correlation_id"].startswith("kommo:instagram_comment:")
@@ -409,6 +416,7 @@ async def test_native_comment_callback_creates_ready_job_from_signed_identity(mo
     assert create_db.execute_calls[1][1]["job_id"] == "comment-job"
     assert "ready job creation started" in caplog.text
     assert "message_text_resolved=True" in caplog.text
+    assert "context_keys=['post_caption', 'product_sku']" in caplog.text
     assert "signed_entity_type=leads" in caplog.text
     assert "signed_entity_id=100" in caplog.text
     assert "created ready comment job" in caplog.text

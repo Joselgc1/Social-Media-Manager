@@ -418,6 +418,8 @@ You can also manage all scheduler timings from the master dashboard:
 - Set the catalog refresh interval, broadcast checker interval, catalog PDF refresh interval, and the UTC time for token reminders plus daily analytics
 - Click "Save Scheduled Jobs" — the store applies the new timings automatically within about a minute
 
+The store profile panel also manages `store_phone_number`, the public WhatsApp number used in Instagram public-comment fallback replies. Leave it empty to invite commenters only to DM.
+
 Payment methods are no longer master-managed. Configure them in the store dashboard only.
 
 Use orchestration mode as a per-store rollout control:

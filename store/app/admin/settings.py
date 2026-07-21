@@ -6,6 +6,7 @@ and other configuration via HTTP endpoints or Telegram commands.
 
 import json
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -67,6 +68,7 @@ class CustomerUpdate(BaseModel):
 VALID_CUSTOMER_CHANNELS = {"whatsapp", "instagram"}
 VALID_CUSTOMER_STATES = {"active", "escalated", "blocked"}
 VALID_KOMMO_EMOJI_MODES = {"preserve", "safe", "strip"}
+_PHONE_ALLOWED_RE = re.compile(r"^[+0-9 ().-]*$")
 
 
 def _coerce_setting_bool(value) -> bool:
@@ -81,6 +83,18 @@ def _coerce_setting_bool(value) -> bool:
     if isinstance(value, int) and value in {0, 1}:
         return bool(value)
     raise HTTPException(status_code=400, detail="Boolean setting must be true or false.")
+
+
+def _normalize_store_phone_number(value) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    if len(text) > 40 or not _PHONE_ALLOWED_RE.fullmatch(text) or not any(ch.isdigit() for ch in text):
+        raise HTTPException(
+            status_code=400,
+            detail="Store phone number must be a valid public WhatsApp number.",
+        )
+    return text
 
 
 def _validate_setting_value(key: str, value, current_settings: dict):
@@ -173,6 +187,9 @@ def _validate_setting_value(key: str, value, current_settings: dict):
             return normalize_rate_setting_value(value)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if key == "store_phone_number":
+        return _normalize_store_phone_number(value)
 
     if key == "catalog_pdf_interval_hours":
         hours = int(value)

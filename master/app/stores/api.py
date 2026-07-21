@@ -5,6 +5,7 @@ CRUD API for managing stores and their credentials.
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import suppress
 from datetime import date, timedelta
@@ -36,6 +37,7 @@ BLOCKED_PAYMENT_SETTING_KEYS = {
     "payment_zinli_details",
     "payment_bolivares_details",
 }
+_PHONE_ALLOWED_RE = re.compile(r"^[+0-9 ().-]*$")
 
 # Serialize cross-DB stats queries so we do not burst past Supabase Session pooler limits
 # when the dashboard loads many stores in parallel (and store apps already hold pool slots).
@@ -400,6 +402,12 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
             normalized["manual_exchange_rate"] = format(rate.normalize(), "f")
         else:
             normalized["manual_exchange_rate"] = ""
+
+    if "store_phone_number" in normalized:
+        phone = re.sub(r"\s+", " ", str(normalized["store_phone_number"] or "")).strip()
+        if phone and (len(phone) > 40 or not _PHONE_ALLOWED_RE.fullmatch(phone) or not any(ch.isdigit() for ch in phone)):
+            raise HTTPException(status_code=400, detail="Store phone number must be a valid public WhatsApp number")
+        normalized["store_phone_number"] = phone
 
     if "catalog_pdf_interval_hours" in normalized:
         hours = int(normalized["catalog_pdf_interval_hours"])

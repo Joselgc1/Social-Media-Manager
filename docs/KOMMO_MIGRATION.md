@@ -65,7 +65,7 @@ The backend never launches the comment Salesbot through `/api/v4/bots/{id}/run`.
 
 General webhook comment detection uses the confirmed sanitized A105 payload shape: `origin=instagram` with `message_type=comment`. The general webhook path logs and ignores those native comment events so it does not create a private-message job or launch `KOMMO_SALESBOT_ID`; the native comment-triggered Salesbot widget callback creates the durable `instagram_comment` job instead.
 
-Public-comment AI replies are restricted: concise single-message text, no Markdown, no checkout/order/payment/escalation mutations, no customer/order/address/phone/delivery details, and DM invitation whenever private information is needed.
+Public-comment replies are deterministic. Eva answers only price or availability, and only when the widget callback provides post/product context that maps confidently to one catalog product. Greetings, sizing, recommendations, payment, delivery, ordering, comparisons, complaints, unknown products, and ambiguous post context return `Para más información escríbenos al DM o por WhatsApp al {store_phone_number}!`; if `store_phone_number` is empty, the reply is `Para más información escríbenos al DM!`.
 
 ## Private Integration Creation
 
@@ -150,7 +150,7 @@ python3 build_widget.py --widget-code YOUR_WIDGET_CODE
 
 Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, widget version, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
 
-The widget version must be incremented on every upload. Current version: `1.2.5`.
+The widget version must be incremented on every upload. Current version: `1.2.6`.
 
 ## Widget Installation
 

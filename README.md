@@ -245,10 +245,11 @@ These values are stored in the store database and can be changed without redeplo
 - `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`
 - `token_reminder_hour`, `token_reminder_minute`, `daily_analytics_hour`, `daily_analytics_minute`
 - `kommo_emoji_mode_whatsapp`, `kommo_emoji_mode_instagram`, `kommo_strip_emoji`
+- `store_phone_number`
 
 Store-only payment methods are persisted separately under `payment_methods` in the same `settings` table. They are edited only from the store dashboard through `GET/PUT /admin/settings/payment-methods`, and the bot uses the configured method names plus their stored instructions at checkout. Scheduler timings are edited only from the master dashboard.
 
-The store-only `accepted_exchange_rate` setting is also stored in the same `settings` table. It is edited only from the store dashboard and is used when customers ask things like `¿a qué tasa recibes?`.
+Exchange-rate settings are stored in the same `settings` table and are used when customers ask things like `¿a qué tasa recibes?`. The `store_phone_number` setting controls public Instagram comment fallback replies; when empty, public comments invite only to DM.
 
 The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information. The `send_catalog_pdf` AI tool is available only for direct Meta WhatsApp delivery; Kommo WhatsApp/Instagram and direct Instagram answer catalog requests with normal text. The Google Sheets catalog can be modeled as one row per size variant with `SKU`, `Parent SKU`, and a singular `Size` column; see [store/DEPLOYMENT.md](store/DEPLOYMENT.md) for the exact sheet format.
 

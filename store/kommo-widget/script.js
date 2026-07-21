@@ -180,6 +180,27 @@ define(['jquery'], function ($) {
           interaction_type: interactionType
         };
 
+        if (interactionType === 'instagram_comment') {
+          Object.assign(requestData, {
+            post_id: '{{post.id}}',
+            comment_id: '{{comment.id}}',
+            parent_comment_id: '{{comment.parent_id}}',
+            media_id: '{{media.id}}',
+            post_url: '{{post.url}}',
+            comment_url: '{{comment.url}}',
+            post_caption: '{{post.caption}}',
+            post_text: '{{post.text}}',
+            media_caption: '{{media.caption}}',
+            product_name: '{{product.name}}',
+            post_product_name: '{{post.product_name}}',
+            product_sku: '{{product.sku}}',
+            parent_sku: '{{product.parent_sku}}',
+            image_url: '{{media.url}}',
+            post_image_url: '{{post.image_url}}',
+            post_media_url: '{{post.media_url}}'
+          });
+        }
+
         const flow = [
           {
             question: [
