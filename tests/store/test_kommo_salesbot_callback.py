@@ -140,13 +140,13 @@ async def test_salesbot_callback_logs_interaction_message_and_signed_entity(clie
 
 
 @pytest.mark.asyncio
-async def test_native_comment_general_webhook_is_ignored_by_private_message_path(
+async def test_mirrored_comment_general_webhook_creates_private_message_job_for_reconciliation(
     client,
     monkeypatch,
     caplog,
     sanitized_a105_native_instagram_comment_payload,
 ):
-    record = AsyncMock()
+    record = AsyncMock(return_value={"status": "created", "job_id": "private-job"})
     scheduled = AsyncMock()
     monkeypatch.setattr(kommo, "record_incoming_event", record)
     monkeypatch.setattr(kommo, "schedule_due_job_processing", scheduled)
@@ -155,13 +155,15 @@ async def test_native_comment_general_webhook_is_ignored_by_private_message_path
         response = await client.post("/webhooks/kommo/events/secret-path", json=sanitized_a105_native_instagram_comment_payload)
 
     assert response.status_code == 200
-    record.assert_not_awaited()
-    scheduled.assert_not_called()
-    assert "Kommo native Instagram comment ignored by private-message webhook path" in caplog.text
-    assert "interaction_type': 'instagram_comment'" in caplog.text
-    assert "post_id': 'ig-post-a105'" in caplog.text
-    assert "comment_id': 'ig-comment-a105'" in caplog.text
-    assert "has_post_url': True" in caplog.text
+    record.assert_awaited_once()
+    scheduled.assert_called_once()
+    event = record.await_args.args[0]
+    assert event.origin == "instagram_business"
+    assert event.message_type == "text"
+    assert event.talk_id == "105"
+    assert event.interaction_type == "private_message"
+    assert "Kommo native Instagram comment ignored by private-message webhook path" not in caplog.text
+    assert "interaction_type': 'private_message'" in caplog.text
     assert "Precio?" not in caplog.text
 
 

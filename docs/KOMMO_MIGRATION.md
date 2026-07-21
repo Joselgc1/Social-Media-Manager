@@ -63,7 +63,7 @@ Create two Salesbot flows that both use the installed Social Media Manager widge
 
 The backend never launches the comment Salesbot through `/api/v4/bots/{id}/run`. Authenticated Instagram-comment widget callbacks create durable `ready` jobs directly. Private-message callbacks must still match an existing `waiting_for_salesbot` job.
 
-General webhook comment detection uses the confirmed sanitized A105 payload shape: `origin=instagram` with `message_type=comment`. The general webhook path logs and ignores those native comment events so it does not create a private-message job or launch `KOMMO_SALESBOT_ID`; the native comment-triggered Salesbot widget callback creates the durable `instagram_comment` job instead.
+Kommo may also mirror a native Instagram comment through the general webhook as `origin=instagram_business` with `message_type=text`. That event is intentionally treated as a normal Instagram private-message job first. The authenticated native comment-triggered Salesbot callback creates the durable `instagram_comment` job, then reconciliation discards any recent matching private-message mirror before `KOMMO_SALESBOT_ID` can launch.
 
 Public-comment replies are deterministic. Eva answers only price or availability, and only when the widget callback provides post/product context that maps confidently to one catalog product. Greetings, sizing, recommendations, payment, delivery, ordering, comparisons, complaints, unknown products, and ambiguous post context return `Para más información escríbenos al DM o por WhatsApp al {store_phone_number}!`; if `store_phone_number` is empty, the reply is `Para más información escríbenos al DM!`.
 
@@ -261,8 +261,8 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 1. Create a public Instagram comment.
 2. Confirm the native comment-triggered Salesbot calls the widget and the public reply comes from the Kommo Comment step using `{{json.message}}`.
-3. Confirm the general webhook logs the same `message_type=comment` event as ignored by the private-message path.
-4. Confirm no private-message job is created and `KOMMO_SALESBOT_ID` is not launched for that comment.
+3. Confirm the general webhook may create a short-lived Instagram `private_message` mirror when Kommo sends `origin=instagram_business`, `message_type=text`.
+4. Confirm the authenticated native comment callback creates the `instagram_comment` job and the mirrored private-message job is discarded with `superseded_by_instagram_comment` before `KOMMO_SALESBOT_ID` launches.
 
 ## Human Takeover Procedure
 

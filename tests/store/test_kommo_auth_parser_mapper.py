@@ -310,7 +310,7 @@ def test_direct_json_account_message_normalization():
     assert event.interaction_type == "private_message"
 
 
-def test_instagram_comment_interaction_uses_confirmed_native_comment_type(
+def test_instagram_comment_mirror_uses_confirmed_private_message_shape(
     sanitized_a105_native_instagram_comment_payload,
 ):
     native_event = normalize_kommo_webhook(sanitized_a105_native_instagram_comment_payload)[0]
@@ -324,15 +324,11 @@ def test_instagram_comment_interaction_uses_confirmed_native_comment_type(
     })[0]
 
     assert native_event.channel == "instagram"
-    assert native_event.message_type == "comment"
-    assert native_event.interaction_type == "instagram_comment"
-    assert native_event.correlation_id == "kommo:instagram_comment:105105"
-    assert native_event.post_id == "ig-post-a105"
-    assert native_event.comment_id == "ig-comment-a105"
-    assert native_event.parent_comment_id == "ig-parent-a105"
-    assert native_event.media_id == "ig-media-a105"
-    assert native_event.post_url == "https://www.instagram.com/p/sanitized-a105/"
-    assert native_event.comment_url == "https://www.instagram.com/p/sanitized-a105/c/ig-comment-a105/"
+    assert native_event.origin == "instagram_business"
+    assert native_event.message_type == "text"
+    assert native_event.talk_id == "105"
+    assert native_event.interaction_type == "private_message"
+    assert native_event.correlation_id == "kommo:private_message:105105"
     assert comment_event.channel == "instagram"
     assert comment_event.interaction_type == "instagram_comment"
     assert comment_event.correlation_id == "kommo:instagram_comment:100"

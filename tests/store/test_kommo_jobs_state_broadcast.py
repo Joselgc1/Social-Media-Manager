@@ -58,9 +58,12 @@ class _StrictCallbackDB:
 
 
 class _CallbackCreateDB:
-    def __init__(self, *, duplicate_job=None):
+    def __init__(self, *, duplicate_job=None, duplicate_is_stale=False, superseded_private_jobs=None):
         self.duplicate_job = duplicate_job
+        self.duplicate_is_stale = duplicate_is_stale
+        self.superseded_private_jobs = superseded_private_jobs or []
         self.fetch_one_calls = []
+        self.fetch_all_calls = []
         self.execute_calls = []
 
     def get_db(self):
@@ -77,7 +80,41 @@ class _CallbackCreateDB:
         if "INSERT INTO kommo_message_jobs" in query:
             return {"id": "comment-job", "status": "ready", **dict(values or {})}
         if "FROM kommo_message_jobs" in query:
+            if (
+                self.duplicate_is_stale
+                and self.duplicate_job
+                and (values or {}).get("external_message_id") != self.duplicate_job.get("external_message_id")
+            ):
+                return None
             return self.duplicate_job
+        return None
+
+    async def fetch_all(self, query, values=None):
+        self.fetch_all_calls.append((query, dict(values or {})))
+        if "UPDATE kommo_message_jobs job" in query and "interaction_type = 'private_message'" in query:
+            return self.superseded_private_jobs
+        return []
+
+
+class _LaunchSafetyDB:
+    def __init__(self, *, comment_match=None):
+        self.comment_match = comment_match
+        self.fetch_one_calls = []
+        self.execute_calls = []
+
+    async def fetch_one(self, query, values=None):
+        supplied = set((values or {}).keys())
+        expected = _bind_names(query)
+        assert supplied == expected
+        self.fetch_one_calls.append((query, dict(values or {})))
+        if "interaction_type = 'instagram_comment'" in query:
+            return self.comment_match
+        if "status = 'waiting_for_salesbot'" in query:
+            return {"id": (values or {}).get("id"), "status": "waiting_for_salesbot", "lead_id": "100", "contact_id": "200", "channel": "instagram", "combined_message": "Precio?"}
+        return None
+
+    async def execute(self, query, values=None):
+        self.execute_calls.append((query, dict(values or {})))
         return None
 
 
@@ -411,7 +448,13 @@ async def test_native_comment_callback_creates_ready_job_from_signed_identity(mo
     assert insert_values["salesbot_token_jti"] == "token-id"
     assert insert_values["external_message_id"].startswith("kommo:instagram_comment_callback:")
     assert insert_values["correlation_id"].startswith("kommo:instagram_comment:")
-    assert create_db.execute_calls[0][0] == "SELECT pg_advisory_xact_lock(hashtext(:dedupe_key))"
+    assert "pg_advisory_xact_lock(hashtext(:dedupe_key))" in create_db.execute_calls[0][0]
+    assert "pg_advisory_xact_lock(hashtext(:reconciliation_key))" in create_db.execute_calls[0][0]
+    reconciliation_query, reconciliation_values = create_db.fetch_all_calls[0]
+    assert "status IN ('pending', 'prepared')" in reconciliation_query
+    assert reconciliation_values["reason"] == "superseded_by_instagram_comment"
+    assert reconciliation_values["window_seconds"] == 30
+    assert reconciliation_values["normalized_message"] == "precio?"
     assert "INSERT INTO kommo_message_receipts" in create_db.execute_calls[1][0]
     assert create_db.execute_calls[1][1]["job_id"] == "comment-job"
     assert "ready job creation started" in caplog.text
@@ -445,12 +488,121 @@ async def test_native_comment_callback_duplicate_uses_jti_or_stable_callback(mon
     assert result == {"status": "duplicate", "job_id": "existing-comment"}
     duplicate_query, duplicate_values = create_db.fetch_one_calls[1]
     assert "salesbot_token_jti = CAST(:salesbot_token_jti AS text)" in duplicate_query
+    assert "callback_claims ->> 'iat'" in duplicate_query
+    assert "created_at >= NOW() - (:dedup_seconds * INTERVAL '1 second')" in duplicate_query
+    assert "REGEXP_REPLACE" in duplicate_query
     assert "return_url = :return_url" in duplicate_query
     assert duplicate_values["salesbot_token_jti"] == "token-id"
+    assert duplicate_values["normalized_message"] == "precio?"
+    assert duplicate_values["dedup_seconds"] == 300
     assert duplicate_values["entity_type"] == "leads"
     assert duplicate_values["entity_id"] == "100"
     assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
     assert len(create_db.execute_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_private_webhook_job_created_before_comment_callback_is_discarded(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    create_db = _CallbackCreateDB(superseded_private_jobs=[{"id": "private-job"}])
+    monkeypatch.setattr(jobs, "db", create_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(message="  Precio?  ", lead_id="100", origin="instagram", interaction_type="instagram_comment"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {
+            "jti": "token-id",
+            "iat": 123456,
+            "account_id": 123,
+            "client_uid": "client-uuid",
+            "entity_type": "leads",
+            "entity_id": "100",
+        },
+    )
+
+    assert result == {"status": "ready", "job_id": "comment-job"}
+    reconciliation_query, reconciliation_values = create_db.fetch_all_calls[0]
+    assert "interaction_type = 'private_message'" in reconciliation_query
+    assert "channel = 'instagram'" in reconciliation_query
+    assert "status IN ('pending', 'prepared')" in reconciliation_query
+    assert "FOR UPDATE SKIP LOCKED" in reconciliation_query
+    assert reconciliation_values["normalized_message"] == "precio?"
+    assert reconciliation_values["window_seconds"] == jobs.COMMENT_MIRROR_RECONCILIATION_SECONDS
+    assert reconciliation_values["reason"] == "superseded_by_instagram_comment"
+
+
+@pytest.mark.asyncio
+async def test_repeated_comment_callback_is_idempotent(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    first_values = jobs._callback_values(
+        SalesbotWidgetData(message="Precio?", lead_id="100", origin="instagram", interaction_type="instagram_comment"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {"jti": "token-id", "iat": 123456, "account_id": 123, "entity_type": "leads", "entity_id": "100"},
+    )
+    external_message_id, _correlation_id = jobs._comment_callback_ids(first_values, "Precio?")
+    create_db = _CallbackCreateDB(
+        duplicate_job={
+            "id": "existing-comment",
+            "status": "sent",
+            "interaction_type": "instagram_comment",
+            "external_message_id": external_message_id,
+        }
+    )
+    monkeypatch.setattr(jobs, "db", create_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(message="Precio?", lead_id="100", origin="instagram", interaction_type="instagram_comment"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {"jti": "token-id", "iat": 123456, "account_id": 123, "entity_type": "leads", "entity_id": "100"},
+    )
+
+    assert result == {"status": "duplicate", "job_id": "existing-comment"}
+    duplicate_values = create_db.fetch_one_calls[1][1]
+    assert duplicate_values["external_message_id"] == external_message_id
+    assert duplicate_values["salesbot_token_iat"] == "123456"
+    assert duplicate_values["normalized_message"] == "precio?"
+    assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
+
+
+@pytest.mark.asyncio
+async def test_later_comment_from_same_lead_is_not_duplicate_when_callback_identity_changes(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    first_values = jobs._callback_values(
+        SalesbotWidgetData(message="Precio?", lead_id="100", origin="instagram", interaction_type="instagram_comment"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {"jti": "reused-token-id", "iat": 1000, "account_id": 123, "entity_type": "leads", "entity_id": "100"},
+    )
+    later_values = jobs._callback_values(
+        SalesbotWidgetData(message="Precio?", lead_id="100", origin="instagram", interaction_type="instagram_comment"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/99",
+        {"jti": "reused-token-id", "iat": 2000, "account_id": 123, "entity_type": "leads", "entity_id": "100"},
+    )
+    first_external_id, _ = jobs._comment_callback_ids(first_values, "Precio?")
+    later_external_id, _ = jobs._comment_callback_ids(later_values, "Precio?")
+    create_db = _CallbackCreateDB(
+        duplicate_job={
+            "id": "old-sent-comment",
+            "status": "sent",
+            "interaction_type": "instagram_comment",
+            "external_message_id": first_external_id,
+        },
+        duplicate_is_stale=True,
+    )
+    monkeypatch.setattr(jobs, "db", create_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(message="Precio?", lead_id="100", origin="instagram", interaction_type="instagram_comment"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/99",
+        {"jti": "reused-token-id", "iat": 2000, "account_id": 123, "entity_type": "leads", "entity_id": "100"},
+    )
+
+    assert first_external_id != later_external_id
+    assert result == {"status": "ready", "job_id": "comment-job"}
+    insert_values = next(values for query, values in create_db.fetch_one_calls if "INSERT INTO kommo_message_jobs" in query)
+    assert insert_values["external_message_id"] == later_external_id
 
 
 @pytest.mark.asyncio
@@ -707,6 +859,76 @@ async def test_comment_job_does_not_launch_salesbot_from_backend(monkeypatch):
     values = mock_db.execute.await_args.args[1]
     assert values["status"] == "failed"
     assert values["last_error"] == "instagram_comment_requires_native_salesbot_callback"
+
+
+@pytest.mark.asyncio
+async def test_comment_callback_before_private_webhook_job_suppresses_launch(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    safety_db = _LaunchSafetyDB(comment_match={"id": "comment-job"})
+    monkeypatch.setattr(jobs, "db", safety_db)
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: pytest.fail("private Salesbot must not launch"))
+
+    await jobs._launch_salesbot_for_job(
+        {
+            "id": "private-job",
+            "status": "processing",
+            "lead_id": "100",
+            "contact_id": "200",
+            "combined_message": "Precio?",
+            "channel": "instagram",
+            "origin": "instagram_business",
+            "interaction_type": "private_message",
+        }
+    )
+
+    assert any("interaction_type = 'instagram_comment'" in query for query, _values in safety_db.fetch_one_calls)
+    discard_values = safety_db.execute_calls[-1][1]
+    assert discard_values["status"] == "discarded"
+    assert discard_values["last_error"] == "superseded_by_instagram_comment"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    safety_db = _LaunchSafetyDB(comment_match=None)
+    safety_db.get_settings = AsyncMock(return_value={"ai_enabled": True})
+    monkeypatch.setattr(jobs, "db", safety_db)
+    monkeypatch.setattr(jobs, "ensure_ai_mode_initialized", AsyncMock(return_value=(1, False)))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock(return_value=None))
+    monkeypatch.setattr(jobs, "_reactivate_expired_escalation_if_needed", AsyncMock(return_value=1))
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason=None, needs_ai_mode_initialization=False),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+
+    client = MagicMock()
+    client.get_lead = AsyncMock(return_value={"id": 100})
+    client.run_salesbot = AsyncMock()
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._launch_salesbot_for_job(
+        {
+            "id": "private-job",
+            "status": "processing",
+            "lead_id": "100",
+            "contact_id": "200",
+            "combined_message": "Hola por DM",
+            "channel": "instagram",
+            "origin": "instagram_business",
+            "interaction_type": "private_message",
+        }
+    )
+
+    client.run_salesbot.assert_awaited_once_with("100", "leads")
+    assert not any(call[1].get("last_error") == "superseded_by_instagram_comment" for call in safety_db.execute_calls)
 
 
 @pytest.mark.asyncio
