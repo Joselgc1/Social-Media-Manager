@@ -39,11 +39,11 @@ INCLUDE = [
 ]
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_IMAGE_BYTES = 300 * 1024
-EXPECTED_WIDGET_VERSION = "1.2.3"
+EXPECTED_WIDGET_VERSION = "1.2.5"
 REQUIRED_I18N_KEYS = {
     "widget": {"name", "short_description", "description", "tour_description"},
     "settings": {"backend_url"},
-    "salesbot": {"handler_name", "webhook_url", "success_exit", "fail_exit"},
+    "salesbot": {"private_message_handler_name", "instagram_comment_handler_name", "webhook_url", "success_exit", "fail_exit"},
 }
 REQUIRED_LOCATIONS = {"settings", "salesbot_designer"}
 UNRESOLVED_PLACEHOLDERS = (WIDGET_CODE_PLACEHOLDER, "YOUR_WIDGET_CODE", "YOUR-STORE-DOMAIN")
@@ -129,12 +129,13 @@ def _validate_manifest(manifest: dict, widget_code: str) -> None:
     expected_logo = f"/widgets/{widget_code}/images/logo_small.png"
     if salesbot.get("logo") != expected_logo:
         raise WidgetBuildError(f"salesbot_designer.logo must be {expected_logo}")
-    handler = salesbot.get("kommo_ai_request") or {}
-    webhook = (handler.get("settings") or {}).get("webhook_url") or {}
-    if webhook.get("name") != "salesbot.webhook_url" or webhook.get("default_value") != "" or webhook.get("type") != "url" or webhook.get("manual") is not True:
-        raise WidgetBuildError("salesbot webhook_url must be an optional manual URL setting")
-    if "required" in webhook:
-        raise WidgetBuildError("salesbot webhook_url must not be required")
+    for handler_code in ("kommo_ai_private_message", "kommo_ai_instagram_comment"):
+        handler = salesbot.get(handler_code) or {}
+        webhook = (handler.get("settings") or {}).get("webhook_url") or {}
+        if webhook.get("name") != "salesbot.webhook_url" or webhook.get("default_value") != "" or webhook.get("type") != "url" or webhook.get("manual") is not True:
+            raise WidgetBuildError("salesbot webhook_url must be an optional manual URL setting")
+        if "required" in webhook:
+            raise WidgetBuildError("salesbot webhook_url must not be required")
 
 
 def _validate_i18n_files(manifest: dict) -> None:
@@ -155,9 +156,11 @@ def _validate_manifest_localization_keys(manifest: dict) -> None:
         manifest.get("widget", {}).get("description"),
         manifest.get("tour", {}).get("tour_description"),
         manifest.get("settings", {}).get("backend_url", {}).get("name"),
-        (manifest.get("salesbot_designer", {}).get("kommo_ai_request", {}) or {}).get("name"),
-        (((manifest.get("salesbot_designer", {}).get("kommo_ai_request", {}) or {}).get("settings") or {}).get("webhook_url") or {}).get("name"),
     }
+    for handler_code in ("kommo_ai_private_message", "kommo_ai_instagram_comment"):
+        handler = manifest.get("salesbot_designer", {}).get(handler_code, {}) or {}
+        expected_paths.add(handler.get("name"))
+        expected_paths.add(((handler.get("settings") or {}).get("webhook_url") or {}).get("name"))
     expected_paths.discard(None)
     for path in expected_paths:
         section, _, key = str(path).partition(".")

@@ -87,6 +87,14 @@ define(['jquery'], function ($) {
       return null;
     }
 
+    function interactionTypeForHandler(handlerCode) {
+      if (handlerCode === 'kommo_ai_instagram_comment') {
+        return 'instagram_comment';
+      }
+
+      return 'private_message';
+    }
+
     this.callbacks = {
       settings: function () {
         return true;
@@ -146,16 +154,17 @@ define(['jquery'], function ($) {
         };
       },
 
-      onSalesbotDesignerSave: function (_handlerCode, params) {
+      onSalesbotDesignerSave: function (handlerCode, params) {
         const blockParams = getBlockParams(params);
         const blockUrl = normalizeBackendUrl(
           unwrapSettingValue(blockParams.webhook_url)
         );
         const webhookUrl = blockUrl || getInstalledBackendUrl();
+        const interactionType = interactionTypeForHandler(handlerCode);
 
         if (!webhookUrl) {
           console.warn('Kommo Salesbot widget configuration is invalid', {
-            handlerCode: _handlerCode,
+            handlerCode: handlerCode,
             parameterKeys: Object.keys(blockParams)
           });
           throw new Error(
@@ -167,7 +176,8 @@ define(['jquery'], function ($) {
           message: '{{message_text}}',
           lead_id: '{{lead.id}}',
           contact_id: '{{contact.id}}',
-          origin: '{{origin}}'
+          origin: '{{origin}}',
+          interaction_type: interactionType
         };
 
         const flow = [

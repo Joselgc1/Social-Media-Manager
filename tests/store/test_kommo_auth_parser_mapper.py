@@ -457,7 +457,7 @@ async def test_salesbot_launch_request_and_accepted_response(monkeypatch):
         "app.integrations.kommo.client.get_config",
         lambda: SimpleNamespace(kommo_salesbot_id=555),
     )
-    await KommoClient(subdomain="acme", access_token="token").run_salesbot(100, "leads", salesbot_id=555)
+    await KommoClient(subdomain="acme", access_token="token").run_salesbot(100, "leads")
     assert recorded["method"] == "POST"
     assert recorded["url"] == "https://acme.kommo.com/api/v4/bots/555/run"
     assert recorded["json"] == {"entity_id": 100, "entity_type": "leads"}

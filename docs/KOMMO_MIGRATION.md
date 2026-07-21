@@ -47,22 +47,23 @@ Connect the Instagram Business account inside Kommo using Kommo's official Insta
 Public Instagram comments use the same durable path as private messages:
 
 ```text
-Kommo webhook -> normalize event -> create kommo_message_job -> launch Salesbot -> widget callback -> AI response -> continue Salesbot with json.message
+Kommo native comment trigger -> widget callback -> create ready kommo_message_job -> AI response -> continue Salesbot with json.message
 ```
 
-The only runtime difference is Salesbot selection:
+Private messages still use the backend-created job path:
 
-- WhatsApp and Instagram DMs use `KOMMO_SALESBOT_ID`.
-- Instagram comments use `KOMMO_COMMENTS_SALESBOT_ID`.
+```text
+Kommo webhook -> normalize event -> create kommo_message_job -> launch KOMMO_SALESBOT_ID -> widget callback -> AI response -> continue Salesbot with json.message
+```
 
-Create two Salesbots that both use the installed Social Media Manager widget:
+Create two Salesbot flows that both use the installed Social Media Manager widget:
 
-1. Private-message Salesbot: widget step followed by a Kommo Message step using `{{json.message}}`.
-2. Comment Salesbot: widget step followed by a Kommo Comment step using `{{json.message}}`.
+1. Private-message Salesbot: add the `Ask Eva AI for DMs` widget block, followed by a Kommo Message step using `{{json.message}}`. Set this Salesbot ID as `KOMMO_SALESBOT_ID`.
+2. Comment Salesbot: configure Kommo's native `When a comment is received` trigger, add the `Ask Eva AI for Instagram comments` widget block, followed by a Kommo Comment step using `{{json.message}}`. Do not set a backend Salesbot ID for this flow.
 
-The backend will not create jobs from unsolicited widget callbacks. A callback must still match an existing `waiting_for_salesbot` job.
+The backend never launches the comment Salesbot through `/api/v4/bots/{id}/run`. Authenticated Instagram-comment widget callbacks create durable `ready` jobs directly. Private-message callbacks must still match an existing `waiting_for_salesbot` job.
 
-Comment detection is intentionally gated. This repository only contains confirmed Kommo private-message payloads (`message_type=text`); it does not contain a confirmed native Instagram comment payload. The parser therefore defaults every event to `interaction_type=private_message` and only routes comments when the webhook payload explicitly includes `interaction_type=instagram_comment`. Do not infer comments from `origin=instagram` alone.
+General webhook comment detection remains intentionally gated. This repository only contains confirmed Kommo private-message payloads (`message_type=text`); it does not contain a confirmed native Instagram comment general-webhook payload. The parser therefore defaults every event to `interaction_type=private_message` and only routes comments when the webhook payload explicitly includes `interaction_type=instagram_comment`. Do not infer comments from `origin=instagram` alone.
 
 Before enabling native comment routing in production, capture a real Kommo Instagram comment webhook sample and record the non-sensitive classification fields: `origin`, `message_type`, event `type`/`direction`, message ID, lead/contact/chat/talk IDs, and entity ID/type. After that payload is verified, map the confirmed field(s) in `store/app/integrations/kommo/webhook_parser.py` and add a fixture-based test.
 
@@ -126,7 +127,6 @@ KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
 KOMMO_INTEGRATION_SECRET=
 KOMMO_SALESBOT_ID=
-KOMMO_COMMENTS_SALESBOT_ID=
 KOMMO_WEBHOOK_SECRET=
 KOMMO_AI_MODE_FIELD_ID=
 KOMMO_AI_ACTIVE_ENUM_ID=
@@ -152,7 +152,7 @@ python3 build_widget.py --widget-code YOUR_WIDGET_CODE
 
 Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, widget version, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
 
-The widget version must be incremented on every upload. Current version: `1.2.3`.
+The widget version must be incremented on every upload. Current version: `1.2.5`.
 
 ## Widget Installation
 
@@ -178,20 +178,19 @@ If invalid manifests were previously uploaded first and Kommo continues using st
 
 ## Salesbot Creation
 
-Create a Salesbot that contains the installed widget step. The integration settings `backend_url` is used automatically, so do not enter the same URL twice. If needed for a per-block override, set the block URL as:
+Create a private-message Salesbot that contains the installed `Ask Eva AI for DMs` widget step. The integration settings `backend_url` is used automatically, so do not enter the same URL twice. If needed for a per-block override, set the block URL as:
 
 ```text
 https://<store-domain>/webhooks/kommo/salesbot
 ```
 
-The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, and `{{origin}}`. Its saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes `success` and `fail` branches; use `success` for normal AI completion and `fail` for fallback/human handling. The continuation response remains `{"data":{"status":"success","message":"..."}}`; the chosen Salesbot determines whether `{{json.message}}` is sent as a private message or a public comment.
+The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, `{{origin}}`, and `interaction_type`. Its saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes `success` and `fail` branches; use `success` for normal AI completion and `fail` for fallback/human handling. The continuation response remains `{"data":{"status":"success","message":"..."}}`.
+
+For public comments, create a separate Kommo Salesbot using the native `When a comment is received` trigger and the installed `Ask Eva AI for Instagram comments` widget block. End that flow with a Kommo Comment step using `{{json.message}}`. The backend validates the widget JWT and creates the durable comment job from the callback, so no comment Salesbot ID is configured in this app.
 
 ## Salesbot ID Retrieval
 
-Retrieve both Salesbot IDs from Kommo's Salesbot UI or API:
-
-- Set `KOMMO_SALESBOT_ID` to the private-message Salesbot.
-- Set `KOMMO_COMMENTS_SALESBOT_ID` to the public-comment Salesbot.
+Retrieve the private-message Salesbot ID from Kommo's Salesbot UI or API and set it as `KOMMO_SALESBOT_ID`. Do not configure a public-comment Salesbot ID in the backend.
 
 ## General Webhook Registration
 
@@ -221,7 +220,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 1. Run the consolidated `store/migrations/001_schema.sql`.
 2. Upload the widget.
-3. Create and test the Salesbot.
+3. Create and test the private-message Salesbot and native comment-triggered Salesbot.
 4. Register the general webhook.
 5. Set all Kommo env vars.
 6. Set `CHANNEL_BACKEND=kommo`.
@@ -266,7 +265,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 2. Confirm the payload has a verified, non-speculative field that differentiates public comments from Instagram DMs.
 3. Map only that confirmed field to `interaction_type=instagram_comment` in the webhook parser.
 4. Confirm `/admin/settings/kommo/status` shows `job_counts_by_interaction_type.instagram_comment` increasing.
-5. Confirm the comments Salesbot is launched and the public reply comes from the Kommo Comment step using `{{json.message}}`.
+5. Confirm the native comment-triggered Salesbot calls the widget and the public reply comes from the Kommo Comment step using `{{json.message}}`.
 
 ## Human Takeover Procedure
 

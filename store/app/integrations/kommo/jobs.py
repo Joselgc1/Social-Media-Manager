@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -211,7 +212,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
                   (:entity_type = 'leads' AND candidate.lead_id = :entity_id)
                   OR (:entity_type = 'contacts' AND candidate.contact_id = :entity_id)
               )
-              AND (CAST(:interaction_type AS text) IS NULL OR candidate.interaction_type = CAST(:interaction_type AS text))
+              AND candidate.interaction_type = CAST(:interaction_type AS text)
             ORDER BY candidate.salesbot_launched_at DESC NULLS LAST, candidate.created_at DESC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -223,6 +224,9 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
     if job:
         logger.info("Kommo Salesbot callback matched waiting job: %s", _job_log_context(dict(job)))
         return {"status": "ready", "job_id": str(job["id"])}
+
+    if values["interaction_type"] == "instagram_comment":
+        return await _create_ready_comment_job_from_callback(data, values)
 
     latest = await _find_latest_job_for_callback(values)
     if latest and latest["status"] in _TERMINAL_STATUSES | _ACTIVE_SALESBOT_STATUSES:
@@ -442,6 +446,14 @@ async def _claim_ready_job():
 
 
 async def _launch_salesbot_for_job(job: dict) -> None:
+    if _job_interaction_type(job) == "instagram_comment":
+        logger.info(
+            "Kommo Instagram comment job will not launch Salesbot from backend: job_id=%s",
+            job["id"],
+        )
+        await _mark_job(job["id"], "failed", "instagram_comment_requires_native_salesbot_callback")
+        return
+
     try:
         logger.info("Kommo Salesbot launch preparing job: %s", _job_log_context(job))
         settings = await db.get_settings()
@@ -489,7 +501,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             return
         logger.info("Kommo job waiting for Salesbot callback before launch: job_id=%s", job["id"])
         try:
-            await client.run_salesbot(entity_id, entity_type, salesbot_id=_salesbot_id_for_job(job, config=get_config()))
+            await client.run_salesbot(entity_id, entity_type)
         except KommoAPIError as e:
             error = sanitize_job_error(e)
             if _is_definitive_launch_error(e):
@@ -742,11 +754,134 @@ async def _find_latest_job_for_callback(values: dict):
             (:entity_type = 'leads' AND lead_id = :entity_id)
             OR (:entity_type = 'contacts' AND contact_id = :entity_id)
         )
-          AND (CAST(:interaction_type AS text) IS NULL OR interaction_type = CAST(:interaction_type AS text))
+          AND interaction_type = CAST(:interaction_type AS text)
         ORDER BY salesbot_launched_at DESC NULLS LAST, created_at DESC
         LIMIT 1
     """
     return await db.fetch_one(query, query_values)
+
+
+async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, values: dict) -> dict:
+    message = _callback_comment_text(data)
+    external_message_id, correlation_id = _comment_callback_ids(values, message)
+    job_values = {
+        "correlation_id": correlation_id,
+        "external_message_id": external_message_id,
+        "lead_id": values["entity_id"] if values["entity_type"] == "leads" else None,
+        "contact_id": values["entity_id"] if values["entity_type"] == "contacts" else None,
+        "origin": _instagram_callback_origin(data.origin),
+        "channel": "instagram",
+        "interaction_type": "instagram_comment",
+        "combined_message": message,
+        "return_url": values["return_url"],
+        "callback_claims": values["callback_claims"],
+        "salesbot_token_jti": values["salesbot_token_jti"],
+        "salesbot_account_id": values["salesbot_account_id"],
+        "salesbot_user_id": values["salesbot_user_id"],
+        "salesbot_client_uuid": values["salesbot_client_uuid"],
+    }
+
+    async with db.get_db().transaction():
+        await db.execute("SELECT pg_advisory_xact_lock(hashtext(:dedupe_key))", {"dedupe_key": external_message_id})
+        duplicate = await _find_duplicate_comment_callback_job(
+            external_message_id=external_message_id,
+            salesbot_token_jti=values["salesbot_token_jti"],
+            entity_type=values["entity_type"],
+            entity_id=values["entity_id"],
+            return_url=values["return_url"],
+        )
+        if duplicate:
+            logger.info("Kommo native comment callback ignored as duplicate for job: %s", _job_log_context(dict(duplicate)))
+            return {"status": "duplicate", "job_id": str(duplicate["id"])}
+
+        job = await db.fetch_one(
+            """
+            INSERT INTO kommo_message_jobs (
+                correlation_id, external_message_id, lead_id, contact_id, origin, channel,
+                interaction_type, combined_message, return_url, status, buffer_expires_at,
+                callback_claims, salesbot_token_jti, salesbot_account_id,
+                salesbot_user_id, salesbot_client_uuid
+            ) VALUES (
+                :correlation_id, :external_message_id, :lead_id, :contact_id, :origin, :channel,
+                :interaction_type, :combined_message, :return_url, 'ready', NOW(),
+                CAST(:callback_claims AS jsonb), :salesbot_token_jti, :salesbot_account_id,
+                :salesbot_user_id, :salesbot_client_uuid
+            )
+            RETURNING *
+            """,
+            job_values,
+        )
+        if not job:
+            raise RuntimeError("comment_callback_job_insert_failed")
+        await _record_callback_receipt(job_values, str(job["id"]))
+
+    logger.info("Kommo native comment callback created ready job: %s", _job_log_context(dict(job)))
+    return {"status": "ready", "job_id": str(job["id"])}
+
+
+async def _find_duplicate_comment_callback_job(
+    *,
+    external_message_id: str,
+    salesbot_token_jti: str | None,
+    entity_type: str,
+    entity_id: str,
+    return_url: str,
+):
+    return await db.fetch_one(
+        """
+        SELECT *
+        FROM kommo_message_jobs
+        WHERE interaction_type = 'instagram_comment'
+          AND (
+              external_message_id = :external_message_id
+              OR (
+                  CAST(:salesbot_token_jti AS text) IS NOT NULL
+                  AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
+              )
+              OR (
+                  return_url = :return_url
+                  AND (
+                      (:entity_type = 'leads' AND lead_id = :entity_id)
+                      OR (:entity_type = 'contacts' AND contact_id = :entity_id)
+                  )
+              )
+          )
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        {
+            "external_message_id": external_message_id,
+            "salesbot_token_jti": salesbot_token_jti,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "return_url": return_url,
+        },
+    )
+
+
+async def _record_callback_receipt(values: dict, job_id: str) -> None:
+    await db.execute(
+        """
+        INSERT INTO kommo_message_receipts (
+            external_message_id, job_id, correlation_id, lead_id, contact_id, origin,
+            channel, interaction_type, receipt_status
+        ) VALUES (
+            :external_message_id, :job_id, :correlation_id, :lead_id, :contact_id, :origin,
+            :channel, :interaction_type, 'created'
+        )
+        ON CONFLICT (external_message_id) DO NOTHING
+        """,
+        {
+            "external_message_id": values["external_message_id"],
+            "job_id": job_id,
+            "correlation_id": values["correlation_id"],
+            "lead_id": values["lead_id"],
+            "contact_id": values["contact_id"],
+            "origin": values["origin"],
+            "channel": values["channel"],
+            "interaction_type": values["interaction_type"],
+        },
+    )
 
 
 def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) -> dict:
@@ -767,8 +902,42 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         "salesbot_account_id": _claim_as_str(claims, "account_id"),
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
         "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
-        "interaction_type": data.interaction_type,
+        "interaction_type": data.interaction_type or "private_message",
     }
+
+
+def _callback_comment_text(data: SalesbotWidgetData) -> str:
+    text = str(data.message or "").strip()
+    if not text or (text.startswith("{{") and text.endswith("}}")):
+        raise ValueError("missing_comment_message")
+    return text
+
+
+def _comment_callback_ids(values: dict, message: str) -> tuple[str, str]:
+    if values.get("salesbot_token_jti"):
+        stable = f"jti:{values['salesbot_token_jti']}"
+    else:
+        stable = "|".join(
+            str(part or "")
+            for part in (
+                values.get("salesbot_account_id"),
+                values.get("entity_type"),
+                values.get("entity_id"),
+                values.get("return_url"),
+                message,
+            )
+        )
+    digest = hashlib.sha256(stable.encode("utf-8")).hexdigest()
+    external_message_id = f"kommo:instagram_comment_callback:{digest}"
+    correlation_id = f"kommo:instagram_comment:{digest[:32]}"
+    return external_message_id, correlation_id
+
+
+def _instagram_callback_origin(origin: str | None) -> str:
+    text = str(origin or "").strip()
+    if not text or (text.startswith("{{") and text.endswith("}}")):
+        return "instagram"
+    return text
 
 
 def _safe_claims(claims: dict) -> dict:
@@ -1064,13 +1233,6 @@ def _job_log_context(job: dict) -> dict:
 def _job_interaction_type(job: dict) -> str:
     interaction_type = str(job.get("interaction_type") or "private_message").strip().lower()
     return interaction_type if interaction_type in {"private_message", "instagram_comment"} else "private_message"
-
-
-def _salesbot_id_for_job(job: dict, config=None) -> int | None:
-    cfg = config or get_config()
-    if _job_interaction_type(job) == "instagram_comment":
-        return cfg.kommo_comments_salesbot_id
-    return cfg.kommo_salesbot_id
 
 
 def _timestamp_for_log(value) -> str | None:

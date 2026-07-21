@@ -311,7 +311,6 @@ Click **"+ Add Credential"** and add each one:
 | `KOMMO_INTEGRATION_ID` | Kommo mode only |
 | `KOMMO_INTEGRATION_SECRET` | Kommo mode only |
 | `KOMMO_SALESBOT_ID` | Kommo private-message Salesbot |
-| `KOMMO_COMMENTS_SALESBOT_ID` | Kommo public-comment Salesbot |
 | `KOMMO_WEBHOOK_SECRET` | Kommo mode only |
 | `KOMMO_AI_MODE_FIELD_ID` | Kommo mode only |
 | `KOMMO_AI_ACTIVE_ENUM_ID` | Kommo mode only |

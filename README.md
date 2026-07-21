@@ -187,7 +187,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 ### Kommo Mode
 
 - Text-first WhatsApp and Instagram DM handling through the private-message Kommo Salesbot.
-- Public Instagram comment replies can use the same durable Kommo job and widget callback flow, routed to a separate comments Salesbot when the inbound webhook is explicitly classified as `interaction_type=instagram_comment`.
+- Public Instagram comment replies use Kommo's native comment-triggered Salesbot flow; the authenticated widget callback creates a durable `instagram_comment` job directly.
 - Salesbot buttons when supported, otherwise numbered text choices.
 - Product images degrade to caption plus public image URL when rich media is not supported by the Kommo channel.
 - Catalog PDF delivery is not offered through Kommo; catalog requests are answered as normal text from the loaded catalog.
@@ -304,7 +304,7 @@ Transcript regression tests live in `tests/store/test_ai_transcript_regressions.
 - **CORS:** Restricted to the app's own origin (`APP_BASE_URL`).
 - **Security headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Strict-Transport-Security` (production), `Content-Security-Policy` (production).
 - **Error sanitization:** Unhandled exceptions return a generic 500 in production; full errors only shown in debug mode.
-- **Production startup validation:** In `store/`, production boot fails fast if `ADMIN_PASSWORD` or all LLM keys are missing. Meta mode requires WhatsApp Meta credentials. Kommo mode requires the Kommo private integration, private-message Salesbot, comments Salesbot, webhook secret, and AI Mode field/enum variables. Instagram and Telegram remain optional, but if either Meta Instagram or Telegram is enabled it must be fully configured.
+- **Production startup validation:** In `store/`, production boot fails fast if `ADMIN_PASSWORD` or all LLM keys are missing. Meta mode requires WhatsApp Meta credentials. Kommo mode requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Instagram and Telegram remain optional, but if either Meta Instagram or Telegram is enabled it must be fully configured.
 - **Log redaction:** Normal webhook logging uses masked sender IDs and avoids logging raw customer message text or tool arguments at `INFO`.
 - **Inbound debounce:** Rapid consecutive inbound messages from the same customer are buffered briefly and grouped into a single AI turn, so the bot does not answer twice when the user is still typing follow-up context.
 
@@ -378,7 +378,6 @@ KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
 KOMMO_INTEGRATION_SECRET=
 KOMMO_SALESBOT_ID=
-KOMMO_COMMENTS_SALESBOT_ID=
 KOMMO_WEBHOOK_SECRET=
 KOMMO_AI_MODE_FIELD_ID=
 KOMMO_AI_ACTIVE_ENUM_ID=

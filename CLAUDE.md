@@ -51,7 +51,7 @@ curl -X POST http://localhost:8000/test/chat \
 
 ### Minimal .env for local testing
 
-For local debug, either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` plus `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, and `PRODUCT_SHEET_ID` are the core minimum. Meta, Kommo, and Telegram fields may stay empty when `DEBUG=true` unless you are testing that specific channel backend. In production (`DEBUG=false`), startup validation requires `ADMIN_PASSWORD`, at least one LLM key, and the complete credential set for the selected `CHANNEL_BACKEND`: Meta mode requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`); Kommo mode requires the Kommo private integration, private-message Salesbot, comments Salesbot, webhook secret, and AI Mode field/enum vars. Instagram and Telegram remain optional but must be all-or-nothing if enabled.
+For local debug, either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` plus `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, and `PRODUCT_SHEET_ID` are the core minimum. Meta, Kommo, and Telegram fields may stay empty when `DEBUG=true` unless you are testing that specific channel backend. In production (`DEBUG=false`), startup validation requires `ADMIN_PASSWORD`, at least one LLM key, and the complete credential set for the selected `CHANNEL_BACKEND`: Meta mode requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`); Kommo mode requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum vars. Instagram and Telegram remain optional but must be all-or-nothing if enabled.
 
 ## Development workflow
 
@@ -143,7 +143,7 @@ When adding new models, update BOTH files:
 5. The selected agent prompt is composed from `store/prompts/shared/` plus `store/prompts/agents/`, direct SDK providers are called, and `store/app/ai/runner.py` enforces per-agent tool allowlists
 6. Response sent back via `store/app/channels/{whatsapp,instagram}_sender.py`
 
-In Kommo mode, Kommo sends general webhooks to `store/app/webhooks/kommo.py`; the app persists durable jobs, launches the private-message Salesbot or comments Salesbot based on `interaction_type`, receives the Salesbot `widget_request` callback, runs the existing AI engine, then posts a data-only Salesbot continuation (`data.status`, `data.message`) to the validated Kommo `return_url`.
+In Kommo mode, Kommo sends general DM webhooks to `store/app/webhooks/kommo.py`; the app persists durable jobs, launches the private-message Salesbot, receives the Salesbot `widget_request` callback, runs the existing AI engine, then posts a data-only Salesbot continuation (`data.status`, `data.message`) to the validated Kommo `return_url`. Public Instagram comments use Kommo's native comment-triggered Salesbot; its authenticated widget callback creates the durable `instagram_comment` job directly, and the backend never launches that Salesbot.
 
 **Key modules:**
 
@@ -168,7 +168,7 @@ In Kommo mode, Kommo sends general webhooks to `store/app/webhooks/kommo.py`; th
 
 **Database:** Supabase PostgreSQL. Fresh installs use the consolidated schema in `store/migrations/001_schema.sql` (run manually via Supabase SQL Editor). This single store schema includes Kommo tables, conversation sessions, and AI run observability. Tables include customers, conversations, orders, broadcasts, settings, usage_log, ai_run_logs, daily_analytics, product_analytics, conversation_sessions, customer_channel_mappings, kommo_message_jobs, and kommo_message_receipts.
 
-**Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Multi-store fields: `admin_password` (protects store dashboard), `system_prompt_override` (replaces prompt template file), `llm_managed_externally` (when True, locks LLM controls in store dashboard/Telegram/API — managed from master instead), and `ai_orchestration_mode` (optional env default; DB setting wins). Kommo env vars are exactly: `CHANNEL_BACKEND`, `KOMMO_SUBDOMAIN`, `KOMMO_ACCESS_TOKEN`, `KOMMO_INTEGRATION_ID`, `KOMMO_INTEGRATION_SECRET`, `KOMMO_SALESBOT_ID`, `KOMMO_COMMENTS_SALESBOT_ID`, `KOMMO_WEBHOOK_SECRET`, `KOMMO_AI_MODE_FIELD_ID`, `KOMMO_AI_ACTIVE_ENUM_ID`, `KOMMO_AI_HUMAN_ENUM_ID`, `KOMMO_AI_PAUSED_ENUM_ID`, `KOMMO_DEFAULT_RESPONSIBLE_USER_ID`.
+**Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Multi-store fields: `admin_password` (protects store dashboard), `system_prompt_override` (replaces prompt template file), `llm_managed_externally` (when True, locks LLM controls in store dashboard/Telegram/API — managed from master instead), and `ai_orchestration_mode` (optional env default; DB setting wins). Kommo env vars are exactly: `CHANNEL_BACKEND`, `KOMMO_SUBDOMAIN`, `KOMMO_ACCESS_TOKEN`, `KOMMO_INTEGRATION_ID`, `KOMMO_INTEGRATION_SECRET`, `KOMMO_SALESBOT_ID`, `KOMMO_WEBHOOK_SECRET`, `KOMMO_AI_MODE_FIELD_ID`, `KOMMO_AI_ACTIVE_ENUM_ID`, `KOMMO_AI_HUMAN_ENUM_ID`, `KOMMO_AI_PAUSED_ENUM_ID`, `KOMMO_DEFAULT_RESPONSIBLE_USER_ID`.
 
 ### Master Control Plane (`master/`)
 

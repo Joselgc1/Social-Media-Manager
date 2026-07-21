@@ -141,9 +141,8 @@ class KommoClient:
     async def get_account(self) -> dict:
         return await self._request("GET", "/api/v4/account", idempotent=True)
 
-    async def run_salesbot(self, entity_id: int | str, entity_type: str, *, salesbot_id: int | str | None = None) -> None:
-        if salesbot_id is None:
-            salesbot_id = get_config().kommo_salesbot_id
+    async def run_salesbot(self, entity_id: int | str, entity_type: str) -> None:
+        salesbot_id = get_config().kommo_salesbot_id
         if not salesbot_id:
             raise KommoAPIError("Kommo Salesbot ID is not configured")
         payload = {"entity_id": int(entity_id), "entity_type": entity_type}

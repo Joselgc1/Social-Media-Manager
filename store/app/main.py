@@ -76,7 +76,6 @@ def _validate_startup_config(config):
                 "KOMMO_INTEGRATION_ID": config.kommo_integration_id,
                 "KOMMO_INTEGRATION_SECRET": config.kommo_integration_secret,
                 "KOMMO_SALESBOT_ID": config.kommo_salesbot_id,
-                "KOMMO_COMMENTS_SALESBOT_ID": config.kommo_comments_salesbot_id,
                 "KOMMO_WEBHOOK_SECRET": config.kommo_webhook_secret,
                 "KOMMO_AI_MODE_FIELD_ID": config.kommo_ai_mode_field_id,
                 "KOMMO_AI_ACTIVE_ENUM_ID": config.kommo_ai_active_enum_id,
@@ -121,14 +120,13 @@ def _log_kommo_startup_config_summary(config) -> None:
     logger.info(
         "Kommo startup config summary: channel_backend=%s kommo_subdomain=%s "
         "integration_id_present=%s integration_secret_present=%s integration_secret_length=%s "
-        "private_salesbot_configured=%s comments_salesbot_configured=%s",
+        "salesbot_configured=%s",
         config.channel_backend,
         config.kommo_subdomain or "",
         bool(config.kommo_integration_id),
         bool(config.kommo_integration_secret),
         len(config.kommo_integration_secret or ""),
         config.kommo_salesbot_id is not None,
-        config.kommo_comments_salesbot_id is not None,
     )
 
 
