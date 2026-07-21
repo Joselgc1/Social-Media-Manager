@@ -35,6 +35,8 @@ The widget uses `installation=true`, has both `settings` and `salesbot_designer`
 
 The Salesbot source uses `widget_request` followed by `goto` question step `1`. The backend resumes the flow by calling Kommo's continuation URL. The widget exposes two documented Salesbot exits: `success` for completed AI responses and `fail` for errors.
 
+The same installed widget is used by both Kommo Salesbots. The private-message Salesbot should end with a Kommo Message step using `{{json.message}}`; the public-comment Salesbot should end with a Kommo Comment step using `{{json.message}}`. The backend chooses which Salesbot to launch from the persisted job `interaction_type`.
+
 If invalid manifests were previously uploaded first and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive, following Kommo's widget update behavior.
 
 Production notes:

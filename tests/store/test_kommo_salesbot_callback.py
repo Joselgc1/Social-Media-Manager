@@ -116,6 +116,13 @@ async def test_salesbot_callback_accepts_json_string_data_field(client):
 
 
 @pytest.mark.asyncio
+async def test_salesbot_callback_accepts_comment_interaction_type(client):
+    response = await _post(client, json=_json_body(data={"lead_id": "100", "origin": "instagram", "interaction_type": "instagram_comment"}))
+    assert response.status_code == 200
+    assert kommo.persist_salesbot_callback.await_args.args[0].interaction_type == "instagram_comment"
+
+
+@pytest.mark.asyncio
 async def test_salesbot_callback_accepts_flattened_form_data_fields(client):
     response = await _post(
         client,

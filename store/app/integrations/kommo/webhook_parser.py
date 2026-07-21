@@ -24,16 +24,17 @@ def parse_nested_form(flat_items: dict[str, Any]) -> dict[str, Any]:
 def normalize_kommo_webhook(payload: dict[str, Any]) -> list[NormalizedKommoEvent]:
     data = parse_nested_form(payload) if any("[" in str(key) for key in payload) else payload
     events: list[NormalizedKommoEvent] = []
+    default_interaction_type = normalize_interaction_type(data.get("interaction_type"))
 
     for item in _as_list(data.get("add")):
-        events.append(_message_event(item, "incoming_message"))
+        events.append(_message_event(item, "incoming_message", default_interaction_type=default_interaction_type))
 
     for item in _message_items(data.get("message")):
         event_type = "outgoing_message" if _is_outgoing_message(item) else "incoming_message"
-        events.append(_message_event(item, event_type))
+        events.append(_message_event(item, event_type, default_interaction_type=default_interaction_type))
 
     for item in _as_list((data.get("outgoing_message") or {}).get("add")):
-        events.append(_message_event(item, "outgoing_message"))
+        events.append(_message_event(item, "outgoing_message", default_interaction_type=default_interaction_type))
 
     for item in _as_list((data.get("leads") or {}).get("update")):
         events.append(_lead_update_event(item))
@@ -63,7 +64,24 @@ def origin_to_channel(origin: str | None) -> str | None:
     return None
 
 
-def _message_event(item: dict[str, Any], event_type: str) -> NormalizedKommoEvent:
+def normalize_interaction_type(value: Any) -> str | None:
+    """
+    Normalize only an explicit app-level interaction marker.
+
+    The repository does not include a confirmed native Kommo Instagram-comment
+    payload, so comment detection deliberately does not infer from origin,
+    message_type, or other speculative values.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in {"private_message", "instagram_comment"} else None
+
+
+def _message_event(
+    item: dict[str, Any],
+    event_type: str,
+    *,
+    default_interaction_type: str | None = None,
+) -> NormalizedKommoEvent:
     author = item.get("author") if isinstance(item.get("author"), dict) else {}
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else {}
     origin = _string_or_none(item.get("origin"))
@@ -83,6 +101,7 @@ def _message_event(item: dict[str, Any], event_type: str) -> NormalizedKommoEven
         message_type=_string_or_none(item.get("message_type") or attachment.get("type")),
         origin=origin,
         channel=origin_to_channel(origin),
+        interaction_type=normalize_interaction_type(item.get("interaction_type")) or default_interaction_type or "private_message",
         author_id=_string_or_none(author.get("id") or author.get("user_id")),
         author_name=_string_or_none(author.get("name")),
         author_type=_string_or_none(author.get("type")),

@@ -70,12 +70,13 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
             SELECT id, combined_message
             FROM kommo_message_jobs
             WHERE correlation_id = :correlation_id
+              AND interaction_type = :interaction_type
               AND status = 'pending'
             ORDER BY created_at DESC
             FOR UPDATE
             LIMIT 1
             """,
-            {"correlation_id": event.correlation_id},
+            {"correlation_id": event.correlation_id, "interaction_type": event.interaction_type},
         )
         if pending:
             merged = "\n".join(part for part in (pending["combined_message"], text) if part)
@@ -92,6 +93,7 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                     author_name = COALESCE(:author_name, author_name),
                     origin = COALESCE(origin, :origin),
                     channel = COALESCE(channel, :channel),
+                    interaction_type = :interaction_type,
                     updated_at = NOW(),
                     buffer_expires_at = NOW() + (:debounce_seconds * INTERVAL '1 second')
                 WHERE id = :id
@@ -107,6 +109,7 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                     "author_name": event.author_name,
                     "origin": event.origin,
                     "channel": event.channel,
+                    "interaction_type": event.interaction_type,
                     "debounce_seconds": MESSAGE_DEBOUNCE_SECONDS,
                     "id": pending["id"],
                 },
@@ -119,10 +122,10 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
             """
             INSERT INTO kommo_message_jobs (
                 correlation_id, external_message_id, lead_id, contact_id, chat_id, talk_id,
-                author_id, author_name, origin, channel, combined_message, media_url, status, buffer_expires_at
+                author_id, author_name, origin, channel, interaction_type, combined_message, media_url, status, buffer_expires_at
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :chat_id, :talk_id,
-                :author_id, :author_name, :origin, :channel, :combined_message, :media_url, 'pending',
+                :author_id, :author_name, :origin, :channel, :interaction_type, :combined_message, :media_url, 'pending',
                 NOW() + (:debounce_seconds * INTERVAL '1 second')
             )
             RETURNING id
@@ -186,6 +189,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "salesbot_account_id": values["salesbot_account_id"],
         "salesbot_user_id": values["salesbot_user_id"],
         "salesbot_client_uuid": values["salesbot_client_uuid"],
+        "interaction_type": values["interaction_type"],
     }
 
     job = await db.fetch_one(
@@ -207,6 +211,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
                   (:entity_type = 'leads' AND candidate.lead_id = :entity_id)
                   OR (:entity_type = 'contacts' AND candidate.contact_id = :entity_id)
               )
+              AND (CAST(:interaction_type AS text) IS NULL OR candidate.interaction_type = CAST(:interaction_type AS text))
             ORDER BY candidate.salesbot_launched_at DESC NULLS LAST, candidate.created_at DESC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -308,6 +313,14 @@ async def diagnostics_summary() -> dict:
         """
     )
     counts = {row["status"]: row["cnt"] for row in rows}
+    interaction_rows = await db.fetch_all(
+        """
+        SELECT COALESCE(interaction_type, 'private_message') AS interaction_type, COUNT(*) AS cnt
+        FROM kommo_message_jobs
+        GROUP BY COALESCE(interaction_type, 'private_message')
+        """
+    )
+    interaction_counts = {row["interaction_type"]: row["cnt"] for row in interaction_rows}
     timestamps = await db.fetch_one(
         """
         SELECT
@@ -337,6 +350,7 @@ async def diagnostics_summary() -> dict:
         "last_successful_widget_callback_at": timestamps["last_callback"] if timestamps else None,
         "last_successful_continuation_at": timestamps["last_continuation"] if timestamps else None,
         "last_kommo_api_error_summary": sanitize_job_error(timestamps["last_error"]) if timestamps and timestamps["last_error"] else None,
+        "job_counts_by_interaction_type": interaction_counts,
     }
 
 
@@ -356,6 +370,7 @@ async def _claim_due_pending_job():
               AND NOT EXISTS (
                   SELECT 1 FROM kommo_message_jobs active
                   WHERE active.correlation_id = candidate.correlation_id
+                    AND active.interaction_type = candidate.interaction_type
                     AND active.status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')
                     AND active.id <> candidate.id
               )
@@ -371,7 +386,7 @@ async def _claim_due_pending_job():
 async def _log_pending_claim_diagnostics() -> None:
     pending = await db.fetch_one(
         """
-        SELECT id, correlation_id, status, channel, origin, lead_id, contact_id, chat_id, talk_id,
+        SELECT id, correlation_id, status, channel, interaction_type, origin, lead_id, contact_id, chat_id, talk_id,
                combined_message, media_url, buffer_expires_at,
                GREATEST(EXTRACT(EPOCH FROM (buffer_expires_at - NOW())), 0) AS seconds_until_due
         FROM kommo_message_jobs
@@ -385,7 +400,7 @@ async def _log_pending_claim_diagnostics() -> None:
 
     blockers = await db.fetch_all(
         """
-        SELECT id, status, channel, origin, lead_id, contact_id, chat_id, talk_id,
+        SELECT id, status, channel, interaction_type, origin, lead_id, contact_id, chat_id, talk_id,
                combined_message, media_url, return_url, attempt_count, buffer_expires_at,
                salesbot_launched_at, processing_started_at, created_at, updated_at, last_error
         FROM kommo_message_jobs
@@ -474,7 +489,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             return
         logger.info("Kommo job waiting for Salesbot callback before launch: job_id=%s", job["id"])
         try:
-            await client.run_salesbot(entity_id, entity_type)
+            await client.run_salesbot(entity_id, entity_type, salesbot_id=_salesbot_id_for_job(job, config=get_config()))
         except KommoAPIError as e:
             error = sanitize_job_error(e)
             if _is_definitive_launch_error(e):
@@ -611,6 +626,7 @@ async def _process_ready_job(job: dict) -> None:
                 "chat_id": job.get("chat_id"),
                 "talk_id": job.get("talk_id"),
                 "author_id": job.get("author_id"),
+                "interaction_type": _job_interaction_type(job),
                 "media_url_is_direct": bool(job.get("media_url")),
             },
             persist_assistant_message=False,
@@ -658,6 +674,7 @@ async def _process_ready_job(job: dict) -> None:
             raw_customer_text,
             job.get("channel") or "whatsapp",
             settings,
+            interaction_type=_job_interaction_type(job),
         )
         if not customer_text:
             logger.info(
@@ -717,6 +734,7 @@ async def _find_latest_job_for_callback(values: dict):
     query_values = {
         "entity_type": values["entity_type"],
         "entity_id": values["entity_id"],
+        "interaction_type": values["interaction_type"],
     }
     query = """
         SELECT * FROM kommo_message_jobs
@@ -724,6 +742,7 @@ async def _find_latest_job_for_callback(values: dict):
             (:entity_type = 'leads' AND lead_id = :entity_id)
             OR (:entity_type = 'contacts' AND contact_id = :entity_id)
         )
+          AND (CAST(:interaction_type AS text) IS NULL OR interaction_type = CAST(:interaction_type AS text))
         ORDER BY salesbot_launched_at DESC NULLS LAST, created_at DESC
         LIMIT 1
     """
@@ -748,6 +767,7 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         "salesbot_account_id": _claim_as_str(claims, "account_id"),
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
         "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
+        "interaction_type": data.interaction_type,
     }
 
 
@@ -771,7 +791,12 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
         _log_continuation_prepared(
             job["id"],
             continuation_data,
-            build_kommo_message_diagnostics("", job.get("channel") or "whatsapp", "preserve"),
+            build_kommo_message_diagnostics(
+                "",
+                job.get("channel") or "whatsapp",
+                "preserve",
+                interaction_type=_job_interaction_type(job),
+            ),
         )
         response_payload = await client.continue_salesbot(
             job["return_url"],
@@ -837,10 +862,11 @@ def _log_continuation_prepared(
     message = str(continuation_data.get("message") or "")
     diagnostics = message_diagnostics or build_kommo_message_diagnostics(message, None, False)
     logger.info(
-        "Kommo continuation prepared: job_id=%s status=%s channel=%s message_present=%s message_length=%s newline_count=%s non_ascii_present=%s emoji_present=%s replacement_char_present=%s literal_question_mark_present=%s kommo_emoji_mode=%s kommo_strip_emoji_applied=%s",
+        "Kommo continuation prepared: job_id=%s status=%s channel=%s interaction_type=%s message_present=%s message_length=%s newline_count=%s non_ascii_present=%s emoji_present=%s replacement_char_present=%s literal_question_mark_present=%s kommo_emoji_mode=%s kommo_strip_emoji_applied=%s",
         job_id,
         continuation_data.get("status"),
         diagnostics["channel"],
+        diagnostics["interaction_type"],
         bool(message),
         diagnostics["message_length"],
         diagnostics["newline_count"],
@@ -957,6 +983,7 @@ def _event_values(event: NormalizedKommoEvent, external_message_id: str, text: s
         "author_name": event.author_name,
         "origin": event.origin,
         "channel": event.channel,
+        "interaction_type": event.interaction_type,
         "combined_message": text,
         "media_url": event.media_url,
     }
@@ -972,10 +999,10 @@ async def _record_message_receipt(
         """
         INSERT INTO kommo_message_receipts (
             external_message_id, job_id, correlation_id, lead_id, contact_id, chat_id,
-            talk_id, author_id, origin, channel, receipt_status, received_at
+            talk_id, author_id, origin, channel, interaction_type, receipt_status, received_at
         ) VALUES (
             :external_message_id, :job_id, :correlation_id, :lead_id, :contact_id, :chat_id,
-            :talk_id, :author_id, :origin, :channel, :receipt_status, :received_at
+            :talk_id, :author_id, :origin, :channel, :interaction_type, :receipt_status, :received_at
         )
         ON CONFLICT (external_message_id) DO NOTHING
         """,
@@ -990,6 +1017,7 @@ async def _record_message_receipt(
             "author_id": event.author_id,
             "origin": event.origin,
             "channel": event.channel,
+            "interaction_type": event.interaction_type,
             "receipt_status": receipt_status,
             "received_at": event.created_at,
         },
@@ -1013,6 +1041,7 @@ def _job_log_context(job: dict) -> dict:
         "job_id": str(job.get("id")) if job.get("id") is not None else None,
         "status": job.get("status"),
         "channel": job.get("channel"),
+        "interaction_type": _job_interaction_type(job),
         "origin": job.get("origin"),
         "lead_id": job.get("lead_id"),
         "contact_id": job.get("contact_id"),
@@ -1030,6 +1059,18 @@ def _job_log_context(job: dict) -> dict:
         "created_at": _timestamp_for_log(job.get("created_at")),
         "updated_at": _timestamp_for_log(job.get("updated_at")),
     }
+
+
+def _job_interaction_type(job: dict) -> str:
+    interaction_type = str(job.get("interaction_type") or "private_message").strip().lower()
+    return interaction_type if interaction_type in {"private_message", "instagram_comment"} else "private_message"
+
+
+def _salesbot_id_for_job(job: dict, config=None) -> int | None:
+    cfg = config or get_config()
+    if _job_interaction_type(job) == "instagram_comment":
+        return cfg.kommo_comments_salesbot_id
+    return cfg.kommo_salesbot_id
 
 
 def _timestamp_for_log(value) -> str | None:

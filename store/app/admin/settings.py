@@ -273,6 +273,7 @@ async def kommo_status():
         "kommo_integration_id_configured": bool(config.kommo_integration_id),
         "kommo_integration_secret_configured": bool(config.kommo_integration_secret),
         "kommo_salesbot_id_configured": config.kommo_salesbot_id is not None,
+        "kommo_comments_salesbot_id_configured": config.kommo_comments_salesbot_id is not None,
         "kommo_webhook_secret_configured": bool(config.kommo_webhook_secret),
         "kommo_ai_mode_field_configured": config.kommo_ai_mode_field_id is not None,
         "kommo_ai_mode_enum_ids_configured": all(
@@ -334,6 +335,8 @@ async def kommo_test():
 
     salesbot_id_ok = isinstance(config.kommo_salesbot_id, int) and config.kommo_salesbot_id > 0
     checks.append({"name": "salesbot_id_format", "ok": salesbot_id_ok})
+    comments_salesbot_id_ok = isinstance(config.kommo_comments_salesbot_id, int) and config.kommo_comments_salesbot_id > 0
+    checks.append({"name": "comments_salesbot_id_format", "ok": comments_salesbot_id_ok})
 
     return {"channel_backend": config.channel_backend, "ok": all(item["ok"] for item in checks), "checks": checks}
 

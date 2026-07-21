@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 KommoEntityType = Literal["leads", "contacts"]
 KommoChannel = Literal["whatsapp", "instagram"]
+KommoInteractionType = Literal["private_message", "instagram_comment"]
 KommoEventType = Literal[
     "incoming_message",
     "outgoing_message",
@@ -40,6 +41,7 @@ class KommoIdentifiers(BaseModel):
     entity_id: str | None = None
     entity_type: str | None = None
     origin: str | None = None
+    interaction_type: KommoInteractionType = "private_message"
 
 
 class NormalizedKommoEvent(BaseModel):
@@ -61,6 +63,7 @@ class NormalizedKommoEvent(BaseModel):
     created_at: datetime | None = None
     ai_mode_enum_id: int | None = None
     media_url: str | None = None
+    interaction_type: KommoInteractionType = "private_message"
 
     @property
     def stable_entity_id(self) -> str | None:
@@ -69,7 +72,7 @@ class NormalizedKommoEvent(BaseModel):
     @property
     def correlation_id(self) -> str:
         stable = self.lead_id or self.entity_id or self.chat_id or self.contact_id or self.talk_id
-        return f"kommo:{stable or self.message_id or 'unknown'}"
+        return f"kommo:{self.interaction_type}:{stable or self.message_id or 'unknown'}"
 
 
 class IncomingMessageEvent(NormalizedKommoEvent):
@@ -96,6 +99,7 @@ class SalesbotWidgetData(BaseModel):
     responsible_user_id: str | None = None
     chat_id: str | None = None
     talk_id: str | None = None
+    interaction_type: KommoInteractionType | None = None
 
     @field_validator("lead_id", "contact_id", "responsible_user_id", "chat_id", "talk_id", mode="before")
     @classmethod
@@ -106,6 +110,18 @@ class SalesbotWidgetData(BaseModel):
         if text.startswith("{{") and text.endswith("}}"):
             return None
         return text
+
+    @field_validator("interaction_type", mode="before")
+    @classmethod
+    def _normalize_interaction_type(cls, value):
+        if value in ("", None):
+            return None
+        text = str(value).strip().lower()
+        if text.startswith("{{") and text.endswith("}}"):
+            return None
+        if text in {"private_message", "instagram_comment"}:
+            return text
+        return None
 
 
 class SalesbotWidgetRequest(BaseModel):
@@ -124,6 +140,7 @@ class PersistentKommoJob(BaseModel):
     talk_id: str | None = None
     origin: str | None = None
     channel: str | None = None
+    interaction_type: KommoInteractionType = "private_message"
     author_id: str | None = None
     author_name: str | None = None
     combined_message: str

@@ -84,6 +84,7 @@ async def generate_response(
     settings = await db.get_settings()
     config = get_config()
     payment_methods = settings.get("payment_methods", [])
+    is_public_comment = _is_public_instagram_comment(integration_context)
     orchestration_mode = resolve_effective_orchestration_mode(
         settings,
         getattr(config, "ai_orchestration_mode", "legacy"),
@@ -153,6 +154,16 @@ async def generate_response(
     # ── 2c. Auto-escalate abusive customers ─────────────────
     hostility_reason = _detect_hostile_customer_message(message_text)
     if hostility_reason:
+        if is_public_comment:
+            return await _handle_public_comment_private_invite(
+                customer=customer,
+                channel=channel,
+                media_url=media_url,
+                message_text=message_text,
+                orchestration_mode=orchestration_mode,
+                route_intent="hostile_message",
+                persist_assistant_message=persist_assistant_message,
+            )
         t_start = time.monotonic()
         await conversations.store_message(
             customer_id=customer["id"],
@@ -233,6 +244,16 @@ async def generate_response(
     # ── 2d. Explicit human requests bypass router/agents ─────
     human_request_reason = guards.detect_human_request(message_text)
     if human_request_reason:
+        if is_public_comment:
+            return await _handle_public_comment_private_invite(
+                customer=customer,
+                channel=channel,
+                media_url=media_url,
+                message_text=message_text,
+                orchestration_mode=orchestration_mode,
+                route_intent="human_request",
+                persist_assistant_message=persist_assistant_message,
+            )
         t_start = time.monotonic()
         await conversations.store_message(
             customer_id=customer["id"],
@@ -299,17 +320,17 @@ async def generate_response(
 
     # ── 3. Load conversation history ─────────────────────────
     max_history = settings.get("max_conversation_history", 20)
-    stored_history = await conversations.get_history(customer["id"], limit=max_history)
+    stored_history = [] if is_public_comment else await conversations.get_history(customer["id"], limit=max_history)
     has_previous_context = bool(stored_history)
     history = conversations.prepare_history_for_generation(stored_history, latest_user_message=message_text)
     original_message_text = message_text
 
-    open_order = await orders.get_latest_open_order(customer["id"])
+    open_order = None if is_public_comment else await orders.get_latest_open_order(customer["id"])
 
     # ── 4. If image attached, analyze it first ───────────────
     vision_result = None
     payment_proof_attempt = False
-    if media_url:
+    if media_url and not is_public_comment:
         direct_media_url = bool((integration_context or {}).get("media_url_is_direct"))
         vision_channel = "instagram" if direct_media_url else channel
         vision_result = await analyze_payment_screenshot(
@@ -394,9 +415,9 @@ async def generate_response(
             catalog_markdown=catalog_md,
             store_name=settings.get("store_name", config.store_name),
             channel=channel,
-            customer=customer,
+            customer=None if is_public_comment else customer,
             open_order=open_order,
-            payment_methods=payment_methods,
+            payment_methods=[] if is_public_comment else payment_methods,
             exchange_rate_settings=settings,
             order_discount_percent=settings.get("order_discount_percent"),
             order_discount_threshold_usd=settings.get("order_discount_threshold_usd"),
@@ -405,6 +426,8 @@ async def generate_response(
         ),
     )
     system_prompt = _with_conversation_continuity_guidance(system_prompt, has_previous_context)
+    if is_public_comment:
+        system_prompt = _with_public_comment_guidance(system_prompt)
 
     # ── 6. Run the selected agent with timing ────────────────
     t_start = time.monotonic()
@@ -426,7 +449,7 @@ async def generate_response(
         context=AgentRunContext(
             customer=customer,
             channel=channel,
-            payment_methods=payment_methods or [],
+            payment_methods=[] if is_public_comment else payment_methods or [],
             vision_result=vision_result,
             payment_proof_attempt=payment_proof_attempt,
             latest_user_message=message_text,
@@ -435,6 +458,11 @@ async def generate_response(
         ),
     )
     _apply_conversation_continuity_to_agent_result(agent_result, has_previous_context)
+    if is_public_comment:
+        agent_result.text = _sanitize_public_comment_reply(agent_result.text)
+        agent_result.interactive = None
+        agent_result.catalog_pdf = None
+        agent_result.product_image = None
     t_end = time.monotonic()
     response_time_ms = int((t_end - t_start) * 1000)
 
@@ -663,6 +691,64 @@ async def _handle_exchange_rate_question(
     }
 
 
+async def _handle_public_comment_private_invite(
+    *,
+    customer: dict,
+    channel: str,
+    media_url: str | None,
+    message_text: str,
+    orchestration_mode: str,
+    route_intent: str,
+    persist_assistant_message: bool = True,
+) -> dict:
+    """Answer public comments without changing private customer or escalation state."""
+    t_start = time.monotonic()
+    await conversations.store_message(
+        customer_id=customer["id"],
+        role="user",
+        content=message_text,
+        channel=channel,
+        media_url=media_url,
+    )
+    reply_text = _sanitize_public_comment_reply("Escríbenos por DM y con gusto te ayudamos por privado.")
+    response_time_ms = int((time.monotonic() - t_start) * 1000)
+    await analytics.log_ai_run(
+        customer_id=customer["id"],
+        channel=channel,
+        orchestration_mode=orchestration_mode,
+        selected_agent="direct",
+        route_intent=route_intent,
+        route_source="public_comment_guard",
+        route_confidence=1.0,
+        provider=None,
+        model=None,
+        usage={},
+        response_time_ms=response_time_ms,
+        tool_names=[],
+        tool_rounds=0,
+        handoff_occurred=False,
+        fallback_occurred=False,
+        escalation_occurred=False,
+        shadow_evaluation=False,
+        legacy_fallback=False,
+    )
+    if persist_assistant_message:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="assistant",
+            content=reply_text,
+            channel=channel,
+        )
+    return {
+        "text": reply_text,
+        "interactive": None,
+        "catalog_pdf": None,
+        "product_image": None,
+        "customer_id": customer["id"],
+        "escalated": False,
+    }
+
+
 def _detect_exchange_rate_question(message_text: str, stored_history: list[dict] | None = None) -> bool:
     normalized = guards.normalize_text_for_moderation(message_text)
     if _looks_like_exchange_rate_question(normalized):
@@ -732,6 +818,34 @@ def _with_conversation_continuity_guidance(system_prompt: str, has_previous_cont
     return f"{system_prompt}\n\n# Continuidad de conversacion\n\n{guidance}"
 
 
+def _with_public_comment_guidance(system_prompt: str) -> str:
+    guidance = (
+        "Esta respuesta se publicara como comentario de Instagram, visible para otras personas. "
+        "Responde en una sola frase corta, sin Markdown, sin listas y sin datos privados. "
+        "No menciones pedidos, pagos, direcciones, telefonos, envios ni informacion personal del cliente. "
+        "No hagas checkout ni pidas datos de compra; cuando haga falta informacion privada, invita a escribir por DM."
+    )
+    return f"{system_prompt}\n\n# Reglas para comentario publico de Instagram\n\n{guidance}"
+
+
+def _is_public_instagram_comment(integration_context: dict | None) -> bool:
+    return (integration_context or {}).get("interaction_type") == "instagram_comment"
+
+
+def _sanitize_public_comment_reply(text: str | None) -> str:
+    cleaned = _runner_clean_assistant_reply_text(text or "")
+    cleaned = re.sub(r"```[\s\S]*?```", " ", cleaned)
+    cleaned = re.sub(r"`([^`\n]+?)`", r"\1", cleaned)
+    cleaned = re.sub(r"\*\*(.+?)\*\*", r"\1", cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r"__(.+?)__", r"\1", cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = cleaned.replace("*", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        cleaned = "Escríbenos por DM y con gusto te ayudamos."
+    return cleaned[:297].rstrip() + "..." if len(cleaned) > 300 else cleaned
+
+
 def _catalog_pdf_supported(channel: str, integration_context: dict | None, config=None) -> bool:
     delivery_provider = (integration_context or {}).get("provider")
     if not delivery_provider:
@@ -759,6 +873,8 @@ def _tool_names_for_delivery(
     integration_context: dict | None,
     config=None,
 ) -> tuple[str, ...]:
+    if _is_public_instagram_comment(integration_context):
+        return tuple(name for name in tool_names if name == "check_inventory")
     if _catalog_pdf_supported(channel, integration_context, config):
         return tuple(tool_names)
     return tuple(name for name in tool_names if name != "send_catalog_pdf")

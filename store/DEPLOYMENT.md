@@ -243,6 +243,7 @@ KOMMO_ACCESS_TOKEN=...
 KOMMO_INTEGRATION_ID=...
 KOMMO_INTEGRATION_SECRET=...
 KOMMO_SALESBOT_ID=123456
+KOMMO_COMMENTS_SALESBOT_ID=654321
 KOMMO_WEBHOOK_SECRET=your-random-path-secret
 KOMMO_AI_MODE_FIELD_ID=111
 KOMMO_AI_ACTIVE_ENUM_ID=222
@@ -290,7 +291,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 open http://localhost:8000/admin/login
 ```
 
-> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires `ADMIN_PASSWORD` and at least one LLM API key. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide both Telegram variables.
+> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires `ADMIN_PASSWORD` and at least one LLM API key. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, private-message Salesbot, comments Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide both Telegram variables.
 
 ---
 
@@ -342,10 +343,13 @@ Only do this when `CHANNEL_BACKEND=kommo`.
 
 1. Confirm `store/migrations/001_schema.sql` has been run in the store Supabase database.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
-3. Create a Kommo Salesbot with the widget step pointing to `https://abc123.ngrok-free.app/webhooks/kommo/salesbot`.
-4. Register a Kommo general webhook at `https://abc123.ngrok-free.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`.
-5. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
-6. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
+3. Create the private-message Kommo Salesbot with the widget step pointing to `https://abc123.ngrok-free.app/webhooks/kommo/salesbot`, ending in a Message step with `{{json.message}}`.
+4. Create the public-comment Kommo Salesbot with the same widget step and callback URL, ending in a Comment step with `{{json.message}}`.
+5. Register a Kommo general webhook at `https://abc123.ngrok-free.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`.
+6. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
+7. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
+
+Instagram comment routing requires an explicit `interaction_type=instagram_comment` classification. The repository does not yet include a confirmed native Kommo comment webhook payload, so capture and verify a real payload before mapping native comment fields automatically.
 
 The complete Kommo setup is documented in [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md).
 
@@ -408,7 +412,8 @@ Additional variables for `CHANNEL_BACKEND=kommo`:
 | `KOMMO_ACCESS_TOKEN`                | Long-lived private integration token       |
 | `KOMMO_INTEGRATION_ID`              | Private integration ID/client UUID         |
 | `KOMMO_INTEGRATION_SECRET`          | JWT validation secret                      |
-| `KOMMO_SALESBOT_ID`                 | Salesbot that contains the private widget  |
+| `KOMMO_SALESBOT_ID`                 | Private-message Salesbot with the widget   |
+| `KOMMO_COMMENTS_SALESBOT_ID`        | Public-comment Salesbot with the widget    |
 | `KOMMO_WEBHOOK_SECRET`              | Random path secret for general webhook URL |
 | `KOMMO_AI_MODE_FIELD_ID`            | Lead field ID for AI Mode                  |
 | `KOMMO_AI_ACTIVE_ENUM_ID`           | Enum ID for AI Active                      |
@@ -439,7 +444,7 @@ https://vs-chatbot-production.up.railway.app/webhooks/whatsapp
 
 For Kommo mode, update:
 
-- Salesbot widget URL: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/salesbot`
+- Salesbot widget URL in both private-message and comments Salesbots: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/salesbot`
 - General webhook URL: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`
 
 ---
@@ -975,7 +980,7 @@ Testing (DEBUG=true only — disabled in production):
 - **Kommo Salesbot callbacks return 401**
   Verify `KOMMO_INTEGRATION_SECRET`, `KOMMO_INTEGRATION_ID`, `KOMMO_SUBDOMAIN`, and the widget request JWT. Confirm the Salesbot widget URL points to `/webhooks/kommo/salesbot`.
 - **Kommo jobs stuck in `waiting_for_salesbot`**
-  The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. If this repeats, verify the uploaded widget is present in the Salesbot, the widget URL is reachable over HTTPS, and the Salesbot ID matches `KOMMO_SALESBOT_ID`.
+  The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. If this repeats, verify the uploaded widget is present in the selected Salesbot, the widget URL is reachable over HTTPS, and the Salesbot ID matches `KOMMO_SALESBOT_ID` for DMs or `KOMMO_COMMENTS_SALESBOT_ID` for comments.
 - **Kommo image payment screenshots are ignored**
   Direct media downloads are intentionally limited to trusted Meta/Instagram/Kommo hosts over HTTPS, with redirects disabled and a 5 MB size limit. Some Kommo media payloads may need manual production validation.
 - **Kommo catalog requests do not send PDFs**

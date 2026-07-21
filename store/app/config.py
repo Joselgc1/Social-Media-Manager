@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     kommo_integration_id: str = ""
     kommo_integration_secret: str = ""
     kommo_salesbot_id: int | None = None
+    kommo_comments_salesbot_id: int | None = None
     kommo_webhook_secret: str = ""
     kommo_ai_mode_field_id: int | None = None
     kommo_ai_active_enum_id: int | None = None
@@ -84,6 +85,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "kommo_salesbot_id",
+        "kommo_comments_salesbot_id",
         "kommo_ai_mode_field_id",
         "kommo_ai_active_enum_id",
         "kommo_ai_human_enum_id",

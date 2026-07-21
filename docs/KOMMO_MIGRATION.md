@@ -6,7 +6,7 @@
 
 ```text
 WhatsApp / Instagram -> Kommo inbox -> Kommo webhook -> Social-Media-Manager
-Social-Media-Manager -> Kommo Salesbot widget continuation -> Customer
+Social-Media-Manager -> selected Kommo Salesbot widget continuation -> Customer
 ```
 
 Kommo owns the WhatsApp and Instagram channel connection. The app does not create a custom Kommo Chats API channel and does not call Meta sender modules in Kommo mode.
@@ -27,7 +27,7 @@ Kommo removes the need to manage Meta Developers app review, long-lived Meta acc
 
 - Registers `/webhooks/kommo/events/{webhook_secret}` and `/webhooks/kommo/salesbot`.
 - Does not require Meta credentials.
-- Launches and resumes Kommo Salesbot for replies.
+- Launches and resumes the configured Kommo Salesbot for replies.
 - Rejects direct WhatsApp broadcast delivery.
 
 ## Kommo Plan Prerequisites
@@ -44,14 +44,29 @@ Connect the Instagram Business account inside Kommo using Kommo's official Insta
 
 ## Instagram Comment Setup
 
-Do not route public Instagram comments directly to this app in the first release. Configure native Kommo comment triggers manually:
+Public Instagram comments use the same durable path as private messages:
 
-1. Create a Kommo automation for new Instagram comments.
-2. Send a controlled public template reply from Kommo.
-3. Open or invite the user into a private Instagram DM through Kommo-supported behavior.
-4. Let this app handle the resulting Instagram DM only.
+```text
+Kommo webhook -> normalize event -> create kommo_message_job -> launch Salesbot -> widget callback -> AI response -> continue Salesbot with json.message
+```
 
-Dynamic LLM-generated public comment replies are deliberately unsupported.
+The only runtime difference is Salesbot selection:
+
+- WhatsApp and Instagram DMs use `KOMMO_SALESBOT_ID`.
+- Instagram comments use `KOMMO_COMMENTS_SALESBOT_ID`.
+
+Create two Salesbots that both use the installed Social Media Manager widget:
+
+1. Private-message Salesbot: widget step followed by a Kommo Message step using `{{json.message}}`.
+2. Comment Salesbot: widget step followed by a Kommo Comment step using `{{json.message}}`.
+
+The backend will not create jobs from unsolicited widget callbacks. A callback must still match an existing `waiting_for_salesbot` job.
+
+Comment detection is intentionally gated. This repository only contains confirmed Kommo private-message payloads (`message_type=text`); it does not contain a confirmed native Instagram comment payload. The parser therefore defaults every event to `interaction_type=private_message` and only routes comments when the webhook payload explicitly includes `interaction_type=instagram_comment`. Do not infer comments from `origin=instagram` alone.
+
+Before enabling native comment routing in production, capture a real Kommo Instagram comment webhook sample and record the non-sensitive classification fields: `origin`, `message_type`, event `type`/`direction`, message ID, lead/contact/chat/talk IDs, and entity ID/type. After that payload is verified, map the confirmed field(s) in `store/app/integrations/kommo/webhook_parser.py` and add a fixture-based test.
+
+Public-comment AI replies are restricted: concise single-message text, no Markdown, no checkout/order/payment/escalation mutations, no customer/order/address/phone/delivery details, and DM invitation whenever private information is needed.
 
 ## Private Integration Creation
 
@@ -111,6 +126,7 @@ KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
 KOMMO_INTEGRATION_SECRET=
 KOMMO_SALESBOT_ID=
+KOMMO_COMMENTS_SALESBOT_ID=
 KOMMO_WEBHOOK_SECRET=
 KOMMO_AI_MODE_FIELD_ID=
 KOMMO_AI_ACTIVE_ENUM_ID=
@@ -123,7 +139,7 @@ KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
 
 ## Database Migration
 
-Run `store/migrations/001_schema.sql` manually in Supabase SQL Editor. The consolidated schema includes `customer_channel_mappings`, `kommo_message_jobs`, `kommo_message_receipts`, callback claim storage, continuation tracking, `delivery_unknown`, assistant-history idempotency, and lead-safe contact mappings.
+Run `store/migrations/001_schema.sql` manually in Supabase SQL Editor. The consolidated schema includes `customer_channel_mappings`, `kommo_message_jobs`, `kommo_message_receipts`, `interaction_type` persistence for private messages versus public comments, callback claim storage, continuation tracking, `delivery_unknown`, assistant-history idempotency, and lead-safe contact mappings.
 
 ## Widget Build
 
@@ -168,11 +184,14 @@ Create a Salesbot that contains the installed widget step. The integration setti
 https://<store-domain>/webhooks/kommo/salesbot
 ```
 
-The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, and `{{origin}}`. Its saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes `success` and `fail` branches; use `success` for normal AI completion and `fail` for fallback/human handling.
+The widget sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, and `{{origin}}`. Its saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes `success` and `fail` branches; use `success` for normal AI completion and `fail` for fallback/human handling. The continuation response remains `{"data":{"status":"success","message":"..."}}`; the chosen Salesbot determines whether `{{json.message}}` is sent as a private message or a public comment.
 
 ## Salesbot ID Retrieval
 
-Retrieve the Salesbot ID from Kommo's Salesbot UI or API and set `KOMMO_SALESBOT_ID`.
+Retrieve both Salesbot IDs from Kommo's Salesbot UI or API:
+
+- Set `KOMMO_SALESBOT_ID` to the private-message Salesbot.
+- Set `KOMMO_COMMENTS_SALESBOT_ID` to the public-comment Salesbot.
 
 ## General Webhook Registration
 
@@ -219,9 +238,12 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 [ ] Widget ZIP uploaded to the private integration
 [ ] Widget installed from Settings -> Integrations with backend_url=https://<store-domain>/webhooks/kommo/salesbot
 [ ] Social Media Manager AI appears in Salesbot as an installed widget
+[ ] Private-message Salesbot ends with a Message step using {{json.message}}
+[ ] Comment Salesbot ends with a Comment step using {{json.message}}
 [ ] General webhook points to https://<store-domain>/webhooks/kommo/events/<secret>
 [ ] /admin/settings/kommo/test passes with admin auth
 [ ] A real WhatsApp or Instagram DM produces one customer reply through Kommo
+[ ] A real Instagram comment payload has been captured and confirmed before native comment classification is enabled
 [ ] AI Mode=Human suppresses future AI replies
 ```
 
@@ -237,6 +259,14 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 1. Send an Instagram DM to the connected account.
 2. Confirm origin maps to `instagram`.
 3. Confirm AI response appears through Kommo, not Meta sender modules.
+
+## Instagram Comment Test Procedure
+
+1. Capture a real Kommo webhook generated by a public Instagram comment without logging message text, tokens, secrets, phone numbers, payment data, or addresses.
+2. Confirm the payload has a verified, non-speculative field that differentiates public comments from Instagram DMs.
+3. Map only that confirmed field to `interaction_type=instagram_comment` in the webhook parser.
+4. Confirm `/admin/settings/kommo/status` shows `job_counts_by_interaction_type.instagram_comment` increasing.
+5. Confirm the comments Salesbot is launched and the public reply comes from the Kommo Comment step using `{{json.message}}`.
 
 ## Human Takeover Procedure
 
@@ -270,6 +300,8 @@ The first release is text-first. Product images become caption plus public image
 Kommo Salesbot continuations are data-only payloads shaped as `{"data":{"status":"success","message":"..."}}` or `{"data":{"status":"fail","message":""}}`. They do not include `execute_handlers`, `attachment_type`, or public catalog PDF URLs.
 
 Emoji and markdown formatting are normalized before Kommo continuation. Per-channel settings `kommo_emoji_mode_whatsapp` and `kommo_emoji_mode_instagram` accept `preserve`, `safe`, or `strip`; the default is `safe`. The legacy `kommo_strip_emoji=true` setting still forces stripping.
+
+For `interaction_type=instagram_comment`, final text is additionally collapsed to one short public-safe message before continuation.
 
 ## Payment-Image Limitations
 

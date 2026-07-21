@@ -215,7 +215,9 @@ def _event_log_context(event) -> dict:
     return {
         "type": event.event_type,
         "channel": event.channel,
+        "interaction_type": event.interaction_type,
         "origin": event.origin,
+        "message_type": event.message_type,
         "author_id": event.author_id,
         "has_author_name": bool(event.author_name),
         "author_type": event.author_type,
@@ -226,6 +228,8 @@ def _event_log_context(event) -> dict:
         "contact_id": event.contact_id,
         "chat_id": event.chat_id,
         "talk_id": event.talk_id,
+        "entity_id": event.entity_id,
+        "entity_type": event.entity_type,
     }
 
 

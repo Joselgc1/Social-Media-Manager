@@ -46,6 +46,18 @@ def test_send_catalog_pdf_excluded_from_instagram_tool_availability():
     assert "send_catalog_pdf" not in _tool_names(tools)
 
 
+def test_public_instagram_comment_restricts_mutating_tools():
+    from app.ai.engine import _tools_for_delivery
+
+    tools = _tools_for_delivery(
+        "instagram",
+        {"provider": "kommo", "interaction_type": "instagram_comment"},
+        SimpleNamespace(channel_backend="kommo"),
+    )
+
+    assert _tool_names(tools) == {"check_inventory"}
+
+
 @pytest.mark.asyncio
 async def test_kommo_catalog_request_returns_normal_text_response(monkeypatch):
     from app.ai import engine

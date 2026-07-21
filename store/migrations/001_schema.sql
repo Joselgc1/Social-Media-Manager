@@ -396,6 +396,7 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
     author_name TEXT,
     origin TEXT,
     channel TEXT,
+    interaction_type TEXT NOT NULL DEFAULT 'private_message',
     combined_message TEXT NOT NULL,
     media_url TEXT,
     return_url TEXT,
@@ -421,6 +422,7 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
 ALTER TABLE kommo_message_jobs
     ADD COLUMN IF NOT EXISTS author_id TEXT,
     ADD COLUMN IF NOT EXISTS author_name TEXT,
+    ADD COLUMN IF NOT EXISTS interaction_type TEXT NOT NULL DEFAULT 'private_message',
     ADD COLUMN IF NOT EXISTS callback_claims JSONB,
     ADD COLUMN IF NOT EXISTS salesbot_token_jti TEXT,
     ADD COLUMN IF NOT EXISTS salesbot_account_id TEXT,
@@ -447,6 +449,14 @@ ALTER TABLE kommo_message_jobs
             'delivery_unknown',
             'failed'
         )
+    );
+
+ALTER TABLE kommo_message_jobs
+    DROP CONSTRAINT IF EXISTS kommo_message_jobs_interaction_type_check;
+
+ALTER TABLE kommo_message_jobs
+    ADD CONSTRAINT kommo_message_jobs_interaction_type_check CHECK (
+        interaction_type IN ('private_message', 'instagram_comment')
     );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_external_message
@@ -485,6 +495,7 @@ COMMENT ON TABLE kommo_message_jobs IS 'Durable Kommo inbound jobs. Failed jobs 
 COMMENT ON COLUMN kommo_message_jobs.continuation_payload IS 'Last Salesbot continuation payload attempted for this job.';
 COMMENT ON COLUMN kommo_message_jobs.continuation_response IS 'Sanitized Salesbot continuation response when Kommo accepted the request.';
 COMMENT ON COLUMN kommo_message_jobs.assistant_message_persisted_at IS 'Set after the delivered Kommo continuation has been persisted as assistant conversation history. Used to make retries idempotent.';
+COMMENT ON COLUMN kommo_message_jobs.interaction_type IS 'private_message for WhatsApp/Instagram DMs, instagram_comment for public Instagram comment replies through the comments Salesbot.';
 
 -- ============================================================
 -- Kommo inbound message receipts
@@ -501,6 +512,7 @@ CREATE TABLE IF NOT EXISTS kommo_message_receipts (
     author_id TEXT,
     origin TEXT,
     channel TEXT,
+    interaction_type TEXT NOT NULL DEFAULT 'private_message',
     receipt_status TEXT NOT NULL DEFAULT 'created',
     received_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -508,7 +520,16 @@ CREATE TABLE IF NOT EXISTS kommo_message_receipts (
 );
 
 ALTER TABLE kommo_message_receipts
-    ADD COLUMN IF NOT EXISTS author_id TEXT;
+    ADD COLUMN IF NOT EXISTS author_id TEXT,
+    ADD COLUMN IF NOT EXISTS interaction_type TEXT NOT NULL DEFAULT 'private_message';
+
+ALTER TABLE kommo_message_receipts
+    DROP CONSTRAINT IF EXISTS kommo_message_receipts_interaction_type_check;
+
+ALTER TABLE kommo_message_receipts
+    ADD CONSTRAINT kommo_message_receipts_interaction_type_check CHECK (
+        interaction_type IN ('private_message', 'instagram_comment')
+    );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_receipts_external_message
     ON kommo_message_receipts(external_message_id);
@@ -522,7 +543,7 @@ CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_author
 
 INSERT INTO kommo_message_receipts (
     external_message_id, job_id, correlation_id, lead_id, contact_id, chat_id,
-    talk_id, author_id, origin, channel, receipt_status, received_at, created_at
+    talk_id, author_id, origin, channel, interaction_type, receipt_status, received_at, created_at
 )
 SELECT
     external_message_id,
@@ -535,6 +556,7 @@ SELECT
     author_id,
     origin,
     channel,
+    COALESCE(interaction_type, 'private_message'),
     CASE WHEN status = 'discarded' AND COALESCE(last_error, '') LIKE 'Merged into %' THEN 'merged' ELSE 'created' END,
     created_at,
     created_at

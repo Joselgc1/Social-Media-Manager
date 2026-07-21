@@ -27,6 +27,7 @@ def _base_config(**overrides):
         "kommo_integration_id": "client-uuid",
         "kommo_integration_secret": "kommo-secret",
         "kommo_salesbot_id": 123,
+        "kommo_comments_salesbot_id": 456,
         "kommo_webhook_secret": "webhook-secret",
         "kommo_ai_mode_field_id": 111,
         "kommo_ai_active_enum_id": 222,
@@ -66,6 +67,13 @@ def test_kommo_mode_startup_validation_requires_kommo_credentials():
         _validate_startup_config(_base_config(channel_backend="kommo", kommo_integration_id=""))
 
 
+def test_kommo_mode_startup_validation_requires_comments_salesbot_id():
+    from app.main import _validate_startup_config
+
+    with pytest.raises(RuntimeError, match="KOMMO_COMMENTS_SALESBOT_ID"):
+        _validate_startup_config(_base_config(channel_backend="kommo", kommo_comments_salesbot_id=None))
+
+
 def test_kommo_mode_startup_validation_rejects_invalid_subdomain():
     from app.main import _validate_startup_config
 
@@ -90,6 +98,14 @@ def test_optional_kommo_responsible_user_accepts_empty_string(monkeypatch):
     assert Settings().kommo_default_responsible_user_id is None
 
 
+def test_kommo_comments_salesbot_id_accepts_empty_string(monkeypatch):
+    monkeypatch.setenv("KOMMO_COMMENTS_SALESBOT_ID", "")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
+    monkeypatch.setenv("GOOGLE_SHEETS_CREDENTIALS_B64", "e30=")
+    monkeypatch.setenv("PRODUCT_SHEET_ID", "sheet")
+    assert Settings().kommo_comments_salesbot_id is None
+
+
 def test_kommo_startup_config_summary_logs_only_safe_fields(caplog):
     from app.main import _log_kommo_startup_config_summary
 
@@ -109,6 +125,8 @@ def test_kommo_startup_config_summary_logs_only_safe_fields(caplog):
     assert "integration_id_present=True" in caplog.text
     assert "integration_secret_present=True" in caplog.text
     assert "integration_secret_length=18" in caplog.text
+    assert "private_salesbot_configured=True" in caplog.text
+    assert "comments_salesbot_configured=True" in caplog.text
     assert "access-token-secret" not in caplog.text
     assert "client-uuid-secret" not in caplog.text
     assert "integration-secret" not in caplog.text

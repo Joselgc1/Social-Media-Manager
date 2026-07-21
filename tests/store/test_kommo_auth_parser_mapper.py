@@ -226,6 +226,7 @@ def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
     assert incoming.lead_id == "100"
     assert incoming.author_id == "author-uuid"
     assert incoming.author_name == "Maria Cliente"
+    assert incoming.interaction_type == "private_message"
 
     outgoing = normalize_kommo_webhook({
         "outgoing_message[add][0][id]": "out1",
@@ -234,6 +235,7 @@ def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
     })[0]
     assert outgoing.event_type == "outgoing_message"
     assert outgoing.channel == "instagram"
+    assert outgoing.interaction_type == "private_message"
 
     lead = normalize_kommo_webhook({
         "leads[update][0][id]": "100",
@@ -281,6 +283,7 @@ def test_account_message_wrapper_normalization_from_real_kommo_payload():
     assert event.author_id == "author-real"
     assert event.author_name == "Cliente Real"
     assert event.author_type == "external"
+    assert event.interaction_type == "private_message"
 
 
 def test_direct_json_account_message_normalization():
@@ -304,6 +307,33 @@ def test_direct_json_account_message_normalization():
     assert event.channel == "instagram"
     assert event.author_id == "author-json"
     assert event.author_name == "Cliente JSON"
+    assert event.interaction_type == "private_message"
+
+
+def test_instagram_comment_interaction_requires_explicit_marker():
+    private_event = normalize_kommo_webhook({
+        "message[add][0][id]": "m-ig-dm",
+        "message[add][0][lead_id]": "100",
+        "message[add][0][origin]": "instagram",
+        "message[add][0][message_type]": "comment",
+        "message[add][0][type]": "incoming",
+    })[0]
+    comment_event = normalize_kommo_webhook({
+        "message[add][0][id]": "m-ig-comment",
+        "message[add][0][lead_id]": "100",
+        "message[add][0][origin]": "instagram",
+        "message[add][0][message_type]": "text",
+        "message[add][0][interaction_type]": "instagram_comment",
+        "message[add][0][type]": "incoming",
+    })[0]
+
+    assert private_event.channel == "instagram"
+    assert private_event.message_type == "comment"
+    assert private_event.interaction_type == "private_message"
+    assert private_event.correlation_id == "kommo:private_message:100"
+    assert comment_event.channel == "instagram"
+    assert comment_event.interaction_type == "instagram_comment"
+    assert comment_event.correlation_id == "kommo:instagram_comment:100"
 
 
 def test_missing_optional_and_unknown_events_are_safe():
@@ -427,7 +457,7 @@ async def test_salesbot_launch_request_and_accepted_response(monkeypatch):
         "app.integrations.kommo.client.get_config",
         lambda: SimpleNamespace(kommo_salesbot_id=555),
     )
-    await KommoClient(subdomain="acme", access_token="token").run_salesbot(100, "leads")
+    await KommoClient(subdomain="acme", access_token="token").run_salesbot(100, "leads", salesbot_id=555)
     assert recorded["method"] == "POST"
     assert recorded["url"] == "https://acme.kommo.com/api/v4/bots/555/run"
     assert recorded["json"] == {"entity_id": 100, "entity_type": "leads"}
