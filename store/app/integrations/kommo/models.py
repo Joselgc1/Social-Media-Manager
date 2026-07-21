@@ -60,6 +60,10 @@ class NormalizedKommoEvent(BaseModel):
     author_id: str | None = None
     author_name: str | None = None
     author_type: str | None = None
+    author_username: str | None = None
+    author_profile_url: str | None = None
+    sender_username: str | None = None
+    sender_profile_url: str | None = None
     created_at: datetime | None = None
     ai_mode_enum_id: int | None = None
     media_url: str | None = None
@@ -105,6 +109,10 @@ class SalesbotWidgetData(BaseModel):
     responsible_user_id: str | None = None
     chat_id: str | None = None
     talk_id: str | None = None
+    author_username: str | None = None
+    author_profile_url: str | None = None
+    sender_username: str | None = None
+    sender_profile_url: str | None = None
     interaction_type: KommoInteractionType | None = None
     post_id: str | None = None
     comment_id: str | None = None
@@ -129,6 +137,10 @@ class SalesbotWidgetData(BaseModel):
         "responsible_user_id",
         "chat_id",
         "talk_id",
+        "author_username",
+        "author_profile_url",
+        "sender_username",
+        "sender_profile_url",
         "post_id",
         "comment_id",
         "parent_comment_id",
@@ -188,6 +200,10 @@ class PersistentKommoJob(BaseModel):
     interaction_type: KommoInteractionType = "private_message"
     author_id: str | None = None
     author_name: str | None = None
+    author_username: str | None = None
+    author_profile_url: str | None = None
+    sender_username: str | None = None
+    sender_profile_url: str | None = None
     combined_message: str
     media_url: str | None = None
     return_url: str | None = None

@@ -1,5 +1,8 @@
+import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,6 +25,22 @@ def _rate(rate_key="usd_bcv", rate="736.9339"):
         change_percentage=Decimal("1.25"),
         source=source,
     )
+
+
+def exchange_rate_service_row(rate_key="usd_bcv", rate="736.9339"):
+    normalized = _rate(rate_key, rate)
+    return {
+        "rate_key": normalized.rate_key,
+        "currency_code": normalized.currency_code,
+        "market": normalized.market,
+        "rate": normalized.rate,
+        "effective_at": normalized.effective_at,
+        "fetched_at": normalized.fetched_at,
+        "previous_rate": normalized.previous_rate,
+        "change_percentage": normalized.change_percentage,
+        "source": normalized.source,
+        "updated_at": normalized.fetched_at,
+    }
 
 
 def test_bcv_usd_and_eur_response_is_parsed_with_decimal_values():
@@ -68,6 +87,52 @@ def test_usdt_response_follows_current_openapi_shape_and_uses_average():
     assert rate.change_percentage == Decimal("1.10")
     assert rate.source == USDT_EXCHANGE_RATE_URL
     assert not isinstance(rate.rate, float)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"current": {"usd": "736.9339", "date": "2026-07-20"}},
+        {
+            "current": {"usd": "0", "eur": "843.19976838", "date": "2026-07-20"},
+            "previous": {"usd": "732.4787", "eur": "838.0655046"},
+            "changePercentage": {"usd": "0.6", "eur": "0.6"},
+        },
+        {
+            "current": {"usd": "not-a-rate", "eur": "843.19976838", "date": "2026-07-20"},
+            "previous": {"usd": "732.4787", "eur": "838.0655046"},
+            "changePercentage": {"usd": "0.6", "eur": "0.6"},
+        },
+    ],
+)
+def test_bcv_malformed_incomplete_or_zero_responses_are_rejected(payload):
+    from app.stores.dolarvzla import DolarVzlaClientError, parse_bcv_response
+
+    with pytest.raises(DolarVzlaClientError):
+        parse_bcv_response(payload, fetched_at=datetime(2026, 7, 20, 12, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"current": {"average": "780.50", "date": "2026-07-20 21:00:03.932Z"}},
+        {
+            "current": {"average": "0", "date": "2026-07-20 21:00:03.932Z"},
+            "previous": {"average": "772.00"},
+            "changePercentage": {"average": "1.10"},
+        },
+        {
+            "current": {"average": "NaN", "date": "2026-07-20 21:00:03.932Z"},
+            "previous": {"average": "772.00"},
+            "changePercentage": {"average": "1.10"},
+        },
+    ],
+)
+def test_usdt_malformed_incomplete_or_zero_responses_are_rejected(payload):
+    from app.stores.dolarvzla import DolarVzlaClientError, parse_usdt_response
+
+    with pytest.raises(DolarVzlaClientError):
+        parse_usdt_response(payload, fetched_at=datetime(2026, 7, 20, 12, tzinfo=UTC))
 
 
 @pytest.mark.asyncio
@@ -139,8 +204,56 @@ async def test_partial_provider_failure_does_not_delete_previous_values(monkeypa
     assert result["status"] == "ok"
     assert result["sources"]["bcv"] == {"ok": False, "error": "fetch_failed"}
     assert result["sources"]["usdt"]["ok"] is True
+    assert result["successful_rate_keys"] == ["usdt_binance"]
     persisted = [call.args[1] for call in execute.call_args_list]
     assert [item["rate_key"] for item in persisted] == ["usdt_binance"]
+
+
+@pytest.mark.asyncio
+async def test_total_refresh_failure_does_not_write_any_exchange_rate(monkeypatch):
+    from app.stores import exchange_rates
+
+    class FakeClient:
+        async def fetch_bcv_rates(self):
+            raise RuntimeError("bcv unavailable")
+
+        async def fetch_usdt_rate(self):
+            raise RuntimeError("usdt unavailable")
+
+    execute = AsyncMock()
+    monkeypatch.setattr(exchange_rates.db, "fetch_one", AsyncMock(return_value={"rate": Decimal("700")}))
+    monkeypatch.setattr(exchange_rates.db, "execute", execute)
+
+    result = await exchange_rates.refresh_exchange_rates(client=FakeClient())
+
+    assert result["status"] == "failed"
+    assert result["sources"]["bcv"] == {"ok": False, "error": "fetch_failed"}
+    assert result["sources"]["usdt"] == {"ok": False, "error": "fetch_failed"}
+    assert result["successful_rate_keys"] == []
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_or_incomplete_normalized_rates_are_not_persisted(monkeypatch):
+    from app.stores import exchange_rates
+
+    class FakeClient:
+        async def fetch_bcv_rates(self):
+            return [_rate("usd_bcv", "736.9339")]
+
+        async def fetch_usdt_rate(self):
+            return replace(_rate("usdt_binance", "780.50"), rate=Decimal("0"))
+
+    execute = AsyncMock()
+    monkeypatch.setattr(exchange_rates.db, "fetch_one", AsyncMock(return_value=None))
+    monkeypatch.setattr(exchange_rates.db, "execute", execute)
+
+    result = await exchange_rates.refresh_exchange_rates(client=FakeClient())
+
+    assert result["status"] == "failed"
+    assert result["sources"]["bcv"] == {"ok": False, "error": "validation_failed"}
+    assert result["sources"]["usdt"] == {"ok": False, "error": "validation_failed"}
+    execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -193,6 +306,111 @@ def test_store_rate_settings_include_source_and_fetch_metadata():
     assert settings["exchange_rate_usd_bcv_fetched_at"] == "2026-07-20T12:30:00+00:00"
     assert settings["exchange_rate_usd_bcv_source"] == "https://rates.dolarvzla.com/bcv/current.json"
     assert settings["exchange_rates_last_synced_at"]
+
+
+def test_store_rate_settings_omit_invalid_rows_instead_of_emptying_values():
+    from app.stores import exchange_rates
+
+    settings = exchange_rates.build_store_rate_settings([
+        {
+            "rate_key": "usd_bcv",
+            "rate": Decimal("0"),
+            "effective_at": datetime(2026, 7, 20, tzinfo=UTC),
+            "fetched_at": datetime(2026, 7, 20, 12, tzinfo=UTC),
+            "source": "https://rates.dolarvzla.com/bcv/current.json",
+        },
+        {
+            "rate_key": "usdt_binance",
+            "rate": Decimal("780.50"),
+            "effective_at": datetime(2026, 7, 20, tzinfo=UTC),
+            "fetched_at": None,
+            "source": "https://api.dolarvzla.com/public/usdt/exchange-rate",
+        },
+    ])
+
+    assert settings == {}
+
+
+@pytest.mark.asyncio
+async def test_store_sync_after_partial_failure_only_writes_successful_source(monkeypatch):
+    from app.stores import api
+
+    store_db = SimpleNamespace(execute=AsyncMock())
+    monkeypatch.setattr(api, "_get_store_row", AsyncMock(return_value={"id": "store-1", "name": "Store", "db_url_encrypted": "encrypted"}))
+    monkeypatch.setattr(api, "decrypt", lambda value: "postgresql://store")
+    monkeypatch.setattr(api, "_get_store_db", AsyncMock(return_value=store_db))
+    monkeypatch.setattr(api, "_store_stats_semaphore", asyncio.Semaphore(1))
+    rows = [
+        exchange_rate_service_row("usd_bcv", "736.9339"),
+        exchange_rate_service_row("usdt_binance", "780.50"),
+    ]
+
+    result = await api.sync_exchange_rates_to_store(
+        "store-1",
+        rows=rows,
+        rate_keys={"usdt_binance"},
+    )
+
+    written_keys = [call.args[1]["key"] for call in store_db.execute.await_args_list]
+    assert result["synced"] is True
+    assert "exchange_rate_usdt_binance" in written_keys
+    assert "exchange_rate_usd_bcv" not in written_keys
+    assert all("usd_bcv" not in key for key in written_keys)
+
+
+@pytest.mark.asyncio
+async def test_store_sync_after_total_failure_writes_nothing(monkeypatch):
+    from app.stores import api
+
+    get_store_db = AsyncMock()
+    monkeypatch.setattr(api, "_get_store_row", AsyncMock(return_value={"id": "store-1", "name": "Store", "db_url_encrypted": "encrypted"}))
+    monkeypatch.setattr(api, "_get_store_db", get_store_db)
+
+    result = await api.sync_exchange_rates_to_store(
+        "store-1",
+        rows=[exchange_rate_service_row("usd_bcv", "736.9339")],
+        rate_keys=set(),
+    )
+
+    assert result["synced"] is False
+    assert result["settings"] == []
+    get_store_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_later_successful_refresh_persists_replacement_after_retained_failure(monkeypatch):
+    from app.stores import exchange_rates
+
+    class FailingClient:
+        async def fetch_bcv_rates(self):
+            raise RuntimeError("bcv unavailable")
+
+        async def fetch_usdt_rate(self):
+            raise RuntimeError("usdt unavailable")
+
+    class SuccessfulClient:
+        async def fetch_bcv_rates(self):
+            return [_rate("usd_bcv", "740.00"), _rate("eur_bcv", "845.00")]
+
+        async def fetch_usdt_rate(self):
+            return _rate("usdt_binance", "790.00")
+
+    execute = AsyncMock()
+    monkeypatch.setattr(exchange_rates.db, "fetch_one", AsyncMock(return_value=None))
+    monkeypatch.setattr(exchange_rates.db, "execute", execute)
+
+    failed = await exchange_rates.refresh_exchange_rates(client=FailingClient())
+    assert failed["status"] == "failed"
+    execute.assert_not_awaited()
+
+    successful = await exchange_rates.refresh_exchange_rates(client=SuccessfulClient())
+    assert successful["status"] == "ok"
+    persisted = {call.args[1]["rate_key"]: call.args[1]["rate"] for call in execute.await_args_list}
+    assert persisted == {
+        "usd_bcv": Decimal("740.00"),
+        "eur_bcv": Decimal("845.00"),
+        "usdt_binance": Decimal("790.00"),
+    }
 
 
 def test_master_runtime_normalizes_store_phone_number():

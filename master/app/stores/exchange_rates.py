@@ -6,7 +6,7 @@ import asyncio
 import logging
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app import db
@@ -24,10 +24,18 @@ RATE_KEYS = ("usd_bcv", "eur_bcv", "usdt_binance")
 _refresh_lock = asyncio.Lock()
 
 
+class ExchangeRateValidationError(ValueError):
+    """Raised when normalized provider data is incomplete or unsafe to persist."""
+
+
 def _decimal_or_none(value: Any) -> Decimal | None:
     if value is None:
         return None
-    return value if isinstance(value, Decimal) else Decimal(str(value))
+    try:
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return decimal_value if decimal_value.is_finite() else None
 
 
 def _datetime_or_none(value: Any) -> datetime | None:
@@ -60,6 +68,7 @@ def _rate_changed(existing: Any, rate: NormalizedExchangeRate) -> bool:
 
 
 async def upsert_exchange_rate(rate: NormalizedExchangeRate) -> bool:
+    validate_exchange_rate(rate)
     existing = await db.fetch_one(
         "SELECT currency_code, market, rate, effective_at, previous_rate, change_percentage, source "
         "FROM exchange_rates WHERE rate_key = :rate_key",
@@ -137,6 +146,11 @@ def _serialize_datetime(value: Any) -> str:
     return parsed.astimezone(UTC).isoformat()
 
 
+def _serialize_datetime_or_none(value: Any) -> str | None:
+    parsed = _datetime_or_none(value)
+    return parsed.astimezone(UTC).isoformat() if parsed else None
+
+
 def serialize_rate_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "rate_key": row["rate_key"],
@@ -196,12 +210,15 @@ def build_store_rate_settings(rows: list[dict[str, Any]], *, synced_at: datetime
         if not row:
             continue
         rate = _serialize_decimal(row["rate"])
-        if rate is None:
+        effective_at = _serialize_datetime_or_none(row.get("effective_at"))
+        fetched_at = _serialize_datetime_or_none(row.get("fetched_at"))
+        source = str(row.get("source") or "").strip()
+        if rate is None or Decimal(rate) <= 0 or not effective_at or not fetched_at or not source:
             continue
         settings[value_key] = rate
-        settings[effective_key] = _serialize_datetime(row["effective_at"])
-        settings[fetched_key] = _serialize_datetime(row.get("fetched_at"))
-        settings[source_key] = str(row.get("source") or "")
+        settings[effective_key] = effective_at
+        settings[fetched_key] = fetched_at
+        settings[source_key] = source
     if settings:
         sync_time = synced_at or datetime.now(UTC)
         settings["exchange_rates_last_synced_at"] = sync_time.astimezone(UTC).isoformat()
@@ -219,15 +236,32 @@ async def refresh_exchange_rates(
 
     async with _refresh_lock:
         client = client or DolarVzlaClient.from_config()
-        result: dict[str, Any] = {"status": "ok", "sources": {}}
+        result: dict[str, Any] = {"status": "ok", "sources": {}, "successful_rate_keys": []}
 
         if include_bcv:
             try:
                 bcv_rates = await client.fetch_bcv_rates()
+                bcv_rates = validate_exchange_rate_source(
+                    "bcv",
+                    bcv_rates,
+                    required_rate_keys={"usd_bcv", "eur_bcv"},
+                )
                 changed = []
                 for rate in bcv_rates:
                     changed.append({"rate_key": rate.rate_key, "changed": await upsert_exchange_rate(rate)})
                 result["sources"]["bcv"] = {"ok": True, "rates": changed}
+                result["successful_rate_keys"].extend(rate.rate_key for rate in bcv_rates)
+            except ExchangeRateValidationError:
+                logger.warning(
+                    "DolarVZLA rate refresh failed",
+                    extra={
+                        "source": "DolarVZLA BCV CDN",
+                        "rate_key": "usd_bcv,eur_bcv",
+                        "success": False,
+                        "reason": "validation_failed",
+                    },
+                )
+                result["sources"]["bcv"] = {"ok": False, "error": "validation_failed"}
             except Exception:
                 logger.warning(
                     "DolarVZLA rate refresh failed",
@@ -238,8 +272,14 @@ async def refresh_exchange_rates(
         if include_usdt:
             try:
                 usdt_rate = await client.fetch_usdt_rate()
+                usdt_rate = validate_exchange_rate_source(
+                    "usdt",
+                    [usdt_rate],
+                    required_rate_keys={"usdt_binance"},
+                )[0]
                 changed = await upsert_exchange_rate(usdt_rate)
                 result["sources"]["usdt"] = {"ok": True, "rates": [{"rate_key": usdt_rate.rate_key, "changed": changed}]}
+                result["successful_rate_keys"].append(usdt_rate.rate_key)
             except DolarVzlaConfigurationError:
                 logger.warning(
                     "DolarVZLA rate refresh failed",
@@ -262,6 +302,17 @@ async def refresh_exchange_rates(
                     },
                 )
                 result["sources"]["usdt"] = {"ok": False, "error": "api_key_unauthorized"}
+            except ExchangeRateValidationError:
+                logger.warning(
+                    "DolarVZLA rate refresh failed",
+                    extra={
+                        "source": "DolarVZLA USDT Binance",
+                        "rate_key": "usdt_binance",
+                        "success": False,
+                        "reason": "validation_failed",
+                    },
+                )
+                result["sources"]["usdt"] = {"ok": False, "error": "validation_failed"}
             except Exception:
                 logger.warning(
                     "DolarVZLA rate refresh failed",
@@ -272,6 +323,41 @@ async def refresh_exchange_rates(
         if not any(source.get("ok") for source in result["sources"].values()):
             result["status"] = "failed"
         return result
+
+
+def validate_exchange_rate_source(
+    source_name: str,
+    rates: list[NormalizedExchangeRate],
+    *,
+    required_rate_keys: set[str],
+) -> list[NormalizedExchangeRate]:
+    if not rates:
+        raise ExchangeRateValidationError(f"{source_name}_source_returned_no_rates")
+    by_key = {rate.rate_key: rate for rate in rates if isinstance(rate, NormalizedExchangeRate)}
+    if set(by_key) != required_rate_keys:
+        raise ExchangeRateValidationError(f"{source_name}_source_returned_incomplete_rates")
+    for rate in by_key.values():
+        validate_exchange_rate(rate)
+    return [by_key[rate_key] for rate_key in RATE_KEYS if rate_key in by_key]
+
+
+def validate_exchange_rate(rate: NormalizedExchangeRate) -> None:
+    if not isinstance(rate, NormalizedExchangeRate):
+        raise ExchangeRateValidationError("rate_payload_type_invalid")
+    if rate.rate_key not in RATE_KEYS:
+        raise ExchangeRateValidationError("rate_key_invalid")
+    if not str(rate.currency_code or "").strip() or not str(rate.market or "").strip():
+        raise ExchangeRateValidationError("rate_metadata_missing")
+    if _decimal_or_none(rate.rate) is None or _decimal_or_none(rate.rate) <= 0:
+        raise ExchangeRateValidationError("rate_value_invalid")
+    if _datetime_or_none(rate.effective_at) is None or _datetime_or_none(rate.fetched_at) is None:
+        raise ExchangeRateValidationError("rate_timestamp_missing")
+    if _decimal_or_none(rate.previous_rate) is None or _decimal_or_none(rate.previous_rate) <= 0:
+        raise ExchangeRateValidationError("previous_rate_invalid")
+    if _decimal_or_none(rate.change_percentage) is None:
+        raise ExchangeRateValidationError("change_percentage_invalid")
+    if not str(rate.source or "").strip():
+        raise ExchangeRateValidationError("rate_source_missing")
 
 
 def as_public_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:

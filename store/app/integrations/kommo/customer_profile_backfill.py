@@ -77,11 +77,16 @@ async def _candidate_rows(*, limit: int) -> list[Any]:
             mapping.external_origin,
             mapping.channel AS mapping_channel,
             latest_job.author_name,
+            latest_job.author_username,
+            latest_job.author_profile_url,
+            latest_job.sender_username,
+            latest_job.sender_profile_url,
             COALESCE(latest_job.author_id, latest_receipt.author_id, mapping.external_author_id) AS author_id
         FROM customer_channel_mappings mapping
         JOIN customers customer ON customer.id = mapping.customer_id
         LEFT JOIN LATERAL (
-            SELECT job.author_name, job.author_id
+            SELECT job.author_name, job.author_id, job.author_username, job.author_profile_url,
+                   job.sender_username, job.sender_profile_url
             FROM kommo_message_jobs job
             WHERE (
                 (mapping.external_contact_id IS NOT NULL AND job.contact_id = mapping.external_contact_id)
@@ -166,6 +171,10 @@ def _job_from_row(row) -> dict[str, Any]:
         "talk_id": _value(row, "external_talk_id"),
         "author_id": _value(row, "author_id"),
         "author_name": _value(row, "author_name"),
+        "author_username": _value(row, "author_username"),
+        "author_profile_url": _value(row, "author_profile_url"),
+        "sender_username": _value(row, "sender_username"),
+        "sender_profile_url": _value(row, "sender_profile_url"),
         "origin": _value(row, "external_origin"),
     }
 

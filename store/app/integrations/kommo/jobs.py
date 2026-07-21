@@ -114,6 +114,10 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                     talk_id = COALESCE(talk_id, :talk_id),
                     author_id = COALESCE(:author_id, author_id),
                     author_name = COALESCE(:author_name, author_name),
+                    author_username = COALESCE(:author_username, author_username),
+                    author_profile_url = COALESCE(:author_profile_url, author_profile_url),
+                    sender_username = COALESCE(:sender_username, sender_username),
+                    sender_profile_url = COALESCE(:sender_profile_url, sender_profile_url),
                     origin = COALESCE(origin, :origin),
                     channel = COALESCE(channel, :channel),
                     interaction_type = :interaction_type,
@@ -130,6 +134,10 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                     "talk_id": event.talk_id,
                     "author_id": event.author_id,
                     "author_name": event.author_name,
+                    "author_username": event.author_username,
+                    "author_profile_url": event.author_profile_url,
+                    "sender_username": event.sender_username,
+                    "sender_profile_url": event.sender_profile_url,
                     "origin": event.origin,
                     "channel": event.channel,
                     "interaction_type": event.interaction_type,
@@ -145,10 +153,12 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
             """
             INSERT INTO kommo_message_jobs (
                 correlation_id, external_message_id, lead_id, contact_id, chat_id, talk_id,
-                author_id, author_name, origin, channel, interaction_type, combined_message, media_url, status, buffer_expires_at
+                author_id, author_name, author_username, author_profile_url, sender_username, sender_profile_url,
+                origin, channel, interaction_type, combined_message, media_url, status, buffer_expires_at
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :chat_id, :talk_id,
-                :author_id, :author_name, :origin, :channel, :interaction_type, :combined_message, :media_url, 'pending',
+                :author_id, :author_name, :author_username, :author_profile_url, :sender_username, :sender_profile_url,
+                :origin, :channel, :interaction_type, :combined_message, :media_url, 'pending',
                 NOW() + (:debounce_seconds * INTERVAL '1 second')
             )
             RETURNING id
@@ -213,6 +223,10 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "salesbot_user_id": values["salesbot_user_id"],
         "salesbot_client_uuid": values["salesbot_client_uuid"],
         "interaction_type": values["interaction_type"],
+        "author_username": values["author_username"],
+        "author_profile_url": values["author_profile_url"],
+        "sender_username": values["sender_username"],
+        "sender_profile_url": values["sender_profile_url"],
     }
 
     job = await db.fetch_one(
@@ -225,6 +239,10 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             salesbot_account_id = :salesbot_account_id,
             salesbot_user_id = :salesbot_user_id,
             salesbot_client_uuid = :salesbot_client_uuid,
+            author_username = COALESCE(:author_username, author_username),
+            author_profile_url = COALESCE(:author_profile_url, author_profile_url),
+            sender_username = COALESCE(:sender_username, sender_username),
+            sender_profile_url = COALESCE(:sender_profile_url, sender_profile_url),
             updated_at = NOW()
         WHERE job.id = (
             SELECT candidate.id
@@ -842,6 +860,10 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
         "salesbot_account_id": values["salesbot_account_id"],
         "salesbot_user_id": values["salesbot_user_id"],
         "salesbot_client_uuid": values["salesbot_client_uuid"],
+        "author_username": values["author_username"],
+        "author_profile_url": values["author_profile_url"],
+        "sender_username": values["sender_username"],
+        "sender_profile_url": values["sender_profile_url"],
     }
 
     async with db.get_db().transaction():
@@ -876,11 +898,13 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
             """
             INSERT INTO kommo_message_jobs (
                 correlation_id, external_message_id, lead_id, contact_id, origin, channel,
+                author_username, author_profile_url, sender_username, sender_profile_url,
                 interaction_type, combined_message, return_url, status, buffer_expires_at,
                 callback_claims, public_comment_context, salesbot_token_jti, salesbot_account_id,
                 salesbot_user_id, salesbot_client_uuid
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :origin, :channel,
+                :author_username, :author_profile_url, :sender_username, :sender_profile_url,
                 :interaction_type, :combined_message, :return_url, 'ready', NOW(),
                 CAST(:callback_claims AS jsonb), CAST(:public_comment_context AS jsonb), :salesbot_token_jti, :salesbot_account_id,
                 :salesbot_user_id, :salesbot_client_uuid
@@ -1043,6 +1067,10 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
         "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
         "interaction_type": data.interaction_type or "private_message",
+        "author_username": data.author_username,
+        "author_profile_url": data.author_profile_url,
+        "sender_username": data.sender_username,
+        "sender_profile_url": data.sender_profile_url,
     }
 
 
@@ -1414,6 +1442,10 @@ def _event_values(event: NormalizedKommoEvent, external_message_id: str, text: s
         "talk_id": event.talk_id,
         "author_id": event.author_id,
         "author_name": event.author_name,
+        "author_username": event.author_username,
+        "author_profile_url": event.author_profile_url,
+        "sender_username": event.sender_username,
+        "sender_profile_url": event.sender_profile_url,
         "origin": event.origin,
         "channel": event.channel,
         "interaction_type": event.interaction_type,
@@ -1482,6 +1514,10 @@ def _job_log_context(job: dict) -> dict:
         "talk_id": job.get("talk_id"),
         "author_id": job.get("author_id"),
         "has_author_name": bool(job.get("author_name")),
+        "has_author_username": bool(job.get("author_username")),
+        "has_author_profile_url": bool(job.get("author_profile_url")),
+        "has_sender_username": bool(job.get("sender_username")),
+        "has_sender_profile_url": bool(job.get("sender_profile_url")),
         "has_message": bool(job.get("combined_message")),
         "has_media": bool(job.get("media_url")),
         "has_return_url": bool(job.get("return_url")),

@@ -6,7 +6,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -43,14 +43,18 @@ class DolarVzlaConfigurationError(DolarVzlaClientError):
     """Raised when DolarVZLA credentials are missing."""
 
 
-def _decimal(value: Any) -> Decimal:
-    return value if isinstance(value, Decimal) else Decimal(str(value))
-
-
-def _optional_decimal(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    return _decimal(value)
+def _decimal(value: Any, *, field: str, positive: bool = True) -> Decimal:
+    if value in (None, ""):
+        raise DolarVzlaClientError(f"DolarVZLA response is missing {field}")
+    try:
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise DolarVzlaClientError(f"Invalid DolarVZLA decimal field: {field}") from exc
+    if not decimal_value.is_finite():
+        raise DolarVzlaClientError(f"Invalid DolarVZLA decimal field: {field}")
+    if positive and decimal_value <= 0:
+        raise DolarVzlaClientError(f"DolarVZLA field must be positive: {field}")
+    return decimal_value
 
 
 def _effective_at(value: str) -> datetime:
@@ -84,22 +88,22 @@ def parse_bcv_response(payload: dict[str, Any], *, fetched_at: datetime | None =
             rate_key="usd_bcv",
             currency_code="USD",
             market="bcv",
-            rate=_decimal(current["usd"]),
+            rate=_decimal(current.get("usd"), field="current.usd"),
             effective_at=effective,
             fetched_at=fetched,
-            previous_rate=_optional_decimal(previous.get("usd")),
-            change_percentage=_optional_decimal(change.get("usd")),
+            previous_rate=_decimal(previous.get("usd"), field="previous.usd"),
+            change_percentage=_decimal(change.get("usd"), field="changePercentage.usd", positive=False),
             source=BCV_CURRENT_URL,
         ),
         NormalizedExchangeRate(
             rate_key="eur_bcv",
             currency_code="EUR",
             market="bcv",
-            rate=_decimal(current["eur"]),
+            rate=_decimal(current.get("eur"), field="current.eur"),
             effective_at=effective,
             fetched_at=fetched,
-            previous_rate=_optional_decimal(previous.get("eur")),
-            change_percentage=_optional_decimal(change.get("eur")),
+            previous_rate=_decimal(previous.get("eur"), field="previous.eur"),
+            change_percentage=_decimal(change.get("eur"), field="changePercentage.eur", positive=False),
             source=BCV_CURRENT_URL,
         ),
     ]
@@ -113,11 +117,11 @@ def parse_usdt_response(payload: dict[str, Any], *, fetched_at: datetime | None 
         rate_key="usdt_binance",
         currency_code="USDT",
         market="binance",
-        rate=_decimal(current["average"]),
+        rate=_decimal(current.get("average"), field="current.average"),
         effective_at=_effective_at(current.get("date")),
         fetched_at=_fetched_at(fetched_at),
-        previous_rate=_optional_decimal(previous.get("average")),
-        change_percentage=_optional_decimal(change.get("average")),
+        previous_rate=_decimal(previous.get("average"), field="previous.average"),
+        change_percentage=_decimal(change.get("average"), field="changePercentage.average", positive=False),
         source=USDT_EXCHANGE_RATE_URL,
     )
 

@@ -226,6 +226,8 @@ def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
     assert incoming.lead_id == "100"
     assert incoming.author_id == "author-uuid"
     assert incoming.author_name == "Maria Cliente"
+    assert incoming.author_username is None
+    assert incoming.sender_profile_url is None
     assert incoming.interaction_type == "private_message"
 
     outgoing = normalize_kommo_webhook({
@@ -308,6 +310,51 @@ def test_direct_json_account_message_normalization():
     assert event.author_id == "author-json"
     assert event.author_name == "Cliente JSON"
     assert event.interaction_type == "private_message"
+
+
+def test_documented_chats_api_payload_profile_link_can_supply_instagram_handle():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    event = normalize_kommo_webhook({
+        "event_type": "new_message",
+        "payload": {
+            "timestamp": 1639604761,
+            "msgid": "msg-doc",
+            "conversation_id": "chat-doc",
+            "origin": "instagram",
+            "sender": {
+                "id": "client-doc",
+                "name": "Maria Cliente",
+                "profile_link": "https://www.instagram.com/maria.bonita/?hl=es",
+            },
+            "message": {"type": "text", "text": "Hola"},
+        },
+    })[0]
+
+    assert event.event_type == "incoming_message"
+    assert event.channel == "instagram"
+    assert event.author_type == "external"
+    assert event.author_profile_url is None
+    assert event.sender_profile_url == "https://www.instagram.com/maria.bonita/?hl=es"
+    profile = build_kommo_customer_profile(job=event.model_dump(), contact=None)
+    assert profile.instagram_handle == "maria.bonita"
+    assert profile.instagram_handle_source == "webhook_sender_profile_url"
+
+
+def test_native_instagram_general_webhook_has_no_documented_handle_fields(
+    sanitized_a105_native_instagram_comment_payload,
+):
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    event = normalize_kommo_webhook(sanitized_a105_native_instagram_comment_payload)[0]
+
+    assert event.channel == "instagram"
+    assert event.author_username is None
+    assert event.author_profile_url is None
+    assert event.sender_username is None
+    assert event.sender_profile_url is None
+    profile = build_kommo_customer_profile(job=event.model_dump(), contact=None)
+    assert profile.instagram_handle is None
 
 
 def test_instagram_comment_mirror_uses_confirmed_private_message_shape(

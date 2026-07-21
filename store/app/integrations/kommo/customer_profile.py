@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from urllib.parse import urlparse
 
 from app import db
 from app.customer_identity import is_uuid_like, normalize_phone_number
+
+logger = logging.getLogger(__name__)
 
 _LEAD_PLACEHOLDER_RE = re.compile(r"^lead\s+#\d+$", re.IGNORECASE)
 _HEX_ID_RE = re.compile(r"^[0-9a-f]{16,}$", re.IGNORECASE)
@@ -47,6 +50,27 @@ _RESERVED_INSTAGRAM_PATHS = {"explore", "p", "reel", "reels", "stories", "tv"}
 _MOBILE_MARKERS = {"cell", "cel", "celular", "mobile", "movil", "móvil", "mob"}
 _INSTAGRAM_MARKERS = {"ig", "inst", "insta", "instagram"}
 _MESSAGING_MARKERS = {"im", "messaging", "messenger", "social", "red social", "redes sociales"}
+_WEBHOOK_USERNAME_FIELDS = ("author_username", "sender_username")
+_WEBHOOK_PROFILE_URL_FIELDS = ("author_profile_url", "sender_profile_url")
+_CONTACT_API_USERNAME_KEYS = (
+    "instagram_username",
+    "instagram_handle",
+    "username",
+    "handle",
+    "login",
+    "screen_name",
+    "nickname",
+)
+_CONTACT_API_PROFILE_URL_KEYS = (
+    "instagram_profile_url",
+    "instagram_url",
+    "profile_link",
+    "profile_url",
+    "profile",
+    "permalink",
+    "url",
+    "link",
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +78,7 @@ class KommoCustomerProfile:
     display_name: str | None = None
     phone: str | None = None
     instagram_handle: str | None = None
+    instagram_handle_source: str | None = None
 
     def as_customer_profile(self) -> dict[str, str | None]:
         return {
@@ -69,6 +94,7 @@ def build_kommo_customer_profile(
     contact: dict[str, Any] | None = None,
 ) -> KommoCustomerProfile:
     """Build customer-facing profile data from safe Kommo sources only."""
+    instagram = extract_instagram_handle_candidate(job=job, contact=contact)
     display_name = first_meaningful_display_name(
         _value(job, "author_name"),
         _contact_full_name(contact),
@@ -77,7 +103,8 @@ def build_kommo_customer_profile(
     return KommoCustomerProfile(
         display_name=display_name,
         phone=extract_contact_phone(contact),
-        instagram_handle=extract_instagram_handle(contact),
+        instagram_handle=instagram.handle if instagram else None,
+        instagram_handle_source=instagram.source if instagram else None,
     )
 
 
@@ -97,6 +124,11 @@ async def enrich_customer_profile(
         f"UPDATE customers SET {', '.join(set_clauses)} WHERE id::text = :id",
         values,
     )
+    if updates.get("instagram_handle") and profile.instagram_handle_source:
+        logger.info(
+            "Kommo Instagram handle enrichment applied: source=%s",
+            profile.instagram_handle_source,
+        )
     refreshed = await db.fetch_one("SELECT * FROM customers WHERE id::text = :id", {"id": str(customer["id"])})
     return dict(refreshed) if refreshed else customer | updates
 
@@ -182,6 +214,53 @@ def extract_contact_phone(contact: dict[str, Any] | None) -> str | None:
 
 
 def extract_instagram_handle(contact: dict[str, Any] | None) -> str | None:
+    candidate = extract_instagram_handle_candidate(job={"channel": "instagram"}, contact=contact)
+    return candidate.handle if candidate else None
+
+
+@dataclass(frozen=True)
+class InstagramHandleCandidate:
+    handle: str
+    source: str
+
+
+def extract_instagram_handle_candidate(
+    *,
+    job: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+) -> InstagramHandleCandidate | None:
+    instagram_context = _is_instagram_profile_context(job or {})
+    if instagram_context:
+        for raw, source in _webhook_instagram_candidates(job or {}):
+            handle = normalize_instagram_handle(raw)
+            if handle:
+                return InstagramHandleCandidate(handle=handle, source=source)
+
+        for raw, source in _contact_api_profile_candidates(contact):
+            handle = normalize_instagram_handle(raw)
+            if handle:
+                return InstagramHandleCandidate(handle=handle, source=source)
+
+    for raw, source in _contact_custom_field_candidates(contact):
+        handle = normalize_instagram_handle(raw)
+        if handle:
+            return InstagramHandleCandidate(handle=handle, source=source)
+
+    if instagram_context:
+        contact_name_handle = _contact_name_instagram_handle(contact, identifiers=kommo_identifier_values(job or {}))
+        if contact_name_handle:
+            return InstagramHandleCandidate(handle=contact_name_handle, source="contact_name")
+    return None
+
+
+def _is_instagram_profile_context(job: dict[str, Any]) -> bool:
+    channel = str(_value(job, "channel") or "").strip().lower()
+    origin = str(_value(job, "origin") or "").strip().lower()
+    return channel == "instagram" or "instagram" in origin
+
+
+def _contact_custom_field_candidates(contact: dict[str, Any] | None) -> list[tuple[str | None, str]]:
+    candidates: list[tuple[str | None, str]] = []
     for field in _custom_fields(contact):
         field_label = _field_label(field)
         field_is_instagram = _has_marker(field_label, _INSTAGRAM_MARKERS)
@@ -193,10 +272,47 @@ def extract_instagram_handle(contact: dict[str, Any] | None) -> str | None:
             explicit_im = field_is_messaging and _has_marker(value_label, _INSTAGRAM_MARKERS)
             if not (field_is_instagram or explicit_im or explicit_value):
                 continue
-            handle = normalize_instagram_handle(raw)
-            if handle:
-                return handle
-    return None
+            candidates.append((raw, "contact_custom_field"))
+    return candidates
+
+
+def _webhook_instagram_candidates(job: dict[str, Any]) -> list[tuple[str | None, str]]:
+    candidates: list[tuple[str | None, str]] = []
+    for field in _WEBHOOK_USERNAME_FIELDS:
+        candidates.append((_text(_value(job, field)), f"webhook_{field}"))
+    for field in _WEBHOOK_PROFILE_URL_FIELDS:
+        candidates.append((_text(_value(job, field)), f"webhook_{field}"))
+    return candidates
+
+
+def _contact_api_profile_candidates(contact: dict[str, Any] | None) -> list[tuple[str | None, str]]:
+    candidates: list[tuple[str | None, str]] = []
+    for key in _CONTACT_API_USERNAME_KEYS:
+        for value in _values_for_key(contact, key):
+            candidates.append((_text(value), f"contact_api_{key}"))
+    for key in _CONTACT_API_PROFILE_URL_KEYS:
+        for value in _values_for_key(contact, key):
+            raw = _text(value)
+            if _looks_like_explicit_instagram_value(raw):
+                candidates.append((raw, f"contact_api_{key}"))
+    return candidates
+
+
+def _contact_name_instagram_handle(
+    contact: dict[str, Any] | None,
+    *,
+    identifiers: set[str] | None = None,
+) -> str | None:
+    raw = _text(_value(contact or {}, "name"))
+    handle = normalize_instagram_handle(raw)
+    if not handle:
+        return None
+    if raw and raw.strip() in {str(value).strip() for value in identifiers or set()}:
+        return None
+    # A plain one-word contact name is more likely a display name than a verified username.
+    if not str(raw or "").strip().startswith("@") and "." not in handle and "_" not in handle:
+        return None
+    return handle
 
 
 def normalize_instagram_handle(value: str | None) -> str | None:
@@ -237,6 +353,7 @@ def kommo_identifier_values(*sources: dict[str, Any] | None) -> set[str]:
         "external_lead_id",
         "external_talk_id",
         "lead_id",
+        "platform_id",
         "talk_id",
     }
     values: set[str] = set()
@@ -297,6 +414,24 @@ def _is_mobile_value(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     return _has_marker(_field_label(value), _MOBILE_MARKERS)
+
+
+def _values_for_key(source: Any, key: str) -> list[Any]:
+    values: list[Any] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for current_key, current_value in value.items():
+                if str(current_key).strip().lower() == key:
+                    values.append(current_value)
+                    continue
+                collect(current_value)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(source)
+    return values
 
 
 def _looks_like_explicit_instagram_value(value: str | None) -> bool:

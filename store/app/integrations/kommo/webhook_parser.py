@@ -26,6 +26,14 @@ def normalize_kommo_webhook(payload: dict[str, Any]) -> list[NormalizedKommoEven
     events: list[NormalizedKommoEvent] = []
     default_interaction_type = normalize_interaction_type(data.get("interaction_type"))
 
+    chat_api_event = _chat_api_message_event(data, default_interaction_type=default_interaction_type)
+    if chat_api_event:
+        events.append(chat_api_event)
+
+    chat_api_payload_event = _chat_api_payload_event(data, default_interaction_type=default_interaction_type)
+    if chat_api_payload_event:
+        events.append(chat_api_payload_event)
+
     for item in _as_list(data.get("add")):
         events.append(_message_event(item, "incoming_message", default_interaction_type=default_interaction_type))
 
@@ -76,6 +84,7 @@ def _message_event(
     default_interaction_type: str | None = None,
 ) -> NormalizedKommoEvent:
     author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else {}
     origin = _string_or_none(item.get("origin"))
     message_type = _string_or_none(item.get("message_type") or attachment.get("type"))
@@ -102,9 +111,80 @@ def _message_event(
         author_id=_string_or_none(author.get("id") or author.get("user_id")),
         author_name=_string_or_none(author.get("name")),
         author_type=_string_or_none(author.get("type")),
+        **_profile_identity_fields(author=author, sender=sender, item=item),
         created_at=_timestamp(item.get("created_at")),
         media_url=media_url,
         **comment_fields,
+    )
+
+
+def _chat_api_message_event(
+    data: dict[str, Any],
+    *,
+    default_interaction_type: str | None = None,
+) -> NormalizedKommoEvent | None:
+    """Normalize documented Chats API webhooks sent from Kommo to a custom channel."""
+    wrapper = data.get("message") if isinstance(data.get("message"), dict) else {}
+    message = wrapper.get("message") if isinstance(wrapper.get("message"), dict) else {}
+    conversation = wrapper.get("conversation") if isinstance(wrapper.get("conversation"), dict) else {}
+    if not message or not conversation:
+        return None
+
+    sender = wrapper.get("sender") if isinstance(wrapper.get("sender"), dict) else {}
+    source = wrapper.get("source") if isinstance(wrapper.get("source"), dict) else {}
+    origin = _first_string(wrapper.get("origin"), source.get("external_id"))
+    return NormalizedKommoEvent(
+        event_type="outgoing_message",
+        message_id=_first_string(message.get("id"), message.get("client_id"), message.get("msgid")),
+        chat_id=_first_string(conversation.get("id"), conversation.get("client_id")),
+        text=_string_or_none(message.get("text")),
+        message_type=_string_or_none(message.get("type")),
+        origin=origin,
+        channel=origin_to_channel(origin),
+        interaction_type=default_interaction_type or _infer_interaction_type(origin_to_channel(origin), message.get("type")),
+        author_id=_first_string(sender.get("id"), sender.get("ref_id")),
+        author_name=_string_or_none(sender.get("name")),
+        author_type="internal",
+        **_profile_identity_fields(author={}, sender=sender, item=wrapper),
+        created_at=_timestamp(wrapper.get("timestamp") or data.get("time")),
+        media_url=_string_or_none(message.get("media")),
+        **_chat_api_comment_fields(message),
+    )
+
+
+def _chat_api_payload_event(
+    data: dict[str, Any],
+    *,
+    default_interaction_type: str | None = None,
+) -> NormalizedKommoEvent | None:
+    """Normalize documented Chats API send/import payloads when posted to this parser."""
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+    if not payload or not message or not sender:
+        return None
+
+    receiver = payload.get("receiver") if isinstance(payload.get("receiver"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    origin = _first_string(payload.get("origin"), source.get("external_id"))
+    event_type = "outgoing_message" if receiver else "incoming_message"
+    author_type = "internal" if receiver else "external"
+    return NormalizedKommoEvent(
+        event_type=event_type,
+        message_id=_first_string(payload.get("msgid"), message.get("id"), message.get("client_id")),
+        chat_id=_first_string(payload.get("conversation_ref_id"), payload.get("conversation_id")),
+        text=_string_or_none(message.get("text")),
+        message_type=_string_or_none(message.get("type")),
+        origin=origin,
+        channel=origin_to_channel(origin),
+        interaction_type=default_interaction_type or _infer_interaction_type(origin_to_channel(origin), message.get("type")),
+        author_id=_first_string(sender.get("id"), sender.get("ref_id")),
+        author_name=_string_or_none(sender.get("name")),
+        author_type=author_type,
+        **_profile_identity_fields(author={}, sender=sender, item=payload),
+        created_at=_timestamp(payload.get("timestamp")),
+        media_url=_string_or_none(message.get("media")),
+        **_chat_api_comment_fields(message),
     )
 
 
@@ -129,6 +209,64 @@ def _comment_fields(item: dict[str, Any]) -> dict[str, str | None]:
         "media_id": _first_string(item.get("media_id"), media.get("id"), post.get("media_id")),
         "post_url": _first_string(item.get("post_url"), post.get("url"), post.get("link"), media.get("permalink")),
         "comment_url": _first_string(item.get("comment_url"), comment.get("url"), comment.get("link")),
+    }
+
+
+def _chat_api_comment_fields(message: dict[str, Any]) -> dict[str, str | None]:
+    post = message.get("post") if isinstance(message.get("post"), dict) else {}
+    return {
+        "post_id": _first_string(post.get("id")),
+        "comment_id": None,
+        "parent_comment_id": None,
+        "media_id": None,
+        "post_url": _first_string(post.get("url")),
+        "comment_url": None,
+    }
+
+
+def _profile_identity_fields(
+    *,
+    author: dict[str, Any],
+    sender: dict[str, Any],
+    item: dict[str, Any],
+) -> dict[str, str | None]:
+    return {
+        "author_username": _first_string(
+            author.get("username"),
+            author.get("handle"),
+            author.get("login"),
+            item.get("author_username"),
+            item.get("author_handle"),
+            item.get("author_login"),
+        ),
+        "author_profile_url": _first_string(
+            author.get("profile_link"),
+            author.get("profile_url"),
+            author.get("profile"),
+            author.get("url"),
+            author.get("link"),
+            author.get("permalink"),
+            item.get("author_profile_link"),
+            item.get("author_profile_url"),
+        ),
+        "sender_username": _first_string(
+            sender.get("username"),
+            sender.get("handle"),
+            sender.get("login"),
+            item.get("sender_username"),
+            item.get("sender_handle"),
+            item.get("sender_login"),
+        ),
+        "sender_profile_url": _first_string(
+            sender.get("profile_link"),
+            sender.get("profile_url"),
+            sender.get("profile"),
+            sender.get("url"),
+            sender.get("link"),
+            sender.get("permalink"),
+            item.get("sender_profile_link"),
+            item.get("sender_profile_url"),
+        ),
     }
 
 

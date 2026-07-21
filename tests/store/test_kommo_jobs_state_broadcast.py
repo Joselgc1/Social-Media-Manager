@@ -190,6 +190,10 @@ async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
         channel="whatsapp",
         author_id="author-1",
         author_name="Maria Cliente",
+        author_username="@maria.cliente",
+        author_profile_url="https://instagram.com/maria.cliente",
+        sender_username="sender.profile",
+        sender_profile_url="https://instagram.com/sender.profile",
         author_type="external",
     )
     result = await jobs.record_incoming_event(event)
@@ -200,6 +204,10 @@ async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
     assert "INSERT INTO kommo_message_jobs" in mock_db.execute.await_args_list[0].args[0]
     assert mock_db.execute.await_args_list[0].args[1]["author_id"] == "author-1"
     assert mock_db.execute.await_args_list[0].args[1]["author_name"] == "Maria Cliente"
+    assert mock_db.execute.await_args_list[0].args[1]["author_username"] == "@maria.cliente"
+    assert mock_db.execute.await_args_list[0].args[1]["author_profile_url"] == "https://instagram.com/maria.cliente"
+    assert mock_db.execute.await_args_list[0].args[1]["sender_username"] == "sender.profile"
+    assert mock_db.execute.await_args_list[0].args[1]["sender_profile_url"] == "https://instagram.com/sender.profile"
     assert mock_db.execute.await_args_list[0].args[1]["interaction_type"] == "private_message"
     assert "INSERT INTO kommo_message_receipts" in mock_db.execute.await_args_list[1].args[0]
     assert mock_db.execute.await_args_list[1].args[1]["author_id"] == "author-1"
@@ -229,6 +237,8 @@ async def test_debounce_merges_rapid_messages(monkeypatch):
         channel="whatsapp",
         author_id="author-new",
         author_name="Maria Nueva",
+        author_username="@maria.nueva",
+        sender_profile_url="https://instagram.com/sender.nueva",
     )
     result = await jobs.record_incoming_event(event)
     assert result["status"] == "merged"
@@ -237,10 +247,14 @@ async def test_debounce_merges_rapid_messages(monkeypatch):
     assert update_call.args[1]["interaction_type"] == "private_message"
     assert "author_id = COALESCE(:author_id, author_id)" in update_call.args[0]
     assert "author_name = COALESCE(:author_name, author_name)" in update_call.args[0]
+    assert "author_username = COALESCE(:author_username, author_username)" in update_call.args[0]
+    assert "sender_profile_url = COALESCE(:sender_profile_url, sender_profile_url)" in update_call.args[0]
     assert "lead_id = COALESCE(lead_id, :lead_id)" in update_call.args[0]
     assert "interaction_type = :interaction_type" in update_call.args[0]
     assert update_call.args[1]["author_id"] == "author-new"
     assert update_call.args[1]["author_name"] == "Maria Nueva"
+    assert update_call.args[1]["author_username"] == "@maria.nueva"
+    assert update_call.args[1]["sender_profile_url"] == "https://instagram.com/sender.nueva"
     receipt_call = mock_db.execute.await_args_list[1]
     assert "INSERT INTO kommo_message_receipts" in receipt_call.args[0]
     assert receipt_call.args[1]["job_id"] == "pending-id"
@@ -655,6 +669,10 @@ async def test_valid_lead_callback_uses_exact_update_bind_parameters(monkeypatch
         "salesbot_user_id": "456",
         "salesbot_client_uuid": "client-uuid",
         "interaction_type": "private_message",
+        "author_username": None,
+        "author_profile_url": None,
+        "sender_username": None,
+        "sender_profile_url": None,
     }
 
 
@@ -689,6 +707,10 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
         "salesbot_user_id",
         "salesbot_client_uuid",
         "interaction_type",
+        "author_username",
+        "author_profile_url",
+        "sender_username",
+        "sender_profile_url",
     }
     assert values["entity_type"] == "contacts"
     assert values["entity_id"] == "200"

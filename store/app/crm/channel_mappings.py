@@ -205,6 +205,10 @@ async def resolve_customer_from_kommo_event(event, lead: dict | None = None) -> 
         "talk_id": event.talk_id,
         "author_id": event.author_id,
         "author_name": event.author_name,
+        "author_username": event.author_username,
+        "author_profile_url": event.author_profile_url,
+        "sender_username": event.sender_username,
+        "sender_profile_url": event.sender_profile_url,
         "origin": event.origin,
     }
     return await resolve_customer_from_kommo_job(job_like, lead=lead)

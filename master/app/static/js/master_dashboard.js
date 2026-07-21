@@ -12,6 +12,7 @@ let costDays = 1;
 let usageDays = 1;
 const MOBILE_BREAKPOINT = 768;
 let lastMobileViewport = window.innerWidth < MOBILE_BREAKPOINT;
+const exchangeRateRefreshStatusByStore = new Map();
 
 function isMobileViewport() {
     return window.innerWidth < MOBILE_BREAKPOINT;
@@ -749,7 +750,7 @@ function formatExchangeRateTimestamp(value) {
     return parsed.toLocaleString('es-VE', { dateStyle: 'short', timeStyle: 'short' });
 }
 
-function renderExchangeRatesSettings(s) {
+function renderExchangeRatesSettings(s, refreshStatus = null) {
     const selected = s.exchange_rate_reference || 'usd_bcv';
     const rows = exchangeRateDefinitions().map(def => {
         const rate = formatExchangeRateValue(s[def.setting]);
@@ -779,8 +780,17 @@ function renderExchangeRatesSettings(s) {
             This store currently uses a manual rate${manualRate ? `: ${esc(formatExchangeRateValue(manualRate))} Bs/USD` : ', but no manual value is set'}.
         </div>`
         : '';
+    const failedSources = Object.entries(refreshStatus?.sources || {})
+        .filter(([, source]) => source && source.ok === false)
+        .map(([name, source]) => `${name.toUpperCase()}: ${source.error || 'refresh_failed'}`);
+    const failureNotice = failedSources.length
+        ? `<div class="mb-3 rounded-lg bg-yellow-50 dark:bg-yellow-950/30 text-yellow-800 dark:text-yellow-200 p-3 text-sm">
+            Refresh failed for ${esc(failedSources.join(', '))}. Showing last-known-good values.
+        </div>`
+        : '';
 
     return `
+        ${failureNotice}
         <div class="space-y-2">${rows}</div>
         <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 text-sm text-gray-500 dark:text-gray-400">
             Synced to this store: ${esc(formatExchangeRateTimestamp(s.exchange_rates_last_synced_at))}
@@ -800,7 +810,9 @@ async function refreshExchangeRates(storeId) {
         const result = await apiPost(`/api/stores/${storeId}/exchange-rates/refresh`, {});
         const status = result.refresh?.status || 'unknown';
         const synced = result.sync?.synced ? 'synced to this store' : 'not synced';
-        const toastType = status === 'failed' || !result.sync?.synced ? 'error' : 'success';
+        const hasSourceFailure = Object.values(result.refresh?.sources || {}).some(source => source && source.ok === false);
+        const toastType = status === 'failed' || hasSourceFailure || !result.sync?.synced ? 'error' : 'success';
+        exchangeRateRefreshStatusByStore.set(storeId, result.refresh || null);
         toast(`Exchange rates refreshed (${status}) and ${synced}.`, toastType);
         await loadRuntimeSettings(storeId);
     } catch (e) {
@@ -956,7 +968,10 @@ async function loadRuntimeSettings(storeId) {
         }
 
         if (exchangeRatesContainer) {
-            exchangeRatesContainer.innerHTML = renderExchangeRatesSettings(s);
+            exchangeRatesContainer.innerHTML = renderExchangeRatesSettings(
+                s,
+                exchangeRateRefreshStatusByStore.get(storeId) || null,
+            );
         }
 
         // Store available models globally for provider change handlers

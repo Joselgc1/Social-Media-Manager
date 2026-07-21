@@ -96,6 +96,118 @@ def test_instagram_author_name_becomes_display_name_and_handle_is_normalized():
     assert profile.instagram_handle == "maria.bonita"
 
 
+def test_explicit_webhook_username_fields_are_preferred_for_instagram_handle():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    profile = build_kommo_customer_profile(
+        job={
+            "channel": "instagram",
+            "author_username": "@maria.bonita_23",
+            "sender_username": "weaker.sender",
+        },
+        contact=_contact(fields=[_field("INSTAGRAM", [{"value": "custom.field"}], name="Instagram")]),
+    )
+
+    assert profile.instagram_handle == "maria.bonita_23"
+    assert profile.instagram_handle_source == "webhook_author_username"
+
+
+def test_explicit_profile_urls_are_normalized_for_instagram_handle():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    profile = build_kommo_customer_profile(
+        job={
+            "channel": "instagram",
+            "author_profile_url": "https://www.instagram.com/maria_bonita/?hl=es",
+        },
+    )
+
+    assert profile.instagram_handle == "maria_bonita"
+    assert profile.instagram_handle_source == "webhook_author_profile_url"
+
+
+def test_contact_api_profile_fields_are_used_before_custom_fields():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    contact = _contact(
+        name="Maria Bonita",
+        fields=[_field("INSTAGRAM", [{"value": "custom.field"}], name="Instagram")],
+    ) | {"profile_url": "https://instagram.com/contact.profile"}
+
+    profile = build_kommo_customer_profile(job={"channel": "instagram"}, contact=contact)
+
+    assert profile.instagram_handle == "contact.profile"
+    assert profile.instagram_handle_source == "contact_api_profile_url"
+
+
+def test_contact_api_username_fields_supply_instagram_handle():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    contact = _contact(name="Maria Bonita") | {"username": "@contact_user"}
+
+    profile = build_kommo_customer_profile(job={"channel": "instagram"}, contact=contact)
+
+    assert profile.instagram_handle == "contact_user"
+    assert profile.instagram_handle_source == "contact_api_username"
+
+
+def test_instagram_labelled_contact_custom_field_still_supplies_handle():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    contact = _contact(fields=[_field("TEXT", [{"value": "@custom_handle"}], name="Instagram")])
+
+    profile = build_kommo_customer_profile(job={"channel": "instagram"}, contact=contact)
+
+    assert profile.instagram_handle == "custom_handle"
+    assert profile.instagram_handle_source == "contact_custom_field"
+
+
+def test_handle_like_contact_name_is_lowest_priority_fallback():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    profile = build_kommo_customer_profile(
+        job={"channel": "instagram"},
+        contact=_contact(name="maria.bonita_23"),
+    )
+
+    assert profile.instagram_handle == "maria.bonita_23"
+    assert profile.instagram_handle_source == "contact_name"
+
+
+@pytest.mark.parametrize(
+    "job,contact",
+    [
+        ({"channel": "instagram", "author_id": "maria.bonita"}, _contact(name="Maria Bonita")),
+        ({"channel": "instagram", "contact_id": "420105"}, _contact(name="420105")),
+        ({"channel": "instagram", "platform_id": "chat.handle"}, _contact(name="chat.handle")),
+        ({"channel": "instagram", "chat_id": "550e8400-e29b-41d4-a716-446655440000"}, _contact(name="550e8400-e29b-41d4-a716-446655440000")),
+        ({"channel": "instagram"}, _contact(name="Maria Bonita")),
+        ({"channel": "instagram"}, _contact(name="cliente")),
+    ],
+)
+def test_ids_uuids_generic_names_and_full_names_are_not_instagram_handles(job, contact):
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    profile = build_kommo_customer_profile(job=job, contact=contact)
+
+    assert profile.instagram_handle is None
+
+
+def test_whatsapp_profile_behavior_ignores_new_explicit_instagram_sources():
+    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+
+    profile = build_kommo_customer_profile(
+        job={
+            "channel": "whatsapp",
+            "author_username": "@maria.bonita",
+            "author_profile_url": "https://instagram.com/maria.bonita",
+        },
+        contact=_contact(name="maria.bonita"),
+    )
+
+    assert profile.instagram_handle is None
+
+
 def test_uuid_values_are_rejected_as_instagram_handles():
     from app.integrations.kommo.customer_profile import extract_instagram_handle, normalize_instagram_handle
 
@@ -104,6 +216,24 @@ def test_uuid_values_are_rejected_as_instagram_handles():
 
     assert normalize_instagram_handle(uuid) is None
     assert extract_instagram_handle(contact) is None
+
+
+def test_existing_valid_instagram_handle_is_not_overwritten_by_weaker_data():
+    from app.integrations.kommo.customer_profile import KommoCustomerProfile, compute_customer_profile_updates
+
+    updates = compute_customer_profile_updates(
+        {"display_name": None, "phone": None, "instagram_handle": "existing.handle"},
+        KommoCustomerProfile(instagram_handle=None),
+    )
+
+    assert "instagram_handle" not in updates
+
+    updates = compute_customer_profile_updates(
+        {"display_name": None, "phone": None, "instagram_handle": "existing.handle"},
+        KommoCustomerProfile(instagram_handle="custom_field"),
+    )
+
+    assert "instagram_handle" not in updates
 
 
 @pytest.mark.asyncio
@@ -173,6 +303,47 @@ async def test_existing_mapped_customer_is_enriched_without_duplication(monkeypa
     channel_mappings.customers.get_or_create_customer.assert_not_awaited()
     channel_mappings.enrich_customer_profile.assert_awaited_once()
     assert result["display_name"] == "Maria Cliente"
+
+
+@pytest.mark.asyncio
+async def test_existing_instagram_customer_missing_handle_is_enriched_on_next_event(monkeypatch, caplog):
+    from app.crm import channel_mappings
+    from app.integrations.kommo import customer_profile
+
+    existing = {
+        "id": "customer-ig-1",
+        "channel": "instagram",
+        "platform_id": "chat-ig",
+        "display_name": "Cliente Instagram",
+        "phone": None,
+        "instagram_handle": None,
+    }
+    refreshed = existing | {"instagram_handle": "maria.bonita"}
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[{"customer_id": "customer-ig-1"}, existing, refreshed])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(channel_mappings, "db", mock_db)
+    monkeypatch.setattr(customer_profile, "db", mock_db)
+    monkeypatch.setattr(channel_mappings, "upsert_mapping", AsyncMock(return_value={"id": "mapping"}))
+    monkeypatch.setattr(channel_mappings.customers, "get_or_create_customer", AsyncMock())
+
+    with caplog.at_level("INFO", logger="app.integrations.kommo.customer_profile"):
+        result = await channel_mappings.resolve_customer_from_kommo_job(
+            {
+                "channel": "instagram",
+                "contact_id": "200",
+                "chat_id": "chat-ig",
+                "author_username": "@maria.bonita",
+                "author_name": "Cliente Instagram",
+            }
+        )
+
+    channel_mappings.customers.get_or_create_customer.assert_not_awaited()
+    values = mock_db.execute.await_args.args[1]
+    assert values["instagram_handle"] == "maria.bonita"
+    assert result["instagram_handle"] == "maria.bonita"
+    assert "source=webhook_author_username" in caplog.text
+    assert "maria.bonita" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -259,4 +430,50 @@ async def test_backfill_dry_run_does_not_modify_data_or_mappings(monkeypatch):
     report = await backfill.backfill_kommo_customer_profiles(dry_run=True, limit=10)
 
     assert report == {"dry_run": True, "scanned": 1, "updated": 1, "skipped": 0, "failed": 0}
+    mock_db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backfill_uses_stored_sender_profile_url_for_instagram_handle(monkeypatch):
+    from app.integrations.kommo import customer_profile_backfill as backfill
+
+    row = {
+        "customer_id": "customer-1",
+        "channel": "instagram",
+        "platform_id": "chat-uuid",
+        "display_name": "Maria Cliente",
+        "phone": None,
+        "instagram_handle": None,
+        "external_contact_id": None,
+        "external_lead_id": "100",
+        "external_chat_id": "chat-uuid",
+        "external_talk_id": "talk-1",
+        "external_author_id": "author-1",
+        "mapping_channel": "instagram",
+        "author_name": "Maria Cliente",
+        "author_id": "author-1",
+        "author_username": None,
+        "author_profile_url": None,
+        "sender_username": None,
+        "sender_profile_url": "https://www.instagram.com/maria.backfill/?hl=es",
+        "external_origin": "instagram",
+    }
+    mock_db = MagicMock()
+    mock_db.fetch_all = AsyncMock(return_value=[row])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(backfill, "db", mock_db)
+
+    captured = {}
+
+    def capture_updates(customer, profile, *, identifiers=None):
+        captured["profile"] = profile
+        return {"instagram_handle": profile.instagram_handle} if profile.instagram_handle else {}
+
+    monkeypatch.setattr(backfill, "compute_customer_profile_updates", capture_updates)
+
+    report = await backfill.backfill_kommo_customer_profiles(dry_run=True, limit=10)
+
+    assert report == {"dry_run": True, "scanned": 1, "updated": 1, "skipped": 0, "failed": 0}
+    assert captured["profile"].instagram_handle == "maria.backfill"
+    assert captured["profile"].instagram_handle_source == "webhook_sender_profile_url"
     mock_db.execute.assert_not_awaited()

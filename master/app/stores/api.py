@@ -488,9 +488,16 @@ async def _write_store_runtime_settings(store_db: db_lib.Database, fields: dict)
         )
 
 
-async def sync_exchange_rates_to_store(store_id: str, *, rows: list[dict] | None = None) -> dict:
+async def sync_exchange_rates_to_store(
+    store_id: str,
+    *,
+    rows: list[dict] | None = None,
+    rate_keys: set[str] | None = None,
+) -> dict:
     store = await _get_store_row(store_id)
     rows = rows if rows is not None else await exchange_rate_service.get_current_exchange_rates()
+    if rate_keys is not None:
+        rows = [row for row in rows if row.get("rate_key") in rate_keys]
     settings = exchange_rate_service.build_store_rate_settings(rows)
     if not settings:
         return {
@@ -516,8 +523,10 @@ async def sync_exchange_rates_to_store(store_id: str, *, rows: list[dict] | None
     }
 
 
-async def sync_exchange_rates_to_active_stores() -> dict:
+async def sync_exchange_rates_to_active_stores(*, rate_keys: set[str] | None = None) -> dict:
     rows = await exchange_rate_service.get_current_exchange_rates()
+    if rate_keys is not None:
+        rows = [row for row in rows if row.get("rate_key") in rate_keys]
     settings = exchange_rate_service.build_store_rate_settings(rows)
     if not settings:
         return {"stores_synced": 0, "settings": [], "errors": []}
@@ -551,7 +560,7 @@ async def sync_exchange_rates_to_active_stores() -> dict:
 
 async def refresh_and_sync_exchange_rates(*, include_bcv: bool = True, include_usdt: bool = True) -> dict:
     refresh = await exchange_rate_service.refresh_exchange_rates(include_bcv=include_bcv, include_usdt=include_usdt)
-    sync = await sync_exchange_rates_to_active_stores()
+    sync = await sync_exchange_rates_to_active_stores(rate_keys=set(refresh.get("successful_rate_keys") or []))
     return {"refresh": refresh, "sync": sync}
 
 
@@ -576,7 +585,11 @@ async def force_store_exchange_rates_refresh(store_id: str):
     refresh = await exchange_rate_service.refresh_exchange_rates(include_bcv=True, include_usdt=True)
     rows = await exchange_rate_service.get_current_exchange_rates()
     try:
-        sync = await sync_exchange_rates_to_store(store_id, rows=rows)
+        sync = await sync_exchange_rates_to_store(
+            store_id,
+            rows=rows,
+            rate_keys=set(refresh.get("successful_rate_keys") or []),
+        )
     except HTTPException:
         raise
     except Exception as exc:
