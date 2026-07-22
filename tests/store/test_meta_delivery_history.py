@@ -102,6 +102,27 @@ async def test_instagram_assistant_history_is_written_only_after_send():
 
 
 @pytest.mark.asyncio
+async def test_instagram_long_unpunctuated_response_is_delivered_without_truncation():
+    from app.webhooks import instagram
+
+    response_text = "á" * 1001
+    send_text = AsyncMock()
+    store_message = AsyncMock()
+    with (
+        patch.object(instagram, "generate_response", AsyncMock(return_value=_response(response_text))),
+        patch.object(instagram, "send_text", send_text),
+        patch.object(instagram.conversations, "store_message", store_message),
+    ):
+        await instagram._deliver_ai_response("ig-user", "Hola", None, {}, "meta-job-long")
+
+    chunks = [call.kwargs["text"] for call in send_text.await_args_list]
+    assert len(chunks) == 3
+    assert all(len(chunk.encode("utf-8")) <= 950 for chunk in chunks)
+    assert "".join(chunks) == response_text
+    assert store_message.await_args.kwargs["content"] == "\n".join(chunks)
+
+
+@pytest.mark.asyncio
 async def test_conversation_source_id_makes_delivery_persistence_idempotent():
     from app.crm import conversations
 

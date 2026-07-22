@@ -3,29 +3,56 @@ Pydantic models for store management.
 """
 
 import ipaddress
-from urllib.parse import urlparse
+import socket
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, field_validator
 
 
+def _allow_loopback_app_url(hostname: str) -> bool:
+    """Allow exact loopback targets only when the master itself runs locally."""
+    if hostname != "localhost":
+        try:
+            if not ipaddress.ip_address(hostname).is_loopback:
+                return False
+        except ValueError:
+            return False
+    try:
+        from app.config import get_config
+
+        return get_config().is_local_environment
+    except Exception:
+        return False
+
+
+def resolve_host_addresses(hostname: str, port: int) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve every address advertised for a health-check hostname."""
+    records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    return {ipaddress.ip_address(record[4][0]) for record in records}
+
+
+def is_safe_app_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_loopback: bool) -> bool:
+    return address.is_global or (allow_loopback and address.is_loopback)
+
+
 def _validate_app_url(url: str) -> str:
-    """Reject URLs pointing to private/reserved IPs (SSRF prevention)."""
+    """Reject app URLs that could target internal network services."""
     if not url:
         return url
-    parsed = urlparse(url)
+    parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("app_url must use http or https scheme")
     hostname = parsed.hostname or ""
-    if hostname in ("localhost", ""):
-        return url  # localhost is allowed for local dev
+    if not hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("app_url must be an absolute base URL without credentials, query, or fragment")
     try:
-        ip = ipaddress.ip_address(hostname)
-        if ip.is_private or ip.is_reserved or ip.is_loopback or ip.is_link_local:
-            raise ValueError(f"app_url must not point to private/reserved IP: {hostname}")
-    except ValueError as e:
-        if "must not point to" in str(e):
-            raise
-        # hostname is not an IP — that's fine (e.g., "my-store.railway.app")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = resolve_host_addresses(hostname, port)
+    except (OSError, ValueError) as exc:
+        raise ValueError("app_url hostname could not be resolved safely") from exc
+    allow_loopback = _allow_loopback_app_url(hostname)
+    if not addresses or any(not is_safe_app_address(address, allow_loopback=allow_loopback) for address in addresses):
+        raise ValueError("app_url must resolve only to public IP addresses")
     return url
 
 

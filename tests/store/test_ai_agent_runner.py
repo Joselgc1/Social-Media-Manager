@@ -131,6 +131,10 @@ async def test_multi_round_tool_execution(monkeypatch):
     assert result.text == "Sí tenemos pijamas."
     assert [entry["name"] for entry in result.tool_log] == ["check_inventory", "tag_customer"]
     assert result.usage == {"input_tokens": 6, "output_tokens": 6}
+    second_history = provider.continue_after_tool.await_args_list[1].kwargs["tool_history"]
+    assert [entry["name"] for entry in second_history] == ["check_inventory", "tag_customer"]
+    assert second_history[0]["arguments"] == {"product_query": "pijama"}
+    assert '"found": true' in second_history[0]["result"]
 
 
 @pytest.mark.asyncio
@@ -164,6 +168,46 @@ async def test_provider_fallback(monkeypatch):
     assert result.model == "claude-haiku-4-5"
     assert result.was_fallback is True
     assert result.usage == {"input_tokens": 7, "output_tokens": 8}
+
+
+@pytest.mark.asyncio
+async def test_provider_fallback_continues_after_committed_tool_without_reexecution(monkeypatch):
+    primary = _provider(LLMResponse(tool_calls=[_tool_call("create_order", {"items": []})]))
+    primary.continue_after_tool.side_effect = RuntimeError("continuation failed")
+    fallback = _provider()
+    fallback.continue_after_tool.return_value = LLMResponse(text="Tu pedido quedó registrado.")
+    execute_tool = AsyncMock(return_value={"order_id": "order-1", "status": "pending"})
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai", "anthropic"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: primary if name == "openai" else fallback)
+    monkeypatch.setattr("app.ai.runner.execute_tool", execute_tool)
+
+    result = await AgentRunner().run(LEGACY_AGENT, "prompt", [], _settings(), _context())
+
+    assert result.text == "Tu pedido quedó registrado."
+    assert result.provider == "anthropic"
+    assert result.was_fallback is True
+    execute_tool.assert_awaited_once()
+    fallback.chat.assert_not_awaited()
+    assert fallback.continue_after_tool.await_args.kwargs["tool_history"][0]["name"] == "create_order"
+
+
+@pytest.mark.asyncio
+async def test_committed_tool_has_deterministic_reply_when_all_continuations_fail(monkeypatch):
+    primary = _provider(LLMResponse(tool_calls=[_tool_call("escalate_to_human", {"reason": "Ayuda"})]))
+    primary.continue_after_tool.side_effect = RuntimeError("continuation failed")
+    fallback = _provider()
+    fallback.continue_after_tool.side_effect = RuntimeError("fallback failed")
+    execute_tool = AsyncMock(return_value={"status": "escalated"})
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai", "anthropic"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: primary if name == "openai" else fallback)
+    monkeypatch.setattr("app.ai.runner.execute_tool", execute_tool)
+
+    result = await AgentRunner().run(LEGACY_AGENT, "prompt", [], _settings(), _context())
+
+    assert "persona del equipo" in result.text
+    assert result.escalated is True
+    assert result.was_fallback is True
+    execute_tool.assert_awaited_once()
 
 
 @pytest.mark.asyncio

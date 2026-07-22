@@ -154,6 +154,7 @@ async def test_executor_create_order_returns_catalog_validation_error(monkeypatc
         {
             "items": [{"product_name": "Inventado", "sku": "fake", "size": "M", "quantity": 1, "unit_price": 1}],
             "payment_method": "Zelle",
+            "shipping_city": "Caracas",
             "shipping_address": "Av Principal",
             "shipping_method": "mrw",
         },
@@ -163,6 +164,57 @@ async def test_executor_create_order_returns_catalog_validation_error(monkeypatc
     assert result == {"status": "error", "message": "Product or size was not found in the current catalog."}
     notify_new_order.assert_not_awaited()
     add_tags.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_args",
+    [
+        {
+            "items": [],
+            "payment_method": "Zelle",
+            "shipping_city": "Caracas",
+            "shipping_address": "Av Principal",
+            "shipping_method": "mrw",
+        },
+        {
+            "items": [{"product_name": "Pijama", "sku": "PJ-001-S", "size": "S", "quantity": 1, "unit_price": 28}],
+            "payment_method": "Zelle",
+            "shipping_address": "Av Principal",
+            "shipping_method": "mrw",
+        },
+    ],
+)
+async def test_executor_rejects_invalid_create_order_arguments_before_dispatch(monkeypatch, invalid_args):
+    create_order = AsyncMock()
+    monkeypatch.setattr(tool_orders.orders, "create_order", create_order)
+
+    result = await execute_tool("create_order", invalid_args, _context())
+
+    assert result["status"] == "error"
+    assert result["message"].startswith("Invalid arguments for create_order:")
+    create_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_unconfigured_create_order_payment_method(monkeypatch):
+    create_order = AsyncMock(side_effect=ValueError("Payment method is not configured for this store."))
+    monkeypatch.setattr(tool_orders.orders, "create_order", create_order)
+
+    result = await execute_tool(
+        "create_order",
+        {
+            "items": [{"product_name": "Pijama", "sku": "PJ-001-S", "size": "S", "quantity": 1, "unit_price": 28}],
+            "payment_method": "Inventado",
+            "shipping_city": "Caracas",
+            "shipping_address": "Av Principal",
+            "shipping_method": "mrw",
+        },
+        _context(),
+    )
+
+    assert result == {"status": "error", "message": "Payment method is not configured for this store."}
+    create_order.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -231,7 +283,7 @@ async def test_executor_payment_validation_success(monkeypatch):
     assert payment_update.kwargs["note"] == "Comprobante Zelle"
     set_current_order.assert_awaited_once_with(
         "customer-1",
-        "order-1",
+        None,
         workflow_stage="completed",
         active_agent="payment",
     )
@@ -375,7 +427,7 @@ async def test_executor_support_order_status_is_scoped_to_current_customer(monke
 
     result = await execute_tool(
         "get_customer_order_status",
-        {"customer_id": "attacker-controlled", "limit": 99},
+        {"customer_id": "attacker-controlled", "limit": 5},
         _context(),
     )
 
@@ -386,10 +438,9 @@ async def test_executor_support_order_status_is_scoped_to_current_customer(monke
 
 
 @pytest.mark.asyncio
-async def test_executor_catalog_pdf_generation_failure(monkeypatch, tmp_path):
-    monkeypatch.setattr(tool_messaging, "PDF_PATH", tmp_path / "missing.pdf")
+async def test_executor_catalog_pdf_generation_failure(monkeypatch):
     monkeypatch.setattr(tool_messaging, "get_cached_catalog", _catalog)
-    monkeypatch.setattr(tool_messaging, "generate_catalog_pdf", MagicMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(tool_messaging, "ensure_catalog_pdf", MagicMock(side_effect=RuntimeError("boom")))
 
     result = await execute_tool("send_catalog_pdf", {"caption": "Catálogo"}, _context())
 

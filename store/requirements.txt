@@ -29,5 +29,6 @@ slowapi==0.1.9
 python-dotenv==1.2.2
 pydantic==2.9.0
 pydantic-settings==2.6.0
+jsonschema==4.26.0
 python-multipart==0.0.32
 PyJWT==2.13.0

@@ -43,6 +43,7 @@ ngrok http 8000
 | Deploy one store in Kommo mode | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) plus [`docs/KOMMO_MIGRATION.md`](docs/KOMMO_MIGRATION.md) |
 | Manage multiple stores from one dashboard | [`master/DEPLOYMENT.md`](master/DEPLOYMENT.md) |
 | Build/upload the Kommo Salesbot widget | [`store/kommo-widget/README.md`](store/kommo-widget/README.md) |
+| Back up, restore, migrate, roll back, and review retention | [`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md) |
 
 Use `CHANNEL_BACKEND=meta` for direct Meta WhatsApp/Instagram webhooks. Use `CHANNEL_BACKEND=kommo` when Kommo owns the official WhatsApp/Instagram channel integrations and this backend only receives Kommo events plus Salesbot callbacks.
 

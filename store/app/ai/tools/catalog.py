@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from app import analytics
 from app.catalog.sheets import get_cached_catalog, get_product_sizes, group_catalog_products
 
 
@@ -40,6 +41,8 @@ async def check_inventory(args: dict) -> dict:
                 for variant in product.get("variants", [])
             ],
         })
+
+    await analytics.record_product_inquiries(result_products[:5])
 
     if not result_products:
         return {

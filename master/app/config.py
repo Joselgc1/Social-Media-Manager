@@ -27,6 +27,7 @@ class MasterSettings(BaseSettings):
     # App config
     app_base_url: str
     health_check_interval_seconds: int = 300  # 5 minutes
+    health_check_max_concurrent: int = 10
 
     # Cap parallel /stats connections to each store DB (Supabase session pooler limits)
     store_stats_max_concurrent: int = 5
@@ -64,6 +65,13 @@ class MasterSettings(BaseSettings):
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("APP_BASE_URL must be an absolute HTTP(S) URL")
+        return value
+
+    @field_validator("health_check_max_concurrent")
+    @classmethod
+    def validate_health_check_max_concurrent(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("HEALTH_CHECK_MAX_CONCURRENT must be at least 1")
         return value
 
     @property

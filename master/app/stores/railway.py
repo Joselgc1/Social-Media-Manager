@@ -73,14 +73,15 @@ async def get_service_info(service_id: str) -> dict:
     return data.get("service", {})
 
 
-async def get_variables(service_id: str, environment_id: str) -> dict:
+async def get_variables(project_id: str, service_id: str, environment_id: str) -> dict:
     """Get all environment variables for a service in a given environment."""
     query = """
-    query($serviceId: String!, $environmentId: String!) {
-        variables(serviceId: $serviceId, environmentId: $environmentId)
+    query($projectId: String!, $serviceId: String!, $environmentId: String!) {
+        variables(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId)
     }
     """
     data = await _graphql(query, {
+        "projectId": project_id,
         "serviceId": service_id,
         "environmentId": environment_id,
     })
@@ -113,6 +114,30 @@ async def upsert_variables(
         },
     })
     logger.info(f"Upserted {len(variables)} variables on service {service_id}")
+    return True
+
+
+async def delete_variable(
+    project_id: str,
+    service_id: str,
+    environment_id: str,
+    name: str,
+) -> bool:
+    """Delete one service variable from a specific Railway environment."""
+    query = """
+    mutation($input: VariableDeleteInput!) {
+        variableDelete(input: $input)
+    }
+    """
+    await _graphql(query, {
+        "input": {
+            "projectId": project_id,
+            "serviceId": service_id,
+            "environmentId": environment_id,
+            "name": name,
+        },
+    })
+    logger.info("Deleted variable %s from service %s", name, service_id)
     return True
 
 

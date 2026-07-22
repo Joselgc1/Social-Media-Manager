@@ -51,6 +51,8 @@ async def verify_payment_proof(
     expected_method_name = str(order.get("payment_method", "") or "").strip()
 
     if str(order.get("payment_status") or "").strip().lower() in {"proof_received", "confirmed"}:
+        if update_order:
+            await _mark_session_payment_verified(customer_id)
         return _result(
             "verified",
             order_id=order_id,
@@ -227,7 +229,7 @@ async def verify_payment_proof(
                 detected_currency=detected_currency,
                 message="Este comprobante ya fue usado para otro pedido.",
             )
-        await _mark_session_payment_verified(customer_id, order_id)
+        await _mark_session_payment_verified(customer_id)
 
     return _result(
         "verified",
@@ -440,8 +442,8 @@ def _result(
     )
 
 
-async def _mark_session_payment_verified(customer_id: str, order_id: str) -> None:
-    await sessions.set_current_order(customer_id, order_id, workflow_stage="completed", active_agent="payment")
+async def _mark_session_payment_verified(customer_id: str) -> None:
+    await sessions.set_current_order(customer_id, None, workflow_stage="completed", active_agent="payment")
 
 
 async def _get_payment_target_order(customer_id: str) -> tuple[dict | None, str]:

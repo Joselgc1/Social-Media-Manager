@@ -33,8 +33,8 @@ from app.ai.tools.context import ToolExecutionContext
 from app.ai.tools.executor import execute_tool
 from app.ai.tools.registry import get_tool_schemas
 from app.ai.vision import analyze_payment_screenshot
-from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
-from app.catalog.sheets import get_cached_catalog, group_catalog_products
+from app.catalog.pdf_generator import ensure_catalog_pdf
+from app.catalog.sheets import get_cached_catalog, group_catalog_products, refresh_catalog_async
 from app.config import get_config
 from app.crm import conversations, customers, escalations, orders, sessions
 from app.exchange_rates import build_customer_exchange_rate_reply
@@ -490,6 +490,9 @@ async def generate_response(
     _log_route_decision(orchestration)
 
     catalog = get_cached_catalog()
+    if not catalog:
+        await refresh_catalog_async()
+        catalog = get_cached_catalog()
     catalog_md = format_catalog_as_markdown(catalog)
     catalog_pdf_supported = _catalog_pdf_supported(channel, integration_context, config)
     system_prompt = build_agent_prompt(
@@ -1404,15 +1407,14 @@ async def _tool_send_catalog_pdf(args: dict, channel: str, integration_context: 
             "status": "error",
             "message": "Catalog PDF delivery is unavailable here. Describe catalog categories in text instead.",
         }
-    if not PDF_PATH.exists():
-        catalog = get_cached_catalog()
-        if not catalog:
-            return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
-        try:
-            generate_catalog_pdf(catalog)
-        except Exception as e:
-            logger.error(f"Auto-generate catalog PDF failed: {e}")
-            return {"status": "error", "message": "Could not generate catalog PDF."}
+    catalog = get_cached_catalog()
+    if not catalog:
+        return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
+    try:
+        ensure_catalog_pdf(catalog)
+    except Exception as e:
+        logger.error(f"Auto-generate catalog PDF failed: {e}")
+        return {"status": "error", "message": "Could not generate catalog PDF."}
     return {
         "type": "catalog_pdf",
         "caption": args.get("caption", "Aqui tienes nuestro catalogo de productos 📖"),

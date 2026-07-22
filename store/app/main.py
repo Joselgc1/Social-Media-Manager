@@ -27,7 +27,8 @@ from app.admin.telegram_bot import router as telegram_router
 from app.ai.providers import init_providers, list_providers
 from app.broadcast.api import router as broadcast_router
 from app.broadcast.scheduler import get_scheduler, start_scheduler, stop_scheduler
-from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
+from app.catalog.pdf_generator import ensure_catalog_pdf, invalidate_catalog_pdf
+from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog_async
 from app.config import get_config
 from app.request_limits import RequestBodyLimitMiddleware
 from app.test_endpoint import router as test_router
@@ -234,12 +235,21 @@ async def lifespan(app: FastAPI):
     logger.info(f"LLM providers initialized: {list_providers()}")
 
     # 3. Load the product catalog from Google Sheets
+    invalidate_catalog_pdf()
     try:
-        refresh_catalog()
+        if not await refresh_catalog_async(force=True):
+            raise RuntimeError("Google Sheets refresh did not complete.")
         logger.info("Product catalog loaded.")
     except Exception as e:
         logger.warning(f"Could not load catalog on startup: {e}")
         logger.warning("The catalog will be loaded on the first message.")
+    else:
+        catalog = get_cached_catalog()
+        if catalog:
+            try:
+                ensure_catalog_pdf(catalog)
+            except Exception as e:
+                logger.warning("Could not generate catalog PDF on startup: %s", e)
 
     # 4. Load settings into cache
     settings = await db.get_settings()
@@ -352,19 +362,36 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Detailed health check for monitoring."""
+    """Readiness check using only local cache, scheduler, and database state."""
     config = get_config()
     catalog = get_cached_catalog()
-    settings = await db.get_settings()
     scheduler = get_scheduler()
+    catalog_count = count_grouped_catalog_products(catalog)
+    scheduler_status = "running" if scheduler.running else "stopped"
+    database_status = "connected"
+    settings = {}
+    pending_broadcasts = None
+    try:
+        settings = await db.get_settings()
+        pending_broadcasts = await db.fetch_one(
+            "SELECT COUNT(*) as cnt FROM broadcasts WHERE status IN ('draft', 'scheduled')"
+        )
+    except Exception:
+        logger.exception("Health check database probe failed")
+        database_status = "error"
 
-    pending_broadcasts = await db.fetch_one(
-        "SELECT COUNT(*) as cnt FROM broadcasts WHERE status IN ('draft', 'scheduled')"
+    providers = list_providers()
+    active_provider = settings.get("llm_provider")
+    ready = (
+        database_status == "connected"
+        and scheduler_status == "running"
+        and catalog_count > 0
+        and bool(providers)
+        and active_provider in providers
     )
-
-    return {
-        "status": "healthy",
-        "database": "connected",
+    payload = {
+        "status": "healthy" if ready else "unhealthy",
+        "database": database_status,
         "scheduler": "running" if scheduler.running else "stopped",
         "channels": {
             "backend": config.channel_backend,
@@ -374,10 +401,11 @@ async def health():
             "whatsapp_via_kommo": config.channel_backend == "kommo",
             "instagram_via_kommo": config.channel_backend == "kommo",
         },
-        "providers": list_providers(),
-        "active_provider": settings.get("llm_provider"),
+        "providers": providers,
+        "active_provider": active_provider,
         "active_model": settings.get("llm_model"),
         "auto_fallback": settings.get("auto_fallback"),
-        "catalog_products": count_grouped_catalog_products(catalog),
+        "catalog_products": catalog_count,
         "pending_broadcasts": pending_broadcasts["cnt"] if pending_broadcasts else 0,
     }
+    return JSONResponse(status_code=200 if ready else 503, content=payload)

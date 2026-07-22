@@ -405,26 +405,45 @@ async def _store_delivered_assistant_message(result: dict, content: str, source_
 def _split_message(text: str, max_bytes: int = 950) -> list[str]:
     """
     Split a message into chunks that fit within Instagram's byte limit.
-    Tries to split at sentence boundaries for natural reading.
+    Prefer sentence and word boundaries, then hard-split long unbroken text.
     """
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+
     chunks = []
-    current = ""
+    remaining = text.strip()
+    while remaining:
+        byte_count = 0
+        prefix_end = 0
+        for index, char in enumerate(remaining):
+            char_bytes = len(char.encode("utf-8"))
+            if byte_count + char_bytes > max_bytes:
+                break
+            byte_count += char_bytes
+            prefix_end = index + 1
 
-    sentences = text.replace(". ", ".|").replace("! ", "!|").replace("? ", "?|").split("|")
+        if prefix_end == 0:
+            raise ValueError("max_bytes is too small for the first UTF-8 character")
+        if prefix_end == len(remaining):
+            chunks.append(remaining)
+            break
 
-    for sentence in sentences:
-        test = (current + " " + sentence).strip() if current else sentence
-        if len(test.encode("utf-8")) <= max_bytes:
-            current = test
+        prefix = remaining[:prefix_end]
+        minimum_natural_split = max(1, prefix_end // 2)
+        sentence_end = max(prefix.rfind(mark) for mark in (".", "!", "?", "\n")) + 1
+        whitespace_end = max((index + 1 for index, char in enumerate(prefix) if char.isspace()), default=0)
+
+        if sentence_end >= minimum_natural_split:
+            split_at = sentence_end
+        elif whitespace_end >= minimum_natural_split:
+            split_at = whitespace_end
         else:
-            if current:
-                chunks.append(current)
-            current = sentence
+            split_at = prefix_end
 
-    if current:
-        chunks.append(current)
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
 
-    return chunks if chunks else [text[:max_bytes]]
+    return chunks
 
 
 def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bool:

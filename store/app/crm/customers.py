@@ -167,7 +167,44 @@ async def decrement_orders(customer_id: str, amount: float):
     )
 
 
-async def update_customer(customer_id: str, channel: str | None = None, conversation_state: str | None = None) -> dict | None:
+async def sync_purchase_tier_tags(customer_id: str):
+    """Reconcile derived purchase-tier tags with the customer's current totals."""
+    row = await db.fetch_one(
+        "SELECT total_orders, total_spent, tags FROM customers WHERE id = :id",
+        {"id": customer_id},
+    )
+    if not row:
+        return
+
+    total_orders = int(row["total_orders"] or 0)
+    total_spent = float(row["total_spent"] or 0)
+    desired = set()
+    if total_orders >= 2:
+        desired.add("repeat_buyer")
+    if total_orders >= 3 or total_spent >= 100:
+        desired.add("vip")
+
+    raw_tags = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
+    existing = normalize_tags(raw_tags)
+    tier_tags = {"repeat_buyer", "vip"}
+    updated = [tag for tag in existing if tag not in tier_tags or tag in desired]
+    for tag in ("repeat_buyer", "vip"):
+        if tag in desired and tag not in updated:
+            updated.append(tag)
+
+    if updated != existing:
+        await db.execute(
+            "UPDATE customers SET tags = :tags WHERE id = :id",
+            {"tags": json.dumps(updated), "id": customer_id},
+        )
+
+
+async def update_customer(
+    customer_id: str,
+    channel: str | None = None,
+    conversation_state: str | None = None,
+    marketing_opt_in: bool | None = None,
+) -> dict | None:
     row = await db.fetch_one(
         "SELECT * FROM customers WHERE id::text = :id",
         {"id": customer_id},
@@ -185,6 +222,14 @@ async def update_customer(customer_id: str, channel: str | None = None, conversa
     if conversation_state is not None:
         updates["state"] = conversation_state
         set_clauses.append("conversation_state = :state")
+
+    if marketing_opt_in is not None:
+        updates["marketing_opt_in"] = marketing_opt_in
+        set_clauses.extend([
+            "marketing_opt_in = :marketing_opt_in",
+            "marketing_opt_in_at = CASE WHEN :marketing_opt_in THEN NOW() ELSE marketing_opt_in_at END",
+            "marketing_opt_out_at = CASE WHEN :marketing_opt_in THEN NULL ELSE NOW() END",
+        ])
 
     if not set_clauses:
         return dict(row)

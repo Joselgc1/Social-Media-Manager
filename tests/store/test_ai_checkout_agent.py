@@ -114,7 +114,7 @@ async def test_missing_quantity_and_missing_address(monkeypatch):
         "shipping_city": "Caracas",
         "payment_method": "Zelle",
     })))
-    monkeypatch.setattr(service.orders, "get_latest_open_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value=None))
 
     result = await service.finalize_checkout(_customer(), payment_methods=_payment_methods())
 
@@ -157,7 +157,7 @@ async def test_invalid_size(monkeypatch):
 async def test_product_becoming_unavailable(monkeypatch):
     _patch_catalog(monkeypatch, _catalog(stock=0))
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft())))
-    monkeypatch.setattr(service.orders, "get_latest_open_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value=None))
 
     result = await service.finalize_checkout(_customer(), payment_methods=_payment_methods())
 
@@ -171,7 +171,7 @@ async def test_requested_quantity_cannot_exceed_current_stock(monkeypatch):
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft(
         items=[{"product_query": "Pijama satén azul", "size": "M", "quantity": 2}],
     ))))
-    monkeypatch.setattr(service.orders, "get_latest_open_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value=None))
 
     result = await service.finalize_checkout(_customer(), payment_methods=_payment_methods())
 
@@ -185,7 +185,7 @@ async def test_catalog_price_and_discount_come_from_backend(monkeypatch):
     _patch_catalog(monkeypatch, _catalog(price=40.0))
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft())))
     monkeypatch.setattr(service.sessions, "set_current_order", AsyncMock(return_value=_session(current_order_id="order-1")))
-    monkeypatch.setattr(service.orders, "get_latest_open_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value=None))
     create_order = AsyncMock(return_value={
         "order_id": "order-1",
         "items": [{"product_name": "Pijama satén azul", "sku": "PJ-001-M", "size": "M", "quantity": 10, "unit_price": 40.0}],
@@ -226,7 +226,7 @@ async def test_successful_finalization_sets_session(monkeypatch):
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft())))
     set_current = AsyncMock(return_value=_session(current_order_id="order-1"))
     monkeypatch.setattr(service.sessions, "set_current_order", set_current)
-    monkeypatch.setattr(service.orders, "get_latest_open_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value=None))
     monkeypatch.setattr(service.orders, "create_order", AsyncMock(return_value={
         "order_id": "order-1",
         "items": [],
@@ -247,7 +247,10 @@ async def test_successful_finalization_sets_session(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_duplicate_finalization_reuses_current_order(monkeypatch):
-    monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(current_order_id="order-1")))
+    monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(
+        current_order_id="order-1",
+        workflow_stage="waiting_for_payment",
+    )))
     monkeypatch.setattr(service.orders, "get_order", AsyncMock(return_value={
         "id": "order-1",
         "items": [],
@@ -264,6 +267,37 @@ async def test_duplicate_finalization_reuses_current_order(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_new_checkout_does_not_reuse_completed_session_order(monkeypatch):
+    _patch_catalog(monkeypatch, _catalog())
+    monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(
+        _complete_draft(),
+        current_order_id="order-completed",
+        workflow_stage="checkout_ready",
+    )))
+    get_old_order = AsyncMock()
+    monkeypatch.setattr(service.orders, "get_order", get_old_order)
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value=None))
+    create_order = AsyncMock(return_value={
+        "order_id": "order-new",
+        "items": [],
+        "total": 28.0,
+        "payment_method": "Zelle",
+        "created_new": True,
+    })
+    monkeypatch.setattr(service.orders, "create_order", create_order)
+    monkeypatch.setattr(service.sessions, "set_current_order", AsyncMock())
+    monkeypatch.setattr(service, "_notify_checkout_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_save_shipping_address", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.customers, "add_tags", AsyncMock(return_value=None))
+
+    result = await service.finalize_checkout(_customer(), payment_methods=_payment_methods())
+
+    assert result["order_id"] == "order-new"
+    create_order.assert_awaited_once()
+    get_old_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cancellation_resets_session(monkeypatch):
     reset = AsyncMock(return_value=_session(active_agent="legacy", workflow_stage="idle"))
     monkeypatch.setattr(service.sessions, "reset_session", reset)
@@ -277,7 +311,7 @@ async def test_cancellation_resets_session(monkeypatch):
 @pytest.mark.asyncio
 async def test_existing_unpaid_order_requires_explicit_choice(monkeypatch):
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft())))
-    monkeypatch.setattr(service.orders, "get_latest_open_order", AsyncMock(return_value={"id": "order-open"}))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value={"id": "order-open"}))
 
     result = await service.finalize_checkout(_customer(), payment_methods=_payment_methods())
 
@@ -290,7 +324,7 @@ async def test_starting_separate_new_purchase(monkeypatch):
     _patch_catalog(monkeypatch, _catalog())
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft())))
     monkeypatch.setattr(service.sessions, "set_current_order", AsyncMock(return_value=_session(current_order_id="order-new")))
-    monkeypatch.setattr(service.orders, "get_latest_open_order", AsyncMock(return_value={"id": "order-open"}))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value={"id": "order-open"}))
     monkeypatch.setattr(service.orders, "create_order", AsyncMock(return_value={
         "order_id": "order-new",
         "items": [],

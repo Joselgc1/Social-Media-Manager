@@ -19,10 +19,11 @@ from app import db
 from app.admin.notify import notify_owner
 from app.analytics import build_daily_aggregate
 from app.broadcast.sender import execute_broadcast
-from app.catalog.pdf_generator import generate_catalog_pdf
-from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
+from app.catalog.pdf_generator import ensure_catalog_pdf
+from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog_async
 from app.config import get_config
 from app.crm import escalations, orders
+from app.data_retention import run_data_retention
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 from app.webhooks.inbound_buffer import cleanup_completed_inbound_jobs, process_due_inbound_jobs
 
@@ -116,6 +117,14 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        _run_data_retention,
+        trigger=CronTrigger(hour=3, minute=30, timezone=UTC),
+        id="sensitive_data_retention",
+        name="Apply sensitive data retention policy",
+        replace_existing=True,
+    )
+
     if get_config().channel_backend == "meta":
         scheduler.add_job(
             _process_meta_inbound_jobs,
@@ -158,8 +167,14 @@ def stop_scheduler():
 async def _refresh_catalog_job():
     """Refresh the product catalog from Google Sheets."""
     try:
-        refresh_catalog()
-        logger.debug("Scheduled catalog refresh completed.")
+        refreshed = await refresh_catalog_async()
+        catalog = get_cached_catalog()
+        if refreshed and catalog:
+            ensure_catalog_pdf(catalog)
+        if refreshed:
+            logger.debug("Scheduled catalog refresh completed.")
+        else:
+            logger.debug("Scheduled catalog refresh skipped or failed; cached catalog retained.")
     except Exception as e:
         logger.error(f"Scheduled catalog refresh failed: {e}")
 
@@ -262,7 +277,7 @@ async def _refresh_catalog_pdf():
     try:
         catalog = get_cached_catalog()
         if catalog:
-            generate_catalog_pdf(catalog)
+            ensure_catalog_pdf(catalog)
             logger.info(
                 "Scheduled catalog PDF refresh completed (%s grouped products).",
                 count_grouped_catalog_products(catalog),
@@ -296,6 +311,13 @@ async def _cleanup_meta_inbound_jobs():
         await cleanup_completed_inbound_jobs()
     except Exception:
         logger.exception("Meta inbound job cleanup failed")
+
+
+async def _run_data_retention():
+    try:
+        await run_data_retention()
+    except Exception:
+        logger.exception("Sensitive data retention cleanup failed")
 
 
 async def _process_expired_escalations():

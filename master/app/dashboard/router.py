@@ -8,7 +8,13 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.auth import COOKIE_NAME, _make_cookie_token, is_master_cookie_valid
+from app.auth import (
+    COOKIE_NAME,
+    SESSION_MAX_AGE_SECONDS,
+    _make_cookie_token,
+    is_master_cookie_valid,
+    revoke_master_session,
+)
 from app.config import get_config
 
 router = APIRouter(tags=["dashboard"])
@@ -52,14 +58,15 @@ async def login(request: Request):
         httponly=True,
         secure=not config.is_local_environment,
         samesite="lax",
-        max_age=86400,
+        max_age=SESSION_MAX_AGE_SECONDS,
     )
     return response
 
 
 @router.post("/logout")
-async def logout():
+async def logout(request: Request):
     """Clear the master dashboard session."""
+    revoke_master_session(request)
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(COOKIE_NAME, samesite="lax")
     return response

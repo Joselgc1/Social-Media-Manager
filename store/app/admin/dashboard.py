@@ -12,7 +12,13 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.admin.auth import COOKIE_NAME, _make_cookie_token, is_admin_cookie_valid
+from app.admin.auth import (
+    COOKIE_NAME,
+    SESSION_MAX_AGE_SECONDS,
+    _make_cookie_token,
+    is_admin_cookie_valid,
+    revoke_admin_session,
+)
 from app.config import get_config
 
 router = APIRouter(prefix="/admin", tags=["dashboard"])
@@ -71,14 +77,15 @@ async def login(request: Request):
         httponly=True,
         secure=not config.debug,
         samesite="lax",
-        max_age=86400,
+        max_age=SESSION_MAX_AGE_SECONDS,
     )
     return response
 
 
 @router.post("/logout")
-async def logout():
+async def logout(request: Request):
     """Clear the dashboard session cookie."""
+    revoke_admin_session(request)
     response = RedirectResponse(url="/admin/login", status_code=303)
     response.delete_cookie(COOKIE_NAME, samesite="lax")
     return response

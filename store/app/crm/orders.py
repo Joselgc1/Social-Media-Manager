@@ -14,6 +14,7 @@ from typing import Any
 from app import db
 from app.catalog.sheets import deduct_stock, get_cached_catalog, get_product_sizes, restore_stock
 from app.crm import customers
+from app.payment_methods import normalize_payment_methods
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,39 @@ async def create_order(
     Reuses a matching recent open order to avoid duplicate orders from repeated tool calls
     or webhook retries.
     """
+    if not isinstance(items, list) or not items or any(not isinstance(item, dict) for item in items):
+        raise ValueError("Order must contain at least one item.")
+
+    required_fields = {
+        "payment method": payment_method,
+        "shipping city": shipping_city,
+        "shipping address": shipping_address,
+        "shipping method": shipping_method,
+    }
+    missing_fields = [name for name, value in required_fields.items() if not isinstance(value, str) or not value.strip()]
+    if missing_fields:
+        raise ValueError(f"Missing required order field: {missing_fields[0]}.")
+    if shipping_method.strip().lower() not in {"mrw", "zoom"}:
+        raise ValueError("Shipping method must be MRW or Zoom.")
+
     settings = await db.get_settings()
+    configured_methods = normalize_payment_methods(settings.get("payment_methods") or [])
+    normalized_payment_method = _normalize_catalog_text(payment_method)
+    matching_method = next(
+        (
+            method["name"]
+            for method in configured_methods
+            if _normalize_catalog_text(method["name"]) == normalized_payment_method
+        ),
+        None,
+    )
+    if not matching_method:
+        raise ValueError("Payment method is not configured for this store.")
+
+    payment_method = matching_method
+    shipping_city = shipping_city.strip()
+    shipping_address = shipping_address.strip()
+    shipping_method = shipping_method.strip().lower()
     normalized_items = _normalize_order_items(items)
     pricing = _calculate_order_amounts(normalized_items, settings=settings)
     total = pricing["total"]
@@ -337,20 +370,13 @@ async def create_order(
 async def _apply_paid_customer_updates(customer_id: str, amount: float):
     """Increment paid-order totals and attach repeat-buyer tags when thresholds are met."""
     await customers.increment_orders(customer_id, amount)
-    customer = await db.fetch_one(
-        "SELECT total_orders, total_spent FROM customers WHERE id = :id",
-        {"id": customer_id},
-    )
-    if not customer:
-        return
+    await customers.sync_purchase_tier_tags(customer_id)
 
-    tags = []
-    if customer["total_orders"] >= 2:
-        tags.append("repeat_buyer")
-    if customer["total_orders"] >= 3 or float(customer["total_spent"]) >= 100:
-        tags.append("vip")
-    if tags:
-        await customers.add_tags(customer_id, tags)
+
+async def _revert_paid_customer_updates(customer_id: str, amount: float):
+    """Reverse paid-order totals and remove tier tags that no longer qualify."""
+    await customers.decrement_orders(customer_id, amount)
+    await customers.sync_purchase_tier_tags(customer_id)
 
 
 async def get_order(order_id: str) -> dict | None:
@@ -481,6 +507,24 @@ async def get_latest_open_order(customer_id: str) -> dict | None:
         FROM orders
         WHERE customer_id = :cid
           AND payment_status IN ('pending', 'proof_received')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        {"cid": customer_id},
+    )
+    if not row:
+        return None
+    return await get_order(str(row["id"]))
+
+
+async def get_latest_pending_order(customer_id: str) -> dict | None:
+    """Return the latest order that still requires payment."""
+    row = await db.fetch_one(
+        """
+        SELECT id
+        FROM orders
+        WHERE customer_id = :cid
+          AND payment_status = 'pending'
         ORDER BY created_at DESC
         LIMIT 1
         """,
@@ -624,13 +668,14 @@ async def update_order_payment_status(
                 {"status": status, "note": note, "oid": order_id},
             )
 
-        applied_now = False
+        totals_applied = bool(row["customer_totals_applied"])
+        customer_id = str(row["customer_id"]) if row["customer_id"] is not None else None
         if (
             status in PAID_STATUSES
-            and not row["customer_totals_applied"]
-            and row["customer_id"] is not None
+            and not totals_applied
+            and customer_id is not None
         ):
-            await _apply_paid_customer_updates(str(row["customer_id"]), float(row["total"]))
+            await _apply_paid_customer_updates(customer_id, float(row["total"]))
             await db.execute(
                 """
                 UPDATE orders
@@ -639,12 +684,24 @@ async def update_order_payment_status(
                 """,
                 {"oid": order_id},
             )
-            applied_now = True
+            totals_applied = True
+        elif status not in PAID_STATUSES and totals_applied:
+            if customer_id is not None:
+                await _revert_paid_customer_updates(customer_id, float(row["total"]))
+            await db.execute(
+                """
+                UPDATE orders
+                SET customer_totals_applied = FALSE, updated_at = NOW()
+                WHERE id = :oid
+                """,
+                {"oid": order_id},
+            )
+            totals_applied = False
 
     return {
         "order_id": str(order_id),
         "payment_status": status,
-        "customer_totals_applied": bool(row["customer_totals_applied"] or applied_now),
+        "customer_totals_applied": totals_applied,
     }
 
 
@@ -679,13 +736,17 @@ async def update_order_shipping(
         """
         UPDATE orders
         SET shipping_status = COALESCE(:shipping_status, shipping_status),
-            tracking_number = :tracking_number,
+            tracking_number = CASE
+                WHEN :update_tracking_number THEN :tracking_number
+                ELSE tracking_number
+            END,
             updated_at = NOW()
         WHERE id = :oid
         """,
         {
             "shipping_status": shipping_status,
             "tracking_number": (tracking_number or "").strip() or None,
+            "update_tracking_number": tracking_number is not None,
             "oid": order_id,
         },
     )
@@ -722,7 +783,7 @@ async def delete_order(order_id: str) -> dict | None:
             await asyncio.to_thread(restore_stock, items)
 
         if row["customer_totals_applied"] and row["customer_id"]:
-            await customers.decrement_orders(str(row["customer_id"]), float(row["total"]))
+            await _revert_paid_customer_updates(str(row["customer_id"]), float(row["total"]))
 
         await db.execute(
             "DELETE FROM orders WHERE id = :oid",

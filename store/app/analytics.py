@@ -219,44 +219,69 @@ async def get_response_time_stats(days: int = 7) -> dict:
 
 # ── Product popularity ───────────────────────────────────────
 
+async def record_product_inquiries(products: list[dict]) -> None:
+    """Increment daily counters for resolved products without storing customer queries."""
+    safe_by_sku = {}
+    for product in products:
+        sku = str(product.get("parent_sku") or product.get("sku") or "").strip()[:120]
+        if sku:
+            safe_by_sku[sku] = {
+                "sku": sku,
+                "product_name": str(product.get("product_name") or "").strip()[:300],
+            }
+    safe_products = list(safe_by_sku.values())
+    if not safe_products:
+        return
+    try:
+        await db.execute(
+            """
+            INSERT INTO product_analytics (date, sku, product_name, times_asked)
+            SELECT CURRENT_DATE, item->>'sku', item->>'product_name', 1
+            FROM jsonb_array_elements(CAST(:products AS jsonb)) AS item
+            ON CONFLICT (date, sku) DO UPDATE
+            SET product_name = EXCLUDED.product_name,
+                times_asked = product_analytics.times_asked + 1
+            """,
+            {"products": json.dumps(safe_products, ensure_ascii=False)},
+        )
+    except Exception as e:
+        logger.error("Failed to record product inquiry analytics: %s", e)
+
+
 async def get_popular_products(days: int = 30) -> list[dict]:
     """
-    Find the most asked-about products based on check_inventory calls
-    logged in conversation function_calls.
+    Find the most asked-about resolved catalog products.
     """
     since = date.today() - timedelta(days=days)
 
-    # Parse function_calls JSONB to extract product queries
     rows = await db.fetch_all(
         """
-        SELECT
-            fc_elem->>'args' as args_json,
-            COUNT(*) as times_asked
-        FROM conversations,
-             jsonb_array_elements(function_calls::jsonb) as fc_elem
-        WHERE function_calls IS NOT NULL
-          AND fc_elem->>'name' = 'check_inventory'
-          AND created_at >= :since
-        GROUP BY fc_elem->>'args'
-        ORDER BY times_asked DESC
+        SELECT sku,
+               MAX(product_name) AS product_name,
+               SUM(times_asked) AS times_asked,
+               SUM(times_ordered) AS times_ordered,
+               SUM(revenue) AS revenue
+        FROM product_analytics
+        WHERE date >= :since
+        GROUP BY sku
+        ORDER BY times_asked DESC, product_name
         LIMIT 20
         """,
         {"since": since},
     )
 
-    products = []
-    for r in rows:
-        try:
-            args = json.loads(r["args_json"]) if r["args_json"] else {}
-            products.append({
-                "query": args.get("product_query", "unknown"),
-                "size_filter": args.get("size"),
-                "times_asked": r["times_asked"],
-            })
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    return products
+    return [
+        {
+            "sku": row["sku"],
+            "product_name": row["product_name"] or row["sku"],
+            "query": row["product_name"] or row["sku"],
+            "size_filter": None,
+            "times_asked": int(row["times_asked"] or 0),
+            "times_ordered": int(row["times_ordered"] or 0),
+            "revenue": float(row["revenue"] or 0),
+        }
+        for row in rows
+    ]
 
 
 # ── Daily aggregate builder ──────────────────────────────────
@@ -270,77 +295,99 @@ async def build_daily_aggregate(target_date: date | None = None):
         target_date = date.today() - timedelta(days=1)  # Yesterday
 
     for channel in ["whatsapp", "instagram"]:
-        for provider in ["openai", "anthropic"]:
-            try:
-                # Message counts
-                msgs = await db.fetch_one(
-                    """
-                    SELECT
-                        COUNT(*) FILTER (WHERE c.role = 'user') as msgs_in,
-                        COUNT(*) FILTER (WHERE c.role = 'assistant') as msgs_out,
-                        COUNT(DISTINCT c.customer_id) as uniq
-                    FROM conversations c
-                    JOIN usage_log u ON u.customer_id = c.customer_id
-                        AND u.created_at::date = :d AND u.provider = :prov
-                    WHERE c.created_at::date = :d AND c.channel = :ch
-                    """,
-                    {"d": target_date, "ch": channel, "prov": provider},
-                )
+        try:
+            messages = await db.fetch_one(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE role = 'user') AS msgs_in,
+                    COUNT(*) FILTER (WHERE role = 'assistant') AS msgs_out,
+                    COUNT(DISTINCT customer_id) AS uniq
+                FROM conversations
+                WHERE created_at::date = :d AND channel = :ch
+                """,
+                {"d": target_date, "ch": channel},
+            )
+            await _upsert_daily_analytics(
+                target_date,
+                channel,
+                "all",
+                messages_in=messages["msgs_in"] if messages else 0,
+                messages_out=messages["msgs_out"] if messages else 0,
+                unique_customers=messages["uniq"] if messages else 0,
+            )
 
-                # Response times
-                rt = await db.fetch_one(
-                    """
-                    SELECT
-                        AVG(response_time_ms)::int as avg_rt,
-                        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY response_time_ms)::int as p95_rt
-                    FROM usage_log
-                    WHERE created_at::date = :d AND channel = :ch AND provider = :prov
-                      AND response_time_ms IS NOT NULL
-                    """,
-                    {"d": target_date, "ch": channel, "prov": provider},
+            usage_rows = await db.fetch_all(
+                """
+                SELECT provider,
+                       AVG(response_time_ms)::int AS avg_rt,
+                       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY response_time_ms)::int AS p95_rt,
+                       COALESCE(SUM(input_tokens), 0) AS inp,
+                       COALESCE(SUM(output_tokens), 0) AS out
+                FROM usage_log
+                WHERE created_at::date = :d AND channel = :ch
+                  AND provider IN ('openai', 'anthropic')
+                GROUP BY provider
+                """,
+                {"d": target_date, "ch": channel},
+            )
+            usage_by_provider = {row["provider"]: row for row in usage_rows}
+            for provider in ["openai", "anthropic"]:
+                usage = usage_by_provider.get(provider)
+                await _upsert_daily_analytics(
+                    target_date,
+                    channel,
+                    provider,
+                    avg_response_ms=usage["avg_rt"] if usage else 0,
+                    p95_response_ms=usage["p95_rt"] if usage else 0,
+                    input_tokens=usage["inp"] if usage else 0,
+                    output_tokens=usage["out"] if usage else 0,
                 )
-
-                # Token usage
-                tokens = await db.fetch_one(
-                    """
-                    SELECT COALESCE(SUM(input_tokens), 0) as inp,
-                           COALESCE(SUM(output_tokens), 0) as out
-                    FROM usage_log
-                    WHERE created_at::date = :d AND channel = :ch AND provider = :prov
-                    """,
-                    {"d": target_date, "ch": channel, "prov": provider},
-                )
-
-                await db.execute(
-                    """
-                    INSERT INTO daily_analytics
-                        (date, channel, provider, total_messages_in, total_messages_out,
-                         unique_customers, avg_response_ms, p95_response_ms,
-                         total_input_tokens, total_output_tokens)
-                    VALUES (:d, :ch, :prov, :mi, :mo, :uniq, :avg, :p95, :inp, :out)
-                    ON CONFLICT (date, channel, provider)
-                    DO UPDATE SET
-                        total_messages_in = EXCLUDED.total_messages_in,
-                        total_messages_out = EXCLUDED.total_messages_out,
-                        unique_customers = EXCLUDED.unique_customers,
-                        avg_response_ms = EXCLUDED.avg_response_ms,
-                        p95_response_ms = EXCLUDED.p95_response_ms,
-                        total_input_tokens = EXCLUDED.total_input_tokens,
-                        total_output_tokens = EXCLUDED.total_output_tokens
-                    """,
-                    {
-                        "d": target_date, "ch": channel, "prov": provider,
-                        "mi": msgs["msgs_in"] if msgs else 0,
-                        "mo": msgs["msgs_out"] if msgs else 0,
-                        "uniq": msgs["uniq"] if msgs else 0,
-                        "avg": rt["avg_rt"] if rt and rt["avg_rt"] else 0,
-                        "p95": rt["p95_rt"] if rt and rt["p95_rt"] else 0,
-                        "inp": tokens["inp"] if tokens else 0,
-                        "out": tokens["out"] if tokens else 0,
-                    },
-                )
-
-            except Exception as e:
-                logger.error(f"Daily aggregate failed for {target_date}/{channel}/{provider}: {e}")
+        except Exception as e:
+            logger.error("Daily aggregate failed for %s/%s: %s", target_date, channel, e)
 
     logger.info(f"Daily analytics aggregated for {target_date}")
+
+
+async def _upsert_daily_analytics(
+    target_date: date,
+    channel: str,
+    provider: str,
+    *,
+    messages_in: int = 0,
+    messages_out: int = 0,
+    unique_customers: int = 0,
+    avg_response_ms: int = 0,
+    p95_response_ms: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO daily_analytics
+            (date, channel, provider, total_messages_in, total_messages_out,
+             unique_customers, avg_response_ms, p95_response_ms,
+             total_input_tokens, total_output_tokens)
+        VALUES (:d, :ch, :prov, :mi, :mo, :uniq, :avg, :p95, :inp, :out)
+        ON CONFLICT (date, channel, provider)
+        DO UPDATE SET
+            total_messages_in = EXCLUDED.total_messages_in,
+            total_messages_out = EXCLUDED.total_messages_out,
+            unique_customers = EXCLUDED.unique_customers,
+            avg_response_ms = EXCLUDED.avg_response_ms,
+            p95_response_ms = EXCLUDED.p95_response_ms,
+            total_input_tokens = EXCLUDED.total_input_tokens,
+            total_output_tokens = EXCLUDED.total_output_tokens
+        """,
+        {
+            "d": target_date,
+            "ch": channel,
+            "prov": provider,
+            "mi": int(messages_in or 0),
+            "mo": int(messages_out or 0),
+            "uniq": int(unique_customers or 0),
+            "avg": int(avg_response_ms or 0),
+            "p95": int(p95_response_ms or 0),
+            "inp": int(input_tokens or 0),
+            "out": int(output_tokens or 0),
+        },
+    )

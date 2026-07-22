@@ -153,14 +153,18 @@ async def test_sales_whatsapp_buttons(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sales_instagram_does_not_return_whatsapp_interactive_payload(monkeypatch):
+async def test_sales_instagram_returns_quick_reply_payload(monkeypatch):
     provider = _provider("send_interactive_buttons", {"body_text": "¿Qué buscas?", "buttons": ["Pijamas", "Panties"]}, final_text="Te doy opciones por aquí.")
     monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai"])
     monkeypatch.setattr("app.ai.runner.get_provider", lambda name: provider)
 
     result = await AgentRunner().run(SALES_AGENT, "prompt", [], _settings(), _run_context("instagram"))
 
-    assert result.interactive is None
+    assert result.interactive == {
+        "type": "interactive_buttons",
+        "body_text": "¿Qué buscas?",
+        "buttons": ["Pijamas", "Panties"],
+    }
     assert result.text == "Te doy opciones por aquí."
 
 

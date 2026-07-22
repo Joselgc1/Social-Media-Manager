@@ -5,6 +5,7 @@ Create, preview, list, and execute broadcasts.
 
 import logging
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -13,6 +14,7 @@ from app.admin.auth import require_admin
 from app.broadcast.sender import (
     create_broadcast,
     execute_broadcast,
+    list_broadcast_deliveries,
     list_broadcasts,
     preview_broadcast,
 )
@@ -26,13 +28,13 @@ class BroadcastCreate(BaseModel):
     template_name: str
     target_tags: list[str]
     template_params: list[str] | None = None
-    target_channel: str = "whatsapp"
+    target_channel: Literal["whatsapp"] = "whatsapp"
     scheduled_at: datetime | None = None
 
 
 class BroadcastPreview(BaseModel):
     target_tags: list[str]
-    target_channel: str = "whatsapp"
+    target_channel: Literal["whatsapp"] = "whatsapp"
 
 
 @router.post("/create")
@@ -65,6 +67,12 @@ async def list_broadcasts_endpoint(limit: int = 20):
     return await list_broadcasts(limit=limit)
 
 
+@router.get("/{broadcast_id}/deliveries")
+async def list_broadcast_deliveries_endpoint(broadcast_id: str, limit: int = 500):
+    """Return per-recipient delivery outcomes for reconciliation."""
+    return await list_broadcast_deliveries(broadcast_id, limit=limit)
+
+
 @router.post("/{broadcast_id}/send")
 async def send_broadcast_endpoint(broadcast_id: str):
     """Execute a draft or scheduled broadcast immediately."""
@@ -87,7 +95,16 @@ async def reset_broadcast_endpoint(broadcast_id: str):
         raise HTTPException(status_code=404, detail="Broadcast not found")
 
     await db.execute(
-        "UPDATE broadcasts SET status = 'draft', sent_at = NULL, recipients = 0 WHERE id = :id",
+        """
+        UPDATE broadcasts
+        SET status = 'draft',
+            sent_at = NULL,
+            recipients = (
+                SELECT COUNT(*) FROM broadcast_deliveries
+                WHERE broadcast_id = :id AND status = 'sent'
+            )
+        WHERE id = :id
+        """,
         {"id": broadcast_id},
     )
     return {"broadcast_id": broadcast_id, "status": "draft", "message": "Broadcast reset to draft"}

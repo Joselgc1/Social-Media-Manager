@@ -169,8 +169,7 @@ def engine_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(tool_messaging, "notify_escalation", AsyncMock(return_value=None))
     monkeypatch.setattr(tool_orders, "notify_new_order", AsyncMock(return_value=None))
     monkeypatch.setattr(engine, "analyze_payment_screenshot", AsyncMock(return_value={"analyzed": False}))
-    monkeypatch.setattr(tool_messaging, "PDF_PATH", tmp_path / "catalog.pdf")
-    monkeypatch.setattr(tool_messaging, "generate_catalog_pdf", MagicMock(return_value=tmp_path / "catalog.pdf"))
+    monkeypatch.setattr(tool_messaging, "ensure_catalog_pdf", MagicMock(return_value=tmp_path / "catalog.pdf"))
 
     return SimpleNamespace(
         settings=settings,
@@ -397,7 +396,7 @@ async def test_generate_response_contract_for_catalog_pdf(engine_harness):
     assert response["catalog_pdf"] == {"type": "catalog_pdf", "caption": "Te envío el catálogo."}
     assert response["interactive"] is None
     assert response["product_image"] is None
-    tool_messaging.generate_catalog_pdf.assert_called_once_with(engine_harness.catalog)
+    tool_messaging.ensure_catalog_pdf.assert_called_once_with(engine_harness.catalog)
 
 
 @pytest.mark.asyncio
@@ -680,7 +679,7 @@ async def test_valid_payment_proof_short_circuits_llm_and_updates_existing_order
     assert payment_update.kwargs["note"] == "Pago Zelle a pagos@example.com por $28"
     set_current_order.assert_awaited_once_with(
         "customer-1",
-        "order-1",
+        None,
         workflow_stage="completed",
         active_agent="payment",
     )

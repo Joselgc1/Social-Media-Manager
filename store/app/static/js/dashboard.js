@@ -6,13 +6,19 @@ let MODELS = {};
 // Sends the session cookie (same-origin) on every admin API call.
 // On 401, prompts re-authentication instead of silently failing.
 async function apiFetch(url, options = {}) {
-  const resp = await fetch(url, {
-    credentials: 'same-origin',
-    ...options,
-    headers: {
-      ...options.headers,
-    },
-  });
+  let resp;
+  try {
+    resp = await fetch(url, {
+      credentials: 'same-origin',
+      ...options,
+      headers: {
+        ...options.headers,
+      },
+    });
+  } catch (error) {
+    toast('No se pudo conectar con el servidor', '#dc2626');
+    throw error;
+  }
   if (resp.status === 401) {
     toast('Sesión expirada — redirigiendo al login...', '#dc2626');
     setTimeout(() => {
@@ -20,11 +26,33 @@ async function apiFetch(url, options = {}) {
     }, 500);
     throw new Error('Unauthorized');
   }
-  if (resp.status === 403) {
-    toast('Acceso denegado', '#dc2626');
-    throw new Error('Forbidden');
+  if (!resp.ok) {
+    const rawBody = await resp.text().catch(() => '');
+    let payload = {};
+    try {
+      payload = rawBody ? JSON.parse(rawBody) : {};
+    } catch (_error) {
+      payload = {};
+    }
+    let detail = payload.detail || payload.message || rawBody;
+    if (Array.isArray(detail)) {
+      detail = detail.map(item => item.msg || String(item)).join('; ');
+    }
+    const message = detail || (resp.status === 403 ? 'Acceso denegado' : `Error del servidor (${resp.status})`);
+    toast(message, '#dc2626');
+    const error = new Error(message);
+    error.status = resp.status;
+    throw error;
   }
   return resp;
+}
+
+async function saveSettingsBatch(settings) {
+  return apiFetch(API + '/batch', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({settings}),
+  });
 }
 
 async function logout() {
@@ -518,6 +546,10 @@ function renderCustomers(customers) {
                 </div>
               </div>
             </div>
+            <div class="mobile-card-metric">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Marketing</span>
+              ${c.channel === 'whatsapp' ? `<button type="button" class="badge ${c.marketing_opt_in ? 'badge-green' : 'badge-gray'} mt-1" onclick="changeCustomerMarketingConsent('${c.id}', ${!c.marketing_opt_in})">${c.marketing_opt_in ? 'Autorizado' : 'Sin permiso'}</button>` : '<span class="text-xs text-gray-400 mt-1">No aplica</span>'}
+            </div>
           </div>
           <div class="mt-4">
             <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Tags</div>
@@ -537,6 +569,7 @@ function renderCustomers(customers) {
     <th class="sortable" onclick="sortCustomers('orders')">Pedidos${sortArrow('customers','orders')}</th>
     <th class="sortable" onclick="sortCustomers('spent')">Gastado${sortArrow('customers','spent')}</th>
     <th class="sortable" onclick="sortCustomers('state')">Estado${sortArrow('customers','state')}</th>
+    <th>Marketing</th>
     <th></th></tr></thead><tbody>`;
   for (const c of customers) {
     const tags = (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) || [];
@@ -583,6 +616,7 @@ function renderCustomers(customers) {
           </div>
         </div>
       </td>
+      <td>${c.channel === 'whatsapp' ? `<button type="button" class="badge ${c.marketing_opt_in ? 'badge-green' : 'badge-gray'}" onclick="changeCustomerMarketingConsent('${c.id}', ${!c.marketing_opt_in})">${c.marketing_opt_in ? 'Autorizado' : 'Sin permiso'}</button>` : '<span class="text-xs text-gray-400">No aplica</span>'}</td>
       <td class="customer-actions-cell">
         <button class="btn btn-danger btn-icon text-xs" onclick="deleteCustomer('${c.id}')" title="Eliminar cliente" aria-label="Eliminar cliente">${renderDeleteIcon('Eliminar cliente')}</button>
       </td>
@@ -766,6 +800,28 @@ async function changeCustomerState(customerId, conversationState) {
   Object.assign(customer, payload.customer || {conversation_state: conversationState});
   renderCustomers(getVisibleCustomers());
   toast('Estado actualizado');
+}
+
+async function changeCustomerMarketingConsent(customerId, marketingOptIn) {
+  const customer = _customersData.find(item => item.id === customerId);
+  if (!customer || customer.channel !== 'whatsapp') return;
+  if (marketingOptIn && !confirm('Confirma que este cliente autorizó explícitamente recibir mensajes de marketing por WhatsApp.')) return;
+
+  const resp = await apiFetch(API + '/customers/' + customerId, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({marketing_opt_in: marketingOptIn}),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    toast(data.detail || 'Error actualizando consentimiento', '#dc2626');
+    return;
+  }
+
+  const payload = await resp.json().catch(() => ({}));
+  Object.assign(customer, payload.customer || {marketing_opt_in: marketingOptIn});
+  renderCustomers(getVisibleCustomers());
+  toast(marketingOptIn ? 'Consentimiento registrado' : 'Consentimiento retirado');
 }
 
 async function deleteCustomer(customerId) {
@@ -1464,19 +1520,9 @@ async function saveExchangeRateSetting() {
     }
   }
 
-  await apiFetch(API + '/exchange_rate_reference', {
-    method: 'PUT',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({value: reference}),
-  });
-
-  if (reference === 'manual') {
-    await apiFetch(API + '/manual_exchange_rate', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({value: manualValue}),
-    });
-  }
+  const updates = {exchange_rate_reference: reference};
+  if (reference === 'manual') updates.manual_exchange_rate = manualValue;
+  await saveSettingsBatch(updates);
 
   toast('Referencia de tasa guardada');
   await loadSettings();
@@ -1497,18 +1543,10 @@ async function saveDiscountSettings() {
     return;
   }
 
-  await Promise.all([
-    apiFetch(API + '/order_discount_percent', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({value: percent}),
-    }),
-    apiFetch(API + '/order_discount_threshold_usd', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({value: threshold}),
-    }),
-  ]);
+  await saveSettingsBatch({
+    order_discount_percent: percent,
+    order_discount_threshold_usd: threshold,
+  });
 
   toast('Descuento guardado');
   await loadSettings();
@@ -1653,22 +1691,13 @@ async function saveProviderSettings() {
     toast('Historial debe ser entre 5 y 50', '#dc2626'); return;
   }
 
-  await apiFetch(API + '/switch-provider?provider=' + provider + '&model=' + model, {method: 'POST'});
-  await apiFetch(API + '/llm_temperature', {
-    method: 'PUT', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({value: temp}),
-  });
-  await apiFetch(API + '/llm_max_tokens', {
-    method: 'PUT', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({value: maxTokens}),
-  });
-  await apiFetch(API + '/max_conversation_history', {
-    method: 'PUT', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({value: maxHistory}),
-  });
-  await apiFetch(API + '/ai_orchestration_mode', {
-    method: 'PUT', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({value: orchestrationMode}),
+  await saveSettingsBatch({
+    llm_provider: provider,
+    llm_model: model,
+    llm_temperature: temp,
+    llm_max_tokens: maxTokens,
+    max_conversation_history: maxHistory,
+    ai_orchestration_mode: orchestrationMode,
   });
 
   toast('Configuracion guardada');
@@ -1681,9 +1710,11 @@ async function saveFallbackSettings() {
   const provider = document.getElementById('set-fb-provider').value;
   const model = document.getElementById('set-fb-model').value;
 
-  await apiFetch(API + '/auto_fallback', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:enabled})});
-  await apiFetch(API + '/fallback_provider', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:provider})});
-  await apiFetch(API + '/fallback_model', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:model})});
+  await saveSettingsBatch({
+    auto_fallback: enabled,
+    fallback_provider: provider,
+    fallback_model: model,
+  });
 
   toast('Fallback guardado');
   await loadSettings();

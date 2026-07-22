@@ -224,6 +224,7 @@ Add environment variables in the Variables tab:
 | `RAILWAY_API_TOKEN`             | Your Railway API token (see Part 5.6)              |
 | `APP_BASE_URL`                  | Your generated Railway service URL (required)      |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `300`                                              |
+| `HEALTH_CHECK_MAX_CONCURRENT`   | `10`                                               |
 
 
 Set `APP_BASE_URL` to the Railway-generated service URL (for example,

@@ -141,12 +141,11 @@ def _build_orchestration_decision(
 
     if resolved_mode == "shadow":
         logger.info(
-            "Shadow route decision: route=%s agent=%s intent=%s confidence=%.2f reason=%s",
+            "Shadow route decision: route=%s agent=%s intent=%s confidence=%.2f",
             route_decision.route,
             route_agent.name,
             route_decision.intent,
             route_decision.confidence,
-            route_decision.reason,
         )
     elif resolved_mode == "multi_agent" and (fallback_to_legacy or route_fallback):
         logger.info("Route '%s' has no registered agent; falling back to legacy", route_decision.route)

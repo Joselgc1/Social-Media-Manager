@@ -59,13 +59,23 @@ async def execute_broadcast(broadcast_id: str) -> dict:
             )
         }
 
+    channel = str(broadcast["target_channel"] or "whatsapp").strip().lower()
+    if channel != "whatsapp":
+        return {"error": "Broadcast delivery is supported only for opted-in WhatsApp customers."}
+
     from app.channels.whatsapp_sender import send_template
 
-    # Mark as sending
-    await db.execute(
-        "UPDATE broadcasts SET status = 'sending', sent_at = NOW() WHERE id = :id",
+    broadcast = await db.fetch_one(
+        """
+        UPDATE broadcasts
+        SET status = 'sending', sent_at = NOW()
+        WHERE id = :id AND status IN ('draft', 'scheduled')
+        RETURNING *
+        """,
         {"id": broadcast_id},
     )
+    if not broadcast:
+        return {"error": "Broadcast was already claimed by another sender."}
 
     try:
         target_tags = broadcast["target_tags"]
@@ -77,36 +87,51 @@ async def execute_broadcast(broadcast_id: str) -> dict:
         if isinstance(template_params, str):
             template_params = json.loads(template_params)
 
-        channel = broadcast["target_channel"] if broadcast["target_channel"] else "whatsapp"
-        customers = await _query_customers_by_tags(tags=target_tags, channel=channel)
+        await _seed_delivery_ledger(broadcast_id, target_tags)
 
-        if not customers:
-            await db.execute(
-                "UPDATE broadcasts SET status = 'sent', recipients = 0 WHERE id = :id",
-                {"id": broadcast_id},
-            )
-            return {"broadcast_id": broadcast_id, "recipients": 0, "message": "No matching customers found."}
-
-        # Send to each customer
-        sent = 0
-        errors = 0
-
-        for customer in customers:
+        while True:
+            delivery = await _claim_next_delivery(broadcast_id)
+            if not delivery:
+                break
             try:
+                customer = {
+                    "display_name": delivery["display_name"],
+                    "platform_id": delivery["platform_id"],
+                }
                 params = _personalize_params(template_params, customer)
                 await send_template(
-                    to=customer["platform_id"],
+                    to=delivery["platform_id"],
                     template_name=template_name,
                     language="es",
                     parameters=params,
                 )
-                sent += 1
+                await db.execute(
+                    """
+                    UPDATE broadcast_deliveries
+                    SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+                    WHERE id = :id AND status = 'sending'
+                    """,
+                    {"id": delivery["id"]},
+                )
                 await asyncio.sleep(SEND_DELAY)
             except Exception as e:
-                logger.error(f"Broadcast send failed for {_mask_platform_id(customer['platform_id'])}: {e}")
-                errors += 1
+                logger.error(
+                    "Broadcast send failed for %s: %s",
+                    _mask_platform_id(delivery["platform_id"]),
+                    e,
+                )
+                await db.execute(
+                    """
+                    UPDATE broadcast_deliveries
+                    SET status = 'failed', failed_at = NOW(), last_error = :error, updated_at = NOW()
+                    WHERE id = :id AND status = 'sending'
+                    """,
+                    {"id": delivery["id"], "error": type(e).__name__[:100]},
+                )
 
-        # Update broadcast record
+        counts = await _delivery_counts(broadcast_id)
+        sent = counts["sent"]
+        errors = counts["failed"] + counts["sending"]
         final_status = "sent" if errors == 0 else ("partial" if sent > 0 else "failed")
         await db.execute(
             "UPDATE broadcasts SET status = :status, recipients = :sent WHERE id = :id",
@@ -129,6 +154,7 @@ async def execute_broadcast(broadcast_id: str) -> dict:
             "recipients": sent,
             "errors": errors,
             "status": final_status,
+            "pending_reconciliation": counts["sending"],
         }
 
     except Exception as e:
@@ -147,7 +173,7 @@ async def _query_customers_by_tags(tags: list[str], channel: str = "whatsapp") -
     Uses PostgreSQL's JSONB @> operator for efficient tag matching.
     Each tag must be present in the customer's tags array.
     """
-    if not tags:
+    if not tags or channel != "whatsapp":
         return []
 
     # Build a single JSONB containment check: tags must contain ALL specified tags
@@ -156,15 +182,93 @@ async def _query_customers_by_tags(tags: list[str], channel: str = "whatsapp") -
     query = """
         SELECT id, platform_id, display_name, tags
         FROM customers
-        WHERE channel = :channel
+        WHERE channel = 'whatsapp'
+          AND marketing_opt_in = TRUE
+          AND marketing_opt_in_at IS NOT NULL
           AND is_blocked = FALSE
           AND conversation_state != 'blocked'
           AND CAST(tags AS jsonb) @> CAST(:tags_json AS jsonb)
         ORDER BY last_active DESC
     """
 
-    rows = await db.fetch_all(query, {"channel": channel, "tags_json": tags_json})
+    rows = await db.fetch_all(query, {"tags_json": tags_json})
     return [dict(r) for r in rows]
+
+
+async def _seed_delivery_ledger(broadcast_id: str, tags: list[str]) -> None:
+    """Snapshot the eligible audience once so resets cannot expand or duplicate it."""
+    async with db.get_db().transaction():
+        broadcast = await db.fetch_one(
+            "SELECT audience_seeded_at FROM broadcasts WHERE id = :id FOR UPDATE",
+            {"id": broadcast_id},
+        )
+        if not broadcast or broadcast["audience_seeded_at"] is not None:
+            return
+
+        if tags:
+            await db.execute(
+                """
+            INSERT INTO broadcast_deliveries (
+                broadcast_id, customer_id, platform_id, channel, display_name
+            )
+            SELECT :broadcast_id, id, platform_id, 'whatsapp', display_name
+            FROM customers
+            WHERE channel = 'whatsapp'
+              AND marketing_opt_in = TRUE
+              AND marketing_opt_in_at IS NOT NULL
+              AND is_blocked = FALSE
+              AND conversation_state != 'blocked'
+              AND CAST(tags AS jsonb) @> CAST(:tags_json AS jsonb)
+            ON CONFLICT (broadcast_id, channel, platform_id) DO NOTHING
+            """,
+                {"broadcast_id": broadcast_id, "tags_json": json.dumps(tags)},
+            )
+        await db.execute(
+            "UPDATE broadcasts SET audience_seeded_at = NOW() WHERE id = :id",
+            {"id": broadcast_id},
+        )
+
+
+async def _claim_next_delivery(broadcast_id: str):
+    """Atomically claim one never-attempted recipient across all workers."""
+    return await db.fetch_one(
+        """
+        WITH candidate AS (
+            SELECT id
+            FROM broadcast_deliveries
+            WHERE broadcast_id = :broadcast_id AND status = 'pending'
+            ORDER BY created_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE broadcast_deliveries AS delivery
+        SET status = 'sending', attempt_count = attempt_count + 1,
+            claimed_at = NOW(), updated_at = NOW()
+        FROM candidate
+        WHERE delivery.id = candidate.id
+        RETURNING delivery.id, delivery.platform_id, delivery.display_name
+        """,
+        {"broadcast_id": broadcast_id},
+    )
+
+
+async def _delivery_counts(broadcast_id: str) -> dict[str, int]:
+    row = await db.fetch_one(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'sent') AS sent,
+            COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+            COUNT(*) FILTER (WHERE status = 'sending') AS sending,
+            COUNT(*) FILTER (WHERE status = 'pending') AS pending
+        FROM broadcast_deliveries
+        WHERE broadcast_id = :broadcast_id
+        """,
+        {"broadcast_id": broadcast_id},
+    )
+    return {
+        key: int(row[key] or 0) if row else 0
+        for key in ("sent", "failed", "sending", "pending")
+    }
 
 
 def _personalize_params(template_params: list | dict | None, customer: dict) -> list[str] | None:
@@ -197,6 +301,9 @@ async def create_broadcast(
     scheduled_at: datetime | None = None,
 ) -> dict:
     """Create a new broadcast record."""
+    target_channel = str(target_channel or "").strip().lower()
+    if target_channel != "whatsapp":
+        raise ValueError("Broadcasts can target only WhatsApp customers.")
     status = "scheduled" if scheduled_at else "draft"
 
     broadcast_id = await db.execute(
@@ -241,8 +348,26 @@ async def list_broadcasts(limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def list_broadcast_deliveries(broadcast_id: str, limit: int = 500) -> list[dict]:
+    """List durable recipient outcomes for audit and reconciliation."""
+    rows = await db.fetch_all(
+        """
+        SELECT id, customer_id, platform_id, channel, display_name, status,
+               attempt_count, claimed_at, sent_at, failed_at, last_error
+        FROM broadcast_deliveries
+        WHERE broadcast_id = :broadcast_id
+        ORDER BY created_at, id
+        LIMIT :limit
+        """,
+        {"broadcast_id": broadcast_id, "limit": max(1, min(limit, 1000))},
+    )
+    return [dict(row) for row in rows]
+
+
 async def preview_broadcast(target_tags: list[str], channel: str = "whatsapp") -> dict:
     """Preview how many customers would receive a broadcast with these tags."""
+    if str(channel or "").strip().lower() != "whatsapp":
+        raise ValueError("Broadcasts can target only WhatsApp customers.")
     customers = await _query_customers_by_tags(target_tags, channel)
     return {
         "target_tags": target_tags,

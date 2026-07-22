@@ -4,11 +4,13 @@ Reads product data from a shared Google Sheet and caches it in memory.
 Refreshes every N minutes (configurable via settings).
 """
 
+import asyncio
 import base64
 import json
 import logging
 import re
 import time
+from threading import Lock
 from urllib.parse import parse_qs, urlparse
 
 import gspread
@@ -22,6 +24,13 @@ logger = logging.getLogger(__name__)
 _catalog_cache: list[dict] = []
 _catalog_ts: float = 0
 _refresh_interval: int = 900  # 15 minutes in seconds
+_refresh_failures: int = 0
+_next_refresh_allowed: float = 0
+_refresh_generation: int = 0
+_last_refresh_succeeded: bool = False
+_refresh_lock = Lock()
+_REFRESH_BACKOFF_BASE_SECONDS = 60
+_REFRESH_BACKOFF_MAX_SECONDS = 900
 _IMAGE_FORMULA_RE = re.compile(r'=\s*IMAGE\s*\(\s*"([^"]+)"', re.IGNORECASE)
 _HYPERLINK_FORMULA_RE = re.compile(r'=\s*HYPERLINK\s*\(\s*"([^"]+)"', re.IGNORECASE)
 _SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]
@@ -39,83 +48,104 @@ def _get_gspread_client() -> gspread.Client:
     return gspread.authorize(credentials)
 
 
-def refresh_catalog():
+def refresh_catalog(*, force: bool = False) -> bool:
     """
     Pull the latest product data from Google Sheets.
     Called periodically by the scheduler and once at startup.
     """
-    global _catalog_cache, _catalog_ts
+    global _catalog_cache, _catalog_ts, _refresh_failures, _next_refresh_allowed
+    global _refresh_generation, _last_refresh_succeeded
 
-    try:
-        config = get_config()
-        client = _get_gspread_client()
-        sheet = client.open_by_key(config.product_sheet_id).sheet1
+    if not force and time.monotonic() < _next_refresh_allowed:
+        return False
+    observed_generation = _refresh_generation
 
-        # Expected columns (legacy): SKU, Product name, Category, Description,
-        #                            Sizes, Price USD, Stock, Active, Image URL
-        # Expected columns (variant-aware): SKU, Parent SKU, Product name, Category,
-        #                                   Description, Size, Price USD, Stock, Active, Image URL
-        records = sheet.get_all_records()
+    with _refresh_lock:
+        if not force and _refresh_generation != observed_generation:
+            return _last_refresh_succeeded
+        if not force and time.monotonic() < _next_refresh_allowed:
+            return False
         try:
-            formula_records = sheet.get_all_records(value_render_option="FORMULA")
-        except Exception:
-            formula_records = records
+            config = get_config()
+            client = _get_gspread_client()
+            sheet = client.open_by_key(config.product_sheet_id).sheet1
 
-        products = []
-        for idx, row in enumerate(records):
-            # Skip inactive or out-of-stock products
-            if str(row.get("Active", "")).strip().lower() != "yes":
-                continue
-            if int(row.get("Stock", 0)) <= 0:
-                continue
+            # Expected columns (legacy): SKU, Product name, Category, Description,
+            #                            Sizes, Price USD, Stock, Active, Image URL
+            # Expected columns (variant-aware): SKU, Parent SKU, Product name, Category,
+            #                                   Description, Size, Price USD, Stock, Active, Image URL
+            records = sheet.get_all_records()
+            try:
+                formula_records = sheet.get_all_records(value_render_option="FORMULA")
+            except Exception:
+                formula_records = records
 
-            formula_row = formula_records[idx] if idx < len(formula_records) else {}
-            raw_image_value = (
-                formula_row.get("Image URL")
-                if isinstance(formula_row, dict)
-                else None
+            products = []
+            for idx, row in enumerate(records):
+                # Skip inactive or out-of-stock products
+                if str(row.get("Active", "")).strip().lower() != "yes":
+                    continue
+                if int(row.get("Stock", 0)) <= 0:
+                    continue
+
+                formula_row = formula_records[idx] if idx < len(formula_records) else {}
+                raw_image_value = (
+                    formula_row.get("Image URL")
+                    if isinstance(formula_row, dict)
+                    else None
+                )
+                image_url = normalize_sheet_image_url(raw_image_value or row.get("Image URL", ""))
+                size_value = str(row.get("Size", "")).strip().upper()
+                sizes_value = str(row.get("Sizes", "")).strip()
+
+                products.append({
+                    "sku": str(row.get("SKU", "")).strip(),
+                    "parent_sku": str(row.get("Parent SKU", "")).strip(),
+                    "product_name": str(row.get("Product name", "")).strip(),
+                    "category": str(row.get("Category", "")).strip(),
+                    "description": str(row.get("Description", "")).strip(),
+                    "size": size_value,
+                    "sizes": size_value or sizes_value,
+                    "price_usd": float(row.get("Price USD", 0)),
+                    "stock": int(row.get("Stock", 0)),
+                    "image_url": image_url,
+                })
+
+            _catalog_cache = products
+            _catalog_ts = time.time()
+            _refresh_failures = 0
+            _next_refresh_allowed = 0
+            _refresh_generation += 1
+            _last_refresh_succeeded = True
+            logger.info(
+                "Catalog refreshed: %s active variants loaded across %s grouped products.",
+                len(products),
+                count_grouped_catalog_products(products),
             )
-            image_url = normalize_sheet_image_url(raw_image_value or row.get("Image URL", ""))
-            size_value = str(row.get("Size", "")).strip().upper()
-            sizes_value = str(row.get("Sizes", "")).strip()
+            return True
 
-            products.append({
-                "sku": str(row.get("SKU", "")).strip(),
-                "parent_sku": str(row.get("Parent SKU", "")).strip(),
-                "product_name": str(row.get("Product name", "")).strip(),
-                "category": str(row.get("Category", "")).strip(),
-                "description": str(row.get("Description", "")).strip(),
-                "size": size_value,
-                "sizes": size_value or sizes_value,
-                "price_usd": float(row.get("Price USD", 0)),
-                "stock": int(row.get("Stock", 0)),
-                "image_url": image_url,
-            })
+        except Exception as e:
+            _refresh_failures += 1
+            backoff = min(
+                _REFRESH_BACKOFF_BASE_SECONDS * (2 ** min(_refresh_failures - 1, 4)),
+                _REFRESH_BACKOFF_MAX_SECONDS,
+            )
+            _next_refresh_allowed = time.monotonic() + backoff
+            _refresh_generation += 1
+            _last_refresh_succeeded = False
+            logger.error("Failed to refresh catalog from Google Sheets: %s; retry in %ss", e, backoff)
+            return False
 
-        _catalog_cache = products
-        _catalog_ts = time.time()
-        logger.info(
-            "Catalog refreshed: %s active variants loaded across %s grouped products.",
-            len(products),
-            count_grouped_catalog_products(products),
-        )
 
-    except Exception as e:
-        logger.error(f"Failed to refresh catalog from Google Sheets: {e}")
-        # Keep the old cache if the refresh fails
+async def refresh_catalog_async(*, force: bool = False) -> bool:
+    """Refresh through a worker thread so Google APIs never block the event loop."""
+    return await asyncio.to_thread(refresh_catalog, force=force)
 
 
 def get_cached_catalog() -> list[dict]:
     """
-    Return the cached product catalog.
-    If the cache is stale, triggers a synchronous refresh.
+    Return the in-memory product catalog without performing network I/O.
     """
-    global _catalog_cache, _catalog_ts
-
-    now = time.time()
-    if not _catalog_cache or (now - _catalog_ts) > _refresh_interval:
-        refresh_catalog()
-
     return _catalog_cache
 
 
@@ -379,7 +409,7 @@ def _update_stock(items: list[dict], direction: int) -> dict[str, int]:
             sheet.batch_update(updates, raw=True)
         for sku, updated_stock in new_stock.items():
             logger.info("Stock updated for %s: %s", sku, updated_stock)
-        refresh_catalog()
+        refresh_catalog(force=True)
         return new_stock
     except InventoryUpdateError:
         raise

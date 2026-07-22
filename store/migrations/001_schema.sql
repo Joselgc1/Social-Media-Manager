@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS customers (
     last_shipping_address TEXT,
     last_shipping_city    TEXT,
     last_shipping_method  TEXT,
+    marketing_opt_in      BOOLEAN NOT NULL DEFAULT FALSE,
+    marketing_opt_in_at   TIMESTAMPTZ,
+    marketing_opt_out_at  TIMESTAMPTZ,
     UNIQUE(channel, platform_id)
 );
 
@@ -61,6 +64,9 @@ ALTER TABLE customers
 
 CREATE INDEX IF NOT EXISTS idx_customers_tags ON customers USING gin(tags);
 CREATE INDEX IF NOT EXISTS idx_customers_last_active ON customers(last_active DESC);
+CREATE INDEX IF NOT EXISTS idx_customers_marketing_whatsapp
+    ON customers(last_active DESC)
+    WHERE channel = 'whatsapp' AND marketing_opt_in = TRUE;
 CREATE INDEX IF NOT EXISTS idx_customers_expired_automatic_escalations
     ON customers(escalation_expires_at ASC, id)
     WHERE conversation_state = 'escalated'
@@ -181,9 +187,32 @@ CREATE TABLE IF NOT EXISTS broadcasts (
     target_channel  TEXT DEFAULT 'whatsapp',
     scheduled_at    TIMESTAMPTZ,
     sent_at         TIMESTAMPTZ,
+    audience_seeded_at TIMESTAMPTZ,
     recipients      INTEGER DEFAULT 0,
     status          TEXT DEFAULT 'draft'         -- "draft", "scheduled", "sending", "sent", "partial", "failed"
 );
+
+CREATE TABLE IF NOT EXISTS broadcast_deliveries (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    broadcast_id    UUID NOT NULL REFERENCES broadcasts(id) ON DELETE CASCADE,
+    customer_id     UUID REFERENCES customers(id) ON DELETE SET NULL,
+    platform_id     TEXT NOT NULL,
+    channel         TEXT NOT NULL DEFAULT 'whatsapp' CHECK (channel = 'whatsapp'),
+    display_name    TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    claimed_at      TIMESTAMPTZ,
+    sent_at         TIMESTAMPTZ,
+    failed_at       TIMESTAMPTZ,
+    last_error      TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (broadcast_id, channel, platform_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_claim
+    ON broadcast_deliveries(broadcast_id, status, created_at);
 
 -- ============================================================
 -- Settings (key-value store for admin config)
@@ -680,6 +709,7 @@ ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE broadcasts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE broadcast_deliveries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE usage_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai_run_logs ENABLE ROW LEVEL SECURITY;
@@ -711,7 +741,8 @@ REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC, anon, authentica
 
 INSERT INTO schema_migrations (version, name) VALUES
     (1, 'fresh_install_baseline'),
-    (2, 'versioned_schema_and_security_hardening')
+    (2, 'versioned_schema_and_security_hardening'),
+    (3, 'broadcast_delivery_safety')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

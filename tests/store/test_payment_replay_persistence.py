@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -83,6 +84,64 @@ async def test_existing_fingerprint_stops_second_order_before_update():
         "existing_order_id": "order-1",
     }
     execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "failed", "rejected"])
+async def test_paid_status_regression_reverses_customer_totals(status):
+    from app.crm import orders
+
+    row = {
+        "id": "order-1",
+        "customer_id": "customer-1",
+        "total": 75,
+        "payment_status": "proof_received",
+        "customer_totals_applied": True,
+    }
+    execute = AsyncMock(return_value=None)
+    revert = AsyncMock(return_value=None)
+
+    with (
+        patch.object(orders.db, "get_db", return_value=_transactional_db()),
+        patch.object(orders.db, "fetch_one", AsyncMock(return_value=row)),
+        patch.object(orders.db, "execute", execute),
+        patch.object(orders, "_revert_paid_customer_updates", revert),
+    ):
+        result = await orders.update_order_payment_status("order-1", status)
+
+    assert result["customer_totals_applied"] is False
+    revert.assert_awaited_once_with("customer-1", 75.0)
+    assert execute.await_count == 2
+    assert "customer_totals_applied = FALSE" in execute.await_args_list[1].args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("total_orders", "total_spent", "starting_tags", "expected_tags"),
+    [
+        (1, 40, ["new_lead", "repeat_buyer", "vip"], ["new_lead"]),
+        (2, 40, ["new_lead", "vip"], ["new_lead", "repeat_buyer"]),
+        (2, 100, ["new_lead"], ["new_lead", "repeat_buyer", "vip"]),
+    ],
+)
+async def test_purchase_tier_tags_are_reconciled_from_current_totals(
+    total_orders, total_spent, starting_tags, expected_tags
+):
+    from app.crm import customers
+
+    execute = AsyncMock(return_value=None)
+    row = {
+        "total_orders": total_orders,
+        "total_spent": total_spent,
+        "tags": starting_tags,
+    }
+    with (
+        patch.object(customers.db, "fetch_one", AsyncMock(return_value=row)),
+        patch.object(customers.db, "execute", execute),
+    ):
+        await customers.sync_purchase_tier_tags("customer-1")
+
+    assert json.loads(execute.await_args.args[1]["tags"]) == expected_tags
 
 
 @pytest.mark.asyncio

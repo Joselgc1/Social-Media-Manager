@@ -83,7 +83,7 @@ async def test_valid_payment_proof_updates_order_and_payment_session(monkeypatch
     assert call.kwargs["proof_metadata"]["reference"] == "TXN-123456"
     set_current_order.assert_awaited_once_with(
         "customer-1",
-        "order-1",
+        None,
         workflow_stage="completed",
         active_agent="payment",
     )
@@ -100,7 +100,12 @@ async def test_duplicate_payment_proof_is_idempotent(monkeypatch):
 
     assert result.status == "verified"
     update_order_payment_status.assert_not_awaited()
-    set_current_order.assert_not_awaited()
+    set_current_order.assert_awaited_once_with(
+        "customer-1",
+        None,
+        workflow_stage="completed",
+        active_agent="payment",
+    )
 
 
 @pytest.mark.asyncio

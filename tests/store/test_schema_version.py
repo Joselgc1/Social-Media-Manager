@@ -12,7 +12,7 @@ async def test_store_schema_version_accepts_exact_supported_version(monkeypatch)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [None, 1, 3])
+@pytest.mark.parametrize("version", [None, 1, 2, 4])
 async def test_store_schema_version_rejects_missing_old_or_new_versions(monkeypatch, version):
     row = {"version": version} if version is not None else None
     monkeypatch.setattr(db, "fetch_one", AsyncMock(return_value=row))

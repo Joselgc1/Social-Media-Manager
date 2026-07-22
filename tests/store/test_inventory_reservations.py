@@ -38,6 +38,14 @@ def _items():
     return [{"sku": "SKU-S", "product_name": "Pijama", "size": "S", "quantity": 1}]
 
 
+def _order_settings():
+    return {
+        "payment_methods": [
+            {"id": "pm-zelle", "name": "Zelle", "information": "pagos@example.com"},
+        ],
+    }
+
+
 def test_sheet_inventory_uses_one_batch_after_validating_every_item():
     from app.catalog import sheets
 
@@ -98,13 +106,15 @@ async def test_order_reserves_inventory_before_database_insert():
 
     with (
         patch.object(orders, "get_cached_catalog", return_value=_catalog()),
-        patch.object(orders.db, "get_settings", AsyncMock(return_value={})),
+        patch.object(orders.db, "get_settings", AsyncMock(return_value=_order_settings())),
         patch.object(orders.db, "get_db", return_value=_database()),
         patch.object(orders.db, "fetch_one", fetch_one),
         patch.object(orders.db, "execute", execute),
         patch.object(orders, "deduct_stock", deduct),
     ):
-        result = await orders.create_order("customer-1", _items(), "Zelle")
+        result = await orders.create_order(
+            "customer-1", _items(), "Zelle", "Caracas", "Av. Principal", "mrw"
+        )
 
     assert events == ["deduct", "insert"]
     assert result["created_new"] is True
@@ -119,7 +129,7 @@ async def test_failed_order_insert_compensates_inventory_reservation():
     restore = MagicMock()
     with (
         patch.object(orders, "get_cached_catalog", return_value=_catalog()),
-        patch.object(orders.db, "get_settings", AsyncMock(return_value={})),
+        patch.object(orders.db, "get_settings", AsyncMock(return_value=_order_settings())),
         patch.object(orders.db, "get_db", return_value=_database()),
         patch.object(orders.db, "fetch_one", AsyncMock(side_effect=[None, None, None])),
         patch.object(orders.db, "execute", AsyncMock(side_effect=RuntimeError("insert failed"))),
@@ -127,7 +137,9 @@ async def test_failed_order_insert_compensates_inventory_reservation():
         patch.object(orders, "restore_stock", restore),
         pytest.raises(RuntimeError, match="insert failed"),
     ):
-        await orders.create_order("customer-1", _items(), "Zelle")
+        await orders.create_order(
+            "customer-1", _items(), "Zelle", "Caracas", "Av. Principal", "mrw"
+        )
 
     deduct.assert_called_once()
     restore.assert_called_once()
@@ -139,7 +151,7 @@ async def test_failed_compensation_is_propagated_for_manual_reconciliation():
 
     with (
         patch.object(orders, "get_cached_catalog", return_value=_catalog()),
-        patch.object(orders.db, "get_settings", AsyncMock(return_value={})),
+        patch.object(orders.db, "get_settings", AsyncMock(return_value=_order_settings())),
         patch.object(orders.db, "get_db", return_value=_database()),
         patch.object(orders.db, "fetch_one", AsyncMock(side_effect=[None, None, None])),
         patch.object(orders.db, "execute", AsyncMock(side_effect=RuntimeError("insert failed"))),
@@ -147,7 +159,45 @@ async def test_failed_compensation_is_propagated_for_manual_reconciliation():
         patch.object(orders, "restore_stock", MagicMock(side_effect=RuntimeError("restore failed"))),
         pytest.raises(RuntimeError, match="manual reconciliation"),
     ):
-        await orders.create_order("customer-1", _items(), "Zelle")
+        await orders.create_order(
+            "customer-1", _items(), "Zelle", "Caracas", "Av. Principal", "mrw"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("items", "city", "address", "method", "message"),
+    [
+        ([], "Caracas", "Av. Principal", "mrw", "at least one item"),
+        (_items(), " ", "Av. Principal", "mrw", "shipping city"),
+        (_items(), "Caracas", " ", "mrw", "shipping address"),
+        (_items(), "Caracas", "Av. Principal", "pickup", "MRW or Zoom"),
+    ],
+)
+async def test_order_rejects_malformed_required_fields_before_side_effects(
+    items, city, address, method, message
+):
+    from app.crm import orders
+
+    with pytest.raises(ValueError, match=message):
+        await orders.create_order("customer-1", items, "Zelle", city, address, method)
+
+
+@pytest.mark.asyncio
+async def test_order_rejects_unconfigured_payment_method_before_inventory_mutation():
+    from app.crm import orders
+
+    deduct = MagicMock()
+    with (
+        patch.object(orders.db, "get_settings", AsyncMock(return_value=_order_settings())),
+        patch.object(orders, "deduct_stock", deduct),
+        pytest.raises(ValueError, match="not configured"),
+    ):
+        await orders.create_order(
+            "customer-1", _items(), "Inventado", "Caracas", "Av. Principal", "mrw"
+        )
+
+    deduct.assert_not_called()
 
 
 @pytest.mark.asyncio
