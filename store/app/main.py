@@ -30,6 +30,7 @@ from app.broadcast.scheduler import get_scheduler, start_scheduler, stop_schedul
 from app.catalog.pdf_generator import ensure_catalog_pdf, invalidate_catalog_pdf
 from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog_async
 from app.config import get_config
+from app.log_redaction import install_secret_redaction_filter
 from app.request_limits import RequestBodyLimitMiddleware
 from app.test_endpoint import router as test_router
 
@@ -39,6 +40,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+install_secret_redaction_filter()
 logger = logging.getLogger(__name__)
 
 # ── Rate limiter ─────────────────────────────────────────────

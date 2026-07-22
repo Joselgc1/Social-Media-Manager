@@ -106,3 +106,30 @@ async def test_concurrent_async_refreshes_share_one_sheets_request(monkeypatch, 
     assert results == [True, True]
     assert get_client.call_count == 1
     assert catalog_state.get_cached_catalog()[0]["sku"] == "SKU-1"
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_catalog_refreshes_stale_cache(monkeypatch, catalog_state):
+    catalog_state._catalog_cache = [{"sku": "OLD"}]
+    catalog_state._catalog_ts = time.time() - catalog_state.catalog_max_age_seconds() - 1
+    refreshed = [{"sku": "NEW"}]
+
+    async def refresh(force=False):
+        assert force is True
+        catalog_state._catalog_cache = refreshed
+        catalog_state._catalog_ts = time.time()
+        return True
+
+    monkeypatch.setattr(catalog_state, "refresh_catalog_async", refresh)
+
+    assert await catalog_state.ensure_fresh_catalog() == refreshed
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_catalog_fails_closed_when_refresh_cannot_prove_freshness(monkeypatch, catalog_state):
+    catalog_state._catalog_cache = [{"sku": "OLD"}]
+    catalog_state._catalog_ts = time.time() - catalog_state.catalog_max_age_seconds() - 1
+    monkeypatch.setattr(catalog_state, "refresh_catalog_async", AsyncMock(return_value=False))
+
+    with pytest.raises(catalog_state.InventoryUpdateError, match="stale"):
+        await catalog_state.ensure_fresh_catalog()

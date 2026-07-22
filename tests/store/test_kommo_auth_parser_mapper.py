@@ -381,7 +381,7 @@ def test_instagram_comment_mirror_uses_confirmed_private_message_shape(
     assert native_event.message_type == "text"
     assert native_event.talk_id == "105"
     assert native_event.interaction_type == "private_message"
-    assert native_event.correlation_id == "kommo:private_message:105105"
+    assert native_event.correlation_id == "kommo:private_message:chat-a105"
     assert comment_event.channel == "instagram"
     assert comment_event.interaction_type == "instagram_comment"
     assert comment_event.correlation_id == "kommo:instagram_comment:100"
@@ -744,3 +744,104 @@ async def test_kommo_400_text_detail_redacts_secrets_urls_and_message(monkeypatc
     assert "secret-access-token" not in error
     assert "https://acme.kommo.com/api/v4/salesbot/1/continue/2" not in error
     assert len(error) <= 500 + len("Kommo API returned HTTP 400: ")
+
+
+@pytest.mark.asyncio
+async def test_kommo_429_honors_retry_after_before_retrying_continuation(monkeypatch):
+    from app.integrations.kommo import client as kommo_client
+    from app.integrations.kommo.client import KommoClient
+
+    requests = []
+    sleeps = []
+    responses = [429, 202]
+
+    class _Response:
+        content = b""
+
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.headers = {"retry-after": "2"} if status_code == 429 else {}
+
+        @property
+        def text(self):
+            return "rate limited"
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, headers=None, json=None):
+            requests.append((method, url, json))
+            return _Response(responses.pop(0))
+
+    async def _sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(kommo_client, "_NEXT_REQUEST_AT", 0.0)
+    monkeypatch.setattr(kommo_client, "KOMMO_MIN_REQUEST_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(kommo_client.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(kommo_client.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(
+        kommo_client,
+        "get_config",
+        lambda: SimpleNamespace(kommo_subdomain="acme"),
+    )
+
+    await KommoClient(subdomain="acme", access_token="token").continue_salesbot(
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        data={"status": "success", "message": "Hola"},
+    )
+
+    assert len(requests) == 2
+    assert len(sleeps) == 1
+    assert sleeps[0] == pytest.approx(2.0, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_kommo_account_rate_limiter_serializes_consecutive_requests(monkeypatch):
+    from app.integrations.kommo import client as kommo_client
+    from app.integrations.kommo.client import KommoClient
+
+    sleeps = []
+
+    class _Response:
+        status_code = 200
+        content = b"{}"
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, headers=None, json=None):
+            return _Response()
+
+    async def _sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(kommo_client, "_NEXT_REQUEST_AT", 0.0)
+    monkeypatch.setattr(kommo_client, "KOMMO_MIN_REQUEST_INTERVAL_SECONDS", 2.0)
+    monkeypatch.setattr(kommo_client.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(kommo_client.httpx, "AsyncClient", _Client)
+
+    client = KommoClient(subdomain="acme", access_token="token")
+    await client.get_account()
+    await client.get_account()
+
+    assert len(sleeps) == 1
+    assert sleeps[0] > 0

@@ -9,10 +9,18 @@ import json
 import logging
 import re
 import unicodedata
+from contextlib import asynccontextmanager
 from typing import Any
 
 from app import db
-from app.catalog.sheets import deduct_stock, get_cached_catalog, get_product_sizes, restore_stock
+from app.catalog.sheets import (
+    deduct_stock,
+    ensure_fresh_catalog,
+    get_cached_catalog,
+    get_product_sizes,
+    inventory_operation_applied,
+    restore_stock,
+)
 from app.crm import customers
 from app.payment_methods import normalize_payment_methods
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
@@ -26,6 +34,10 @@ ORDER_DISCOUNT_THRESHOLD = float(RUNTIME_SETTING_DEFAULTS["order_discount_thresh
 ORDER_DISCOUNT_RATE = float(RUNTIME_SETTING_DEFAULTS["order_discount_percent"]) / 100.0
 INVENTORY_LOCK_KEY = "store_inventory_google_sheets"
 INVENTORY_RESERVATION_TTL_HOURS = 48
+RESERVATION_IN_PROGRESS = "reservation_pending"
+RESERVATION_FAILED = "reservation_failed"
+RELEASE_IN_PROGRESS = "release_pending"
+RELEASED = "released"
 
 
 def _normalize_order_items(items: list[dict]) -> list[dict]:
@@ -202,12 +214,96 @@ def _normalize_catalog_text(text: str) -> str:
     return re.sub(r"\s+", " ", ascii_text).strip()
 
 
-async def _lock_inventory_mutations() -> None:
-    """Serialize all backend inventory writes across app instances."""
-    await db.fetch_one(
-        "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))",
-        {"key": INVENTORY_LOCK_KEY},
+@asynccontextmanager
+async def _inventory_mutation_connection():
+    """Hold a session advisory lock while coordinating DB state with Sheets."""
+    async with db.get_db().connection() as connection:
+        await connection.fetch_one(
+            "SELECT pg_advisory_lock(hashtextextended(:key, 0))",
+            {"key": INVENTORY_LOCK_KEY},
+        )
+        try:
+            yield connection
+        finally:
+            try:
+                await connection.fetch_one(
+                    "SELECT pg_advisory_unlock(hashtextextended(:key, 0))",
+                    {"key": INVENTORY_LOCK_KEY},
+                )
+            except Exception:
+                logger.exception("Failed to release inventory advisory lock")
+
+
+def _reserve_operation_id(order_id: str) -> str:
+    return f"order:{order_id}:reserve"
+
+
+def _release_operation_id(order_id: str) -> str:
+    return f"order:{order_id}:release"
+
+
+async def _inventory_operation_applied(order_id: str, items: list[dict], direction: int) -> bool:
+    operation_id = _reserve_operation_id(order_id) if direction == -1 else _release_operation_id(order_id)
+    return await asyncio.to_thread(
+        inventory_operation_applied,
+        operation_id,
+        items,
+        direction=direction,
     )
+
+
+async def _deduct_order_inventory(order_id: str, items: list[dict]) -> None:
+    operation_id = _reserve_operation_id(order_id)
+    try:
+        await asyncio.to_thread(deduct_stock, items, operation_id=operation_id)
+    except Exception as mutation_error:
+        try:
+            applied = await _inventory_operation_applied(order_id, items, -1)
+        except Exception as verify_error:
+            logger.exception("Failed to verify inventory reservation operation %s", operation_id)
+            raise mutation_error from verify_error
+        if applied:
+            logger.warning("Inventory reservation operation %s succeeded after a reported Sheets error", operation_id)
+            return
+        raise
+
+
+async def _restore_order_inventory(order_id: str, items: list[dict]) -> None:
+    operation_id = _release_operation_id(order_id)
+    try:
+        await asyncio.to_thread(restore_stock, items, operation_id=operation_id)
+    except Exception as mutation_error:
+        try:
+            applied = await _inventory_operation_applied(order_id, items, 1)
+        except Exception as verify_error:
+            logger.exception("Failed to verify inventory release operation %s", operation_id)
+            raise mutation_error from verify_error
+        if applied:
+            logger.warning("Inventory release operation %s succeeded after a reported Sheets error", operation_id)
+            return
+        raise
+
+
+async def _mark_inventory_reservation_failed(connection, order_id: str) -> None:
+    async with connection.transaction():
+        await connection.execute(
+            """
+            UPDATE orders
+            SET inventory_status = :failed_status,
+                payment_status = CASE
+                    WHEN payment_status = 'pending' THEN 'rejected'
+                    ELSE payment_status
+                END,
+                updated_at = NOW()
+            WHERE id = :oid
+              AND inventory_status = :pending_status
+            """,
+            {
+                "oid": order_id,
+                "failed_status": RESERVATION_FAILED,
+                "pending_status": RESERVATION_IN_PROGRESS,
+            },
+        )
 
 
 async def create_order(
@@ -256,23 +352,30 @@ async def create_order(
     shipping_city = shipping_city.strip()
     shipping_address = shipping_address.strip()
     shipping_method = shipping_method.strip().lower()
+    await ensure_fresh_catalog()
     normalized_items = _normalize_order_items(items)
     pricing = _calculate_order_amounts(normalized_items, settings=settings)
     total = pricing["total"]
     items_json = json.dumps(normalized_items, ensure_ascii=False, sort_keys=True)
 
-    created_new = False
-    inventory_reserved = False
-    try:
-        async with db.get_db().transaction():
-            await db.fetch_one(
-                "SELECT id FROM customers WHERE id = :id FOR UPDATE",
-                {"id": customer_id},
-            )
+    customer_exists = await db.fetch_one(
+        "SELECT id FROM customers WHERE id = :id",
+        {"id": customer_id},
+    )
+    if not customer_exists:
+        raise ValueError("Customer was not found.")
 
-            existing = await db.fetch_one(
+    created_new = False
+    order_id: str | None = None
+    order_status = "pending"
+    order_total = total
+    inventory_status = RESERVATION_IN_PROGRESS
+
+    async with _inventory_mutation_connection() as connection:
+        async with connection.transaction():
+            existing = await connection.fetch_one(
                 """
-                SELECT id, total, payment_status
+                SELECT id, total, payment_status, inventory_status
                 FROM orders
                 WHERE customer_id = :cid
                   AND items = CAST(:items AS jsonb)
@@ -281,7 +384,7 @@ async def create_order(
                   AND COALESCE(shipping_address, '') = COALESCE(:addr, '')
                   AND COALESCE(shipping_method, '') = COALESCE(:method, '')
                   AND payment_status IN ('pending', 'proof_received')
-                  AND inventory_status = 'reserved'
+                  AND inventory_status IN (:reservation_pending, 'reserved')
                   AND created_at >= NOW() - INTERVAL '30 minutes'
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -293,67 +396,111 @@ async def create_order(
                     "city": shipping_city,
                     "addr": shipping_address,
                     "method": shipping_method,
+                    "reservation_pending": RESERVATION_IN_PROGRESS,
                 },
             )
 
             if existing:
-                return {
-                    "order_id": str(existing["id"]),
-                    "items": normalized_items,
-                    "total": float(existing["total"]),
-                    "subtotal": pricing["subtotal"],
-                    "discount_applied": pricing["discount_applied"],
-                    "discount_rate": pricing["discount_rate"],
-                    "discount_percent": pricing["discount_percent"],
-                    "discount_threshold_usd": pricing["discount_threshold_usd"],
-                    "discount_amount": pricing["discount_amount"],
-                    "payment_method": payment_method,
-                    "shipping_city": shipping_city,
-                    "status": existing["payment_status"],
-                    "created_new": False,
-                }
+                order_id = str(existing["id"])
+                order_total = float(existing["total"])
+                order_status = existing["payment_status"]
+                inventory_status = existing["inventory_status"]
+            else:
+                order_id = str(await connection.execute(
+                    """
+                    INSERT INTO orders (
+                        customer_id, items, total, payment_method, shipping_city,
+                        shipping_address, shipping_method, inventory_status
+                    )
+                    VALUES (
+                        :cid, CAST(:items AS jsonb), :total, :pm, :city,
+                        :addr, :sm, :inventory_status
+                    )
+                    RETURNING id
+                    """,
+                    {
+                        "cid": customer_id,
+                        "items": items_json,
+                        "total": total,
+                        "pm": payment_method,
+                        "city": shipping_city,
+                        "addr": shipping_address,
+                        "sm": shipping_method,
+                        "inventory_status": RESERVATION_IN_PROGRESS,
+                    },
+                ))
+                created_new = True
 
-            await _lock_inventory_mutations()
-            await asyncio.to_thread(deduct_stock, normalized_items)
-            inventory_reserved = True
-            order_id = await db.execute(
-                """
-                INSERT INTO orders (
-                    customer_id, items, total, payment_method, shipping_city,
-                    shipping_address, shipping_method, inventory_status, inventory_reserved_at
-                )
-                VALUES (
-                    :cid, CAST(:items AS jsonb), :total, :pm, :city,
-                    :addr, :sm, 'reserved', NOW()
-                )
-                RETURNING id
-                """,
-                {
-                    "cid": customer_id,
-                    "items": items_json,
-                    "total": total,
-                    "pm": payment_method,
-                    "city": shipping_city,
-                    "addr": shipping_address,
-                    "sm": shipping_method,
-                },
+        if inventory_status == "reserved":
+            return {
+                "order_id": str(order_id),
+                "items": normalized_items,
+                "total": order_total,
+                "subtotal": pricing["subtotal"],
+                "discount_applied": pricing["discount_applied"],
+                "discount_rate": pricing["discount_rate"],
+                "discount_percent": pricing["discount_percent"],
+                "discount_threshold_usd": pricing["discount_threshold_usd"],
+                "discount_amount": pricing["discount_amount"],
+                "payment_method": payment_method,
+                "shipping_city": shipping_city,
+                "status": order_status,
+                "created_new": False,
+            }
+
+        if inventory_status != RESERVATION_IN_PROGRESS:
+            raise RuntimeError(
+                f"Order {order_id} is in inventory state '{inventory_status}' and cannot be reserved."
             )
-            created_new = True
-    except Exception:
-        if inventory_reserved:
+
+        try:
+            await _deduct_order_inventory(order_id, normalized_items)
+        except Exception:
             try:
-                await asyncio.to_thread(restore_stock, normalized_items)
-            except Exception as compensation_error:
-                logger.critical("Inventory compensation failed after order creation rollback", exc_info=True)
+                await _mark_inventory_reservation_failed(connection, order_id)
+            except Exception:
+                logger.exception("Failed to mark order %s inventory reservation as failed", order_id)
+            raise
+
+        async with connection.transaction():
+            current = await connection.fetch_one(
+                """
+                SELECT id, payment_status, inventory_status
+                FROM orders
+                WHERE id = :oid
+                FOR UPDATE
+                """,
+                {"oid": order_id},
+            )
+            if not current:
                 raise RuntimeError(
-                    "Order creation and inventory compensation both failed; manual reconciliation is required."
-                ) from compensation_error
-        raise
+                    "Inventory was reserved in Google Sheets, but the order row is missing; manual reconciliation is required."
+                )
+            if current["inventory_status"] == RESERVATION_IN_PROGRESS:
+                await connection.execute(
+                    """
+                    UPDATE orders
+                    SET inventory_status = 'reserved',
+                        inventory_reserved_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = :oid
+                    """,
+                    {"oid": order_id},
+                )
+                inventory_status = "reserved"
+            elif current["inventory_status"] == "reserved":
+                inventory_status = "reserved"
+            else:
+                raise RuntimeError(
+                    f"Inventory was reserved, but order {order_id} is in state '{current['inventory_status']}'; "
+                    "manual reconciliation is required."
+                )
+            order_status = current["payment_status"]
 
     return {
         "order_id": str(order_id),
         "items": normalized_items,
-        "total": total,
+        "total": order_total,
         "subtotal": pricing["subtotal"],
         "discount_applied": pricing["discount_applied"],
         "discount_rate": pricing["discount_rate"],
@@ -362,7 +509,7 @@ async def create_order(
         "discount_amount": pricing["discount_amount"],
         "payment_method": payment_method,
         "shipping_city": shipping_city,
-        "status": "pending",
+        "status": order_status,
         "created_new": created_new,
     }
 
@@ -507,6 +654,7 @@ async def get_latest_open_order(customer_id: str) -> dict | None:
         FROM orders
         WHERE customer_id = :cid
           AND payment_status IN ('pending', 'proof_received')
+          AND inventory_status IN ('reserved', 'legacy_unknown')
         ORDER BY created_at DESC
         LIMIT 1
         """,
@@ -525,6 +673,7 @@ async def get_latest_pending_order(customer_id: str) -> dict | None:
         FROM orders
         WHERE customer_id = :cid
           AND payment_status = 'pending'
+          AND inventory_status IN ('reserved', 'legacy_unknown')
         ORDER BY created_at DESC
         LIMIT 1
         """,
@@ -543,6 +692,7 @@ async def get_unambiguous_open_order(customer_id: str) -> tuple[dict | None, boo
         FROM orders
         WHERE customer_id = :cid
           AND payment_status IN ('pending', 'proof_received')
+          AND inventory_status IN ('reserved', 'legacy_unknown')
         ORDER BY created_at DESC
         LIMIT 2
         """,
@@ -564,6 +714,7 @@ async def get_customer_open_order_by_id(customer_id: str, order_id: str) -> dict
         WHERE id = :oid
           AND customer_id = :cid
           AND payment_status IN ('pending', 'proof_received')
+          AND inventory_status IN ('reserved', 'legacy_unknown')
         LIMIT 1
         """,
         {"oid": order_id, "cid": customer_id},
@@ -618,7 +769,7 @@ async def update_order_payment_status(
 
         row = await db.fetch_one(
             """
-            SELECT id, customer_id, total, payment_status, customer_totals_applied
+            SELECT id, customer_id, total, payment_status, inventory_status, customer_totals_applied
             FROM orders
             WHERE id = :oid
             FOR UPDATE
@@ -626,6 +777,24 @@ async def update_order_payment_status(
             {"oid": order_id},
         )
         if not row:
+            return None
+
+        current_payment_status = str(row["payment_status"] or "")
+        current_inventory_status = (
+            str(row["inventory_status"] or "legacy_unknown")
+            if "inventory_status" in row
+            else "legacy_unknown"
+        )
+        if proof_metadata and (
+            current_payment_status != "pending"
+            or current_inventory_status not in {"reserved", "legacy_unknown"}
+        ):
+            logger.warning(
+                "Payment proof update skipped for order %s because state changed to payment=%s inventory=%s",
+                order_id,
+                current_payment_status,
+                current_inventory_status,
+            )
             return None
 
         if proof_metadata:
@@ -763,37 +932,86 @@ async def update_order_shipping(
 
 async def delete_order(order_id: str) -> dict | None:
     """Delete an order, restore inventory, and roll back applied customer totals if needed."""
-    async with db.get_db().transaction():
-        await _lock_inventory_mutations()
-        row = await db.fetch_one(
-            """
-            SELECT id, customer_id, items, total, customer_totals_applied, inventory_status
-            FROM orders
-            WHERE id = :oid
-            FOR UPDATE
-            """,
-            {"oid": order_id},
-        )
-        if not row:
-            return None
+    items: list[dict] = []
+    restore_required = False
 
-        items = _load_items(row["items"])
-        inventory_was_reserved = row["inventory_status"] == "reserved"
-        if inventory_was_reserved:
-            await asyncio.to_thread(restore_stock, items)
+    async with _inventory_mutation_connection() as connection:
+        async with connection.transaction():
+            row = await connection.fetch_one(
+                """
+                SELECT id, items, inventory_status
+                FROM orders
+                WHERE id = :oid
+                FOR UPDATE
+                """,
+                {"oid": order_id},
+            )
+            if not row:
+                return None
 
-        if row["customer_totals_applied"] and row["customer_id"]:
-            await _revert_paid_customer_updates(str(row["customer_id"]), float(row["total"]))
+            items = _load_items(row["items"])
+            inventory_status = row["inventory_status"]
+            if inventory_status == "reserved":
+                restore_required = True
+                await connection.execute(
+                    """
+                    UPDATE orders
+                    SET inventory_status = :release_pending,
+                        updated_at = NOW()
+                    WHERE id = :oid
+                    """,
+                    {"oid": order_id, "release_pending": RELEASE_IN_PROGRESS},
+                )
+            elif inventory_status == RELEASE_IN_PROGRESS:
+                restore_required = True
 
-        await db.execute(
-            "DELETE FROM orders WHERE id = :oid",
-            {"oid": order_id},
-        )
+        if inventory_status == RESERVATION_IN_PROGRESS:
+            restore_required = await _inventory_operation_applied(order_id, items, -1)
+            if restore_required:
+                async with connection.transaction():
+                    await connection.execute(
+                        """
+                        UPDATE orders
+                        SET inventory_status = :release_pending,
+                            updated_at = NOW()
+                        WHERE id = :oid
+                          AND inventory_status = :reservation_pending
+                        """,
+                        {
+                            "oid": order_id,
+                            "release_pending": RELEASE_IN_PROGRESS,
+                            "reservation_pending": RESERVATION_IN_PROGRESS,
+                        },
+                    )
+
+        if restore_required:
+            await _restore_order_inventory(order_id, items)
+
+        async with connection.transaction():
+            row = await connection.fetch_one(
+                """
+                SELECT id, customer_id, total, customer_totals_applied
+                FROM orders
+                WHERE id = :oid
+                FOR UPDATE
+                """,
+                {"oid": order_id},
+            )
+            if not row:
+                return None
+
+            if row["customer_totals_applied"] and row["customer_id"]:
+                await _revert_paid_customer_updates(str(row["customer_id"]), float(row["total"]))
+
+            await connection.execute(
+                "DELETE FROM orders WHERE id = :oid",
+                {"oid": order_id},
+            )
 
     return {
         "order_id": str(order_id),
         "deleted": True,
-        "restored_items": len(items) if inventory_was_reserved else 0,
+        "restored_items": len(items) if restore_required else 0,
     }
 
 
@@ -803,18 +1021,23 @@ async def release_expired_inventory_reservations(limit: int = 20) -> dict[str, i
         """
         SELECT id
         FROM orders
-        WHERE inventory_status = 'reserved'
+        WHERE inventory_status IN ('reserved', :release_pending, :reservation_pending)
           AND (
               payment_status IN ('failed', 'rejected')
               OR (
                   payment_status = 'pending'
-                  AND inventory_reserved_at <= NOW() - (:ttl_hours * INTERVAL '1 hour')
+                  AND COALESCE(inventory_reserved_at, created_at) <= NOW() - (:ttl_hours * INTERVAL '1 hour')
               )
           )
-        ORDER BY inventory_reserved_at ASC
+        ORDER BY COALESCE(inventory_reserved_at, created_at) ASC
         LIMIT :limit
         """,
-        {"limit": limit, "ttl_hours": INVENTORY_RESERVATION_TTL_HOURS},
+        {
+            "limit": limit,
+            "ttl_hours": INVENTORY_RESERVATION_TTL_HOURS,
+            "release_pending": RELEASE_IN_PROGRESS,
+            "reservation_pending": RESERVATION_IN_PROGRESS,
+        },
     )
     released = 0
     failed = 0
@@ -829,32 +1052,87 @@ async def release_expired_inventory_reservations(limit: int = 20) -> dict[str, i
 
 
 async def _release_inventory_reservation(order_id: str) -> bool:
-    async with db.get_db().transaction():
-        await _lock_inventory_mutations()
-        row = await db.fetch_one(
-            """
-            SELECT id, items, inventory_status, payment_status
-            FROM orders
-            WHERE id = :oid
-            FOR UPDATE
-            """,
-            {"oid": order_id},
-        )
-        releasable_statuses = {"pending", "failed", "rejected"}
-        if not row or row["inventory_status"] != "reserved" or row["payment_status"] not in releasable_statuses:
-            return False
-        await asyncio.to_thread(restore_stock, _load_items(row["items"]))
-        await db.execute(
-            """
-            UPDATE orders
-            SET inventory_status = 'released',
-                inventory_released_at = NOW(),
-                payment_status = CASE WHEN payment_status = 'pending' THEN 'rejected' ELSE payment_status END,
-                updated_at = NOW()
-            WHERE id = :oid
-            """,
-            {"oid": order_id},
-        )
+    items: list[dict] = []
+    restore_required = False
+    releasable_statuses = {"pending", "failed", "rejected"}
+
+    async with _inventory_mutation_connection() as connection:
+        async with connection.transaction():
+            row = await connection.fetch_one(
+                """
+                SELECT id, items, inventory_status, payment_status
+                FROM orders
+                WHERE id = :oid
+                FOR UPDATE
+                """,
+                {"oid": order_id},
+            )
+            if not row or row["payment_status"] not in releasable_statuses:
+                return False
+
+            items = _load_items(row["items"])
+            inventory_status = row["inventory_status"]
+            if inventory_status == "reserved":
+                restore_required = True
+                await connection.execute(
+                    """
+                    UPDATE orders
+                    SET inventory_status = :release_pending,
+                        updated_at = NOW()
+                    WHERE id = :oid
+                    """,
+                    {"oid": order_id, "release_pending": RELEASE_IN_PROGRESS},
+                )
+            elif inventory_status == RELEASE_IN_PROGRESS:
+                restore_required = True
+            elif inventory_status != RESERVATION_IN_PROGRESS:
+                return False
+
+        if inventory_status == RESERVATION_IN_PROGRESS:
+            restore_required = await _inventory_operation_applied(order_id, items, -1)
+            if restore_required:
+                async with connection.transaction():
+                    await connection.execute(
+                        """
+                        UPDATE orders
+                        SET inventory_status = :release_pending,
+                            updated_at = NOW()
+                        WHERE id = :oid
+                          AND inventory_status = :reservation_pending
+                        """,
+                        {
+                            "oid": order_id,
+                            "release_pending": RELEASE_IN_PROGRESS,
+                            "reservation_pending": RESERVATION_IN_PROGRESS,
+                        },
+                    )
+
+        if restore_required:
+            await _restore_order_inventory(order_id, items)
+
+        async with connection.transaction():
+            row = await connection.fetch_one(
+                """
+                SELECT id, payment_status
+                FROM orders
+                WHERE id = :oid
+                FOR UPDATE
+                """,
+                {"oid": order_id},
+            )
+            if not row or row["payment_status"] not in releasable_statuses:
+                return False
+            await connection.execute(
+                """
+                UPDATE orders
+                SET inventory_status = :released,
+                    inventory_released_at = NOW(),
+                    payment_status = CASE WHEN payment_status = 'pending' THEN 'rejected' ELSE payment_status END,
+                    updated_at = NOW()
+                WHERE id = :oid
+                """,
+                {"oid": order_id, "released": RELEASED},
+            )
     return True
 
 

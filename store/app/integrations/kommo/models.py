@@ -77,11 +77,11 @@ class NormalizedKommoEvent(BaseModel):
 
     @property
     def stable_entity_id(self) -> str | None:
-        return self.lead_id or self.entity_id or self.contact_id or self.chat_id or self.talk_id
+        return self.chat_id or self.contact_id or self.talk_id or self.entity_id or self.lead_id
 
     @property
     def correlation_id(self) -> str:
-        stable = self.lead_id or self.entity_id or self.chat_id or self.contact_id or self.talk_id
+        stable = self.chat_id or self.contact_id or self.talk_id or self.entity_id or self.lead_id
         return f"kommo:{self.interaction_type}:{stable or self.message_id or 'unknown'}"
 
 

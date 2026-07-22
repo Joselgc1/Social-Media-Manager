@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -8,7 +8,19 @@ from slowapi.middleware import SlowAPIMiddleware
 from starlette.requests import Request
 
 
-def _settings(app_base_url: str):
+class _Tx:
+    def __init__(self):
+        self.exited = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.exited = exc_type
+        return False
+
+
+def _settings(app_base_url: str, *, enable_test_endpoints: bool = False):
     from app.config import MasterSettings
 
     return MasterSettings(
@@ -16,6 +28,7 @@ def _settings(app_base_url: str):
         master_secret_key="test-master-secret-at-least-32-chars",
         encryption_key="dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3ODkwMTI=",
         app_base_url=app_base_url,
+        enable_test_endpoints=enable_test_endpoints,
         _env_file=None,
     )
 
@@ -72,7 +85,11 @@ def test_encryption_key_must_be_valid_fernet_key(key):
     ],
 )
 def test_exact_loopback_urls_are_local(url):
-    assert _settings(url).is_local_environment is True
+    assert _settings(url, enable_test_endpoints=True).is_local_environment is True
+
+
+def test_loopback_url_is_not_local_without_explicit_test_endpoint_opt_in():
+    assert _settings("http://localhost:9000").is_local_environment is False
 
 
 @pytest.mark.parametrize(
@@ -110,6 +127,23 @@ def test_production_app_does_not_register_test_routes(monkeypatch):
     from app.main import app
 
     assert not any(route.path.startswith("/test") for route in app.routes)
+
+
+@pytest.mark.asyncio
+async def test_runtime_settings_writes_are_transactional():
+    from app.stores.api import _write_store_runtime_settings
+
+    tx = _Tx()
+    store_db = MagicMock()
+    store_db.transaction.return_value = tx
+    store_db.execute = AsyncMock(side_effect=[None, RuntimeError("write failed")])
+
+    with pytest.raises(RuntimeError, match="write failed"):
+        await _write_store_runtime_settings(store_db, {"llm_provider": "openai", "llm_model": "gpt-5-mini"})
+
+    store_db.transaction.assert_called_once()
+    assert store_db.execute.await_count == 2
+    assert tx.exited is RuntimeError
 
 
 @pytest.mark.asyncio

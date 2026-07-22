@@ -64,7 +64,8 @@ async def test_delete_credential_removes_railway_variable_before_local_row(monke
         "railway_project_id": "project-1",
         "credential_id": "credential-1",
     }
-    monkeypatch.setattr(api.db, "fetch_one", AsyncMock(return_value=store))
+    fetch_one = AsyncMock(return_value=store)
+    monkeypatch.setattr(api.db, "fetch_one", fetch_one)
     monkeypatch.setattr(api.db, "execute", AsyncMock(side_effect=lambda *args, **kwargs: events.append("db")))
     monkeypatch.setattr(api, "get_config", lambda: SimpleNamespace(railway_api_token="token"))
     monkeypatch.setattr(
@@ -166,7 +167,8 @@ async def test_deploy_forces_authoritative_master_database_url(monkeypatch):
         "openai-ciphertext": "sk-test",
     }
     upsert = AsyncMock(return_value=True)
-    monkeypatch.setattr(api.db, "fetch_one", AsyncMock(return_value=store))
+    fetch_one = AsyncMock(return_value=store)
+    monkeypatch.setattr(api.db, "fetch_one", fetch_one)
     monkeypatch.setattr(api.db, "fetch_all", AsyncMock(return_value=credentials))
     monkeypatch.setattr(api.db, "execute", AsyncMock())
     monkeypatch.setattr(api, "decrypt", lambda value: decrypt_values[value])
@@ -180,6 +182,7 @@ async def test_deploy_forces_authoritative_master_database_url(monkeypatch):
     result = await api.deploy_credentials("store-1")
 
     variables = upsert.await_args.args[3]
+    assert "db_url_encrypted" in fetch_one.await_args.args[0]
     assert variables["DATABASE_URL"] == "postgresql://authoritative"
     assert variables["OPENAI_API_KEY"] == "sk-test"
     assert result["environment_id"] == "production-1"

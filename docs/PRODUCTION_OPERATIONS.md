@@ -76,6 +76,8 @@ Current store upgrade sequence for an existing version-2 database:
 ```bash
 psql "$STORE_DATABASE_URL" -v ON_ERROR_STOP=1 \
   -f store/migrations/003_broadcast_delivery_safety.sql
+psql "$STORE_DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f store/migrations/004_meta_inbound_lease_fencing.sql
 ```
 
 ## Restore Procedure

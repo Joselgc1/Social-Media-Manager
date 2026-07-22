@@ -26,6 +26,7 @@ class MasterSettings(BaseSettings):
 
     # App config
     app_base_url: str
+    enable_test_endpoints: bool = False
     health_check_interval_seconds: int = 300  # 5 minutes
     health_check_max_concurrent: int = 10
 
@@ -76,7 +77,9 @@ class MasterSettings(BaseSettings):
 
     @property
     def is_local_environment(self) -> bool:
-        """Return true only when APP_BASE_URL has an exact loopback hostname."""
+        """Return true only for explicitly enabled loopback-only development access."""
+        if not self.enable_test_endpoints:
+            return False
         hostname = urlsplit(self.app_base_url).hostname
         if hostname == "localhost":
             return True

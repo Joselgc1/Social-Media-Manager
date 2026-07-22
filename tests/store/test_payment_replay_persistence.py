@@ -34,6 +34,7 @@ async def test_payment_proof_fingerprints_are_locked_and_persisted_atomically():
         "customer_id": "customer-1",
         "total": 28,
         "payment_status": "pending",
+        "inventory_status": "reserved",
         "customer_totals_applied": True,
     }
     fetch_one = AsyncMock(side_effect=[None, None, None, row])
@@ -58,6 +59,37 @@ async def test_payment_proof_fingerprints_are_locked_and_persisted_atomically():
     assert "payment_reference_key = :reference_key" in update_query
     assert update_values["proof_hash"] == "a" * 64
     assert update_values["reference_key"] == "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_payment_proof_does_not_resurrect_released_order_after_lock():
+    from app.crm import orders
+
+    row = {
+        "id": "order-1",
+        "customer_id": "customer-1",
+        "total": 28,
+        "payment_status": "rejected",
+        "inventory_status": "released",
+        "customer_totals_applied": False,
+    }
+    fetch_one = AsyncMock(side_effect=[None, None, None, row])
+    execute = AsyncMock(return_value=None)
+
+    with (
+        patch.object(orders.db, "get_db", return_value=_transactional_db()),
+        patch.object(orders.db, "fetch_one", fetch_one),
+        patch.object(orders.db, "execute", execute),
+    ):
+        result = await orders.update_order_payment_status(
+            "order-1",
+            "proof_received",
+            note="receipt",
+            proof_metadata=_proof_metadata(),
+        )
+
+    assert result is None
+    execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -96,6 +128,7 @@ async def test_paid_status_regression_reverses_customer_totals(status):
         "customer_id": "customer-1",
         "total": 75,
         "payment_status": "proof_received",
+        "inventory_status": "reserved",
         "customer_totals_applied": True,
     }
     execute = AsyncMock(return_value=None)

@@ -97,40 +97,42 @@ async def add_tags(customer_id: str, new_tags: list[str]):
     Append tags to a customer's tag list (deduplicated).
     Tags are stored as a JSONB array.
     """
-    row = await db.fetch_one(
-        "SELECT tags FROM customers WHERE id = :id",
-        {"id": customer_id},
-    )
-    if not row:
-        return
+    async with db.get_db().transaction():
+        row = await db.fetch_one(
+            "SELECT tags FROM customers WHERE id = :id FOR UPDATE",
+            {"id": customer_id},
+        )
+        if not row:
+            return
 
-    existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
-    merged = normalize_tags(existing + (new_tags or []))
+        existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
+        merged = normalize_tags(existing + (new_tags or []))
 
-    await db.execute(
-        "UPDATE customers SET tags = :tags WHERE id = :id",
-        {"tags": json.dumps(merged), "id": customer_id},
-    )
+        await db.execute(
+            "UPDATE customers SET tags = :tags WHERE id = :id",
+            {"tags": json.dumps(merged), "id": customer_id},
+        )
 
 
 async def remove_tag(customer_id: str, tag: str):
     """Remove a single tag from a customer."""
-    row = await db.fetch_one(
-        "SELECT tags FROM customers WHERE id = :id",
-        {"id": customer_id},
-    )
-    if not row:
-        return
+    async with db.get_db().transaction():
+        row = await db.fetch_one(
+            "SELECT tags FROM customers WHERE id = :id FOR UPDATE",
+            {"id": customer_id},
+        )
+        if not row:
+            return
 
-    existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
-    normalized_target = _normalize_tag(tag)
-    filtered = [normalized for normalized in (_normalize_tag(t) for t in existing) if normalized and normalized != normalized_target]
-    filtered = _dedupe_preserve_order(filtered)
+        existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
+        normalized_target = _normalize_tag(tag)
+        filtered = [normalized for normalized in (_normalize_tag(t) for t in existing) if normalized and normalized != normalized_target]
+        filtered = _dedupe_preserve_order(filtered)
 
-    await db.execute(
-        "UPDATE customers SET tags = :tags WHERE id = :id",
-        {"tags": json.dumps(filtered), "id": customer_id},
-    )
+        await db.execute(
+            "UPDATE customers SET tags = :tags WHERE id = :id",
+            {"tags": json.dumps(filtered), "id": customer_id},
+        )
 
 
 async def set_conversation_state(customer_id: str, state: str):

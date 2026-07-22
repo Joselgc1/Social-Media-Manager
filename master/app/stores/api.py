@@ -560,12 +560,13 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
 
 
 async def _write_store_runtime_settings(store_db: db_lib.Database, fields: dict):
-    for key, value in fields.items():
-        await store_db.execute(
-            """INSERT INTO settings (key, value) VALUES (:key, :val)
-               ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()""",
-            {"key": key, "val": json.dumps(value)},
-        )
+    async with store_db.transaction():
+        for key, value in fields.items():
+            await store_db.execute(
+                """INSERT INTO settings (key, value) VALUES (:key, :val)
+                   ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()""",
+                {"key": key, "val": json.dumps(value)},
+            )
 
 
 async def sync_exchange_rates_to_store(
@@ -1167,7 +1168,7 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
         raise HTTPException(status_code=400, detail="RAILWAY_API_TOKEN not configured")
 
     store = await db.fetch_one(
-        "SELECT railway_service_id, railway_project_id, name FROM stores WHERE id = :id",
+        "SELECT railway_service_id, railway_project_id, name, db_url_encrypted FROM stores WHERE id = :id",
         {"id": store_id},
     )
     if not store:

@@ -51,6 +51,7 @@ async def test_whatsapp_delivery_failure_does_not_create_assistant_history():
         patch.object(whatsapp, "send_text", AsyncMock(side_effect=RuntimeError("graph unavailable"))),
         patch.object(whatsapp, "_notify_delivery_failure", AsyncMock()),
         patch.object(whatsapp.conversations, "store_message", store_message),
+        pytest.raises(RuntimeError, match="graph unavailable"),
     ):
         await whatsapp._deliver_ai_response("584121234567", "Hola", None, {}, "meta-job-2")
 
@@ -71,12 +72,11 @@ async def test_whatsapp_partial_delivery_stores_only_successful_parts():
         patch.object(whatsapp, "_notify_delivery_failure", AsyncMock()),
         patch.object(whatsapp.conversations, "store_message", store_message),
         patch.object(whatsapp, "get_config", return_value=type("Config", (), {"app_base_url": "https://store.test"})()),
+        pytest.raises(RuntimeError, match="text failed"),
     ):
         await whatsapp._deliver_ai_response("584121234567", "Catálogo", None, {}, "meta-job-partial")
 
-    store_message.assert_awaited_once()
-    assert store_message.await_args.kwargs["content"] == "[Catálogo PDF enviado]"
-    assert store_message.await_args.kwargs["source_id"] == "meta-job-partial"
+    store_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

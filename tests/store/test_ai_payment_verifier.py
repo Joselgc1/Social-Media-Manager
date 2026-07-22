@@ -170,6 +170,27 @@ async def test_recipient_mismatch_does_not_update(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sender_name_cannot_satisfy_recipient_match(monkeypatch):
+    payment_methods = [{"id": "pm-zelle", "name": "Zelle", "information": "Maria Perez"}]
+    _, _, update_order_payment_status, _ = _patch_order(monkeypatch, _order())
+
+    result = await verifier.verify_payment_proof(
+        "customer-1",
+        payment_methods,
+        _vision(
+            recipient_name="Persona Distinta",
+            recipient_identifier="persona.distinta@example.com",
+            sender_name="Maria Perez",
+            summary="Pago enviado por Maria Perez a Persona Distinta",
+            raw_response="Maria Perez aparece como sender. Referencia Maria Perez TXN-123456",
+        ),
+    )
+
+    assert result.status == "recipient_mismatch"
+    update_order_payment_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("detected_status", ["pending", "failed"])
 async def test_not_completed_proof_does_not_update(monkeypatch, detected_status):
     _, _, update_order_payment_status, _ = _patch_order(monkeypatch, _order())

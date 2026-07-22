@@ -217,6 +217,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "return_url": values["return_url"],
         "entity_id": values["entity_id"],
         "entity_type": values["entity_type"],
+        "widget_contact_id": values["widget_contact_id"],
         "callback_claims": values["callback_claims"],
         "salesbot_token_jti": values["salesbot_token_jti"],
         "salesbot_token_iat": values["salesbot_token_iat"],
@@ -265,6 +266,10 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
               AND (
                   (:entity_type = 'leads' AND candidate.lead_id = :entity_id)
                   OR (:entity_type = 'contacts' AND candidate.contact_id = :entity_id)
+              )
+              AND (
+                  CAST(:widget_contact_id AS text) IS NULL
+                  OR candidate.contact_id = CAST(:widget_contact_id AS text)
               )
               AND candidate.interaction_type = CAST(:interaction_type AS text)
             ORDER BY candidate.salesbot_launched_at DESC NULLS LAST, candidate.created_at DESC
@@ -691,6 +696,19 @@ async def _reactivate_expired_escalation_if_needed(customer: dict, ai_mode_enum:
     return ai_mode_enum
 
 
+def _single_contact_lead_id(contact: dict | None) -> str | None:
+    embedded = (contact or {}).get("_embedded") or {}
+    leads = embedded.get("leads") or []
+    lead_ids = []
+    for lead in leads:
+        if not isinstance(lead, dict):
+            continue
+        lead_id = lead.get("id")
+        if lead_id is not None:
+            lead_ids.append(str(lead_id))
+    return lead_ids[0] if len(set(lead_ids)) == 1 else None
+
+
 async def _process_ready_job(job: dict) -> None:
     config = get_config()
     client = KommoClient.from_config()
@@ -698,9 +716,10 @@ async def _process_ready_job(job: dict) -> None:
     try:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
         settings = await db.get_settings()
-        lead = await client.get_lead(job["lead_id"]) if job.get("lead_id") else None
         contact = await _fetch_contact_for_job(client, job)
-        ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else config.kommo_ai_active_enum_id
+        lead_id = job.get("lead_id") or _single_contact_lead_id(contact)
+        lead = await client.get_lead(lead_id) if lead_id else None
+        ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else None
         profile = build_kommo_customer_profile(job=job, contact=contact)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
         if ai_mode_enum is not None:
@@ -733,7 +752,7 @@ async def _process_ready_job(job: dict) -> None:
             customer_id=str(customer["id"]),
             integration_context={
                 "provider": "kommo",
-                "lead_id": job.get("lead_id"),
+                "lead_id": lead_id,
                 "contact_id": job.get("contact_id"),
                 "chat_id": job.get("chat_id"),
                 "talk_id": job.get("talk_id"),
@@ -750,7 +769,7 @@ async def _process_ready_job(job: dict) -> None:
                 provider="kommo",
                 channel=job.get("channel") or "whatsapp",
                 external_contact_id=job.get("contact_id"),
-                external_lead_id=job.get("lead_id"),
+                external_lead_id=lead_id,
                 external_chat_id=job.get("chat_id"),
                 external_talk_id=job.get("talk_id"),
                 external_author_id=job.get("author_id"),
@@ -758,7 +777,7 @@ async def _process_ready_job(job: dict) -> None:
             )
 
         if not result.get("escalated"):
-            lead_after = await client.get_lead(job["lead_id"]) if job.get("lead_id") else None
+            lead_after = await client.get_lead(lead_id) if lead_id else None
             mode_after = extract_ai_mode_enum_from_lead(lead_after or {}, config) if lead_after else ai_mode_enum
             refreshed_customer = await db.fetch_one("SELECT conversation_state FROM customers WHERE id = :id", {"id": result.get("customer_id") or customer["id"]})
             after = evaluate_automation_state(
@@ -1057,19 +1076,19 @@ async def _find_duplicate_comment_callback_job(
           AND (
               external_message_id = :external_message_id
               OR (
+                  CAST(:salesbot_token_jti AS text) IS NOT NULL
+                  AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
+                  AND (
+                      CAST(:salesbot_token_iat AS text) IS NULL
+                      OR callback_claims ->> 'iat' = CAST(:salesbot_token_iat AS text)
+                  )
+              )
+              OR (
                   created_at >= NOW() - (:dedup_seconds * INTERVAL '1 second')
                   AND {_signed_entity_match_sql()}
                   AND {_normalized_message_sql('combined_message')} = :normalized_message
                   AND (
                       return_url = :return_url
-                      OR (
-                          CAST(:salesbot_token_jti AS text) IS NOT NULL
-                          AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
-                          AND (
-                              CAST(:salesbot_token_iat AS text) IS NULL
-                              OR callback_claims ->> 'iat' = CAST(:salesbot_token_iat AS text)
-                          )
-                      )
                   )
               )
           )
@@ -1129,17 +1148,21 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         raise ValueError("missing_signed_issued_at") from e
     if token_iat <= 0:
         raise ValueError("invalid_signed_issued_at")
+    interaction_type = data.interaction_type or "private_message"
+    if _has_public_comment_context(data) and interaction_type != "instagram_comment":
+        raise ValueError("comment_callback_interaction_type_mismatch")
     return {
         "return_url": return_url,
         "entity_id": entity_id,
         "entity_type": entity_type,
+        "widget_contact_id": _clean_widget_id(data.contact_id),
         "callback_claims": json.dumps(_safe_claims(claims)),
         "salesbot_token_jti": _claim_as_str(claims, "jti"),
         "salesbot_token_iat": str(token_iat),
         "salesbot_account_id": _claim_as_str(claims, "account_id"),
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
         "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
-        "interaction_type": data.interaction_type or "private_message",
+        "interaction_type": interaction_type,
         "author_username": data.author_username,
         "author_profile_url": data.author_profile_url,
         "sender_username": data.sender_username,
@@ -1169,6 +1192,26 @@ def _clean_public_comment_context_value(value) -> str:
     if not text or (text.startswith("{{") and text.endswith("}}")):
         return ""
     return text[:1000]
+
+
+def _clean_widget_text(value) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text or (text.startswith("{{") and text.endswith("}}")):
+        return ""
+    return text
+
+
+def _clean_widget_id(value) -> str | None:
+    text = _clean_widget_text(value)
+    return text or None
+
+
+def _has_public_comment_context(data: SalesbotWidgetData) -> bool:
+    raw = data.model_dump(exclude_none=True)
+    return any(
+        key in _PUBLIC_COMMENT_CONTEXT_FIELDS and _clean_public_comment_context_value(value)
+        for key, value in raw.items()
+    )
 
 
 def _comment_callback_ids(values: dict, message: str) -> tuple[str, str]:

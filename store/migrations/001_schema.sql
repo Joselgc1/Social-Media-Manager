@@ -473,6 +473,10 @@ CREATE TABLE IF NOT EXISTS meta_inbound_jobs (
     available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     attempt_count INTEGER NOT NULL DEFAULT 0,
     processing_started_at TIMESTAMPTZ,
+    processing_heartbeat_at TIMESTAMPTZ,
+    processing_lease_token TEXT,
+    outbound_started_at TIMESTAMPTZ,
+    outbound_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     completed_at TIMESTAMPTZ,
     last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -742,7 +746,8 @@ REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC, anon, authentica
 INSERT INTO schema_migrations (version, name) VALUES
     (1, 'fresh_install_baseline'),
     (2, 'versioned_schema_and_security_hardening'),
-    (3, 'broadcast_delivery_safety')
+    (3, 'broadcast_delivery_safety'),
+    (4, 'meta_inbound_lease_fencing')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

@@ -46,13 +46,13 @@ Copy this. It goes in your `.env` as `DATABASE_URL`.
 
 Run migrations from the Supabase SQL Editor. Choose exactly one path:
 
-**Fresh database:** paste and run `store/migrations/001_schema.sql` once. It creates the current schema, seeds settings, and records schema versions `1` and `2`.
+**Fresh database:** paste and run `store/migrations/001_schema.sql` once. It creates the current schema, seeds settings, and records schema versions through the current application version.
 
-**Existing database created before version tracking:** take a database backup, enter a maintenance window, then paste and run `store/migrations/002_existing_database_upgrade.sql` once. Do not rerun `001_schema.sql`; `CREATE TABLE IF NOT EXISTS` cannot upgrade an existing table safely.
+**Existing database created before version tracking:** take a database backup, enter a maintenance window, then run `store/migrations/002_existing_database_upgrade.sql`, `store/migrations/003_broadcast_delivery_safety.sql`, and `store/migrations/004_meta_inbound_lease_fencing.sql` in that order. Do not rerun `001_schema.sql`; `CREATE TABLE IF NOT EXISTS` cannot upgrade an existing table safely.
 
 For future releases, run only new numbered migrations in ascending order. A migration records its version only at the end of its transaction. The store refuses to start when `schema_migrations` is absent, behind, or ahead of the version supported by the deployed code.
 
-Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. The latest version must be `2`. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
+Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. The latest version must match `EXPECTED_SCHEMA_VERSION` in `store/app/db.py` for the deployed code. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
 
 ### 1.2 OpenAI API Key
 
@@ -343,7 +343,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 Only do this when `CHANNEL_BACKEND=kommo`.
 
-1. Confirm the correct numbered migration path has been completed and `schema_migrations` reports version `2`.
+1. Confirm the correct numbered migration path has been completed and the latest `schema_migrations` version matches `EXPECTED_SCHEMA_VERSION` in `store/app/db.py`.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
 3. Create the private-message Kommo Salesbot with the `Ask Eva AI for DMs` widget step pointing to `https://abc123.ngrok-free.app/webhooks/kommo/salesbot`, ending in a Message step with `{{json.message}}`.
 4. Create the public-comment Kommo Salesbot with Kommo's native `When a comment is received` trigger, the `Ask Eva AI for Instagram comments` widget step, and a Comment step with `{{json.message}}`.

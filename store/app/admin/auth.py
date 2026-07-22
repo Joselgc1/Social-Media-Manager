@@ -83,7 +83,7 @@ def is_admin_cookie_valid(request: Request) -> bool:
     """Return True when the request carries a valid admin session cookie."""
     config = get_config()
     if not config.admin_password:
-        return bool(config.debug)
+        return False
 
     cookie = request.cookies.get(COOKIE_NAME)
     return bool(cookie and _is_cookie_token_valid(cookie, config.admin_password))
@@ -96,13 +96,11 @@ async def require_admin(
     """
     Dependency that validates admin access.
     Checks (in order): Bearer header, session cookie.
-    If ADMIN_PASSWORD is not set, all admin routes are blocked in production.
+    If ADMIN_PASSWORD is not set, all admin routes are blocked.
     """
     config = get_config()
 
     if not config.admin_password:
-        if config.debug:
-            return True
         raise HTTPException(
             status_code=403,
             detail="ADMIN_PASSWORD must be set to access admin endpoints.",

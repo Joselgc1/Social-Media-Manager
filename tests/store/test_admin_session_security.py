@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 
@@ -47,3 +49,23 @@ def test_admin_session_rejects_valid_signature_without_server_state(monkeypatch)
     auth._active_sessions.clear()
 
     assert auth.is_admin_cookie_valid(_request(auth.COOKIE_NAME, token)) is False
+
+
+def test_debug_without_admin_password_does_not_validate_admin_cookie(monkeypatch):
+    from app.admin import auth
+
+    monkeypatch.setattr(auth, "get_config", lambda: SimpleNamespace(admin_password="", debug=True))
+
+    assert auth.is_admin_cookie_valid(_request(auth.COOKIE_NAME, "anything")) is False
+
+
+@pytest.mark.asyncio
+async def test_debug_without_admin_password_does_not_bypass_admin_dependency(monkeypatch):
+    from app.admin import auth
+
+    monkeypatch.setattr(auth, "get_config", lambda: SimpleNamespace(admin_password="", debug=True))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.require_admin(_request(auth.COOKIE_NAME, "anything"), credentials=None)
+
+    assert exc_info.value.status_code == 403

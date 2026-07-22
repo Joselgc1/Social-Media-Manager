@@ -83,7 +83,7 @@ async def test_broadcast_records_and_sends_each_claimed_recipient_once(monkeypat
         _broadcast(),
         broadcast,
         {"audience_seeded_at": None},
-        {"id": "delivery-1", "platform_id": "584121234567", "display_name": "Ana Pérez"},
+        {"id": "delivery-1", "platform_id": "584121234567", "display_name": "Ana Pérez", "status": "sending"},
         None,
         {"sent": 1, "failed": 0, "sending": 0, "pending": 0},
     ])
@@ -116,7 +116,28 @@ async def test_broadcast_records_and_sends_each_claimed_recipient_once(monkeypat
     assert any("status = 'sent'" in query for query in queries)
     claim_query = fetch_one.await_args_list[3].args[0]
     assert "status = 'pending'" in claim_query
-    assert "FOR UPDATE SKIP LOCKED" in claim_query
+    assert "FOR UPDATE OF d SKIP LOCKED" in claim_query
+    assert "marketing_opt_in = TRUE" in claim_query
+    assert "conversation_state != 'blocked'" in claim_query
+
+
+@pytest.mark.asyncio
+async def test_claim_skips_recipient_that_opted_out_after_audience_seed(monkeypatch):
+    from app.broadcast import sender
+
+    fetch_one = AsyncMock(side_effect=[
+        {"id": "delivery-1", "platform_id": "584121234567", "display_name": "Ana", "status": "failed"},
+        None,
+    ])
+    monkeypatch.setattr(sender.db, "fetch_one", fetch_one)
+
+    claimed = await sender._claim_next_delivery("broadcast-1")
+
+    assert claimed is None
+    claim_query = fetch_one.await_args_list[0].args[0]
+    assert "recipient_ineligible_at_claim" in claim_query
+    assert "marketing_opt_in = TRUE" in claim_query
+    assert "is_blocked = FALSE" in claim_query
 
 
 @pytest.mark.asyncio

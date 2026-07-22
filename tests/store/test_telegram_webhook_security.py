@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,20 @@ def telegram_config():
         telegram_admin_chat_id="123456",
         telegram_webhook_secret="valid_webhook-secret",
     )
+
+
+def test_telegram_bot_token_is_redacted_from_http_logs(caplog):
+    from app.log_redaction import install_secret_redaction_filter
+
+    install_secret_redaction_filter()
+    caplog.set_level(logging.INFO, logger="httpx")
+
+    logging.getLogger("httpx").info(
+        'HTTP Request: POST https://api.telegram.org/bot123456:ABC-SECRET/setWebhook "HTTP/1.1 200 OK"'
+    )
+
+    assert "123456:ABC-SECRET" not in caplog.text
+    assert "https://api.telegram.org/bot<redacted>/setWebhook" in caplog.text
 
 
 @pytest.mark.parametrize("headers", [{}, {"X-Telegram-Bot-Api-Secret-Token": "wrong-secret"}])

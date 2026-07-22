@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class AnthropicProvider(LLMProvider):
     def __init__(self, api_key: str):
-        self.client = AsyncAnthropic(api_key=api_key)
+        self.client = AsyncAnthropic(api_key=api_key, timeout=90.0)
 
     # ── Main chat call ───────────────────────────────────────
 

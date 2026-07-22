@@ -137,7 +137,7 @@ KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
 
 ## Database Migration
 
-For a fresh database, run `store/migrations/001_schema.sql` once. For an existing store database, back it up and run `store/migrations/002_existing_database_upgrade.sql`; never rerun `001_schema.sql` as an upgrade. Confirm `schema_migrations` reports version `2` before enabling Kommo mode.
+For a fresh database, run `store/migrations/001_schema.sql` once. For an existing store database, back it up and run `store/migrations/002_existing_database_upgrade.sql`, `store/migrations/003_broadcast_delivery_safety.sql`, and `store/migrations/004_meta_inbound_lease_fencing.sql` in order; never rerun `001_schema.sql` as an upgrade. Confirm `schema_migrations` latest version matches `EXPECTED_SCHEMA_VERSION` in `store/app/db.py` before enabling Kommo mode.
 
 ## Widget Build
 
@@ -216,7 +216,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ## Kommo Mode Activation
 
-1. Apply the correct numbered migration path: `001_schema.sql` for a fresh database or `002_existing_database_upgrade.sql` for an existing database.
+1. Apply the correct numbered migration path: `001_schema.sql` for a fresh database, or `002_existing_database_upgrade.sql` followed by all later numbered migrations for an existing database.
 2. Upload the widget.
 3. Create and test the private-message Salesbot and native comment-triggered Salesbot.
 4. Register the general webhook.

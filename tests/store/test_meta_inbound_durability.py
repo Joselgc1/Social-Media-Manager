@@ -119,6 +119,36 @@ async def test_active_customer_lease_prevents_concurrent_ai_turn():
 
 
 @pytest.mark.asyncio
+async def test_claimed_job_completion_is_fenced_by_lease_token():
+    from app.webhooks import inbound_buffer
+
+    job = {
+        "id": "job-1",
+        "channel": "whatsapp",
+        "sender_id": "sender-1",
+        "message_parts": ["Hola"],
+        "media_url": None,
+        "customer_profile": {},
+        "attempt_count": 1,
+        "processing_lease_token": "lease-1",
+    }
+    processor = AsyncMock(return_value=None)
+    fetch_one = AsyncMock(return_value=None)
+
+    with (
+        patch.object(inbound_buffer, "_resolve_processor", return_value=processor),
+        patch.object(inbound_buffer.db, "fetch_one", fetch_one),
+        patch.object(inbound_buffer.db, "execute", AsyncMock()),
+    ):
+        await inbound_buffer._process_claimed_job(job)
+
+    processor.assert_awaited_once_with("sender-1", "Hola", None, {}, "job-1", "lease-1")
+    completion_query, completion_values = fetch_one.await_args.args
+    assert "processing_lease_token = :lease_token" in completion_query
+    assert completion_values == {"job_id": "job-1", "lease_token": "lease-1"}
+
+
+@pytest.mark.asyncio
 async def test_stale_processing_lease_returns_to_pending_after_crash():
     from app.webhooks import inbound_buffer
 
@@ -142,6 +172,62 @@ async def test_stale_processing_lease_returns_to_pending_after_crash():
     assert recovered == 1
     assert "status = 'pending'" in execute.await_args.args[0]
     assert "stale_lease_recovered" in execute.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_stale_processing_lease_with_outbound_id_completes_instead_of_requeue():
+    from app.webhooks import inbound_buffer
+
+    stale = {"id": "job-1", "channel": "whatsapp", "sender_id": "sender-1"}
+    stale_job = {
+        "id": "job-1",
+        "message_parts": ["Hola"],
+        "media_url": None,
+        "customer_profile": {},
+        "attempt_count": 1,
+        "outbound_started_at": "now",
+        "outbound_message_ids": ["wamid.accepted"],
+    }
+    execute = AsyncMock()
+    with (
+        patch.object(inbound_buffer.db, "fetch_all", AsyncMock(return_value=[stale])),
+        patch.object(inbound_buffer.db, "get_db", return_value=_database()),
+        patch.object(inbound_buffer.db, "fetch_one", AsyncMock(side_effect=[None, stale_job])),
+        patch.object(inbound_buffer.db, "execute", execute),
+    ):
+        recovered = await inbound_buffer.recover_stale_inbound_jobs()
+
+    assert recovered == 1
+    assert "status = 'completed'" in execute.await_args.args[0]
+    assert "stale_lease_completed_after_meta_accept" in execute.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_stale_processing_lease_with_uncertain_send_is_not_requeued():
+    from app.webhooks import inbound_buffer
+
+    stale = {"id": "job-1", "channel": "instagram", "sender_id": "sender-1"}
+    stale_job = {
+        "id": "job-1",
+        "message_parts": ["Hola"],
+        "media_url": None,
+        "customer_profile": {},
+        "attempt_count": 1,
+        "outbound_started_at": "now",
+        "outbound_message_ids": [],
+    }
+    execute = AsyncMock()
+    with (
+        patch.object(inbound_buffer.db, "fetch_all", AsyncMock(return_value=[stale])),
+        patch.object(inbound_buffer.db, "get_db", return_value=_database()),
+        patch.object(inbound_buffer.db, "fetch_one", AsyncMock(side_effect=[None, stale_job])),
+        patch.object(inbound_buffer.db, "execute", execute),
+    ):
+        recovered = await inbound_buffer.recover_stale_inbound_jobs()
+
+    assert recovered == 1
+    assert "status = 'failed'" in execute.await_args.args[0]
+    assert "delivery_unknown_after_stale_lease" in execute.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -177,6 +263,66 @@ async def test_failed_active_turn_merges_ahead_of_newer_pending_messages():
     merged_values = execute.await_args_list[0].args[1]
     assert json.loads(merged_values["parts"]) == ["primero", "después"]
     assert execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_is_requeued_not_completed():
+    from app.webhooks import inbound_buffer
+
+    job = {
+        "id": "job-1",
+        "channel": "whatsapp",
+        "sender_id": "sender-1",
+        "message_parts": ["Hola"],
+        "media_url": None,
+        "customer_profile": {},
+        "attempt_count": 1,
+        "processing_lease_token": "lease-1",
+    }
+    processor = AsyncMock(side_effect=RuntimeError("send failed"))
+    requeue = AsyncMock()
+    with (
+        patch.object(inbound_buffer, "_resolve_processor", return_value=processor),
+        patch.object(inbound_buffer, "_requeue_failed_job", requeue),
+        patch.object(inbound_buffer.db, "fetch_one", AsyncMock()),
+        patch.object(inbound_buffer.db, "execute", AsyncMock()),
+    ):
+        await inbound_buffer._process_claimed_job(job)
+
+    requeue.assert_awaited_once_with(job, "RuntimeError")
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_send_failure_propagates_after_notification():
+    from app.webhooks import whatsapp
+
+    result = {"customer_id": "customer-1", "text": "Hola"}
+    with (
+        patch.object(whatsapp, "generate_response", AsyncMock(return_value=result)),
+        patch.object(whatsapp, "mark_outbound_send_started", AsyncMock(return_value=True)),
+        patch.object(whatsapp, "send_text", AsyncMock(side_effect=RuntimeError("meta down"))),
+        patch.object(whatsapp, "_notify_delivery_failure", AsyncMock()) as notify,
+        pytest.raises(RuntimeError, match="meta down"),
+    ):
+        await whatsapp._deliver_ai_response("sender-1", "Hola", None, {}, "job-1", "lease-1")
+
+    notify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_refuses_send_when_lease_token_is_stale():
+    from app.webhooks import whatsapp
+
+    send_text = AsyncMock(return_value={"messages": [{"id": "wamid.1"}]})
+    with (
+        patch.object(whatsapp, "mark_outbound_send_started", AsyncMock(return_value=False)),
+        patch.object(whatsapp, "record_outbound_message", AsyncMock()) as record,
+        pytest.raises(RuntimeError, match="lease is no longer active"),
+    ):
+        await whatsapp._send_with_delivery_record(send_text, "job-1", "old-lease", to="sender-1", text="Hola")
+
+    send_text.assert_not_awaited()
+    record.assert_not_awaited()
 
 
 @pytest.mark.asyncio

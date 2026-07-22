@@ -34,7 +34,7 @@ from app.ai.tools.executor import execute_tool
 from app.ai.tools.registry import get_tool_schemas
 from app.ai.vision import analyze_payment_screenshot
 from app.catalog.pdf_generator import ensure_catalog_pdf
-from app.catalog.sheets import get_cached_catalog, group_catalog_products, refresh_catalog_async
+from app.catalog.sheets import ensure_fresh_catalog, get_cached_catalog, group_catalog_products
 from app.config import get_config
 from app.crm import conversations, customers, escalations, orders, sessions
 from app.exchange_rates import build_customer_exchange_rate_reply
@@ -489,10 +489,11 @@ async def generate_response(
         session = await _record_active_route(customer["id"], orchestration)
     _log_route_decision(orchestration)
 
-    catalog = get_cached_catalog()
-    if not catalog:
-        await refresh_catalog_async()
-        catalog = get_cached_catalog()
+    try:
+        catalog = await ensure_fresh_catalog()
+    except Exception:
+        logger.exception("Catalog is stale and could not be refreshed before prompt generation")
+        catalog = []
     catalog_md = format_catalog_as_markdown(catalog)
     catalog_pdf_supported = _catalog_pdf_supported(channel, integration_context, config)
     system_prompt = build_agent_prompt(

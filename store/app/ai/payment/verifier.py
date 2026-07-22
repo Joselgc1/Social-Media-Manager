@@ -272,10 +272,10 @@ def validate_payment_identifier_match(payment_information: str, vision_result: d
     if not info:
         return {"ok": False, "message": "El método de pago no tiene datos configurados para validar el destinatario."}
 
-    vision_text = normalize_catalog_text(
+    recipient_text = normalize_catalog_text(
         " ".join(
             str(vision_result.get(key, "") or "")
-            for key in ("summary", "raw_response", "recipient_identifier", "recipient_name", "sender_name", "reference")
+            for key in ("recipient_identifier", "recipient_name")
         )
     )
 
@@ -284,14 +284,14 @@ def validate_payment_identifier_match(payment_information: str, vision_result: d
         for email in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", info, flags=re.IGNORECASE)
     }
     if expected_emails:
-        if any(email in vision_text for email in expected_emails):
+        if any(email in recipient_text for email in expected_emails):
             return {"ok": True}
         return {"ok": False, "message": "El comprobante no muestra el correo o destinatario configurado para este método de pago."}
 
     collapsed_numeric_info = re.sub(r"(?<=\d)[\s\-]+(?=\d)", "", info)
     expected_number_tokens = set(re.findall(r"\d{6,}", collapsed_numeric_info))
     if expected_number_tokens:
-        vision_digits = re.sub(r"[^\d]", "", vision_text)
+        vision_digits = re.sub(r"[^\d]", "", recipient_text)
         if any(token in vision_digits for token in expected_number_tokens):
             return {"ok": True}
         return {"ok": False, "message": "El comprobante no coincide con el número o cuenta configurada para este método de pago."}
@@ -306,11 +306,11 @@ def validate_payment_identifier_match(payment_information: str, vision_result: d
         for segment in name_like_segments
         if segment and segment not in {"nombre", "correo", "telefono", "instrucciones", "pago"}
     ]
-    if name_like_segments and any(segment in vision_text for segment in name_like_segments):
+    if name_like_segments and any(segment in recipient_text for segment in name_like_segments):
         return {"ok": True}
 
     normalized_info = normalize_catalog_text(info)
-    if normalized_info and normalized_info in vision_text:
+    if normalized_info and normalized_info in recipient_text:
         return {"ok": True}
 
     return {"ok": False, "message": "El comprobante no coincide con los datos del método de pago configurado."}

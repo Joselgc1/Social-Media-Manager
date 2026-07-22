@@ -911,6 +911,10 @@ async def update_order(order_id: str, body: OrderUpdate):
     updated_shipping = None
 
     try:
+        if body.payment_status is not None and body.payment_status not in orders.VALID_PAYMENT_STATUSES:
+            raise ValueError(f"Invalid payment status '{body.payment_status}'")
+        if body.shipping_status is not None and body.shipping_status not in orders.VALID_SHIPPING_STATUSES:
+            raise ValueError(f"Invalid shipping status '{body.shipping_status}'")
         if body.payment_status is not None:
             updated_payment = await orders.update_order_payment_status(order_id, body.payment_status)
         if body.shipping_status is not None or body.tracking_number is not None:

@@ -34,7 +34,7 @@ from app.channels.instagram_sender import (
 )
 from app.config import get_config
 from app.crm import conversations
-from app.webhooks.inbound_buffer import enqueue_inbound_message
+from app.webhooks.inbound_buffer import enqueue_inbound_message, mark_outbound_send_started, record_outbound_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,15 +45,6 @@ def _mask_sender(sender: str) -> str:
     if len(sender) <= 4:
         return sender
     return f"{sender[:2]}***{sender[-2:]}"
-
-
-async def _safe_send_apology(sender_id: str):
-    try:
-        await send_text(to=sender_id, text=_APOLOGY_TEXT)
-        return True
-    except Exception as send_error:
-        logger.error(f"Failed to send Instagram fallback reply to {_mask_sender(sender_id)}: {send_error}")
-        return False
 
 
 async def _notify_delivery_failure(sender_id: str, detail: str):
@@ -311,6 +302,7 @@ async def _deliver_ai_response(
     media_url: str | None = None,
     sender_profile: dict | None = None,
     inbound_job_id: str = "",
+    lease_token: str = "",
 ):
     """
     Route the normalized message through the AI engine
@@ -329,7 +321,11 @@ async def _deliver_ai_response(
         )
     except Exception as e:
         logger.exception(f"Error generating Instagram response for {_mask_sender(sender_id)}: {e}")
-        await _safe_send_apology(sender_id)
+        try:
+            await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=_APOLOGY_TEXT)
+        except Exception as send_error:
+            logger.error(f"Failed to send Instagram fallback reply to {_mask_sender(sender_id)}: {send_error}")
+            raise
         return
 
     if result.get("paused"):
@@ -346,14 +342,20 @@ async def _deliver_ai_response(
                 {"title": btn, "payload": btn.upper().replace(" ", "_")}
                 for btn in result["interactive"]["buttons"]
             ]
-            await send_text_with_quick_replies(
+            await _send_with_delivery_record(
+                send_text_with_quick_replies,
+                inbound_job_id,
+                lease_token,
                 to=sender_id,
                 text=result["interactive"]["body_text"],
                 quick_replies=quick_replies,
             )
             delivered_parts.append(result["interactive"]["body_text"])
         elif result.get("product_image") and result["product_image"].get("type") == "product_image":
-            await send_image(
+            await _send_with_delivery_record(
+                send_image,
+                inbound_job_id,
+                lease_token,
                 to=sender_id,
                 image_url=result["product_image"]["image_url"],
             )
@@ -363,27 +365,39 @@ async def _deliver_ai_response(
                 if len(follow_up.encode("utf-8")) > 950:
                     chunks = _split_message(follow_up, max_bytes=950)
                     for chunk in chunks:
-                        await send_text(to=sender_id, text=chunk)
+                        await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=chunk)
                         delivered_parts.append(chunk)
                 else:
-                    await send_text(to=sender_id, text=follow_up)
+                    await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=follow_up)
                     delivered_parts.append(follow_up)
         elif result.get("text"):
             reply = result["text"]
             if len(reply.encode("utf-8")) > 950:
                 chunks = _split_message(reply, max_bytes=950)
                 for chunk in chunks:
-                    await send_text(to=sender_id, text=chunk)
+                    await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=chunk)
                     delivered_parts.append(chunk)
             else:
-                await send_text(to=sender_id, text=reply)
+                await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=reply)
                 delivered_parts.append(reply)
     except Exception as e:
         logger.exception(f"Error sending Instagram response to {_mask_sender(sender_id)}: {e}")
         await _notify_delivery_failure(sender_id, str(e))
+        raise
 
     if delivered_parts:
         await _store_delivered_assistant_message(result, "\n".join(delivered_parts), inbound_job_id)
+
+
+async def _send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
+    if inbound_job_id and lease_token:
+        marked = await mark_outbound_send_started(inbound_job_id, lease_token)
+        if not marked:
+            raise RuntimeError("Meta inbound lease is no longer active; refusing outbound send.")
+    response = await send_func(**kwargs)
+    if inbound_job_id and lease_token:
+        await record_outbound_message(inbound_job_id, lease_token, response)
+    return response
 
 
 async def _store_delivered_assistant_message(result: dict, content: str, source_id: str) -> None:

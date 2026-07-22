@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from datetime import UTC, datetime
 from threading import Lock
 from urllib.parse import parse_qs, urlparse
 
@@ -29,11 +30,24 @@ _next_refresh_allowed: float = 0
 _refresh_generation: int = 0
 _last_refresh_succeeded: bool = False
 _refresh_lock = Lock()
+_MIN_CATALOG_MAX_AGE_SECONDS = 300
+_CATALOG_STALE_MULTIPLIER = 2
+_GOOGLE_SHEETS_TIMEOUT_SECONDS = (5, 30)
 _REFRESH_BACKOFF_BASE_SECONDS = 60
 _REFRESH_BACKOFF_MAX_SECONDS = 900
 _IMAGE_FORMULA_RE = re.compile(r'=\s*IMAGE\s*\(\s*"([^"]+)"', re.IGNORECASE)
 _HYPERLINK_FORMULA_RE = re.compile(r'=\s*HYPERLINK\s*\(\s*"([^"]+)"', re.IGNORECASE)
 _SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]
+_INVENTORY_LEDGER_TITLE = "_inventory_mutations"
+_INVENTORY_LEDGER_HEADERS = [
+    "Operation ID",
+    "Type",
+    "SKU",
+    "Quantity",
+    "Stock Before",
+    "Stock After",
+    "Created At",
+]
 
 
 def _get_gspread_client() -> gspread.Client:
@@ -45,7 +59,9 @@ def _get_gspread_client() -> gspread.Client:
         creds_dict,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    return gspread.authorize(credentials)
+    client = gspread.authorize(credentials)
+    client.set_timeout(_GOOGLE_SHEETS_TIMEOUT_SECONDS)
+    return client
 
 
 def refresh_catalog(*, force: bool = False) -> bool:
@@ -147,6 +163,35 @@ def get_cached_catalog() -> list[dict]:
     Return the in-memory product catalog without performing network I/O.
     """
     return _catalog_cache
+
+
+def catalog_cache_age_seconds() -> float | None:
+    """Return cache age in seconds, or None when no successful catalog load exists."""
+    if not _catalog_ts:
+        return None
+    return max(time.time() - _catalog_ts, 0.0)
+
+
+def catalog_max_age_seconds() -> int:
+    """Maximum safe catalog age before prices/activation must be refreshed."""
+    return max(int(_refresh_interval) * _CATALOG_STALE_MULTIPLIER, _MIN_CATALOG_MAX_AGE_SECONDS)
+
+
+def is_catalog_cache_stale() -> bool:
+    age = catalog_cache_age_seconds()
+    return age is None or age > catalog_max_age_seconds()
+
+
+async def ensure_fresh_catalog() -> list[dict]:
+    """Refresh stale catalog data and fail closed if freshness cannot be proven."""
+    if is_catalog_cache_stale():
+        await refresh_catalog_async(force=True)
+    if is_catalog_cache_stale():
+        age = catalog_cache_age_seconds()
+        raise InventoryUpdateError(
+            f"Product catalog is stale or unavailable; age_seconds={age if age is not None else 'unknown'}."
+        )
+    return get_cached_catalog()
 
 
 def count_grouped_catalog_products(products: list[dict] | None = None) -> int:
@@ -306,6 +351,13 @@ def _safe_int(value) -> int:
         return 0
 
 
+def _safe_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _size_sort_key(size: str) -> tuple[int, str]:
     normalized = str(size or "").strip().upper()
     try:
@@ -344,16 +396,93 @@ class InventoryUpdateError(ValueError):
     """Raised when an inventory mutation cannot be completed safely."""
 
 
-def _update_stock(items: list[dict], direction: int) -> dict[str, int]:
-    """
-    Update stock in Google Sheets.
+def _quote_sheet_title(title: str) -> str:
+    escaped = str(title or "").replace("'", "''")
+    return f"'{escaped}'"
 
-    direction = -1 deducts stock
-    direction = +1 restores stock
-    """
-    if direction not in {-1, 1}:
-        raise ValueError("Inventory direction must be -1 or 1.")
 
+def _sheet_range(worksheet, cell_range: str) -> str:
+    return f"{_quote_sheet_title(worksheet.title)}!{cell_range}"
+
+
+def _get_or_create_inventory_ledger(spreadsheet):
+    try:
+        ledger = spreadsheet.worksheet(_INVENTORY_LEDGER_TITLE)
+    except gspread.WorksheetNotFound:
+        ledger = spreadsheet.add_worksheet(
+            title=_INVENTORY_LEDGER_TITLE,
+            rows=1000,
+            cols=len(_INVENTORY_LEDGER_HEADERS),
+        )
+        ledger.update([_INVENTORY_LEDGER_HEADERS], range_name="A1")
+        return ledger
+
+    headers = [str(value).strip() for value in ledger.row_values(1)]
+    if not any(headers):
+        ledger.update([_INVENTORY_LEDGER_HEADERS], range_name="A1")
+    elif headers[:len(_INVENTORY_LEDGER_HEADERS)] != _INVENTORY_LEDGER_HEADERS:
+        raise InventoryUpdateError(
+            f"Inventory ledger worksheet '{_INVENTORY_LEDGER_TITLE}' has unexpected headers."
+        )
+    return ledger
+
+
+def _read_inventory_ledger(spreadsheet):
+    try:
+        ledger = spreadsheet.worksheet(_INVENTORY_LEDGER_TITLE)
+    except gspread.WorksheetNotFound:
+        return None, []
+    headers = [str(value).strip() for value in ledger.row_values(1)]
+    if not any(headers):
+        return ledger, []
+    if headers[:len(_INVENTORY_LEDGER_HEADERS)] != _INVENTORY_LEDGER_HEADERS:
+        raise InventoryUpdateError(
+            f"Inventory ledger worksheet '{_INVENTORY_LEDGER_TITLE}' has unexpected headers."
+        )
+    return ledger, ledger.get_all_records()
+
+
+def _ledger_operation_rows(records: list[dict], operation_id: str) -> list[dict]:
+    return [
+        record for record in records
+        if str(record.get("Operation ID") or "").strip() == operation_id
+    ]
+
+
+def _validate_existing_inventory_operation(
+    rows: list[dict],
+    requested: dict[str, int],
+    direction: int,
+    operation_id: str,
+) -> dict[str, int]:
+    operation_type = "deduct" if direction == -1 else "restore"
+    if len(rows) != len(requested):
+        raise InventoryUpdateError(
+            f"Inventory operation '{operation_id}' has an incomplete ledger entry."
+        )
+
+    applied: dict[str, int] = {}
+    for row in rows:
+        sku = str(row.get("SKU") or "").strip()
+        quantity = _safe_int(row.get("Quantity"))
+        if (
+            str(row.get("Type") or "").strip() != operation_type
+            or sku not in requested
+            or requested[sku] != quantity
+        ):
+            raise InventoryUpdateError(
+                f"Inventory operation '{operation_id}' does not match the requested mutation."
+            )
+        applied[sku] = _safe_int(row.get("Stock After"))
+
+    if set(applied) != set(requested):
+        raise InventoryUpdateError(
+            f"Inventory operation '{operation_id}' is missing one or more SKUs."
+        )
+    return applied
+
+
+def _build_inventory_request(items: list[dict]) -> dict[str, int]:
     requested: dict[str, int] = {}
     for item in items:
         sku = str(item.get("sku") or "").strip()
@@ -364,11 +493,47 @@ def _update_stock(items: list[dict], direction: int) -> dict[str, int]:
         if not sku or quantity <= 0:
             raise InventoryUpdateError("Every inventory item requires a SKU and positive quantity.")
         requested[sku] = requested.get(sku, 0) + quantity
+    return requested
+
+
+def _update_stock(
+    items: list[dict],
+    direction: int,
+    *,
+    operation_id: str | None = None,
+) -> dict[str, int]:
+    """
+    Update stock in Google Sheets.
+
+    direction = -1 deducts stock
+    direction = +1 restores stock
+    """
+    if direction not in {-1, 1}:
+        raise ValueError("Inventory direction must be -1 or 1.")
+
+    requested = _build_inventory_request(items)
 
     try:
         config = get_config()
         client = _get_gspread_client()
-        sheet = client.open_by_key(config.product_sheet_id).sheet1
+        spreadsheet = client.open_by_key(config.product_sheet_id)
+        sheet = spreadsheet.sheet1
+        ledger = None
+        ledger_records: list[dict] = []
+        if operation_id:
+            ledger = _get_or_create_inventory_ledger(spreadsheet)
+            ledger_records = ledger.get_all_records()
+            existing_operation = _ledger_operation_rows(ledger_records, operation_id)
+            if existing_operation:
+                logger.info("Inventory operation %s was already applied", operation_id)
+                refresh_catalog(force=True)
+                return _validate_existing_inventory_operation(
+                    existing_operation,
+                    requested,
+                    direction,
+                    operation_id,
+                )
+
         all_records = sheet.get_all_records()
         headers = sheet.row_values(1)
         stock_col = next(
@@ -378,35 +543,76 @@ def _update_stock(items: list[dict], direction: int) -> dict[str, int]:
         if stock_col is None:
             raise InventoryUpdateError("Stock column not found in Google Sheets.")
 
-        inventory_rows: dict[str, tuple[int, int]] = {}
+        inventory_rows: dict[str, tuple[int, dict]] = {}
         for index, record in enumerate(all_records):
             sku = str(record.get("SKU", "")).strip()
             if not sku:
                 continue
             if sku in inventory_rows:
                 raise InventoryUpdateError(f"Duplicate SKU '{sku}' found in Google Sheets.")
-            inventory_rows[sku] = (index + 2, _safe_int(record.get("Stock", 0)))
+            inventory_rows[sku] = (index + 2, record)
 
         new_stock: dict[str, int] = {}
         updates = []
+        ledger_values = []
+        operation_type = "deduct" if direction == -1 else "restore"
+        created_at = datetime.now(UTC).isoformat()
         for sku, quantity in requested.items():
             inventory_row = inventory_rows.get(sku)
             if inventory_row is None:
                 raise InventoryUpdateError(f"SKU '{sku}' was not found in Google Sheets.")
-            row_number, current_stock = inventory_row
+            row_number, record = inventory_row
+            current_stock = _safe_int(record.get("Stock", 0))
+            if direction == -1:
+                active = str(record.get("Active", "yes")).strip().lower()
+                if active != "yes":
+                    raise InventoryUpdateError(f"SKU '{sku}' is not active in Google Sheets.")
+                expected_price = next(
+                    (
+                        _safe_float(item.get("unit_price"))
+                        for item in items
+                        if str(item.get("sku") or "").strip() == sku and item.get("unit_price") is not None
+                    ),
+                    None,
+                )
+                current_price = _safe_float(record.get("Price USD"))
+                if expected_price is not None and current_price is not None and abs(current_price - expected_price) > 0.01:
+                    raise InventoryUpdateError(f"SKU '{sku}' price changed in Google Sheets.")
             updated_stock = current_stock + direction * quantity
             if updated_stock < 0:
                 raise InventoryUpdateError(
                     f"Insufficient stock for SKU '{sku}': requested {quantity}, available {current_stock}."
                 )
             new_stock[sku] = updated_stock
+            cell_range = rowcol_to_a1(row_number, stock_col)
             updates.append({
-                "range": rowcol_to_a1(row_number, stock_col),
+                "range": _sheet_range(sheet, cell_range) if operation_id else cell_range,
                 "values": [[updated_stock]],
             })
+            if operation_id:
+                ledger_values.append([
+                    operation_id,
+                    operation_type,
+                    sku,
+                    quantity,
+                    current_stock,
+                    updated_stock,
+                    created_at,
+                ])
 
         if updates:
-            sheet.batch_update(updates, raw=True)
+            if operation_id:
+                next_ledger_row = len(ledger_records) + 2
+                ledger_range = f"A{next_ledger_row}:G{next_ledger_row + len(ledger_values) - 1}"
+                spreadsheet.values_batch_update({
+                    "valueInputOption": "RAW",
+                    "data": [
+                        *updates,
+                        {"range": _sheet_range(ledger, ledger_range), "values": ledger_values},
+                    ],
+                })
+            else:
+                sheet.batch_update(updates, raw=True)
         for sku, updated_stock in new_stock.items():
             logger.info("Stock updated for %s: %s", sku, updated_stock)
         refresh_catalog(force=True)
@@ -417,14 +623,57 @@ def _update_stock(items: list[dict], direction: int) -> dict[str, int]:
         raise InventoryUpdateError(f"Google Sheets inventory update failed: {exc}") from exc
 
 
-def deduct_stock(items: list[dict]) -> dict[str, int]:
+def inventory_operation_exists(operation_id: str) -> bool:
+    """Return whether a stock mutation operation was already recorded in Sheets."""
+    operation_id = str(operation_id or "").strip()
+    if not operation_id:
+        return False
+
+    try:
+        config = get_config()
+        client = _get_gspread_client()
+        spreadsheet = client.open_by_key(config.product_sheet_id)
+        _, records = _read_inventory_ledger(spreadsheet)
+        return bool(_ledger_operation_rows(records, operation_id))
+    except InventoryUpdateError:
+        raise
+    except Exception as exc:
+        raise InventoryUpdateError(f"Google Sheets inventory ledger lookup failed: {exc}") from exc
+
+
+def inventory_operation_applied(operation_id: str, items: list[dict], *, direction: int) -> bool:
+    """Return whether a matching stock mutation operation was already recorded."""
+    operation_id = str(operation_id or "").strip()
+    if not operation_id:
+        return False
+    if direction not in {-1, 1}:
+        raise ValueError("Inventory direction must be -1 or 1.")
+
+    requested = _build_inventory_request(items)
+    try:
+        config = get_config()
+        client = _get_gspread_client()
+        spreadsheet = client.open_by_key(config.product_sheet_id)
+        _, records = _read_inventory_ledger(spreadsheet)
+        rows = _ledger_operation_rows(records, operation_id)
+        if not rows:
+            return False
+        _validate_existing_inventory_operation(rows, requested, direction, operation_id)
+        return True
+    except InventoryUpdateError:
+        raise
+    except Exception as exc:
+        raise InventoryUpdateError(f"Google Sheets inventory ledger lookup failed: {exc}") from exc
+
+
+def deduct_stock(items: list[dict], *, operation_id: str | None = None) -> dict[str, int]:
     """
     Deduct stock from Google Sheets after an order is created.
     Each item should have 'sku' and 'quantity' keys.
     """
-    return _update_stock(items, direction=-1)
+    return _update_stock(items, direction=-1, operation_id=operation_id)
 
 
-def restore_stock(items: list[dict]) -> dict[str, int]:
+def restore_stock(items: list[dict], *, operation_id: str | None = None) -> dict[str, int]:
     """Restore stock in Google Sheets after an order is deleted."""
-    return _update_stock(items, direction=1)
+    return _update_stock(items, direction=1, operation_id=operation_id)

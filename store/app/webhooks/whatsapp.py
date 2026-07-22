@@ -17,7 +17,7 @@ from app.ai.engine import generate_response
 from app.channels.whatsapp_sender import mark_as_read, send_document, send_image, send_interactive_buttons, send_text
 from app.config import get_config
 from app.crm import conversations
-from app.webhooks.inbound_buffer import enqueue_inbound_message
+from app.webhooks.inbound_buffer import enqueue_inbound_message, mark_outbound_send_started, record_outbound_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,15 +28,6 @@ def _mask_sender(sender: str) -> str:
     if len(sender) <= 4:
         return sender
     return f"{sender[:2]}***{sender[-2:]}"
-
-
-async def _safe_send_apology(sender: str):
-    try:
-        await send_text(to=sender, text=_APOLOGY_TEXT)
-        return True
-    except Exception as send_error:
-        logger.error(f"Failed to send WhatsApp fallback reply to {_mask_sender(sender)}: {send_error}")
-        return False
 
 
 async def _notify_delivery_failure(sender: str, detail: str):
@@ -181,6 +172,7 @@ async def _deliver_ai_response(
     media_url: str | None,
     customer_profile: dict,
     inbound_job_id: str = "",
+    lease_token: str = "",
 ):
     # Route through the AI engine
     try:
@@ -196,7 +188,11 @@ async def _deliver_ai_response(
         )
     except Exception as e:
         logger.exception(f"Error generating WhatsApp response for {_mask_sender(sender)}: {e}")
-        await _safe_send_apology(sender)
+        try:
+            await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=_APOLOGY_TEXT)
+        except Exception as send_error:
+            logger.error(f"Failed to send WhatsApp fallback reply to {_mask_sender(sender)}: {send_error}")
+            raise
         return
 
     if result.get("paused"):
@@ -211,7 +207,10 @@ async def _deliver_ai_response(
         if result.get("catalog_pdf") and result["catalog_pdf"].get("type") == "catalog_pdf":
             pdf_url = f"{get_config().app_base_url}/static/catalog/catalog.pdf"
             follow_up = (result.get("text") or result["catalog_pdf"].get("caption") or "").strip()
-            await send_document(
+            await _send_with_delivery_record(
+                send_document,
+                inbound_job_id,
+                lease_token,
                 to=sender,
                 document_url=pdf_url,
                 filename="Catalogo VS.pdf",
@@ -219,10 +218,13 @@ async def _deliver_ai_response(
             )
             delivered_parts.append("[Catálogo PDF enviado]")
             if follow_up:
-                await send_text(to=sender, text=follow_up)
+                await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=follow_up)
                 delivered_parts.append(follow_up)
         elif result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
-            await send_interactive_buttons(
+            await _send_with_delivery_record(
+                send_interactive_buttons,
+                inbound_job_id,
+                lease_token,
                 to=sender,
                 body_text=result["interactive"]["body_text"],
                 buttons=result["interactive"]["buttons"],
@@ -230,7 +232,10 @@ async def _deliver_ai_response(
             delivered_parts.append(result["interactive"]["body_text"])
         elif result.get("product_image") and result["product_image"].get("type") == "product_image":
             caption = result["product_image"].get("caption", "")
-            await send_image(
+            await _send_with_delivery_record(
+                send_image,
+                inbound_job_id,
+                lease_token,
                 to=sender,
                 image_url=result["product_image"]["image_url"],
                 caption=caption,
@@ -238,17 +243,29 @@ async def _deliver_ai_response(
             delivered_parts.append(caption.strip() or "[Imagen de producto enviada]")
             follow_up = (result.get("text") or "").strip()
             if follow_up and follow_up != caption.strip():
-                await send_text(to=sender, text=follow_up)
+                await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=follow_up)
                 delivered_parts.append(follow_up)
         elif result.get("text"):
-            await send_text(to=sender, text=result["text"])
+            await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=result["text"])
             delivered_parts.append(result["text"])
     except Exception as e:
         logger.exception(f"Error sending WhatsApp response to {_mask_sender(sender)}: {e}")
         await _notify_delivery_failure(sender, str(e))
+        raise
 
     if delivered_parts:
         await _store_delivered_assistant_message(result, "\n".join(delivered_parts), inbound_job_id)
+
+
+async def _send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
+    if inbound_job_id and lease_token:
+        marked = await mark_outbound_send_started(inbound_job_id, lease_token)
+        if not marked:
+            raise RuntimeError("Meta inbound lease is no longer active; refusing outbound send.")
+    response = await send_func(**kwargs)
+    if inbound_job_id and lease_token:
+        await record_outbound_message(inbound_job_id, lease_token, response)
+    return response
 
 
 async def _store_delivered_assistant_message(result: dict, content: str, source_id: str) -> None:

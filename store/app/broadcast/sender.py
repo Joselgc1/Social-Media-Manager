@@ -231,25 +231,44 @@ async def _seed_delivery_ledger(broadcast_id: str, tags: list[str]) -> None:
 
 async def _claim_next_delivery(broadcast_id: str):
     """Atomically claim one never-attempted recipient across all workers."""
-    return await db.fetch_one(
-        """
-        WITH candidate AS (
-            SELECT id
-            FROM broadcast_deliveries
-            WHERE broadcast_id = :broadcast_id AND status = 'pending'
-            ORDER BY created_at, id
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
+    while True:
+        row = await db.fetch_one(
+            """
+            WITH candidate AS (
+                SELECT d.id,
+                       (
+                           c.id IS NOT NULL
+                           AND c.channel = 'whatsapp'
+                           AND c.marketing_opt_in = TRUE
+                           AND c.marketing_opt_in_at IS NOT NULL
+                           AND c.is_blocked = FALSE
+                           AND c.conversation_state != 'blocked'
+                       ) AS eligible
+                FROM broadcast_deliveries d
+                LEFT JOIN customers c ON c.id = d.customer_id
+                WHERE d.broadcast_id = :broadcast_id AND d.status = 'pending'
+                ORDER BY d.created_at, d.id
+                FOR UPDATE OF d SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE broadcast_deliveries AS delivery
+            SET status = CASE WHEN candidate.eligible THEN 'sending' ELSE 'failed' END,
+                attempt_count = CASE WHEN candidate.eligible THEN attempt_count + 1 ELSE attempt_count END,
+                claimed_at = CASE WHEN candidate.eligible THEN NOW() ELSE claimed_at END,
+                failed_at = CASE WHEN candidate.eligible THEN failed_at ELSE NOW() END,
+                last_error = CASE WHEN candidate.eligible THEN last_error ELSE 'recipient_ineligible_at_claim' END,
+                updated_at = NOW()
+            FROM candidate
+            WHERE delivery.id = candidate.id
+            RETURNING delivery.id, delivery.platform_id, delivery.display_name, delivery.status
+            """,
+            {"broadcast_id": broadcast_id},
         )
-        UPDATE broadcast_deliveries AS delivery
-        SET status = 'sending', attempt_count = attempt_count + 1,
-            claimed_at = NOW(), updated_at = NOW()
-        FROM candidate
-        WHERE delivery.id = candidate.id
-        RETURNING delivery.id, delivery.platform_id, delivery.display_name
-        """,
-        {"broadcast_id": broadcast_id},
-    )
+        if not row:
+            return None
+        if row["status"] == "sending":
+            return row
+        logger.info("Skipped broadcast delivery %s because recipient is no longer eligible", row["id"])
 
 
 async def _delivery_counts(broadcast_id: str) -> dict[str, int]:

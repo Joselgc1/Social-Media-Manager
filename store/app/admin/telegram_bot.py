@@ -36,6 +36,7 @@ from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
 from app.crm import orders
 from app.crm.customers import add_tags, remove_tag
+from app.log_redaction import install_secret_redaction_filter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -671,6 +672,7 @@ async def setup_telegram_webhook(bot_token: str, webhook_url: str, webhook_secre
     Register the Telegram webhook URL with the Telegram Bot API.
     Call this once after deployment.
     """
+    install_secret_redaction_filter()
     url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
     async with httpx.AsyncClient() as client:
         resp = await client.post(

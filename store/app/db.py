@@ -23,7 +23,7 @@ from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 _db: databases.Database | None = None
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_VERSION = 3
+EXPECTED_SCHEMA_VERSION = 4
 
 
 async def connect():

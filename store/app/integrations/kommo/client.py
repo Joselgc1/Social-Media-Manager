@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -15,9 +17,13 @@ from app.integrations.kommo.auth import kommo_account_hostname, validate_return_
 logger = logging.getLogger(__name__)
 
 KOMMO_HTTP_TIMEOUT_SECONDS = 15
+KOMMO_MIN_REQUEST_INTERVAL_SECONDS = 0.35
+KOMMO_MAX_RETRY_AFTER_SECONDS = 60.0
 _TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 _MAX_ERROR_DETAIL_LENGTH = 500
 _SAFE_ERROR_FIELDS = ("detail", "error", "title", "hint", "status")
+_RATE_LIMIT_LOCK = asyncio.Lock()
+_NEXT_REQUEST_AT = 0.0
 
 
 class KommoAPIError(RuntimeError):
@@ -78,6 +84,42 @@ def _safe_response_detail(response: httpx.Response, request_payload: Any | None)
     return _sanitize_error_text(response.text, request_payload)
 
 
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    text = value.strip()
+    try:
+        delay = float(text)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(text)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            delay = (retry_at - datetime.now(UTC)).total_seconds()
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    return max(0.0, min(delay, KOMMO_MAX_RETRY_AFTER_SECONDS))
+
+
+async def _wait_for_account_rate_limit() -> None:
+    global _NEXT_REQUEST_AT
+    loop = asyncio.get_running_loop()
+    async with _RATE_LIMIT_LOCK:
+        now = loop.time()
+        wait_seconds = max(0.0, _NEXT_REQUEST_AT - now)
+        if wait_seconds:
+            await asyncio.sleep(wait_seconds)
+            now = loop.time()
+        _NEXT_REQUEST_AT = now + KOMMO_MIN_REQUEST_INTERVAL_SECONDS
+
+
+async def _defer_account_requests(delay_seconds: float) -> None:
+    global _NEXT_REQUEST_AT
+    loop = asyncio.get_running_loop()
+    async with _RATE_LIMIT_LOCK:
+        _NEXT_REQUEST_AT = max(_NEXT_REQUEST_AT, loop.time() + delay_seconds)
+
+
 class KommoClient:
     def __init__(self, *, subdomain: str, access_token: str):
         self.subdomain = subdomain.strip().lower()
@@ -108,10 +150,11 @@ class KommoClient:
     ) -> Any:
         url = path_or_url if path_or_url.startswith("https://") else f"{self.base_url}{path_or_url}"
         expected = expected_statuses or {200, 202, 204}
-        attempts = 2 if idempotent else 1
+        attempts = 3 if idempotent else 2
 
         for attempt in range(attempts):
             try:
+                await _wait_for_account_rate_limit()
                 async with httpx.AsyncClient(
                     timeout=KOMMO_HTTP_TIMEOUT_SECONDS,
                     follow_redirects=follow_redirects,
@@ -122,8 +165,13 @@ class KommoClient:
                         return None
                     content_type = response.headers.get("content-type", "")
                     return response.json() if "json" in content_type else response.text
-                if idempotent and response.status_code in _TRANSIENT_STATUSES and attempt + 1 < attempts:
-                    await asyncio.sleep(0.5)
+                retryable_status = response.status_code == 429 or (
+                    idempotent and response.status_code in _TRANSIENT_STATUSES
+                )
+                if retryable_status and attempt + 1 < attempts:
+                    retry_after = _retry_after_seconds(response.headers.get("retry-after"))
+                    sleep_seconds = retry_after if retry_after is not None else 0.5 * (attempt + 1)
+                    await _defer_account_requests(sleep_seconds)
                     continue
                 detail = _safe_response_detail(response, json)
                 message = f"Kommo API returned HTTP {response.status_code}"

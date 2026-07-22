@@ -184,6 +184,38 @@ def test_ai_state_decisions():
 
 
 @pytest.mark.asyncio
+async def test_ai_mode_initialization_refetches_before_writing_active(monkeypatch):
+    from app.integrations.kommo import state
+
+    monkeypatch.setattr(
+        state,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_ai_mode_field_id=10,
+            kommo_ai_active_enum_id=1,
+            kommo_ai_human_enum_id=2,
+            kommo_ai_paused_enum_id=3,
+        ),
+    )
+    client = MagicMock()
+    client.get_lead = AsyncMock(return_value={
+        "custom_fields_values": [{"field_id": 10, "values": [{"enum_id": 2}]}]
+    })
+    client.update_ai_mode = AsyncMock()
+
+    enum_id, initialized_now = await state.ensure_ai_mode_initialized(
+        client,
+        "123",
+        {"custom_fields_values": []},
+    )
+
+    assert enum_id == 2
+    assert initialized_now is False
+    client.get_lead.assert_awaited_once_with("123")
+    client.update_ai_mode.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
     from app.integrations.kommo import jobs
 
@@ -301,6 +333,31 @@ def test_comment_and_private_messages_have_separate_job_correlation():
     assert private_event.correlation_id == "kommo:private_message:100"
     assert comment_event.correlation_id == "kommo:instagram_comment:100"
     assert private_event.correlation_id != comment_event.correlation_id
+
+
+def test_private_messages_on_same_lead_use_specific_chat_correlation():
+    first_chat = NormalizedKommoEvent(
+        event_type="incoming_message",
+        message_id="dm-1",
+        lead_id="100",
+        contact_id="200",
+        chat_id="chat-a",
+        text="Hola",
+        channel="whatsapp",
+    )
+    second_chat = NormalizedKommoEvent(
+        event_type="incoming_message",
+        message_id="dm-2",
+        lead_id="100",
+        contact_id="201",
+        chat_id="chat-b",
+        text="Hola",
+        channel="instagram",
+    )
+
+    assert first_chat.correlation_id == "kommo:private_message:chat-a"
+    assert second_chat.correlation_id == "kommo:private_message:chat-b"
+    assert first_chat.correlation_id != second_chat.correlation_id
 
 
 @pytest.mark.asyncio
@@ -542,6 +599,34 @@ async def test_native_comment_callback_duplicate_uses_jti_or_stable_callback(mon
 
 
 @pytest.mark.asyncio
+async def test_comment_callback_token_replay_is_duplicate_even_with_altered_text(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    create_db = _CallbackCreateDB(duplicate_job={"id": "existing-comment", "status": "sent", "interaction_type": "instagram_comment"})
+    monkeypatch.setattr(jobs, "db", create_db)
+
+    result = await jobs.persist_salesbot_callback(
+        SalesbotWidgetData(message="Texto alterado", lead_id="100", origin="instagram", interaction_type="instagram_comment"),
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        {
+            "jti": "token-id",
+            "iat": 123456,
+            "account_id": 123,
+            "client_uid": "client-uuid",
+            "entity_type": "leads",
+            "entity_id": "100",
+        },
+    )
+
+    assert result == {"status": "duplicate", "job_id": "existing-comment"}
+    duplicate_query, duplicate_values = create_db.fetch_one_calls[1]
+    assert "salesbot_token_jti = CAST(:salesbot_token_jti AS text)" in duplicate_query
+    assert "_normalized_message_sql" not in duplicate_query
+    assert duplicate_values["normalized_message"] == "texto alterado"
+    assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
+
+
+@pytest.mark.asyncio
 async def test_private_webhook_job_created_before_comment_callback_is_discarded(monkeypatch):
     from app.integrations.kommo import jobs
 
@@ -663,6 +748,29 @@ async def test_comment_callback_requires_signed_entity_identity(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_comment_callback_context_cannot_be_replayed_as_private_message(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    with pytest.raises(ValueError, match="comment_callback_interaction_type_mismatch"):
+        await jobs.persist_salesbot_callback(
+            SalesbotWidgetData(
+                message="Precio?",
+                lead_id="100",
+                interaction_type="private_message",
+                comment_id="comment-1",
+                post_id="post-1",
+            ),
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            {"jti": "token-id", "iat": 123456, "account_id": 123, "entity_type": "leads", "entity_id": "100"},
+        )
+
+    mock_db.fetch_one.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_valid_lead_callback_uses_exact_update_bind_parameters(monkeypatch):
     from app.integrations.kommo import jobs
 
@@ -690,6 +798,7 @@ async def test_valid_lead_callback_uses_exact_update_bind_parameters(monkeypatch
         "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
         "entity_id": "100",
         "entity_type": "leads",
+        "widget_contact_id": "200",
         "callback_claims": values["callback_claims"],
         "salesbot_token_jti": "token-id",
         "salesbot_token_iat": "123456",
@@ -730,6 +839,7 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
         "return_url",
         "entity_id",
         "entity_type",
+        "widget_contact_id",
         "callback_claims",
         "salesbot_token_jti",
         "salesbot_token_iat",
@@ -744,6 +854,7 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
     }
     assert values["entity_type"] == "contacts"
     assert values["entity_id"] == "200"
+    assert values["widget_contact_id"] == "200"
     assert values["interaction_type"] == "private_message"
 
 
@@ -1215,6 +1326,55 @@ async def test_ready_job_contact_fetch_failure_does_not_block_processing(monkeyp
     jobs.generate_response.assert_awaited_once()
     assert jobs.generate_response.await_args.kwargs["customer_profile"]["display_name"] == "Maria Cliente"
     client.continue_salesbot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_contact_only_ready_job_without_resolved_lead_is_suppressed(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"})
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_ai_active_enum_id=1,
+            kommo_ai_human_enum_id=2,
+            kommo_ai_paused_enum_id=3,
+        ),
+    )
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock(return_value={"text": "Hola", "escalated": False}))
+
+    client = MagicMock()
+    client.get_contact = AsyncMock(return_value={"id": 200, "_embedded": {"leads": []}})
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job({
+        "id": "job",
+        "processing_lease_id": LEASE_ID,
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "combined_message": "Hola",
+        "channel": "whatsapp",
+        "contact_id": "200",
+        "correlation_id": "corr",
+    })
+
+    client.get_contact.assert_awaited_once_with("200")
+    client.get_lead.assert_not_called()
+    jobs.generate_response.assert_not_awaited()
+    client.continue_salesbot.assert_awaited_once()
+    assert client.continue_salesbot.await_args.kwargs["data"]["status"] == "fail"
+    assert client.continue_salesbot.await_args.kwargs["data"]["message"] == ""
+    assert any(
+        values and values.get("last_error") == "kommo_ai_mode_empty"
+        for _, values in (call.args for call in mock_db.fetch_one.await_args_list)
+    )
 
 
 @pytest.mark.asyncio

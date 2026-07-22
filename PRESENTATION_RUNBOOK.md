@@ -133,7 +133,7 @@ unless you are absolutely sure Pydantic will parse them the way you expect.
 
 ### 4.1. Store database
 
-For a fresh presentation database, run `store/migrations/001_schema.sql` once. For an existing unversioned database, run `store/migrations/002_existing_database_upgrade.sql` instead. Never rerun `001` as an upgrade. Confirm `schema_migrations` reports version `2`.
+For a fresh presentation database, run `store/migrations/001_schema.sql` once. For an existing unversioned database, run `store/migrations/002_existing_database_upgrade.sql`, then all later numbered migrations in order. Never rerun `001` as an upgrade. Confirm the latest `schema_migrations` version matches `EXPECTED_SCHEMA_VERSION` in `store/app/db.py`.
 
 After that, verify the `settings` table contains at least:
 

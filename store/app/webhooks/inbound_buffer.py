@@ -1,8 +1,10 @@
 """Durable debounce queue for Meta inbound messages."""
 
 import asyncio
+import contextlib
 import json
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 
 from app import db
@@ -11,9 +13,10 @@ logger = logging.getLogger(__name__)
 
 MESSAGE_DEBOUNCE_SECONDS = 10
 PROCESSING_LEASE_MINUTES = 5
+PROCESSING_HEARTBEAT_SECONDS = 30
 MAX_PROCESSING_ATTEMPTS = 5
 
-Processor = Callable[[str, str, str | None, dict, str], Awaitable[None]]
+Processor = Callable[[str, str, str | None, dict, str, str], Awaitable[None]]
 
 
 def _merge_profile(current: dict, new_values: dict | None) -> dict:
@@ -147,8 +150,8 @@ async def recover_stale_inbound_jobs() -> int:
         SELECT id, channel, sender_id
         FROM meta_inbound_jobs
         WHERE status = 'processing'
-          AND processing_started_at < NOW() - (:minutes * INTERVAL '1 minute')
-        ORDER BY processing_started_at ASC
+          AND COALESCE(processing_heartbeat_at, processing_started_at) < NOW() - (:minutes * INTERVAL '1 minute')
+        ORDER BY COALESCE(processing_heartbeat_at, processing_started_at) ASC
         LIMIT 20
         """,
         {"minutes": PROCESSING_LEASE_MINUTES},
@@ -161,7 +164,8 @@ async def recover_stale_inbound_jobs() -> int:
             await _lock_sender(channel, sender_id)
             stale_job = await db.fetch_one(
                 """
-                SELECT id, message_parts, media_url, customer_profile, attempt_count
+                SELECT id, message_parts, media_url, customer_profile, attempt_count,
+                       outbound_started_at, outbound_message_ids
                 FROM meta_inbound_jobs
                 WHERE id = :job_id AND status = 'processing'
                 FOR UPDATE
@@ -169,6 +173,34 @@ async def recover_stale_inbound_jobs() -> int:
                 {"job_id": str(stale["id"])},
             )
             if not stale_job:
+                continue
+            outbound_ids = _json_list(_record_value(stale_job, "outbound_message_ids", []))
+            if outbound_ids:
+                await db.execute(
+                    """
+                    UPDATE meta_inbound_jobs
+                    SET status = 'completed', completed_at = NOW(),
+                        processing_started_at = NULL, processing_heartbeat_at = NULL,
+                        processing_lease_token = NULL, last_error = 'stale_lease_completed_after_meta_accept',
+                        updated_at = NOW()
+                    WHERE id = :job_id
+                    """,
+                    {"job_id": str(stale_job["id"])},
+                )
+                recovered += 1
+                continue
+            if _record_value(stale_job, "outbound_started_at") is not None:
+                await db.execute(
+                    """
+                    UPDATE meta_inbound_jobs
+                    SET status = 'failed', processing_started_at = NULL,
+                        processing_heartbeat_at = NULL, processing_lease_token = NULL,
+                        last_error = 'delivery_unknown_after_stale_lease', updated_at = NOW()
+                    WHERE id = :job_id
+                    """,
+                    {"job_id": str(stale_job["id"])},
+                )
+                recovered += 1
                 continue
             pending = await db.fetch_one(
                 """
@@ -205,7 +237,9 @@ async def recover_stale_inbound_jobs() -> int:
                 await db.execute(
                     """
                     UPDATE meta_inbound_jobs
-                    SET status = 'failed', last_error = 'stale_lease_merged', updated_at = NOW()
+                    SET status = 'failed', processing_started_at = NULL,
+                        processing_heartbeat_at = NULL, processing_lease_token = NULL,
+                        last_error = 'stale_lease_merged', updated_at = NOW()
                     WHERE id = :job_id
                     """,
                     {"job_id": str(stale_job["id"])},
@@ -215,7 +249,8 @@ async def recover_stale_inbound_jobs() -> int:
                     """
                     UPDATE meta_inbound_jobs
                     SET status = 'pending', available_at = NOW(),
-                        processing_started_at = NULL, last_error = 'stale_lease_recovered',
+                        processing_started_at = NULL, processing_heartbeat_at = NULL,
+                        processing_lease_token = NULL, last_error = 'stale_lease_recovered',
                         updated_at = NOW()
                     WHERE id = :job_id
                     """,
@@ -239,6 +274,7 @@ async def cleanup_completed_inbound_jobs(retention_days: int = 7) -> None:
 
 async def _claim_due_job() -> dict | None:
     async with db.get_db().transaction():
+        lease_token = uuid.uuid4().hex
         candidate = await db.fetch_one(
             """
             SELECT j.id
@@ -262,18 +298,21 @@ async def _claim_due_job() -> dict | None:
             """
             UPDATE meta_inbound_jobs
             SET status = 'processing', processing_started_at = NOW(),
+                processing_heartbeat_at = NOW(), processing_lease_token = :lease_token,
                 attempt_count = attempt_count + 1, updated_at = NOW()
             WHERE id = :job_id AND status = 'pending'
             RETURNING id, channel, sender_id, message_parts, media_url,
-                      customer_profile, attempt_count
+                      customer_profile, attempt_count, processing_lease_token
             """,
-            {"job_id": str(candidate["id"])},
+            {"job_id": str(candidate["id"]), "lease_token": lease_token},
         )
         return dict(row) if row else None
 
 
 async def _process_claimed_job(job: dict) -> None:
     job_id = str(job["id"])
+    lease_token = str(job.get("processing_lease_token") or "")
+    heartbeat_task = asyncio.create_task(_heartbeat_claimed_job(job_id, lease_token))
     try:
         text = _combine_parts(_json_list(job["message_parts"]))
         if text:
@@ -284,38 +323,92 @@ async def _process_claimed_job(job: dict) -> None:
                 job.get("media_url"),
                 _json_dict(job.get("customer_profile")),
                 job_id,
+                lease_token,
             )
-        await db.execute(
+        completed = await db.fetch_one(
             """
             UPDATE meta_inbound_jobs
             SET status = 'completed', completed_at = NOW(),
-                processing_started_at = NULL, last_error = NULL, updated_at = NOW()
-            WHERE id = :job_id AND status = 'processing'
+                processing_started_at = NULL, processing_heartbeat_at = NULL,
+                processing_lease_token = NULL, last_error = NULL, updated_at = NOW()
+            WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
+            RETURNING id
             """,
-            {"job_id": job_id},
+            {"job_id": job_id, "lease_token": lease_token},
         )
+        if not completed:
+            logger.warning("Skipped completion for stale Meta inbound lease job=%s", job_id)
     except Exception as exc:
         logger.exception("Durable inbound processing failed for job %s", job_id)
         await _requeue_failed_job(job, type(exc).__name__[:100])
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
+
+
+async def _heartbeat_claimed_job(job_id: str, lease_token: str) -> None:
+    if not lease_token:
+        return
+    try:
+        while True:
+            await asyncio.sleep(PROCESSING_HEARTBEAT_SECONDS)
+            await db.execute(
+                """
+                UPDATE meta_inbound_jobs
+                SET processing_heartbeat_at = NOW(), updated_at = NOW()
+                WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
+                """,
+                {"job_id": job_id, "lease_token": lease_token},
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Failed to heartbeat Meta inbound job %s", job_id)
 
 
 async def _requeue_failed_job(job: dict, error: str) -> None:
     """Retry a failed lease without colliding with a newer pending batch."""
     channel = job["channel"]
     sender_id = job["sender_id"]
+    lease_token = str(job.get("processing_lease_token") or "")
     retry = int(job.get("attempt_count") or 0) < MAX_PROCESSING_ATTEMPTS
     async with db.get_db().transaction():
         await _lock_sender(channel, sender_id)
         current = await db.fetch_one(
             """
-            SELECT id, message_parts, media_url, customer_profile
+            SELECT id, message_parts, media_url, customer_profile,
+                   outbound_started_at, outbound_message_ids
             FROM meta_inbound_jobs
-            WHERE id = :job_id AND status = 'processing'
+            WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
             FOR UPDATE
             """,
-            {"job_id": str(job["id"])},
+            {"job_id": str(job["id"]), "lease_token": lease_token},
         )
         if not current:
+            return
+        outbound_ids = _json_list(_record_value(current, "outbound_message_ids", []))
+        if outbound_ids or _record_value(current, "outbound_started_at") is not None:
+            await db.execute(
+                """
+                UPDATE meta_inbound_jobs
+                SET status = CASE WHEN :has_outbound_ids THEN 'completed' ELSE 'failed' END,
+                    completed_at = CASE WHEN :has_outbound_ids THEN NOW() ELSE completed_at END,
+                    processing_started_at = NULL, processing_heartbeat_at = NULL,
+                    processing_lease_token = NULL,
+                    last_error = CASE
+                        WHEN :has_outbound_ids THEN 'completed_after_meta_accept'
+                        ELSE 'delivery_unknown_after_send_attempt'
+                    END,
+                    updated_at = NOW()
+                WHERE id = :job_id AND processing_lease_token = :lease_token
+                """,
+                {
+                    "has_outbound_ids": bool(outbound_ids),
+                    "job_id": str(current["id"]),
+                    "lease_token": lease_token,
+                },
+            )
             return
         pending = await db.fetch_one(
             """
@@ -352,26 +445,29 @@ async def _requeue_failed_job(job: dict, error: str) -> None:
                 """
                 UPDATE meta_inbound_jobs
                 SET status = 'failed', processing_started_at = NULL,
+                    processing_heartbeat_at = NULL, processing_lease_token = NULL,
                     last_error = :error, updated_at = NOW()
-                WHERE id = :job_id
+                WHERE id = :job_id AND processing_lease_token = :lease_token
                 """,
-                {"error": error, "job_id": str(current["id"])},
+                {"error": error, "job_id": str(current["id"]), "lease_token": lease_token},
             )
             return
 
         await db.execute(
             """
             UPDATE meta_inbound_jobs
-            SET status = :status,
+                SET status = :status,
                 available_at = CASE WHEN :retry THEN NOW() + INTERVAL '30 seconds' ELSE available_at END,
-                processing_started_at = NULL, last_error = :error, updated_at = NOW()
-            WHERE id = :job_id
+                processing_started_at = NULL, processing_heartbeat_at = NULL,
+                processing_lease_token = NULL, last_error = :error, updated_at = NOW()
+            WHERE id = :job_id AND processing_lease_token = :lease_token
             """,
             {
                 "status": "pending" if retry else "failed",
                 "retry": retry,
                 "error": error,
                 "job_id": str(current["id"]),
+                "lease_token": lease_token,
             },
         )
 
@@ -390,6 +486,7 @@ async def _process_after_delay(channel: str, sender_id: str) -> None:
 
 async def _claim_sender_job(channel: str, sender_id: str) -> dict | None:
     async with db.get_db().transaction():
+        lease_token = uuid.uuid4().hex
         await _lock_sender(channel, sender_id)
         active = await db.fetch_one(
             """
@@ -404,6 +501,7 @@ async def _claim_sender_job(channel: str, sender_id: str) -> dict | None:
             """
             UPDATE meta_inbound_jobs
             SET status = 'processing', processing_started_at = NOW(),
+                processing_heartbeat_at = NOW(), processing_lease_token = :lease_token,
                 attempt_count = attempt_count + 1, updated_at = NOW()
             WHERE id = (
                 SELECT id FROM meta_inbound_jobs
@@ -414,11 +512,63 @@ async def _claim_sender_job(channel: str, sender_id: str) -> dict | None:
                 LIMIT 1
             )
             RETURNING id, channel, sender_id, message_parts, media_url,
-                      customer_profile, attempt_count
+                      customer_profile, attempt_count, processing_lease_token
             """,
-            {"channel": channel, "sender_id": sender_id},
+            {"channel": channel, "sender_id": sender_id, "lease_token": lease_token},
         )
         return dict(row) if row else None
+
+
+async def mark_outbound_send_started(job_id: str, lease_token: str) -> bool:
+    """Mark that this lease entered the Meta send uncertainty window."""
+    if not job_id or not lease_token:
+        return False
+    row = await db.fetch_one(
+        """
+        UPDATE meta_inbound_jobs
+        SET outbound_started_at = COALESCE(outbound_started_at, NOW()),
+            updated_at = NOW()
+        WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
+        RETURNING id
+        """,
+        {"job_id": job_id, "lease_token": lease_token},
+    )
+    return bool(row)
+
+
+async def record_outbound_message(job_id: str, lease_token: str, response: dict | None) -> None:
+    """Persist accepted Meta message IDs for stale-lease reconciliation."""
+    message_ids = _extract_meta_message_ids(response or {})
+    if not job_id or not lease_token or not message_ids:
+        return
+    await db.execute(
+        """
+        UPDATE meta_inbound_jobs
+        SET outbound_message_ids = (
+                SELECT jsonb_agg(DISTINCT value)
+                FROM jsonb_array_elements_text(outbound_message_ids || CAST(:message_ids AS jsonb)) AS ids(value)
+            ),
+            updated_at = NOW()
+        WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
+        """,
+        {
+            "job_id": job_id,
+            "lease_token": lease_token,
+            "message_ids": json.dumps(message_ids),
+        },
+    )
+
+
+def _extract_meta_message_ids(response: dict) -> list[str]:
+    ids: list[str] = []
+    for message in response.get("messages") or []:
+        message_id = str((message or {}).get("id") or "").strip()
+        if message_id:
+            ids.append(message_id)
+    direct_id = str(response.get("message_id") or response.get("id") or "").strip()
+    if direct_id:
+        ids.append(direct_id)
+    return ids
 
 
 async def _lock_sender(channel: str, sender_id: str) -> None:
@@ -450,3 +600,10 @@ def _json_dict(value) -> dict:
     if isinstance(value, str):
         value = json.loads(value)
     return dict(value or {})
+
+
+def _record_value(record, key: str, default=None):
+    try:
+        return record[key]
+    except (KeyError, TypeError):
+        return default
