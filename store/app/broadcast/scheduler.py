@@ -22,8 +22,9 @@ from app.broadcast.sender import execute_broadcast
 from app.catalog.pdf_generator import generate_catalog_pdf
 from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
 from app.config import get_config
-from app.crm import escalations
+from app.crm import escalations, orders
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
+from app.webhooks.inbound_buffer import cleanup_completed_inbound_jobs, process_due_inbound_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,30 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    if get_config().channel_backend == "kommo":
+    scheduler.add_job(
+        _release_expired_inventory_reservations,
+        trigger=IntervalTrigger(minutes=15),
+        id="inventory_reservation_cleanup",
+        name="Release expired unpaid inventory reservations",
+        replace_existing=True,
+    )
+
+    if get_config().channel_backend == "meta":
+        scheduler.add_job(
+            _process_meta_inbound_jobs,
+            trigger=IntervalTrigger(seconds=5),
+            id="meta_inbound_job_processor",
+            name="Process durable Meta inbound jobs",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            _cleanup_meta_inbound_jobs,
+            trigger=IntervalTrigger(hours=24),
+            id="meta_inbound_job_cleanup",
+            name="Clean completed Meta inbound jobs",
+            replace_existing=True,
+        )
+    else:
         scheduler.add_job(
             _process_kommo_jobs,
             trigger=IntervalTrigger(seconds=15),
@@ -260,6 +284,20 @@ async def _process_kommo_jobs():
         logger.error(f"Kommo job processor failed: {e}")
 
 
+async def _process_meta_inbound_jobs():
+    try:
+        await process_due_inbound_jobs(limit=10)
+    except Exception:
+        logger.exception("Meta inbound job processor failed")
+
+
+async def _cleanup_meta_inbound_jobs():
+    try:
+        await cleanup_completed_inbound_jobs()
+    except Exception:
+        logger.exception("Meta inbound job cleanup failed")
+
+
 async def _process_expired_escalations():
     try:
         result = await escalations.process_expired_automatic_escalations()
@@ -273,6 +311,20 @@ async def _process_expired_escalations():
             )
     except Exception as e:
         logger.error("Expired escalation processor failed: %s", e)
+
+
+async def _release_expired_inventory_reservations():
+    try:
+        result = await orders.release_expired_inventory_reservations()
+        if result.get("checked"):
+            logger.info(
+                "Inventory reservation cleanup completed: checked=%s released=%s failed=%s",
+                result.get("checked"),
+                result.get("released"),
+                result.get("failed"),
+            )
+    except Exception:
+        logger.exception("Inventory reservation cleanup failed")
 
 
 def _bounded_int(settings: dict, key: str, *, minimum: int, maximum: int) -> int:

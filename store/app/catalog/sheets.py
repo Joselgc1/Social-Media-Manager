@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.utils import rowcol_to_a1
 
 from app.config import get_config
 
@@ -309,63 +310,91 @@ def _extract_google_drive_file_id(parsed) -> str | None:
     return None
 
 
-def _update_stock(items: list[dict], direction: int):
+class InventoryUpdateError(ValueError):
+    """Raised when an inventory mutation cannot be completed safely."""
+
+
+def _update_stock(items: list[dict], direction: int) -> dict[str, int]:
     """
     Update stock in Google Sheets.
 
     direction = -1 deducts stock
     direction = +1 restores stock
     """
+    if direction not in {-1, 1}:
+        raise ValueError("Inventory direction must be -1 or 1.")
+
+    requested: dict[str, int] = {}
+    for item in items:
+        sku = str(item.get("sku") or "").strip()
+        try:
+            quantity = int(item.get("quantity", 1))
+        except (TypeError, ValueError) as exc:
+            raise InventoryUpdateError(f"Invalid inventory quantity for SKU '{sku}'.") from exc
+        if not sku or quantity <= 0:
+            raise InventoryUpdateError("Every inventory item requires a SKU and positive quantity.")
+        requested[sku] = requested.get(sku, 0) + quantity
+
     try:
         config = get_config()
         client = _get_gspread_client()
         sheet = client.open_by_key(config.product_sheet_id).sheet1
         all_records = sheet.get_all_records()
-
-        # Build a map of SKU -> row index (1-indexed, +1 for header)
-        sku_to_row = {}
-        stock_col = None
         headers = sheet.row_values(1)
-        for i, h in enumerate(headers):
-            if h.strip() == "Stock":
-                stock_col = i + 1  # 1-indexed for gspread
-                break
-
+        stock_col = next(
+            (index + 1 for index, header in enumerate(headers) if str(header).strip() == "Stock"),
+            None,
+        )
         if stock_col is None:
-            logger.error("Stock column not found in Google Sheets")
-            return
+            raise InventoryUpdateError("Stock column not found in Google Sheets.")
 
-        for idx, record in enumerate(all_records):
-            sku_to_row[str(record.get("SKU", "")).strip()] = idx + 2  # +2: 1-indexed + header
-
-        for item in items:
-            sku = item.get("sku", "")
-            qty = item.get("quantity", 1)
-            row_num = sku_to_row.get(sku)
-            if row_num is None:
-                logger.warning(f"SKU '{sku}' not found in sheet, skipping stock update")
+        inventory_rows: dict[str, tuple[int, int]] = {}
+        for index, record in enumerate(all_records):
+            sku = str(record.get("SKU", "")).strip()
+            if not sku:
                 continue
+            if sku in inventory_rows:
+                raise InventoryUpdateError(f"Duplicate SKU '{sku}' found in Google Sheets.")
+            inventory_rows[sku] = (index + 2, _safe_int(record.get("Stock", 0)))
 
-            current_stock = int(sheet.cell(row_num, stock_col).value or 0)
-            new_stock = max(0, current_stock + (direction * qty))
-            sheet.update_cell(row_num, stock_col, new_stock)
-            logger.info(f"Stock updated for {sku}: {current_stock} -> {new_stock}")
+        new_stock: dict[str, int] = {}
+        updates = []
+        for sku, quantity in requested.items():
+            inventory_row = inventory_rows.get(sku)
+            if inventory_row is None:
+                raise InventoryUpdateError(f"SKU '{sku}' was not found in Google Sheets.")
+            row_number, current_stock = inventory_row
+            updated_stock = current_stock + direction * quantity
+            if updated_stock < 0:
+                raise InventoryUpdateError(
+                    f"Insufficient stock for SKU '{sku}': requested {quantity}, available {current_stock}."
+                )
+            new_stock[sku] = updated_stock
+            updates.append({
+                "range": rowcol_to_a1(row_number, stock_col),
+                "values": [[updated_stock]],
+            })
 
-        # Refresh the in-memory cache to reflect changes
+        if updates:
+            sheet.batch_update(updates, raw=True)
+        for sku, updated_stock in new_stock.items():
+            logger.info("Stock updated for %s: %s", sku, updated_stock)
         refresh_catalog()
+        return new_stock
+    except InventoryUpdateError:
+        raise
+    except Exception as exc:
+        raise InventoryUpdateError(f"Google Sheets inventory update failed: {exc}") from exc
 
-    except Exception as e:
-        logger.error(f"Failed to update stock in Google Sheets: {e}")
 
-
-def deduct_stock(items: list[dict]):
+def deduct_stock(items: list[dict]) -> dict[str, int]:
     """
     Deduct stock from Google Sheets after an order is created.
     Each item should have 'sku' and 'quantity' keys.
     """
-    _update_stock(items, direction=-1)
+    return _update_stock(items, direction=-1)
 
 
-def restore_stock(items: list[dict]):
+def restore_stock(items: list[dict]) -> dict[str, int]:
     """Restore stock in Google Sheets after an order is deleted."""
-    _update_stock(items, direction=1)
+    return _update_stock(items, direction=1)

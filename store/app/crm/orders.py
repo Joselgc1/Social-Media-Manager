@@ -4,6 +4,7 @@ Order creation and status management.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -22,6 +23,8 @@ VALID_PAYMENT_STATUSES = {"pending", "proof_received", "confirmed", "failed", "r
 VALID_SHIPPING_STATUSES = {"pending", "shipped", "delivered"}
 ORDER_DISCOUNT_THRESHOLD = float(RUNTIME_SETTING_DEFAULTS["order_discount_threshold_usd"])
 ORDER_DISCOUNT_RATE = float(RUNTIME_SETTING_DEFAULTS["order_discount_percent"]) / 100.0
+INVENTORY_LOCK_KEY = "store_inventory_google_sheets"
+INVENTORY_RESERVATION_TTL_HOURS = 48
 
 
 def _normalize_order_items(items: list[dict]) -> list[dict]:
@@ -198,6 +201,14 @@ def _normalize_catalog_text(text: str) -> str:
     return re.sub(r"\s+", " ", ascii_text).strip()
 
 
+async def _lock_inventory_mutations() -> None:
+    """Serialize all backend inventory writes across app instances."""
+    await db.fetch_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))",
+        {"key": INVENTORY_LOCK_KEY},
+    )
+
+
 async def create_order(
     customer_id: str,
     items: list[dict],
@@ -218,77 +229,93 @@ async def create_order(
     items_json = json.dumps(normalized_items, ensure_ascii=False, sort_keys=True)
 
     created_new = False
-    async with db.get_db().transaction():
-        await db.fetch_one(
-            "SELECT id FROM customers WHERE id = :id FOR UPDATE",
-            {"id": customer_id},
-        )
+    inventory_reserved = False
+    try:
+        async with db.get_db().transaction():
+            await db.fetch_one(
+                "SELECT id FROM customers WHERE id = :id FOR UPDATE",
+                {"id": customer_id},
+            )
 
-        existing = await db.fetch_one(
-            """
-            SELECT id, total, payment_status
-            FROM orders
-            WHERE customer_id = :cid
-              AND items = CAST(:items AS jsonb)
-              AND COALESCE(payment_method, '') = COALESCE(:pm, '')
-              AND COALESCE(shipping_city, '') = COALESCE(:city, '')
-              AND COALESCE(shipping_address, '') = COALESCE(:addr, '')
-              AND COALESCE(shipping_method, '') = COALESCE(:method, '')
-              AND payment_status IN ('pending', 'proof_received')
-              AND created_at >= NOW() - INTERVAL '30 minutes'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            {
-                "cid": customer_id,
-                "items": items_json,
-                "pm": payment_method,
-                "city": shipping_city,
-                "addr": shipping_address,
-                "method": shipping_method,
-            },
-        )
+            existing = await db.fetch_one(
+                """
+                SELECT id, total, payment_status
+                FROM orders
+                WHERE customer_id = :cid
+                  AND items = CAST(:items AS jsonb)
+                  AND COALESCE(payment_method, '') = COALESCE(:pm, '')
+                  AND COALESCE(shipping_city, '') = COALESCE(:city, '')
+                  AND COALESCE(shipping_address, '') = COALESCE(:addr, '')
+                  AND COALESCE(shipping_method, '') = COALESCE(:method, '')
+                  AND payment_status IN ('pending', 'proof_received')
+                  AND inventory_status = 'reserved'
+                  AND created_at >= NOW() - INTERVAL '30 minutes'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                {
+                    "cid": customer_id,
+                    "items": items_json,
+                    "pm": payment_method,
+                    "city": shipping_city,
+                    "addr": shipping_address,
+                    "method": shipping_method,
+                },
+            )
 
-        if existing:
-            return {
-                "order_id": str(existing["id"]),
-                "items": normalized_items,
-                "total": float(existing["total"]),
-                "subtotal": pricing["subtotal"],
-                "discount_applied": pricing["discount_applied"],
-                "discount_rate": pricing["discount_rate"],
-                "discount_percent": pricing["discount_percent"],
-                "discount_threshold_usd": pricing["discount_threshold_usd"],
-                "discount_amount": pricing["discount_amount"],
-                "payment_method": payment_method,
-                "shipping_city": shipping_city,
-                "status": existing["payment_status"],
-                "created_new": False,
-            }
+            if existing:
+                return {
+                    "order_id": str(existing["id"]),
+                    "items": normalized_items,
+                    "total": float(existing["total"]),
+                    "subtotal": pricing["subtotal"],
+                    "discount_applied": pricing["discount_applied"],
+                    "discount_rate": pricing["discount_rate"],
+                    "discount_percent": pricing["discount_percent"],
+                    "discount_threshold_usd": pricing["discount_threshold_usd"],
+                    "discount_amount": pricing["discount_amount"],
+                    "payment_method": payment_method,
+                    "shipping_city": shipping_city,
+                    "status": existing["payment_status"],
+                    "created_new": False,
+                }
 
-        order_id = await db.execute(
-            """
-            INSERT INTO orders (customer_id, items, total, payment_method, shipping_city, shipping_address, shipping_method)
-            VALUES (:cid, CAST(:items AS jsonb), :total, :pm, :city, :addr, :sm)
-            RETURNING id
-            """,
-            {
-                "cid": customer_id,
-                "items": items_json,
-                "total": total,
-                "pm": payment_method,
-                "city": shipping_city,
-                "addr": shipping_address,
-                "sm": shipping_method,
-            },
-        )
-        created_new = True
-
-    if created_new:
-        try:
-            deduct_stock(normalized_items)
-        except Exception as e:
-            logger.error(f"Failed to deduct stock after order creation: {e}")
+            await _lock_inventory_mutations()
+            await asyncio.to_thread(deduct_stock, normalized_items)
+            inventory_reserved = True
+            order_id = await db.execute(
+                """
+                INSERT INTO orders (
+                    customer_id, items, total, payment_method, shipping_city,
+                    shipping_address, shipping_method, inventory_status, inventory_reserved_at
+                )
+                VALUES (
+                    :cid, CAST(:items AS jsonb), :total, :pm, :city,
+                    :addr, :sm, 'reserved', NOW()
+                )
+                RETURNING id
+                """,
+                {
+                    "cid": customer_id,
+                    "items": items_json,
+                    "total": total,
+                    "pm": payment_method,
+                    "city": shipping_city,
+                    "addr": shipping_address,
+                    "sm": shipping_method,
+                },
+            )
+            created_new = True
+    except Exception:
+        if inventory_reserved:
+            try:
+                await asyncio.to_thread(restore_stock, normalized_items)
+            except Exception as compensation_error:
+                logger.critical("Inventory compensation failed after order creation rollback", exc_info=True)
+                raise RuntimeError(
+                    "Order creation and inventory compensation both failed; manual reconciliation is required."
+                ) from compensation_error
+        raise
 
     return {
         "order_id": str(order_id),
@@ -329,7 +356,7 @@ async def _apply_paid_customer_updates(customer_id: str, amount: float):
 async def get_order(order_id: str) -> dict | None:
     row = await db.fetch_one(
         """
-        SELECT id, customer_id, items, total, payment_method, payment_status,
+        SELECT id, customer_id, items, total, currency, payment_method, payment_status,
                customer_totals_applied, shipping_method, shipping_city, shipping_address,
                shipping_status, tracking_number, created_at, updated_at
         FROM orders
@@ -464,6 +491,26 @@ async def get_latest_open_order(customer_id: str) -> dict | None:
     return await get_order(str(row["id"]))
 
 
+async def get_unambiguous_open_order(customer_id: str) -> tuple[dict | None, bool]:
+    """Return the sole open order, or flag ambiguity when multiple are open."""
+    rows = await db.fetch_all(
+        """
+        SELECT id
+        FROM orders
+        WHERE customer_id = :cid
+          AND payment_status IN ('pending', 'proof_received')
+        ORDER BY created_at DESC
+        LIMIT 2
+        """,
+        {"cid": customer_id},
+    )
+    if len(rows) > 1:
+        return None, True
+    if not rows:
+        return None, False
+    return await get_order(str(rows[0]["id"])), False
+
+
 async def get_customer_open_order_by_id(customer_id: str, order_id: str) -> dict | None:
     """Return an open order only when it belongs to the current customer."""
     row = await db.fetch_one(
@@ -482,7 +529,12 @@ async def get_customer_open_order_by_id(customer_id: str, order_id: str) -> dict
     return await get_order(str(row["id"]))
 
 
-async def update_order_payment_status(order_id: str, status: str, note: str | None = None) -> dict | None:
+async def update_order_payment_status(
+    order_id: str,
+    status: str,
+    note: str | None = None,
+    proof_metadata: dict | None = None,
+) -> dict | None:
     """
     Update an order payment status.
     Customer lifetime totals are applied exactly once, when the order first becomes paid.
@@ -491,6 +543,35 @@ async def update_order_payment_status(order_id: str, status: str, note: str | No
         raise ValueError(f"Invalid payment status '{status}'")
 
     async with db.get_db().transaction():
+        if proof_metadata:
+            proof_hash = str(proof_metadata["proof_hash"])
+            reference_key = str(proof_metadata["reference_key"])
+            for lock_key in sorted((proof_hash, reference_key)):
+                await db.fetch_one(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))",
+                    {"key": lock_key},
+                )
+            replay = await db.fetch_one(
+                """
+                SELECT id
+                FROM orders
+                WHERE id <> :oid
+                  AND (payment_proof_hash = :proof_hash OR payment_reference_key = :reference_key)
+                LIMIT 1
+                """,
+                {
+                    "oid": order_id,
+                    "proof_hash": proof_hash,
+                    "reference_key": reference_key,
+                },
+            )
+            if replay:
+                return {
+                    "order_id": str(order_id),
+                    "payment_status": "replay_detected",
+                    "existing_order_id": str(replay["id"]),
+                }
+
         row = await db.fetch_one(
             """
             SELECT id, customer_id, total, payment_status, customer_totals_applied
@@ -503,16 +584,45 @@ async def update_order_payment_status(order_id: str, status: str, note: str | No
         if not row:
             return None
 
-        await db.execute(
-            """
-            UPDATE orders
-            SET payment_status = :status,
-                payment_proof = COALESCE(:note, payment_proof),
-                updated_at = NOW()
-            WHERE id = :oid
-            """,
-            {"status": status, "note": note, "oid": order_id},
-        )
+        if proof_metadata:
+            await db.execute(
+                """
+                UPDATE orders
+                SET payment_status = :status,
+                    payment_proof = COALESCE(:note, payment_proof),
+                    payment_proof_hash = :proof_hash,
+                    payment_reference = :reference,
+                    payment_reference_key = :reference_key,
+                    payment_currency = :currency,
+                    payment_amount = :amount,
+                    payment_transaction_at = :transaction_at,
+                    payment_verified_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :oid
+                """,
+                {
+                    "status": status,
+                    "note": note,
+                    "oid": order_id,
+                    "proof_hash": proof_metadata["proof_hash"],
+                    "reference": proof_metadata["reference"],
+                    "reference_key": proof_metadata["reference_key"],
+                    "currency": proof_metadata["currency"],
+                    "amount": proof_metadata["amount"],
+                    "transaction_at": proof_metadata["transaction_at"],
+                },
+            )
+        else:
+            await db.execute(
+                """
+                UPDATE orders
+                SET payment_status = :status,
+                    payment_proof = COALESCE(:note, payment_proof),
+                    updated_at = NOW()
+                WHERE id = :oid
+                """,
+                {"status": status, "note": note, "oid": order_id},
+            )
 
         applied_now = False
         if (
@@ -593,9 +703,10 @@ async def update_order_shipping(
 async def delete_order(order_id: str) -> dict | None:
     """Delete an order, restore inventory, and roll back applied customer totals if needed."""
     async with db.get_db().transaction():
+        await _lock_inventory_mutations()
         row = await db.fetch_one(
             """
-            SELECT id, customer_id, items, total, customer_totals_applied
+            SELECT id, customer_id, items, total, customer_totals_applied, inventory_status
             FROM orders
             WHERE id = :oid
             FOR UPDATE
@@ -606,6 +717,9 @@ async def delete_order(order_id: str) -> dict | None:
             return None
 
         items = _load_items(row["items"])
+        inventory_was_reserved = row["inventory_status"] == "reserved"
+        if inventory_was_reserved:
+            await asyncio.to_thread(restore_stock, items)
 
         if row["customer_totals_applied"] and row["customer_id"]:
             await customers.decrement_orders(str(row["customer_id"]), float(row["total"]))
@@ -615,16 +729,72 @@ async def delete_order(order_id: str) -> dict | None:
             {"oid": order_id},
         )
 
-    try:
-        restore_stock(items)
-    except Exception as e:
-        logger.error(f"Failed to restore stock after deleting order {order_id}: {e}")
-
     return {
         "order_id": str(order_id),
         "deleted": True,
-        "restored_items": len(items),
+        "restored_items": len(items) if inventory_was_reserved else 0,
     }
+
+
+async def release_expired_inventory_reservations(limit: int = 20) -> dict[str, int]:
+    """Release unpaid inventory reservations older than the configured TTL."""
+    rows = await db.fetch_all(
+        """
+        SELECT id
+        FROM orders
+        WHERE inventory_status = 'reserved'
+          AND (
+              payment_status IN ('failed', 'rejected')
+              OR (
+                  payment_status = 'pending'
+                  AND inventory_reserved_at <= NOW() - (:ttl_hours * INTERVAL '1 hour')
+              )
+          )
+        ORDER BY inventory_reserved_at ASC
+        LIMIT :limit
+        """,
+        {"limit": limit, "ttl_hours": INVENTORY_RESERVATION_TTL_HOURS},
+    )
+    released = 0
+    failed = 0
+    for row in rows:
+        try:
+            if await _release_inventory_reservation(str(row["id"])):
+                released += 1
+        except Exception:
+            failed += 1
+            logger.exception("Failed to release expired inventory reservation for order %s", row["id"])
+    return {"checked": len(rows), "released": released, "failed": failed}
+
+
+async def _release_inventory_reservation(order_id: str) -> bool:
+    async with db.get_db().transaction():
+        await _lock_inventory_mutations()
+        row = await db.fetch_one(
+            """
+            SELECT id, items, inventory_status, payment_status
+            FROM orders
+            WHERE id = :oid
+            FOR UPDATE
+            """,
+            {"oid": order_id},
+        )
+        releasable_statuses = {"pending", "failed", "rejected"}
+        if not row or row["inventory_status"] != "reserved" or row["payment_status"] not in releasable_statuses:
+            return False
+        await asyncio.to_thread(restore_stock, _load_items(row["items"]))
+        await db.execute(
+            """
+            UPDATE orders
+            SET inventory_status = 'released',
+                inventory_released_at = NOW(),
+                payment_status = CASE WHEN payment_status = 'pending' THEN 'rejected' ELSE payment_status END,
+                updated_at = NOW()
+            WHERE id = :oid
+            """,
+            {"oid": order_id},
+        )
+    return True
 
 
 async def get_customer_orders(customer_id: str, limit: int = 5) -> list[dict]:

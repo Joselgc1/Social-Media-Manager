@@ -214,6 +214,8 @@ class PersistentKommoJob(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     processing_started_at: datetime | None = None
+    processing_lease_id: str | None = None
+    ai_started_at: datetime | None = None
     completed_at: datetime | None = None
 
 

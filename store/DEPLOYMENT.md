@@ -44,13 +44,15 @@ postgresql://postgres:[YOUR-PASSWORD]@db.xyzabc.supabase.co:5432/postgres
 
 Copy this. It goes in your `.env` as `DATABASE_URL`.
 
-Run the migrations. Go to the SQL Editor in Supabase's dashboard:
+Run migrations from the Supabase SQL Editor. Choose exactly one path:
 
-1. Paste the entire contents of `store/migrations/001_schema.sql` and click **Run**.
+**Fresh database:** paste and run `store/migrations/001_schema.sql` once. It creates the current schema, seeds settings, and records schema versions `1` and `2`.
 
-This creates all tables and seeds the runtime settings used by the store dashboard and the master control plane.
+**Existing database created before version tracking:** take a database backup, enter a maintenance window, then paste and run `store/migrations/002_existing_database_upgrade.sql` once. Do not rerun `001_schema.sql`; `CREATE TABLE IF NOT EXISTS` cannot upgrade an existing table safely.
 
-Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, `ai_orchestration_mode=legacy`, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), Kommo transport formatting defaults (`kommo_emoji_mode_*`, `kommo_strip_emoji`), an empty `payment_methods` row, exchange-rate defaults, an empty `store_phone_number` row, and automatic order discount defaults. The same consolidated schema also creates the multi-agent workflow and AI observability tables. For existing stores created from an older schema, re-run this consolidated file in a maintenance window to create any missing tables and default settings before enabling multi-agent mode.
+For future releases, run only new numbered migrations in ascending order. A migration records its version only at the end of its transaction. The store refuses to start when `schema_migrations` is absent, behind, or ahead of the version supported by the deployed code.
+
+Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. The latest version must be `2`. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
 
 ### 1.2 OpenAI API Key
 
@@ -227,6 +229,7 @@ GOOGLE_SHEETS_CREDENTIALS_B64=eyJ0eXBlIjoi...
 PRODUCT_SHEET_ID=1abc2def3ghi...
 TELEGRAM_BOT_TOKEN=123456789:ABC...
 TELEGRAM_ADMIN_CHAT_ID=987654321
+TELEGRAM_WEBHOOK_SECRET=
 STORE_NAME="Zona Pink"
 OWNER_NAME=Carlos
 APP_BASE_URL=https://your-app.railway.app
@@ -290,7 +293,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 open http://localhost:8000/admin/login
 ```
 
-> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires `ADMIN_PASSWORD` and at least one LLM API key. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide both Telegram variables.
+> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters and at least one real LLM API key. Documented sample credentials are rejected. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
 
 ---
 
@@ -340,7 +343,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 Only do this when `CHANNEL_BACKEND=kommo`.
 
-1. Confirm `store/migrations/001_schema.sql` has been run in the store Supabase database.
+1. Confirm the correct numbered migration path has been completed and `schema_migrations` reports version `2`.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
 3. Create the private-message Kommo Salesbot with the `Ask Eva AI for DMs` widget step pointing to `https://abc123.ngrok-free.app/webhooks/kommo/salesbot`, ending in a Message step with `{{json.message}}`.
 4. Create the public-comment Kommo Salesbot with Kommo's native `When a comment is received` trigger, the `Ask Eva AI for Instagram comments` widget step, and a Comment step with `{{json.message}}`.
@@ -454,6 +457,10 @@ For Kommo mode, update:
 
 
 ### 6.1 Telegram Admin Bot
+
+Configure `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and a random
+`TELEGRAM_WEBHOOK_SECRET` first. Generate the secret with
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
 Register the Telegram webhook (run once, requires admin auth):
 
@@ -578,7 +585,7 @@ All tables in Clientes, Pedidos, and Broadcasts are sortable by clicking column 
 
 Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto-detects OS preference on first visit.
 
-**Dashboard and API protection:** `ADMIN_PASSWORD` is **required** in production. Browser access goes through `/admin/login`, which sets an HTTP-only session cookie. All `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API endpoints accept either that cookie or `Authorization: Bearer YOUR_PASSWORD`. Without `ADMIN_PASSWORD` set in production (`DEBUG=false`), startup fails fast.
+**Dashboard and API protection:** A non-placeholder `ADMIN_PASSWORD` of at least 12 characters is **required** in production. Browser access goes through `/admin/login`, which sets an HTTP-only session cookie. All `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API endpoints accept either that cookie or `Authorization: Bearer YOUR_PASSWORD`. Without a valid `ADMIN_PASSWORD` in production (`DEBUG=false`), startup fails fast.
 
 **Custom AI persona:** Set `SYSTEM_PROMPT_OVERRIDE` to replace the default `store/prompts/system_prompt.md` template for a specific store deployment. Must use the same `{store_name}`, `{product_catalog}`, etc. placeholders.
 
@@ -797,7 +804,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 ### 9.5b Kommo Mode
 
 ```text
-[ ] 001_schema.sql has been run in the store DB
+[ ] Store schema_migrations reports version 2 (001 for fresh DB, 002 for existing DB)
 [ ] Widget ZIP uploaded to private Kommo integration
 [ ] Salesbot contains widget step pointing to /webhooks/kommo/salesbot
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>

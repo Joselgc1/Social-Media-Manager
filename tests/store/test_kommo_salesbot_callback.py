@@ -25,7 +25,11 @@ def _config(**overrides):
 
 
 def _token(**claims):
+    now = datetime.now(UTC)
     payload = {
+        "iss": "https://acme.kommo.com",
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
         "subdomain": "acme",
         "client_uid": "client-uuid",
         "account_id": 123,
@@ -267,11 +271,7 @@ async def test_salesbot_callback_invalid_signature_logs_safe_reason_code_only(cl
 
 @pytest.mark.asyncio
 async def test_salesbot_callback_invalid_jwt_logs_safe_reason_code_only(client, caplog):
-    bad_token = jwt.encode(
-        {"subdomain": "acme", "client_uid": "other", "account_id": 123, "entity_type": "lead", "entity_id": 100},
-        "secret",
-        algorithm="HS256",
-    )
+    bad_token = _token(client_uid="other")
     with caplog.at_level("WARNING", logger="app.webhooks.kommo"):
         response = await _post(client, json=_json_body(token=bad_token))
     assert response.status_code == 401

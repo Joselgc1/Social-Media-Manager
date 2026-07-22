@@ -904,9 +904,25 @@ async def setup_telegram_webhook_endpoint():
     Call this once after deployment.
     """
     config = get_config()
+    if not (
+        config.telegram_bot_token
+        and config.telegram_admin_chat_id
+        and config.telegram_webhook_secret
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, and "
+                "TELEGRAM_WEBHOOK_SECRET must all be configured."
+            ),
+        )
     webhook_url = f"{config.app_base_url}/webhooks/telegram"
 
-    result = await setup_telegram_webhook(config.telegram_bot_token, webhook_url)
+    result = await setup_telegram_webhook(
+        config.telegram_bot_token,
+        webhook_url,
+        config.telegram_webhook_secret,
+    )
     return {"webhook_url": webhook_url, "telegram_response": result}
 
 

@@ -3,8 +3,16 @@
 -- AI run observability, Kommo integration tables, and hardening.
 -- Run this against your Supabase PostgreSQL instance
 
+BEGIN;
+
 -- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
@@ -70,11 +78,18 @@ CREATE TABLE IF NOT EXISTS conversations (
     channel         TEXT NOT NULL,
     media_url       TEXT,
     function_calls  JSONB,                       -- Log of any tools the AI invoked
+    source_id       TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS source_id TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_conv_customer ON conversations(customer_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations(created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_delivery_source
+    ON conversations(channel, role, source_id)
+    WHERE source_id IS NOT NULL;
 
 -- ============================================================
 -- Orders
@@ -84,9 +99,20 @@ CREATE TABLE IF NOT EXISTS orders (
     customer_id      UUID REFERENCES customers(id) ON DELETE SET NULL,
     items            JSONB NOT NULL,              -- [{"name": "...", "sku": "...", "size": "M", "qty": 1, "price": 28}]
     total            NUMERIC(10,2) NOT NULL,
+    currency         TEXT NOT NULL DEFAULT 'USD',
     payment_method   TEXT,                        -- Store-defined payment method name
     payment_status   TEXT DEFAULT 'pending',      -- "pending", "proof_received", "confirmed", "failed"
     payment_proof    TEXT,                        -- URL to payment screenshot
+    payment_proof_hash TEXT,
+    payment_reference TEXT,
+    payment_reference_key TEXT,
+    payment_currency TEXT,
+    payment_amount NUMERIC(14,2),
+    payment_transaction_at TIMESTAMPTZ,
+    payment_verified_at TIMESTAMPTZ,
+    inventory_status TEXT NOT NULL DEFAULT 'legacy_unknown',
+    inventory_reserved_at TIMESTAMPTZ,
+    inventory_released_at TIMESTAMPTZ,
     customer_totals_applied BOOLEAN NOT NULL DEFAULT FALSE,
     shipping_method  TEXT,                        -- "mrw" or "zoom"
     shipping_city    TEXT,
@@ -100,6 +126,27 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(payment_status, shipping_status);
+
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD',
+    ADD COLUMN IF NOT EXISTS payment_proof_hash TEXT,
+    ADD COLUMN IF NOT EXISTS payment_reference TEXT,
+    ADD COLUMN IF NOT EXISTS payment_reference_key TEXT,
+    ADD COLUMN IF NOT EXISTS payment_currency TEXT,
+    ADD COLUMN IF NOT EXISTS payment_amount NUMERIC(14,2),
+    ADD COLUMN IF NOT EXISTS payment_transaction_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS payment_verified_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS inventory_status TEXT NOT NULL DEFAULT 'legacy_unknown',
+    ADD COLUMN IF NOT EXISTS inventory_reserved_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS inventory_released_at TIMESTAMPTZ;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_payment_proof_hash_unique
+    ON orders(payment_proof_hash) WHERE payment_proof_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_payment_reference_key_unique
+    ON orders(payment_reference_key) WHERE payment_reference_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_inventory_reservations
+    ON orders(inventory_status, created_at)
+    WHERE inventory_status = 'reserved';
 
 -- ============================================================
 -- Conversation workflow state
@@ -383,6 +430,46 @@ CREATE TRIGGER trg_customer_channel_mappings_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- ============================================================
+-- Durable Meta inbound queue
+-- ============================================================
+CREATE TABLE IF NOT EXISTS meta_inbound_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel TEXT NOT NULL CHECK (channel IN ('whatsapp', 'instagram')),
+    sender_id TEXT NOT NULL,
+    message_parts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    media_url TEXT,
+    customer_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+    available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    processing_started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_inbound_jobs_pending_sender
+    ON meta_inbound_jobs(channel, sender_id) WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_inbound_jobs_processing_sender
+    ON meta_inbound_jobs(channel, sender_id) WHERE status = 'processing';
+CREATE INDEX IF NOT EXISTS idx_meta_inbound_jobs_due
+    ON meta_inbound_jobs(status, available_at, created_at);
+
+CREATE TABLE IF NOT EXISTS meta_inbound_receipts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel TEXT NOT NULL CHECK (channel IN ('whatsapp', 'instagram')),
+    external_message_id TEXT NOT NULL,
+    job_id UUID NOT NULL REFERENCES meta_inbound_jobs(id) ON DELETE CASCADE,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(channel, external_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_meta_inbound_receipts_job
+    ON meta_inbound_receipts(job_id);
+
+-- ============================================================
 -- Kommo durable message jobs
 -- ============================================================
 CREATE TABLE IF NOT EXISTS kommo_message_jobs (
@@ -413,6 +500,8 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     processing_started_at TIMESTAMPTZ,
+    processing_lease_id UUID,
+    ai_started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     callback_claims JSONB,
     public_comment_context JSONB,
@@ -433,6 +522,8 @@ ALTER TABLE kommo_message_jobs
     ADD COLUMN IF NOT EXISTS sender_username TEXT,
     ADD COLUMN IF NOT EXISTS sender_profile_url TEXT,
     ADD COLUMN IF NOT EXISTS interaction_type TEXT NOT NULL DEFAULT 'private_message',
+    ADD COLUMN IF NOT EXISTS processing_lease_id UUID,
+    ADD COLUMN IF NOT EXISTS ai_started_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS callback_claims JSONB,
     ADD COLUMN IF NOT EXISTS public_comment_context JSONB,
     ADD COLUMN IF NOT EXISTS salesbot_token_jti TEXT,
@@ -577,3 +668,50 @@ ON CONFLICT (external_message_id) DO NOTHING;
 
 COMMENT ON TABLE kommo_message_receipts IS 'Durable Kommo inbound message receipts keyed by external_message_id. Rapid messages can merge into one buffered job without creating fake discarded jobs.';
 COMMENT ON COLUMN kommo_message_receipts.receipt_status IS 'created when the receipt opened a new job, merged when it was appended to an existing buffered job.';
+
+-- ============================================================
+-- Supabase Data API lockdown
+-- ============================================================
+-- The application connects directly as the database owner. No store table is
+-- intended for browser access through PostgREST, so anon/authenticated receive
+-- no policies or object privileges.
+ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE broadcasts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_run_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE daily_analytics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_analytics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_channel_mappings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meta_inbound_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meta_inbound_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kommo_message_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kommo_message_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM anon, authenticated;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+-- PostgreSQL grants EXECUTE on new functions to PUBLIC by default. Remove that
+-- default as well as Supabase's Data API role defaults for future objects.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON TABLES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon, authenticated;
+
+REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC, anon, authenticated;
+
+INSERT INTO schema_migrations (version, name) VALUES
+    (1, 'fresh_install_baseline'),
+    (2, 'versioned_schema_and_security_hardening')
+ON CONFLICT (version) DO NOTHING;
+
+COMMIT;

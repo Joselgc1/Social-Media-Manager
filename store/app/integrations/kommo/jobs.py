@@ -219,6 +219,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "entity_type": values["entity_type"],
         "callback_claims": values["callback_claims"],
         "salesbot_token_jti": values["salesbot_token_jti"],
+        "salesbot_token_iat": values["salesbot_token_iat"],
         "salesbot_account_id": values["salesbot_account_id"],
         "salesbot_user_id": values["salesbot_user_id"],
         "salesbot_client_uuid": values["salesbot_client_uuid"],
@@ -234,6 +235,8 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         UPDATE kommo_message_jobs job
         SET return_url = :return_url,
             status = 'ready',
+            processing_lease_id = NULL,
+            ai_started_at = NULL,
             callback_claims = CAST(:callback_claims AS jsonb),
             salesbot_token_jti = :salesbot_token_jti,
             salesbot_account_id = :salesbot_account_id,
@@ -248,6 +251,17 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             SELECT candidate.id
             FROM kommo_message_jobs candidate
             WHERE candidate.status = 'waiting_for_salesbot'
+              AND candidate.salesbot_launched_at <= to_timestamp(CAST(:salesbot_token_iat AS double precision))
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM kommo_message_jobs consumed
+                  WHERE consumed.return_url = :return_url
+                     OR (
+                         CAST(:salesbot_token_jti AS text) IS NOT NULL
+                         AND consumed.salesbot_token_jti = CAST(:salesbot_token_jti AS text)
+                         AND consumed.callback_claims ->> 'iat' = CAST(:salesbot_token_iat AS text)
+                     )
+              )
               AND (
                   (:entity_type = 'leads' AND candidate.lead_id = :entity_id)
                   OR (:entity_type = 'contacts' AND candidate.contact_id = :entity_id)
@@ -268,10 +282,10 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
     if values["interaction_type"] == "instagram_comment":
         return await _create_ready_comment_job_from_callback(data, values)
 
-    latest = await _find_latest_job_for_callback(values)
-    if latest and latest["status"] in _TERMINAL_STATUSES | _ACTIVE_SALESBOT_STATUSES:
-        logger.info("Kommo Salesbot callback ignored as duplicate for job: %s", _job_log_context(dict(latest)))
-        return {"status": "duplicate", "job_id": str(latest["id"])}
+    duplicate = await _find_job_for_callback_identity(values)
+    if duplicate and duplicate["status"] in _TERMINAL_STATUSES | _ACTIVE_SALESBOT_STATUSES:
+        logger.info("Kommo Salesbot callback ignored as duplicate for job: %s", _job_log_context(dict(duplicate)))
+        return {"status": "duplicate", "job_id": str(duplicate["id"])}
     logger.info(
         "Kommo Salesbot callback ignored: no_waiting_job entity_type=%s entity_id=%s",
         values["entity_type"],
@@ -287,6 +301,7 @@ async def recover_stale_jobs() -> dict:
         SET status = 'failed',
             last_error = 'Salesbot callback did not arrive before stale timeout',
             updated_at = NOW(),
+            processing_lease_id = NULL,
             completed_at = NOW()
         WHERE status = 'waiting_for_salesbot'
           AND COALESCE(salesbot_launched_at, updated_at, created_at) < NOW() - (:minutes * INTERVAL '1 minute')
@@ -298,10 +313,12 @@ async def recover_stale_jobs() -> dict:
         UPDATE kommo_message_jobs
         SET status = CASE WHEN return_url IS NULL THEN 'pending' ELSE 'ready' END,
             processing_started_at = NULL,
+            processing_lease_id = NULL,
             updated_at = NOW(),
             last_error = 'Recovered stale processing job'
         WHERE status = 'processing'
           AND processing_started_at < NOW() - (:minutes * INTERVAL '1 minute')
+          AND ai_started_at IS NULL
           AND attempt_count < :max_attempts
         """,
         {"minutes": STALE_PROCESSING_MINUTES, "max_attempts": MAX_JOB_ATTEMPTS},
@@ -313,8 +330,12 @@ async def recover_stale_jobs() -> dict:
             completed_at = NOW(),
             updated_at = NOW(),
             processing_started_at = NULL,
-            last_error = 'Continuation outcome unknown after stale timeout'
-        WHERE status = 'continuing'
+            processing_lease_id = NULL,
+            last_error = CASE
+                WHEN status = 'continuing' THEN 'Continuation outcome unknown after stale timeout'
+                ELSE 'AI execution outcome unknown; manual reconciliation required'
+            END
+        WHERE (status = 'continuing' OR (status = 'processing' AND ai_started_at IS NOT NULL))
           AND processing_started_at < NOW() - (:minutes * INTERVAL '1 minute')
         """,
         {"minutes": STALE_PROCESSING_MINUTES},
@@ -325,9 +346,12 @@ async def recover_stale_jobs() -> dict:
         SET status = 'failed',
             completed_at = NOW(),
             updated_at = NOW(),
+            processing_started_at = NULL,
+            processing_lease_id = NULL,
             last_error = 'Max attempts exceeded during stale recovery'
         WHERE status = 'processing'
           AND processing_started_at < NOW() - (:minutes * INTERVAL '1 minute')
+          AND ai_started_at IS NULL
           AND attempt_count >= :max_attempts
         """,
         {"minutes": STALE_PROCESSING_MINUTES, "max_attempts": MAX_JOB_ATTEMPTS},
@@ -404,6 +428,8 @@ async def _claim_due_pending_job():
         UPDATE kommo_message_jobs job
         SET status = 'processing',
             processing_started_at = NOW(),
+            processing_lease_id = gen_random_uuid(),
+            ai_started_at = NULL,
             attempt_count = attempt_count + 1,
             updated_at = NOW()
         WHERE job.id = (
@@ -413,10 +439,18 @@ async def _claim_due_pending_job():
               AND candidate.buffer_expires_at <= NOW()
               AND NOT EXISTS (
                   SELECT 1 FROM kommo_message_jobs active
-                  WHERE active.correlation_id = candidate.correlation_id
-                    AND active.interaction_type = candidate.interaction_type
+                  WHERE active.interaction_type = candidate.interaction_type
                     AND active.status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')
                     AND active.id <> candidate.id
+                    AND (
+                        (candidate.lead_id IS NOT NULL AND active.lead_id = candidate.lead_id)
+                        OR (candidate.contact_id IS NOT NULL AND active.contact_id = candidate.contact_id)
+                        OR (
+                            candidate.lead_id IS NULL
+                            AND candidate.contact_id IS NULL
+                            AND active.correlation_id = candidate.correlation_id
+                        )
+                    )
               )
             ORDER BY candidate.created_at ASC
             FOR UPDATE SKIP LOCKED
@@ -469,6 +503,8 @@ async def _claim_ready_job():
         UPDATE kommo_message_jobs job
         SET status = 'processing',
             processing_started_at = NOW(),
+            processing_lease_id = gen_random_uuid(),
+            ai_started_at = NOW(),
             attempt_count = attempt_count + 1,
             updated_at = NOW()
         WHERE job.id = (
@@ -486,12 +522,18 @@ async def _claim_ready_job():
 
 
 async def _launch_salesbot_for_job(job: dict) -> None:
+    processing_lease_id = job.get("processing_lease_id")
     if _job_interaction_type(job) == "instagram_comment":
         logger.info(
             "Kommo Instagram comment job will not launch Salesbot from backend: job_id=%s",
             job["id"],
         )
-        await _mark_job(job["id"], "failed", "instagram_comment_requires_native_salesbot_callback")
+        await _mark_job(
+            job["id"],
+            "failed",
+            "instagram_comment_requires_native_salesbot_callback",
+            processing_lease_id=processing_lease_id,
+        )
         return
 
     try:
@@ -528,18 +570,23 @@ async def _launch_salesbot_for_job(job: dict) -> None:
                 decision.reason,
             )
             await _store_user_message_if_suppressed(customer, job)
-            await _mark_job(job["id"], "discarded" if not decision.needs_ai_mode_initialization else "failed", decision.reason)
+            await _mark_job(
+                job["id"],
+                "discarded" if not decision.needs_ai_mode_initialization else "failed",
+                decision.reason,
+                processing_lease_id=processing_lease_id,
+            )
             return
 
         entity_id = job.get("lead_id") or job.get("contact_id")
         entity_type = "leads" if job.get("lead_id") else "contacts"
         if not entity_id:
             logger.warning("Kommo job failed before Salesbot launch: job_id=%s reason=missing_entity_id", job["id"])
-            await _mark_job(job["id"], "failed", "missing_entity_id")
+            await _mark_job(job["id"], "failed", "missing_entity_id", processing_lease_id=processing_lease_id)
             return
         if await _discard_private_job_if_superseded_by_recent_comment(job):
             return
-        waiting_job = await _mark_job_waiting_for_salesbot(job["id"])
+        waiting_job = await _mark_job_waiting_for_salesbot(job["id"], processing_lease_id)
         if not waiting_job:
             logger.info("Kommo Salesbot launch skipped because job was no longer processing: job_id=%s", job["id"])
             return
@@ -552,7 +599,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             error = sanitize_job_error(e)
             if _is_definitive_launch_error(e):
                 logger.warning("Kommo Salesbot launch rejected definitively: job_id=%s error=%s", job["id"], error)
-                await _mark_waiting_job_failed(job["id"], error)
+                await _mark_waiting_job_failed(job["id"], processing_lease_id, error)
                 return
             logger.warning("Kommo Salesbot launch outcome uncertain: job_id=%s error=%s", job["id"], error)
             await _record_uncertain_launch_warning(job["id"], error)
@@ -565,10 +612,10 @@ async def _launch_salesbot_for_job(job: dict) -> None:
         logger.info("Kommo Salesbot launch accepted for job_id=%s", job["id"])
     except Exception as e:
         logger.exception("Kommo Salesbot launch failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
-        await _mark_job(job["id"], "failed", sanitize_job_error(e))
+        await _mark_job(job["id"], "failed", sanitize_job_error(e), processing_lease_id=processing_lease_id)
 
 
-async def _mark_job_waiting_for_salesbot(job_id: str):
+async def _mark_job_waiting_for_salesbot(job_id: str, processing_lease_id: str | None):
     return await db.fetch_one(
         """
         UPDATE kommo_message_jobs
@@ -578,9 +625,10 @@ async def _mark_job_waiting_for_salesbot(job_id: str):
             updated_at = NOW()
         WHERE id = :id
           AND status = 'processing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
         RETURNING *
         """,
-        {"id": job_id},
+        {"id": job_id, "processing_lease_id": processing_lease_id},
     )
 
 
@@ -588,7 +636,7 @@ def _is_definitive_launch_error(error: KommoAPIError) -> bool:
     return error.status_code is not None and 400 <= error.status_code < 500 and error.status_code != 429
 
 
-async def _mark_waiting_job_failed(job_id: str, error: str) -> None:
+async def _mark_waiting_job_failed(job_id: str, processing_lease_id: str | None, error: str) -> None:
     await db.execute(
         """
         UPDATE kommo_message_jobs
@@ -596,11 +644,17 @@ async def _mark_waiting_job_failed(job_id: str, error: str) -> None:
             last_error = :last_error,
             processing_started_at = NULL,
             completed_at = NOW(),
+            processing_lease_id = NULL,
             updated_at = NOW()
         WHERE id = :id
           AND status = 'waiting_for_salesbot'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
         """,
-        {"id": job_id, "last_error": sanitize_job_error(error)},
+        {
+            "id": job_id,
+            "processing_lease_id": processing_lease_id,
+            "last_error": sanitize_job_error(error),
+        },
     )
 
 
@@ -743,7 +797,9 @@ async def _process_ready_job(job: dict) -> None:
             await _continue_and_discard_job(client, job, "empty_after_sanitization")
             return
         continuation_data = {"status": "success", "message": customer_text}
-        await _mark_job_continuing(job["id"], continuation_data)
+        if not await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
+            logger.warning("Kommo ready job lost its processing lease before continuation: job_id=%s", job["id"])
+            return
         continuation_started = True
         _log_continuation_prepared(job["id"], continuation_data, message_diagnostics)
         try:
@@ -773,19 +829,29 @@ async def _process_ready_job(job: dict) -> None:
             _job_interaction_type(job),
         )
         await _store_assistant_message_after_delivery(customer, job, result, customer_text)
-        await _mark_job_sent(job["id"], response_payload)
+        await _mark_job_sent(job["id"], job.get("processing_lease_id"), response_payload)
     except KommoAPIError as e:
         logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         if not continuation_started and job.get("return_url"):
             await _continue_and_discard_job(client, job, sanitize_job_error(e))
             return
-        await _mark_job(job["id"], _status_after_continuation_error(e, continuation_started), sanitize_job_error(e))
+        await _mark_job(
+            job["id"],
+            _status_after_continuation_error(e, continuation_started),
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
     except Exception as e:
         logger.exception("Kommo ready job failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         if not continuation_started and job.get("return_url"):
             await _continue_and_discard_job(client, job, sanitize_job_error(e))
             return
-        await _mark_job(job["id"], "delivery_unknown" if continuation_started else "failed", sanitize_job_error(e))
+        await _mark_job(
+            job["id"],
+            "delivery_unknown" if continuation_started else "failed",
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
 
 
 async def _fetch_contact_for_job(client: KommoClient, job: dict) -> dict | None:
@@ -811,20 +877,21 @@ async def _fetch_contact_for_job(client: KommoClient, job: dict) -> dict | None:
     return None
 
 
-async def _find_latest_job_for_callback(values: dict):
+async def _find_job_for_callback_identity(values: dict):
     query_values = {
-        "entity_type": values["entity_type"],
-        "entity_id": values["entity_id"],
-        "interaction_type": values["interaction_type"],
+        "return_url": values["return_url"],
+        "salesbot_token_jti": values["salesbot_token_jti"],
+        "salesbot_token_iat": values["salesbot_token_iat"],
     }
     query = """
         SELECT * FROM kommo_message_jobs
-        WHERE (
-            (:entity_type = 'leads' AND lead_id = :entity_id)
-            OR (:entity_type = 'contacts' AND contact_id = :entity_id)
-        )
-          AND interaction_type = CAST(:interaction_type AS text)
-        ORDER BY salesbot_launched_at DESC NULLS LAST, created_at DESC
+        WHERE return_url = :return_url
+           OR (
+               CAST(:salesbot_token_jti AS text) IS NOT NULL
+               AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
+               AND callback_claims ->> 'iat' = CAST(:salesbot_token_iat AS text)
+           )
+        ORDER BY updated_at DESC
         LIMIT 1
     """
     return await db.fetch_one(query, query_values)
@@ -1056,13 +1123,19 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         raise ValueError("widget_lead_id_mismatch")
     if entity_type == "contacts" and data.contact_id and data.contact_id != entity_id:
         raise ValueError("widget_contact_id_mismatch")
+    try:
+        token_iat = int(claims.get("iat"))
+    except (TypeError, ValueError) as e:
+        raise ValueError("missing_signed_issued_at") from e
+    if token_iat <= 0:
+        raise ValueError("invalid_signed_issued_at")
     return {
         "return_url": return_url,
         "entity_id": entity_id,
         "entity_type": entity_type,
         "callback_claims": json.dumps(_safe_claims(claims)),
         "salesbot_token_jti": _claim_as_str(claims, "jti"),
-        "salesbot_token_iat": _claim_as_str(claims, "iat"),
+        "salesbot_token_iat": str(token_iat),
         "salesbot_account_id": _claim_as_str(claims, "account_id"),
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
         "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
@@ -1225,7 +1298,9 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
     try:
         continuation_data = {"status": "fail", "message": ""}
         logger.info("Kommo continuing Salesbot with failure status: job_id=%s reason=%s", job["id"], reason)
-        await _mark_job_continuing(job["id"], continuation_data)
+        if not await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
+            logger.warning("Kommo job lost its processing lease before failure continuation: job_id=%s", job["id"])
+            return
         continuation_started = True
         _log_continuation_prepared(
             job["id"],
@@ -1263,7 +1338,7 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
             job["id"],
             _job_interaction_type(job),
         )
-        await _mark_job_discarded(job["id"], reason, response_payload)
+        await _mark_job_discarded(job["id"], job.get("processing_lease_id"), reason, response_payload)
     except KommoAPIError as e:
         status = _status_after_continuation_error(e, continuation_started)
         logger.warning(
@@ -1272,47 +1347,73 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
             status,
             sanitize_job_error(e),
         )
-        await _mark_job(job["id"], status, sanitize_job_error(e))
+        await _mark_job(
+            job["id"],
+            status,
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
     except Exception as e:
-        await _mark_job(job["id"], "delivery_unknown" if continuation_started else "failed", sanitize_job_error(e))
+        await _mark_job(
+            job["id"],
+            "delivery_unknown" if continuation_started else "failed",
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
 
 
 async def _mark_job_continuing(
     job_id: str,
+    processing_lease_id: str | None,
     continuation_data: dict,
-) -> None:
+) -> bool:
     continuation_payload = {"data": continuation_data}
-    await db.execute(
+    updated = await db.fetch_one(
         """
         UPDATE kommo_message_jobs
         SET status = 'continuing',
             continuation_payload = CAST(:continuation_payload AS jsonb),
             processing_started_at = NOW(),
             updated_at = NOW()
-        WHERE id = :id AND status = 'processing'
+        WHERE id = :id
+          AND status = 'processing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+        RETURNING id
         """,
         {
             "id": job_id,
+            "processing_lease_id": processing_lease_id,
             "continuation_payload": json.dumps(continuation_payload),
         },
     )
+    return bool(updated)
 
 
-async def _mark_job_sent(job_id: str, response_payload) -> None:
-    await db.execute(
+async def _mark_job_sent(job_id: str, processing_lease_id: str | None, response_payload) -> bool:
+    updated = await db.fetch_one(
         """
         UPDATE kommo_message_jobs
         SET status = 'sent',
             last_error = NULL,
             continuation_response = CAST(:continuation_response AS jsonb),
             processing_started_at = NULL,
+            processing_lease_id = NULL,
             completed_at = NOW(),
             updated_at = NOW()
         WHERE id = :id
+          AND status = 'continuing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+        RETURNING id
         """,
-        {"id": job_id, "continuation_response": json.dumps({"response": response_payload})},
+        {
+            "id": job_id,
+            "processing_lease_id": processing_lease_id,
+            "continuation_response": json.dumps({"response": response_payload}),
+        },
     )
-    logger.info("Kommo continuation accepted: job_id=%s", job_id)
+    if updated:
+        logger.info("Kommo continuation accepted: job_id=%s", job_id)
+    return bool(updated)
 
 
 def _log_continuation_prepared(
@@ -1340,25 +1441,37 @@ def _log_continuation_prepared(
     )
 
 
-async def _mark_job_discarded(job_id: str, reason: str | None, response_payload) -> None:
-    await db.execute(
+async def _mark_job_discarded(
+    job_id: str,
+    processing_lease_id: str | None,
+    reason: str | None,
+    response_payload,
+) -> bool:
+    updated = await db.fetch_one(
         """
         UPDATE kommo_message_jobs
         SET status = 'discarded',
             last_error = :last_error,
             continuation_response = CAST(:continuation_response AS jsonb),
             processing_started_at = NULL,
+            processing_lease_id = NULL,
             completed_at = NOW(),
             updated_at = NOW()
         WHERE id = :id
+          AND status = 'continuing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+        RETURNING id
         """,
         {
             "id": job_id,
+            "processing_lease_id": processing_lease_id,
             "last_error": sanitize_job_error(reason) if reason else None,
             "continuation_response": json.dumps({"response": response_payload}),
         },
     )
-    logger.info("Kommo job marked discarded: job_id=%s reason=%s", job_id, reason)
+    if updated:
+        logger.info("Kommo job marked discarded: job_id=%s reason=%s", job_id, reason)
+    return bool(updated)
 
 
 async def _store_assistant_message_after_delivery(customer: dict, job: dict, result: dict, customer_text: str | None) -> None:
@@ -1371,10 +1484,15 @@ async def _store_assistant_message_after_delivery(customer: dict, job: dict, res
             SELECT assistant_message_persisted_at
             FROM kommo_message_jobs
             WHERE id = :id
+              AND status = 'continuing'
+              AND processing_lease_id = CAST(:processing_lease_id AS uuid)
             FOR UPDATE
             """,
-            {"id": job["id"]},
+            {"id": job["id"], "processing_lease_id": job.get("processing_lease_id")},
         )
+        if not existing:
+            logger.warning("Kommo assistant history skipped after processing lease loss: job_id=%s", job["id"])
+            return
         if existing and existing["assistant_message_persisted_at"]:
             logger.info("Kommo assistant history already persisted: job_id=%s", job["id"])
             return
@@ -1391,9 +1509,10 @@ async def _store_assistant_message_after_delivery(customer: dict, job: dict, res
             SET assistant_message_persisted_at = NOW(),
                 updated_at = NOW()
             WHERE id = :id
+              AND processing_lease_id = CAST(:processing_lease_id AS uuid)
               AND assistant_message_persisted_at IS NULL
             """,
-            {"id": job["id"]},
+            {"id": job["id"], "processing_lease_id": job.get("processing_lease_id")},
         )
     logger.info("Kommo assistant history persisted: job_id=%s", job["id"])
 
@@ -1406,18 +1525,36 @@ def _status_after_continuation_error(error: KommoAPIError, continuation_started:
     return "failed"
 
 
-async def _mark_job(job_id: str, status: str, error: str | None) -> None:
+async def _mark_job(
+    job_id: str,
+    status: str,
+    error: str | None,
+    *,
+    processing_lease_id: str | None = None,
+) -> None:
+    lease_condition = (
+        "AND processing_lease_id = CAST(:processing_lease_id AS uuid)"
+        if processing_lease_id is not None
+        else ""
+    )
     await db.execute(
-        """
+        f"""
         UPDATE kommo_message_jobs
         SET status = :status,
             last_error = :last_error,
             processing_started_at = NULL,
+            processing_lease_id = NULL,
             completed_at = CASE WHEN :status IN ('sent', 'discarded', 'failed', 'delivery_unknown') THEN NOW() ELSE completed_at END,
             updated_at = NOW()
         WHERE id = :id
+          {lease_condition}
         """,
-        {"status": status, "last_error": sanitize_job_error(error) if error else None, "id": job_id},
+        {
+            "status": status,
+            "last_error": sanitize_job_error(error) if error else None,
+            "id": job_id,
+            **({"processing_lease_id": processing_lease_id} if processing_lease_id is not None else {}),
+        },
     )
     logger.info("Kommo job marked %s: job_id=%s reason=%s", status, job_id, sanitize_job_error(error) if error else None)
 

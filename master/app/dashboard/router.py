@@ -2,7 +2,6 @@
 Master dashboard HTML and login routes.
 """
 
-import json
 from pathlib import Path
 from urllib.parse import quote
 
@@ -34,9 +33,7 @@ async def login_page(request: Request):
     if is_master_cookie_valid(request):
         return RedirectResponse(url="/dashboard", status_code=303)
 
-    page = (_TEMPLATES_DIR / "master_login.html").read_text(encoding="utf-8")
-    error = request.query_params.get("error", "")
-    return HTMLResponse(page.replace("__ERROR__", json.dumps(error)))
+    return _render_template("master_login.html")
 
 
 @router.post("/login")
@@ -48,13 +45,12 @@ async def login(request: Request):
     if token != config.master_secret_key:
         return _redirect_to_login("Clave incorrecta.")
 
-    is_localhost = "localhost" in config.app_base_url or "127.0.0.1" in config.app_base_url
     response = RedirectResponse(url="/dashboard", status_code=303)
     response.set_cookie(
         key=COOKIE_NAME,
         value=_make_cookie_token(config.master_secret_key),
         httponly=True,
-        secure=not is_localhost,
+        secure=not config.is_local_environment,
         samesite="lax",
         max_age=86400,
     )

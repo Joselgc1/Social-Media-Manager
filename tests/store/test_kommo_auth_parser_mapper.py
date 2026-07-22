@@ -28,8 +28,11 @@ def _config(**overrides):
 
 def _token(config=None, algorithm="HS256", **claims):
     config = config or _config()
+    now = datetime.now(UTC)
     payload = {
         "iss": "https://acme.kommo.com",
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
         "subdomain": "acme",
         "client_uid": "client-uuid",
         "account_id": 123,
@@ -41,7 +44,7 @@ def _token(config=None, algorithm="HS256", **claims):
     return jwt.encode(payload, config.kommo_integration_secret, algorithm=algorithm)
 
 
-def test_documented_salesbot_jwt_without_exp_accepted():
+def test_salesbot_jwt_with_documented_claims_accepted():
     claims = validate_salesbot_jwt(_token(), _config())
     assert claims["subdomain"] == "acme"
     assert claims["account_id"] == 123
@@ -55,12 +58,13 @@ def test_salesbot_jwt_hs256_remains_supported():
     assert claims["entity_type"] == "leads"
 
 
-def test_salesbot_jwt_hs512_accepted():
-    claims = validate_salesbot_jwt(_token(algorithm="HS512"), _config())
-    assert claims["entity_type"] == "leads"
+def test_salesbot_jwt_hs512_rejected():
+    with pytest.raises(KommoAuthError, match="algorithm") as exc:
+        validate_salesbot_jwt(_token(algorithm="HS512"), _config())
+    assert exc.value.reason_code == "unsupported_algorithm"
 
 
-def test_salesbot_jwt_with_valid_optional_exp_accepted():
+def test_salesbot_jwt_with_valid_exp_accepted():
     claims = validate_salesbot_jwt(_token(exp=datetime.now(UTC) + timedelta(minutes=5)), _config())
     assert claims["entity_type"] == "leads"
 
@@ -135,9 +139,11 @@ def test_salesbot_jwt_accepts_legacy_client_uuid_claim():
     assert claims["client_uuid"] == "client-uuid"
 
 
-def test_salesbot_jwt_accepts_subdomain_without_issuer():
-    claims = validate_salesbot_jwt(_token(iss=None), _config())
-    assert claims["subdomain"] == "acme"
+@pytest.mark.parametrize("claim", ["iss", "iat", "exp"])
+def test_salesbot_jwt_rejects_missing_required_temporal_or_issuer_claim(claim):
+    with pytest.raises(KommoAuthError, match="required claim") as exc:
+        validate_salesbot_jwt(_token(**{claim: None}), _config())
+    assert exc.value.reason_code == "missing_claim"
 
 
 def test_salesbot_jwt_missing_required_identity_claims_rejected():

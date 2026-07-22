@@ -9,7 +9,7 @@ from urllib.parse import urlparse, urlunparse
 
 import jwt
 
-KOMMO_JWT_ALGORITHMS = ["HS256", "HS512"]
+KOMMO_JWT_ALGORITHMS = ["HS256"]
 KOMMO_JWT_LEEWAY_SECONDS = 10
 _SUBDOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -77,31 +77,32 @@ def validate_salesbot_jwt(token: str, config) -> dict:
     if header.get("alg") not in KOMMO_JWT_ALGORITHMS:
         raise KommoAuthError("Unexpected Salesbot token algorithm", reason_code="unsupported_algorithm")
 
+    expected_subdomain = (config.kommo_subdomain or "").strip().lower()
+    expected_issuer = f"https://{kommo_account_hostname(expected_subdomain)}"
+
     try:
         claims = jwt.decode(
             token,
             config.kommo_integration_secret,
             algorithms=KOMMO_JWT_ALGORITHMS,
+            issuer=expected_issuer,
             leeway=KOMMO_JWT_LEEWAY_SECONDS,
-            options={"verify_aud": False},
+            options={"verify_aud": False, "require": ["exp", "iat", "iss"]},
         )
+    except jwt.MissingRequiredClaimError as e:
+        raise KommoAuthError("Salesbot token missing required claim", reason_code="missing_claim") from e
     except jwt.ExpiredSignatureError as e:
         raise KommoAuthError("Expired Salesbot token", reason_code="expired_token") from e
     except jwt.ImmatureSignatureError as e:
         raise KommoAuthError("Immature Salesbot token", reason_code="immature") from e
     except jwt.InvalidIssuedAtError as e:
         raise KommoAuthError("Invalid Salesbot token issued-at time", reason_code="invalid_entity_claims") from e
+    except jwt.InvalidIssuerError as e:
+        raise KommoAuthError("Salesbot token issuer mismatch", reason_code="issuer_mismatch") from e
     except jwt.InvalidSignatureError as e:
         raise KommoAuthError("Invalid Salesbot token", reason_code="invalid_signature") from e
     except jwt.PyJWTError as e:
         raise KommoAuthError("Invalid Salesbot token", reason_code="invalid_signature") from e
-
-    expected_subdomain = (config.kommo_subdomain or "").strip().lower()
-    expected_issuer = f"https://{kommo_account_hostname(expected_subdomain)}"
-
-    token_issuer = str(claims.get("iss") or "").rstrip("/")
-    if token_issuer and token_issuer != expected_issuer:
-        raise KommoAuthError("Salesbot token issuer mismatch", reason_code="issuer_mismatch")
 
     token_subdomain = str(claims.get("subdomain") or "").strip().lower()
     if not token_subdomain:

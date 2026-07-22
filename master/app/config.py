@@ -3,7 +3,11 @@ Master control plane configuration.
 """
 
 from functools import lru_cache
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 
+from cryptography.fernet import Fernet
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -21,7 +25,7 @@ class MasterSettings(BaseSettings):
     railway_api_token: str = ""
 
     # App config
-    app_base_url: str = "http://localhost:9000"
+    app_base_url: str
     health_check_interval_seconds: int = 300  # 5 minutes
 
     # Cap parallel /stats connections to each store DB (Supabase session pooler limits)
@@ -37,6 +41,41 @@ class MasterSettings(BaseSettings):
     dolarvzla_retry_backoff_seconds: float = 1.0
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @field_validator("master_secret_key")
+    @classmethod
+    def validate_master_secret_key(cls, value: str) -> str:
+        if len(value.strip()) < 32 or value.strip().lower().startswith("change-me"):
+            raise ValueError("MASTER_SECRET_KEY must be a non-placeholder secret of at least 32 characters")
+        return value
+
+    @field_validator("encryption_key")
+    @classmethod
+    def validate_encryption_key(cls, value: str) -> str:
+        try:
+            Fernet(value.encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ENCRYPTION_KEY must be a valid Fernet key") from exc
+        return value
+
+    @field_validator("app_base_url")
+    @classmethod
+    def validate_app_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("APP_BASE_URL must be an absolute HTTP(S) URL")
+        return value
+
+    @property
+    def is_local_environment(self) -> bool:
+        """Return true only when APP_BASE_URL has an exact loopback hostname."""
+        hostname = urlsplit(self.app_base_url).hostname
+        if hostname == "localhost":
+            return True
+        try:
+            return ip_address(hostname).is_loopback
+        except (TypeError, ValueError):
+            return False
 
 
 @lru_cache

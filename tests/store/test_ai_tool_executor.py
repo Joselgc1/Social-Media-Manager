@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -187,11 +188,15 @@ async def test_executor_escalation_notifies_owner_and_sets_state(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_payment_validation_success(monkeypatch):
-    get_latest_open_order = AsyncMock(return_value=_order())
+    get_unambiguous_open_order = AsyncMock(return_value=(_order(), False))
     get_customer_open_order_by_id = AsyncMock(return_value=None)
     update_order_payment_status = AsyncMock(return_value={"order_id": "order-1", "payment_status": "proof_received"})
     set_current_order = AsyncMock(return_value=None)
-    monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_latest_open_order", get_latest_open_order)
+    monkeypatch.setattr(
+        tool_payments.payment_verifier.orders,
+        "get_unambiguous_open_order",
+        get_unambiguous_open_order,
+    )
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_customer_open_order_by_id", get_customer_open_order_by_id)
     monkeypatch.setattr(tool_payments.payment_verifier.sessions, "get_session", AsyncMock(return_value=None))
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "update_order_payment_status", update_order_payment_status)
@@ -203,7 +208,12 @@ async def test_executor_payment_validation_success(monkeypatch):
             "analyzed": True,
             "payment_method": "zelle",
             "amount": "28.00",
+            "currency": "USD",
             "status": "completed",
+            "confidence": "high",
+            "reference": "TXN-TOOL-123",
+            "date": datetime.now(UTC).isoformat(),
+            "proof_hash": "f" * 64,
             "recipient_identifier": "pagos@example.com",
             "summary": "Pago Zelle a pagos@example.com por $28",
         },
@@ -214,11 +224,11 @@ async def test_executor_payment_validation_success(monkeypatch):
     assert result["payment_status"] == "proof_received"
     assert result["validated_amount"] == 28.0
     assert result["validated_payment_method"] == "Zelle"
-    update_order_payment_status.assert_awaited_once_with(
-        "order-1",
-        status="proof_received",
-        note="Comprobante Zelle",
-    )
+    update_order_payment_status.assert_awaited_once()
+    payment_update = update_order_payment_status.await_args
+    assert payment_update.args == ("order-1",)
+    assert payment_update.kwargs["status"] == "proof_received"
+    assert payment_update.kwargs["note"] == "Comprobante Zelle"
     set_current_order.assert_awaited_once_with(
         "customer-1",
         "order-1",
@@ -229,10 +239,14 @@ async def test_executor_payment_validation_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_payment_validation_failure_does_not_update_order(monkeypatch):
-    get_latest_open_order = AsyncMock(return_value=_order())
+    get_unambiguous_open_order = AsyncMock(return_value=(_order(), False))
     get_customer_open_order_by_id = AsyncMock(return_value=None)
     update_order_payment_status = AsyncMock(return_value={"order_id": "order-1"})
-    monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_latest_open_order", get_latest_open_order)
+    monkeypatch.setattr(
+        tool_payments.payment_verifier.orders,
+        "get_unambiguous_open_order",
+        get_unambiguous_open_order,
+    )
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_customer_open_order_by_id", get_customer_open_order_by_id)
     monkeypatch.setattr(tool_payments.payment_verifier.sessions, "get_session", AsyncMock(return_value=None))
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "update_order_payment_status", update_order_payment_status)
@@ -243,7 +257,12 @@ async def test_executor_payment_validation_failure_does_not_update_order(monkeyp
             "analyzed": True,
             "payment_method": "zelle",
             "amount": "20.00",
+            "currency": "USD",
             "status": "completed",
+            "confidence": "high",
+            "reference": "TXN-TOOL-124",
+            "date": datetime.now(UTC).isoformat(),
+            "proof_hash": "1" * 64,
             "recipient_identifier": "pagos@example.com",
             "summary": "Pago Zelle a pagos@example.com por $20",
         },

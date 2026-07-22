@@ -5,7 +5,7 @@ No build step, no JS frameworks. Just Tailwind CSS via CDN and fetch() calls
 to the existing admin API endpoints.
 """
 
-import json
+import html
 from pathlib import Path
 from urllib.parse import quote
 
@@ -47,9 +47,7 @@ async def login_page(request: Request):
         return RedirectResponse(url="/admin/dashboard", status_code=303)
 
     page = (_TEMPLATES_DIR / "admin_login.html").read_text(encoding="utf-8")
-    page = page.replace("__STORE_NAME__", config.store_name)
-    error = request.query_params.get("error", "")
-    return HTMLResponse(page.replace("__ERROR__", json.dumps(error)))
+    return HTMLResponse(page.replace("__STORE_NAME__", html.escape(config.store_name)))
 
 
 @router.post("/login")
@@ -90,7 +88,7 @@ async def logout():
 async def dashboard(request: Request):
     """Serve the admin dashboard as a single HTML page."""
     config = get_config()
-    replacements = {"__STORE_NAME__": config.store_name}
+    replacements = {"__STORE_NAME__": html.escape(config.store_name)}
 
     if not config.admin_password:
         if config.debug:
@@ -108,8 +106,8 @@ async def order_detail_page(request: Request, order_id: str):
     """Serve the order detail page."""
     config = get_config()
     replacements = {
-        "__STORE_NAME__": config.store_name,
-        "__ORDER_ID__": json.dumps(order_id),
+        "__STORE_NAME__": html.escape(config.store_name),
+        "__ORDER_ID__": html.escape(order_id, quote=True),
     }
 
     if not config.admin_password:

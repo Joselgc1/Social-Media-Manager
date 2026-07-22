@@ -99,6 +99,15 @@ function renderDeleteIcon(label) {
   return `<img src="${DELETE_ICON_SRC}" alt="" class="btn-icon-image"><span class="sr-only">${escapeHtml(label)}</span>`;
 }
 
+function renderCustomerTags(customerId, tags) {
+  const safeCustomerId = escapeHtml(customerId);
+  const chips = tags.map(tag => {
+    const safeTag = escapeHtml(tag);
+    return `<button type="button" class="badge badge-blue tag-chip tag-remove-chip" title="Click para eliminar" data-customer-id="${safeCustomerId}" data-tag="${safeTag}">${safeTag} ✕</button>`;
+  }).join('');
+  return `<div class="customer-tags">${chips}<button type="button" class="badge badge-gray tag-add-chip" data-customer-id="${safeCustomerId}" title="Agregar tag">+</button></div>`;
+}
+
 // -- Dark Mode --
 function toggleDarkMode() {
   const isDark = document.documentElement.classList.toggle('dark');
@@ -136,7 +145,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadSettings();
 });
 
-document.addEventListener('click', () => {
+document.addEventListener('click', event => {
+  const removeChip = event.target.closest('.tag-remove-chip');
+  if (removeChip) {
+    removeTag(removeChip.dataset.customerId, removeChip.dataset.tag);
+  }
+  const addChip = event.target.closest('.tag-add-chip');
+  if (addChip) {
+    promptAddTag(addChip.dataset.customerId);
+  }
   closeOrderStatusDropdowns();
   closeCustomerStateDropdowns();
   closeCustomerChannelDropdowns();
@@ -452,11 +469,7 @@ function renderCustomers(customers) {
       const statusBadge = getCustomerStateBadgeClass(currentState);
       const statusLabel = CUSTOMER_STATE_LABELS[currentState] || currentState || 'Activo';
       const channelLabel = CUSTOMER_CHANNEL_LABELS[c.channel] || c.channel || 'Sin canal';
-      const tagHtml = `<div class="customer-tags">${
-        tags.map(t =>
-          `<span class="badge badge-blue tag-chip" title="Click para eliminar" onclick="removeTag('${c.id}','${t}')">${t} ✕</span>`
-        ).join('')
-      }<span class="badge badge-gray tag-add-chip" onclick="promptAddTag('${c.id}')" title="Agregar tag">+</span></div>`;
+      const tagHtml = renderCustomerTags(c.id, tags);
 
       html += `
         <div class="card mobile-data-card">
@@ -530,11 +543,7 @@ function renderCustomers(customers) {
     const primaryName = getCustomerPrimaryName(c);
     const secondaryLabel = getCustomerSecondaryLabel(c);
     const tertiaryLabel = getCustomerContactValue(c);
-    const tagHtml = `<div class="customer-tags">${
-      tags.map(t =>
-        `<span class="badge badge-blue tag-chip" title="Click para eliminar" onclick="removeTag('${c.id}','${t}')">${t} ✕</span>`
-      ).join('')
-    }<span class="badge badge-gray tag-add-chip" onclick="promptAddTag('${c.id}')" title="Agregar tag">+</span></div>`;
+    const tagHtml = renderCustomerTags(c.id, tags);
     const currentState = c.conversation_state || 'active';
     const statusBadge = getCustomerStateBadgeClass(currentState);
     const statusLabel = CUSTOMER_STATE_LABELS[currentState] || currentState || 'Activo';
@@ -1152,11 +1161,11 @@ function renderBroadcasts(data) {
     if (b.status === 'draft') sendBtn = `<button class="btn btn-primary text-xs" onclick="sendBroadcast('${b.id}')">Enviar</button>`;
     else if (b.status === 'sending' || b.status === 'failed') sendBtn = `<button class="btn btn-danger text-xs" onclick="resetBroadcast('${b.id}')">Resetear</button>`;
     html += `<tr class="border-t border-gray-100 dark:border-gray-700">
-      <td class="py-2 font-medium">${b.name}</td>
-      <td>${b.template_name}</td>
-      <td>${tags}</td>
+      <td class="py-2 font-medium">${escapeHtml(b.name)}</td>
+      <td>${escapeHtml(b.template_name || '')}</td>
+      <td>${escapeHtml(tags)}</td>
       <td>${b.recipients || 0}</td>
-      <td><span class="badge ${statusBadge}">${b.status}</span></td>
+      <td><span class="badge ${statusBadge}">${escapeHtml(b.status)}</span></td>
       <td>${sendBtn}</td>
     </tr>`;
   }

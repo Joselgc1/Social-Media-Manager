@@ -3,6 +3,7 @@ Application configuration loaded from environment variables.
 All secrets live in .env (never committed to git).
 """
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -49,6 +50,7 @@ class Settings(BaseSettings):
     # --- Telegram (admin notifications) ---
     telegram_bot_token: str = ""
     telegram_admin_chat_id: str = ""
+    telegram_webhook_secret: str = ""
 
     # --- App config ---
     store_name: str = "Zona Pink"
@@ -81,6 +83,15 @@ class Settings(BaseSettings):
     def _safe_orchestration_mode(cls, value):
         mode = str(value or "legacy").strip().lower()
         return mode if mode in {"legacy", "shadow", "multi_agent"} else "legacy"
+
+    @field_validator("telegram_webhook_secret")
+    @classmethod
+    def _validate_telegram_webhook_secret(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value):
+            raise ValueError(
+                "TELEGRAM_WEBHOOK_SECRET must contain only letters, numbers, underscores, or hyphens"
+            )
+        return value
 
     @field_validator(
         "kommo_salesbot_id",

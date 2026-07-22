@@ -237,20 +237,20 @@ def _normalize_tag(tag: str | None) -> str:
         return ""
 
     if ":" not in raw:
-        return raw.lower()
+        return _slugify_tag_value(raw)
 
     prefix, value = raw.split(":", 1)
-    prefix = prefix.strip().lower()
+    prefix = _slugify_tag_value(prefix)[:32]
     value = value.strip()
+    if not prefix:
+        return ""
 
     if prefix == "size":
-        return f"{prefix}:{value.upper()}"
-
-    if prefix in {"payment", "city", "interested"}:
-        value = _slugify_tag_value(value)
+        value = _slugify_tag_value(value).upper()
         return f"{prefix}:{value}" if value else ""
 
-    return f"{prefix}:{value.lower()}"
+    value = _slugify_tag_value(value)
+    return f"{prefix}:{value}" if value else ""
 
 
 def _slugify_tag_value(value: str) -> str:
@@ -260,4 +260,4 @@ def _slugify_tag_value(value: str) -> str:
     ascii_text = re.sub(r"\s+", "_", ascii_text)
     ascii_text = re.sub(r"[^a-z0-9_]+", "_", ascii_text)
     ascii_text = re.sub(r"_+", "_", ascii_text).strip("_")
-    return ascii_text
+    return ascii_text[:64]
