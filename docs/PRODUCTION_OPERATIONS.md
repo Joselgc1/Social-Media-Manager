@@ -96,7 +96,7 @@ After restore:
 
 1. Verify checksums and `schema_migrations`.
 2. Run row-count and foreign-key sanity checks for customers, orders, settings, jobs, and stores.
-3. Start one application instance against the restored database with outbound webhooks/broadcasts disabled.
+3. Start one application instance against the restored database with `OUTBOUND_PROCESSING_ENABLED=false`. This disables broadcast execution, Meta/Kommo job processing, and inventory reservation cleanup.
 4. Run health and read-only smoke tests.
 5. Point Railway `DATABASE_URL` to the restored database only after approval.
 6. Use the master credential deploy flow so master and Railway retain the same authoritative store URL.

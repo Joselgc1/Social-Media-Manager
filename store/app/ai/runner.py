@@ -4,6 +4,7 @@ Generic model and tool loop for internal AI agents.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -21,6 +22,7 @@ from app.ai.tools.registry import get_tool_schemas
 from app.catalog.sheets import get_cached_catalog
 
 logger = logging.getLogger(__name__)
+AI_TURN_TIMEOUT_SECONDS = 120
 
 DEFAULT_FALLBACK_TEXT = "Lo siento, no pude generar una respuesta. ¿Puedes repetir tu pregunta?"
 
@@ -65,6 +67,18 @@ class AgentRunner:
         self._list_providers = provider_lister or _list_providers
 
     async def run(
+        self,
+        agent: AgentDefinition,
+        system_prompt: str,
+        messages: list[dict],
+        settings: dict,
+        context: AgentRunContext,
+    ) -> AgentRunResult:
+        """Bound the entire provider, fallback, and tool loop for one customer turn."""
+        async with asyncio.timeout(AI_TURN_TIMEOUT_SECONDS):
+            return await self._run(agent, system_prompt, messages, settings, context)
+
+    async def _run(
         self,
         agent: AgentDefinition,
         system_prompt: str,

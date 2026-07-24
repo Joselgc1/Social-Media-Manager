@@ -33,6 +33,7 @@ def _token(config=None, algorithm="HS256", **claims):
         "iss": "https://acme.kommo.com",
         "iat": now,
         "exp": now + timedelta(minutes=5),
+        "jti": "test-token-id",
         "subdomain": "acme",
         "client_uid": "client-uuid",
         "account_id": 123,
@@ -143,6 +144,12 @@ def test_salesbot_jwt_accepts_legacy_client_uuid_claim():
 def test_salesbot_jwt_rejects_missing_required_temporal_or_issuer_claim(claim):
     with pytest.raises(KommoAuthError, match="required claim") as exc:
         validate_salesbot_jwt(_token(**{claim: None}), _config())
+    assert exc.value.reason_code == "missing_claim"
+
+
+def test_salesbot_jwt_rejects_missing_jti():
+    with pytest.raises(KommoAuthError, match="required claim") as exc:
+        validate_salesbot_jwt(_token(jti=None), _config())
     assert exc.value.reason_code == "missing_claim"
 
 

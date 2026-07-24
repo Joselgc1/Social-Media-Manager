@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -102,6 +103,11 @@ async def require_auth(
 
     # Check session cookie (timing-safe)
     if is_master_cookie_valid(request):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            origin = request.headers.get("origin")
+            expected_origin = f"{urlparse(config.app_base_url).scheme}://{urlparse(config.app_base_url).netloc}"
+            if origin != expected_origin:
+                raise HTTPException(status_code=403, detail="Invalid request origin")
         return True
 
     raise HTTPException(status_code=401, detail="Invalid or missing authentication token")

@@ -86,6 +86,7 @@ async def send_broadcast_endpoint(broadcast_id: str):
 async def reset_broadcast_endpoint(broadcast_id: str):
     """Reset a stuck broadcast back to draft status."""
     from app import db
+    from app.broadcast.sender import recover_stale_broadcast_deliveries
 
     broadcast = await db.fetch_one(
         "SELECT id, status FROM broadcasts WHERE id = :id",
@@ -93,6 +94,19 @@ async def reset_broadcast_endpoint(broadcast_id: str):
     )
     if not broadcast:
         raise HTTPException(status_code=404, detail="Broadcast not found")
+
+    recovery = await recover_stale_broadcast_deliveries(broadcast_id)
+    reset_known_failures = await db.execute(
+        """
+        UPDATE broadcast_deliveries
+        SET status = 'pending', failed_at = NULL, outbound_started_at = NULL,
+            last_error = NULL, updated_at = NOW()
+        WHERE broadcast_id = :id
+          AND status = 'failed'
+          AND last_error = 'known_meta_send_failure'
+        """,
+        {"id": broadcast_id},
+    )
 
     await db.execute(
         """
@@ -107,4 +121,5 @@ async def reset_broadcast_endpoint(broadcast_id: str):
         """,
         {"id": broadcast_id},
     )
-    return {"broadcast_id": broadcast_id, "status": "draft", "message": "Broadcast reset to draft"}
+    recovery["reset_known_failures"] = int(reset_known_failures or 0)
+    return {"broadcast_id": broadcast_id, "status": "draft", "message": "Broadcast reset to draft", "recovery": recovery}

@@ -93,6 +93,32 @@ async def test_payment_proof_does_not_resurrect_released_order_after_lock():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("inventory_status", ["released", "reservation_pending", "reservation_failed"])
+async def test_manual_payment_update_cannot_confirm_without_reserved_inventory(inventory_status):
+    from app.crm import orders
+
+    row = {
+        "id": "order-1",
+        "customer_id": "customer-1",
+        "total": 28,
+        "payment_status": "rejected",
+        "inventory_status": inventory_status,
+        "customer_totals_applied": False,
+    }
+    execute = AsyncMock(return_value=None)
+
+    with (
+        patch.object(orders.db, "get_db", return_value=_transactional_db()),
+        patch.object(orders.db, "fetch_one", AsyncMock(return_value=row)),
+        patch.object(orders.db, "execute", execute),
+        pytest.raises(ValueError, match="cannot be marked paid"),
+    ):
+        await orders.update_order_payment_status("order-1", "confirmed")
+
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_existing_fingerprint_stops_second_order_before_update():
     from app.crm import orders
 

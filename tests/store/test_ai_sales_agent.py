@@ -120,6 +120,7 @@ async def test_sales_product_inquiry_and_out_of_stock(monkeypatch):
             "stock": 0,
         }
     ])
+    monkeypatch.setattr(tool_catalog, "ensure_fresh_catalog", AsyncMock())
 
     result = await execute_tool("check_inventory", {"product_query": "pijama satén", "size": "M"}, ToolExecutionContext(customer={"id": "customer-1"}, channel="whatsapp"))
 

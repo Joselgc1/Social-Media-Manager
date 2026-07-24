@@ -89,8 +89,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
     REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon, authenticated;
 
 INSERT INTO schema_migrations (version, name) VALUES
-    (1, 'fresh_install_baseline'),
-    (2, 'versioned_schema_and_security_hardening')
+    (1, 'fresh_install_baseline')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

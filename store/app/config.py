@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     owner_name: str = "Admin"
     app_base_url: str = "http://localhost:8000"
     debug: bool = False
+    outbound_processing_enabled: bool = True
 
     # --- Multi-store support (managed from master control plane) ---
     admin_password: str = ""  # If set, protects /admin/dashboard with a password

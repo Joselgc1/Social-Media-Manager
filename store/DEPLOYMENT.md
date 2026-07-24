@@ -44,15 +44,11 @@ postgresql://postgres:[YOUR-PASSWORD]@db.xyzabc.supabase.co:5432/postgres
 
 Copy this. It goes in your `.env` as `DATABASE_URL`.
 
-Run migrations from the Supabase SQL Editor. Choose exactly one path:
+Run `store/migrations/001_schema.sql` once from the Supabase SQL Editor. It is the complete fresh-install schema baseline and records schema version `1`.
 
-**Fresh database:** paste and run `store/migrations/001_schema.sql` once. It creates the current schema, seeds settings, and records schema versions through the current application version.
+The store refuses to start unless `schema_migrations` contains exactly version `1`. This baseline is for new databases; do not apply it as an upgrade to a deployed database.
 
-**Existing database created before version tracking:** take a database backup, enter a maintenance window, then run `store/migrations/002_existing_database_upgrade.sql`, `store/migrations/003_broadcast_delivery_safety.sql`, and `store/migrations/004_meta_inbound_lease_fencing.sql` in that order. Do not rerun `001_schema.sql`; `CREATE TABLE IF NOT EXISTS` cannot upgrade an existing table safely.
-
-For future releases, run only new numbered migrations in ascending order. A migration records its version only at the end of its transaction. The store refuses to start when `schema_migrations` is absent, behind, or ahead of the version supported by the deployed code.
-
-Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. The latest version must match `EXPECTED_SCHEMA_VERSION` in `store/app/db.py` for the deployed code. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
+Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. It must return only version `1`. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
 
 ### 1.2 OpenAI API Key
 

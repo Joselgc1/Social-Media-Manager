@@ -17,7 +17,7 @@ from app import db
 from app.auth import require_auth
 from app.config import get_config
 from app.stores import exchange_rates as exchange_rate_service
-from app.stores.crypto import decrypt, encrypt, mask
+from app.stores.crypto import decrypt, encrypt, mask, mask_database_url
 from app.stores.models import CredentialSet, LLMSettingsUpdate, RuntimeSettingsUpdate, StoreCreate, StoreUpdate
 from app.stores.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
@@ -116,7 +116,7 @@ async def get_store(store_id: str):
     if result.get("db_url_encrypted"):
         try:
             decrypted = decrypt(result["db_url_encrypted"])
-            result["db_url_masked"] = mask(decrypted, 20)
+            result["db_url_masked"] = mask_database_url(decrypted)
         except Exception:
             result["db_url_masked"] = "****"
     del result["db_url_encrypted"]

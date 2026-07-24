@@ -23,7 +23,7 @@ from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 _db: databases.Database | None = None
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_VERSION = 4
+EXPECTED_SCHEMA_VERSION = 1
 
 
 async def connect():
@@ -76,17 +76,17 @@ async def execute(query: str, values: dict | None = None):
 async def verify_schema_version() -> None:
     """Fail startup before application queries run against an old schema."""
     try:
-        row = await fetch_one("SELECT MAX(version) AS version FROM schema_migrations")
+        rows = await fetch_all("SELECT version FROM schema_migrations ORDER BY version")
     except Exception as e:
         raise RuntimeError(
-            "Store database schema is unversioned. Apply store/migrations/002_existing_database_upgrade.sql "
-            "for an existing database, or store/migrations/001_schema.sql for a fresh database."
+                "Store database schema is unversioned. Apply store/migrations/001_schema.sql to a fresh database."
         ) from e
 
-    version = int(row["version"]) if row and row["version"] is not None else 0
-    if version != EXPECTED_SCHEMA_VERSION:
+    versions = {int(row["version"]) for row in rows}
+    expected_versions = set(range(1, EXPECTED_SCHEMA_VERSION + 1))
+    if versions != expected_versions:
         raise RuntimeError(
-            f"Store database schema version mismatch: expected {EXPECTED_SCHEMA_VERSION}, found {version}. "
+            f"Store database schema version mismatch: expected {sorted(expected_versions)}, found {sorted(versions)}. "
             "Apply pending numbered migrations before starting the service."
         )
 

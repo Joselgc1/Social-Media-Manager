@@ -1,10 +1,14 @@
+import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 
-def _sheet(records):
+def _sheet(records, *, default_active=True):
+    if default_active:
+        records = [{"Active": "yes", **record} for record in records]
     worksheet = MagicMock()
     worksheet.title = "Products"
     worksheet.get_all_records.return_value = records
@@ -179,6 +183,52 @@ def test_sheet_inventory_operation_id_is_idempotent_from_ledger():
     spreadsheet.values_batch_update.assert_not_called()
 
 
+def test_inventory_ledger_grows_before_writing_past_its_grid():
+    from app.catalog import sheets
+
+    client, worksheet = _sheet([{"SKU": "SKU-S", "Stock": 3}])
+    spreadsheet = client.open_by_key.return_value
+    ledger = spreadsheet.worksheet.return_value
+    ledger.row_count = 2
+    ledger.get_all_records.return_value = [{
+        "Operation ID": "order:old:reserve",
+        "Type": "deduct",
+        "SKU": "SKU-S",
+        "Quantity": 1,
+        "Stock Before": 4,
+        "Stock After": 3,
+        "Created At": "2026-01-01T00:00:00+00:00",
+    }]
+    with (
+        patch.object(sheets, "_get_gspread_client", return_value=client),
+        patch.object(sheets, "get_config", return_value=SimpleNamespace(product_sheet_id="capacity-sheet")),
+        patch.object(sheets, "refresh_catalog"),
+    ):
+        sheets.deduct_stock([{"sku": "SKU-S", "quantity": 1}], operation_id="order:new:reserve")
+
+    ledger.add_rows.assert_called_once_with(1000)
+    body = spreadsheet.values_batch_update.call_args.args[0]
+    assert body["data"][1]["range"] == "'_inventory_mutations'!A3:G3"
+
+
+def test_inventory_ledger_is_not_reloaded_after_cached_mutation():
+    from app.catalog import sheets
+
+    client, worksheet = _sheet([{"SKU": "SKU-S", "Stock": 4}])
+    spreadsheet = client.open_by_key.return_value
+    ledger = spreadsheet.worksheet.return_value
+    ledger.row_count = 1000
+    with (
+        patch.object(sheets, "_get_gspread_client", return_value=client),
+        patch.object(sheets, "get_config", return_value=SimpleNamespace(product_sheet_id="cache-sheet")),
+        patch.object(sheets, "refresh_catalog"),
+    ):
+        sheets.deduct_stock([{"sku": "SKU-S", "quantity": 1}], operation_id="order:first:reserve")
+        sheets.deduct_stock([{"sku": "SKU-S", "quantity": 1}], operation_id="order:second:reserve")
+
+    ledger.get_all_records.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "items",
     [
@@ -210,7 +260,28 @@ def test_sheet_inventory_failure_never_partially_updates(items):
 def test_sheet_inventory_deduction_validates_current_active_flag_and_price(record, message):
     from app.catalog import sheets
 
-    client, worksheet = _sheet([record])
+    client, worksheet = _sheet([record], default_active=False)
+    with (
+        patch.object(sheets, "_get_gspread_client", return_value=client),
+        patch.object(sheets, "get_config", return_value=SimpleNamespace(product_sheet_id="sheet")),
+        pytest.raises(sheets.InventoryUpdateError, match=message),
+    ):
+        sheets.deduct_stock([{"sku": "SKU-S", "quantity": 1, "unit_price": 28}])
+
+    worksheet.batch_update.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("record", "message"),
+    [
+        ({"SKU": "SKU-S", "Stock": 2, "Price USD": 28}, "not active"),
+        ({"SKU": "SKU-S", "Stock": 2, "Active": "yes", "Price USD": "invalid"}, "price changed or is invalid"),
+    ],
+)
+def test_sheet_inventory_deduction_fails_closed_for_missing_active_or_malformed_price(record, message):
+    from app.catalog import sheets
+
+    client, worksheet = _sheet([record], default_active=False)
     with (
         patch.object(sheets, "_get_gspread_client", return_value=client),
         patch.object(sheets, "get_config", return_value=SimpleNamespace(product_sheet_id="sheet")),
@@ -420,6 +491,79 @@ async def test_failed_sheet_reservation_marks_order_failed_without_restore():
 
     restore.assert_not_called()
     assert any("inventory_status = :failed_status" in query for query, _ in execute_events)
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_sheet_reservation_stays_pending_for_safe_reconciliation():
+    from app.crm import orders
+
+    execute_events = []
+
+    async def execute(query, values=None):
+        if "INSERT INTO orders" in query:
+            return "order-1"
+        execute_events.append((query, values))
+        return None
+
+    with (
+        patch.object(orders, "get_cached_catalog", return_value=_catalog()),
+        patch.object(orders, "ensure_fresh_catalog", AsyncMock(return_value=_catalog())),
+        patch.object(orders.db, "get_settings", AsyncMock(return_value=_order_settings())),
+        patch.object(orders.db, "fetch_one", AsyncMock(return_value={"id": "customer-1"})),
+        patch.object(
+            orders.db,
+            "get_db",
+            return_value=_database(
+                fetch_one=AsyncMock(side_effect=[None, None]),
+                execute=AsyncMock(side_effect=execute),
+            ),
+        ),
+        patch.object(orders, "deduct_stock", MagicMock(side_effect=RuntimeError("timeout"))),
+        patch.object(orders, "inventory_operation_applied", MagicMock(side_effect=RuntimeError("ledger unavailable"))),
+        pytest.raises(orders.InventoryReservationUncertainError),
+    ):
+        await orders.create_order(
+            "customer-1", _items(), "Zelle", "Caracas", "Av. Principal", "mrw"
+        )
+
+    assert not any("inventory_status = :failed_status" in query for query, _ in execute_events)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sheet_mutation_holds_advisory_lock_until_thread_finishes():
+    from app.crm import orders
+
+    started = threading.Event()
+    finish = threading.Event()
+    lock_events = []
+
+    async def fetch_one(query, values=None):
+        lock_events.append("unlock" if "pg_advisory_unlock" in query else "lock")
+        return None
+
+    def blocking_deduct(items, operation_id=None):
+        started.set()
+        finish.wait(timeout=2)
+
+    async def reserve_inventory():
+        async with orders._inventory_mutation_connection():
+            await orders._deduct_order_inventory("order-1", _items())
+
+    with (
+        patch.object(orders.db, "get_db", return_value=_database(fetch_one=AsyncMock(side_effect=fetch_one))),
+        patch.object(orders, "deduct_stock", blocking_deduct),
+    ):
+        task = asyncio.create_task(reserve_inventory())
+        await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert lock_events == ["lock"]
+
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert lock_events == ["lock", "unlock"]
 
 
 @pytest.mark.asyncio

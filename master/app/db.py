@@ -7,7 +7,7 @@ import databases
 from app.config import get_config
 
 _db: databases.Database | None = None
-EXPECTED_SCHEMA_VERSION = 2
+EXPECTED_SCHEMA_VERSION = 1
 
 
 async def connect():
@@ -43,17 +43,16 @@ async def execute(query: str, values: dict | None = None):
 async def verify_schema_version() -> None:
     """Fail startup before the control plane queries an old schema."""
     try:
-        row = await fetch_one("SELECT MAX(version) AS version FROM schema_migrations")
+        rows = await fetch_all("SELECT version FROM schema_migrations ORDER BY version")
     except Exception as e:
         raise RuntimeError(
-            "Master database schema is unversioned. Apply "
-            "master/migrations/002_existing_database_upgrade.sql for an existing database, or "
-            "master/migrations/001_master_schema.sql for a fresh database."
+            "Master database schema is unversioned. Apply master/migrations/001_master_schema.sql to a fresh database."
         ) from e
 
-    version = int(row["version"]) if row and row["version"] is not None else 0
-    if version != EXPECTED_SCHEMA_VERSION:
+    versions = {int(row["version"]) for row in rows}
+    expected_versions = {EXPECTED_SCHEMA_VERSION}
+    if versions != expected_versions:
         raise RuntimeError(
-            f"Master database schema version mismatch: expected {EXPECTED_SCHEMA_VERSION}, found {version}. "
-            "Apply pending numbered migrations before starting the service."
+            f"Master database schema version mismatch: expected {sorted(expected_versions)}, found {sorted(versions)}. "
+            "This project uses a single fresh-install baseline; recreate the database from the current 001 migration."
         )

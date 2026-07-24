@@ -18,6 +18,7 @@ from datetime import datetime
 
 from app import db
 from app.admin.notify import notify_owner
+from app.channels.meta_errors import MetaSendError
 from app.config import get_config
 from app.customer_identity import extract_safe_first_name
 
@@ -99,7 +100,15 @@ async def execute_broadcast(broadcast_id: str) -> dict:
                     "platform_id": delivery["platform_id"],
                 }
                 params = _personalize_params(template_params, customer)
-                await send_template(
+                await db.execute(
+                    """
+                    UPDATE broadcast_deliveries
+                    SET outbound_started_at = NOW(), updated_at = NOW()
+                    WHERE id = :id AND status = 'sending'
+                    """,
+                    {"id": delivery["id"]},
+                )
+                response = await send_template(
                     to=delivery["platform_id"],
                     template_name=template_name,
                     language="es",
@@ -108,10 +117,11 @@ async def execute_broadcast(broadcast_id: str) -> dict:
                 await db.execute(
                     """
                     UPDATE broadcast_deliveries
-                    SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+                    SET status = 'sent', sent_at = NOW(),
+                        meta_message_id = :meta_message_id, updated_at = NOW()
                     WHERE id = :id AND status = 'sending'
                     """,
-                    {"id": delivery["id"]},
+                    {"id": delivery["id"], "meta_message_id": _meta_message_id(response)},
                 )
                 await asyncio.sleep(SEND_DELAY)
             except Exception as e:
@@ -120,18 +130,22 @@ async def execute_broadcast(broadcast_id: str) -> dict:
                     _mask_platform_id(delivery["platform_id"]),
                     e,
                 )
+                known_safe_failure = isinstance(e, MetaSendError)
                 await db.execute(
                     """
                     UPDATE broadcast_deliveries
                     SET status = 'failed', failed_at = NOW(), last_error = :error, updated_at = NOW()
                     WHERE id = :id AND status = 'sending'
                     """,
-                    {"id": delivery["id"], "error": type(e).__name__[:100]},
+                    {
+                        "id": delivery["id"],
+                        "error": "known_meta_send_failure" if known_safe_failure else type(e).__name__[:100],
+                    },
                 )
 
         counts = await _delivery_counts(broadcast_id)
         sent = counts["sent"]
-        errors = counts["failed"] + counts["sending"]
+        errors = counts["failed"] + counts["sending"] + counts["delivery_unknown"]
         final_status = "sent" if errors == 0 else ("partial" if sent > 0 else "failed")
         await db.execute(
             "UPDATE broadcasts SET status = :status, recipients = :sent WHERE id = :id",
@@ -202,6 +216,8 @@ async def _seed_delivery_ledger(broadcast_id: str, tags: list[str]) -> None:
             "SELECT audience_seeded_at FROM broadcasts WHERE id = :id FOR UPDATE",
             {"id": broadcast_id},
         )
+
+
         if not broadcast or broadcast["audience_seeded_at"] is not None:
             return
 
@@ -227,6 +243,35 @@ async def _seed_delivery_ledger(broadcast_id: str, tags: list[str]) -> None:
             "UPDATE broadcasts SET audience_seeded_at = NOW() WHERE id = :id",
             {"id": broadcast_id},
         )
+
+
+async def recover_stale_broadcast_deliveries(broadcast_id: str | None = None) -> dict[str, int]:
+    """Recover definitely unsent claims and quarantine ambiguous Meta attempts."""
+    requeued = await db.execute(
+        """
+        UPDATE broadcast_deliveries
+        SET status = 'pending', claimed_at = NULL, updated_at = NOW(),
+            last_error = 'recovered_before_meta_send'
+        WHERE (:broadcast_id IS NULL OR broadcast_id = :broadcast_id)
+          AND status = 'sending'
+          AND outbound_started_at IS NULL
+          AND claimed_at < NOW() - INTERVAL '5 minutes'
+        """,
+        {"broadcast_id": broadcast_id},
+    )
+    unknown = await db.execute(
+        """
+        UPDATE broadcast_deliveries
+        SET status = 'delivery_unknown', failed_at = NOW(), updated_at = NOW(),
+            last_error = 'delivery_unknown_after_stale_meta_attempt'
+        WHERE (:broadcast_id IS NULL OR broadcast_id = :broadcast_id)
+          AND status = 'sending'
+          AND outbound_started_at IS NOT NULL
+          AND claimed_at < NOW() - INTERVAL '5 minutes'
+        """,
+        {"broadcast_id": broadcast_id},
+    )
+    return {"requeued": int(requeued or 0), "delivery_unknown": int(unknown or 0)}
 
 
 async def _claim_next_delivery(broadcast_id: str):
@@ -279,15 +324,24 @@ async def _delivery_counts(broadcast_id: str) -> dict[str, int]:
             COUNT(*) FILTER (WHERE status = 'failed') AS failed,
             COUNT(*) FILTER (WHERE status = 'sending') AS sending,
             COUNT(*) FILTER (WHERE status = 'pending') AS pending
+            , COUNT(*) FILTER (WHERE status = 'delivery_unknown') AS delivery_unknown
         FROM broadcast_deliveries
         WHERE broadcast_id = :broadcast_id
         """,
         {"broadcast_id": broadcast_id},
     )
     return {
-        key: int(row[key] or 0) if row else 0
-        for key in ("sent", "failed", "sending", "pending")
+        key: int(row[key] or 0) if row and key in row else 0
+        for key in ("sent", "failed", "sending", "pending", "delivery_unknown")
     }
+
+
+def _meta_message_id(response: dict | None) -> str | None:
+    response = response or {}
+    for message in response.get("messages") or []:
+        if message_id := str((message or {}).get("id") or "").strip():
+            return message_id
+    return str(response.get("message_id") or response.get("id") or "").strip() or None
 
 
 def _personalize_params(template_params: list | dict | None, customer: dict) -> list[str] | None:

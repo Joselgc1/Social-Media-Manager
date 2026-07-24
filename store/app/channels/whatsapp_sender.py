@@ -7,6 +7,7 @@ import logging
 
 import httpx
 
+from app.channels.meta_errors import MetaSendError
 from app.channels.text_formatting import format_customer_text
 from app.config import get_config
 
@@ -157,12 +158,18 @@ async def _send(url: str, payload: dict, access_token: str):
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+        raise MetaSendError("WhatsApp API connection failed before sending", retryable=True) from exc
 
     if not resp.is_success:
         logger.error(f"WhatsApp API error ({resp.status_code})")
-        raise RuntimeError(f"WhatsApp API error {resp.status_code}: {resp.text}")
+        raise MetaSendError(
+            f"WhatsApp API error {resp.status_code}: {resp.text}",
+            retryable=resp.status_code == 429 or resp.status_code >= 500 or resp.status_code in {401, 403},
+        )
 
     response_json = resp.json()
     logger.debug(f"WhatsApp message sent: {response_json}")

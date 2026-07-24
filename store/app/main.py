@@ -28,7 +28,13 @@ from app.ai.providers import init_providers, list_providers
 from app.broadcast.api import router as broadcast_router
 from app.broadcast.scheduler import get_scheduler, start_scheduler, stop_scheduler
 from app.catalog.pdf_generator import ensure_catalog_pdf, invalidate_catalog_pdf
-from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog_async
+from app.catalog.sheets import (
+    catalog_cache_age_seconds,
+    catalog_max_age_seconds,
+    count_grouped_catalog_products,
+    get_cached_catalog,
+    refresh_catalog_async,
+)
 from app.config import get_config
 from app.log_redaction import install_secret_redaction_filter
 from app.request_limits import RequestBodyLimitMiddleware
@@ -259,8 +265,8 @@ async def lifespan(app: FastAPI):
     model = settings.get("llm_model", "gpt-5.4-nano")
     logger.info(f"Active LLM: {active}/{model}")
 
-    # 5. Start background scheduler (catalog refresh + broadcast checker)
-    start_scheduler()
+    # 5. Start safe maintenance jobs; restore mode omits all outbound processing.
+    start_scheduler(outbound_processing_enabled=config.outbound_processing_enabled)
 
     logger.info("Chatbot is ready! Waiting for messages...")
 
@@ -388,6 +394,8 @@ async def health():
         database_status == "connected"
         and scheduler_status == "running"
         and catalog_count > 0
+        and catalog_cache_age_seconds() is not None
+        and catalog_cache_age_seconds() <= catalog_max_age_seconds()
         and bool(providers)
         and active_provider in providers
     )
@@ -408,6 +416,8 @@ async def health():
         "active_model": settings.get("llm_model"),
         "auto_fallback": settings.get("auto_fallback"),
         "catalog_products": catalog_count,
+        "catalog_age_seconds": catalog_cache_age_seconds(),
+        "catalog_max_age_seconds": catalog_max_age_seconds(),
         "pending_broadcasts": pending_broadcasts["cnt"] if pending_broadcasts else 0,
     }
     return JSONResponse(status_code=200 if ready else 503, content=payload)

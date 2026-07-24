@@ -252,7 +252,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             SELECT candidate.id
             FROM kommo_message_jobs candidate
             WHERE candidate.status = 'waiting_for_salesbot'
-              AND candidate.salesbot_launched_at <= to_timestamp(CAST(:salesbot_token_iat AS double precision))
+               AND candidate.salesbot_launched_at < to_timestamp(CAST(:salesbot_token_iat AS double precision) + 1)
               AND NOT EXISTS (
                   SELECT 1
                   FROM kommo_message_jobs consumed
@@ -285,6 +285,10 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         return {"status": "ready", "job_id": str(job["id"])}
 
     if values["interaction_type"] == "instagram_comment":
+        duplicate = await _find_job_for_callback_identity(values)
+        if duplicate:
+            logger.info("Kommo Salesbot comment callback ignored as duplicate for job: %s", _job_log_context(dict(duplicate)))
+            return {"status": "duplicate", "job_id": str(duplicate["id"])}
         return await _create_ready_comment_job_from_callback(data, values)
 
     duplicate = await _find_job_for_callback_identity(values)
@@ -442,10 +446,12 @@ async def _claim_due_pending_job():
             FROM kommo_message_jobs candidate
             WHERE candidate.status = 'pending'
               AND candidate.buffer_expires_at <= NOW()
-              AND NOT EXISTS (
-                  SELECT 1 FROM kommo_message_jobs active
-                  WHERE active.interaction_type = candidate.interaction_type
-                    AND active.status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')
+              AND pg_try_advisory_xact_lock(
+                    hashtext('kommo-salesbot:' || COALESCE(candidate.lead_id, candidate.contact_id, candidate.correlation_id))
+              )
+               AND NOT EXISTS (
+                   SELECT 1 FROM kommo_message_jobs active
+                   WHERE active.status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')
                     AND active.id <> candidate.id
                     AND (
                         (candidate.lead_id IS NOT NULL AND active.lead_id = candidate.lead_id)

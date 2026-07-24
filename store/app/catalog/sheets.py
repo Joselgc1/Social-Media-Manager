@@ -185,7 +185,7 @@ def is_catalog_cache_stale() -> bool:
 async def ensure_fresh_catalog() -> list[dict]:
     """Refresh stale catalog data and fail closed if freshness cannot be proven."""
     if is_catalog_cache_stale():
-        await refresh_catalog_async(force=True)
+        await refresh_catalog_async()
     if is_catalog_cache_stale():
         age = catalog_cache_age_seconds()
         raise InventoryUpdateError(
@@ -396,6 +396,9 @@ class InventoryUpdateError(ValueError):
     """Raised when an inventory mutation cannot be completed safely."""
 
 
+_inventory_ledger_cache: dict[str, dict] = {}
+
+
 def _quote_sheet_title(title: str) -> str:
     escaped = str(title or "").replace("'", "''")
     return f"'{escaped}'"
@@ -415,6 +418,7 @@ def _get_or_create_inventory_ledger(spreadsheet):
             cols=len(_INVENTORY_LEDGER_HEADERS),
         )
         ledger.update([_INVENTORY_LEDGER_HEADERS], range_name="A1")
+        _inventory_ledger_cache[_ledger_cache_key(spreadsheet)] = {"records": [], "next_row": 2}
         return ledger
 
     headers = [str(value).strip() for value in ledger.row_values(1)]
@@ -425,6 +429,38 @@ def _get_or_create_inventory_ledger(spreadsheet):
             f"Inventory ledger worksheet '{_INVENTORY_LEDGER_TITLE}' has unexpected headers."
         )
     return ledger
+
+
+def _ledger_cache_key(spreadsheet) -> str:
+    return str(getattr(spreadsheet, "id", None) or id(spreadsheet))
+
+
+def _cached_inventory_ledger_records(spreadsheet, ledger) -> tuple[list[dict], int]:
+    """Load the durable ledger once per spreadsheet process, then append locally."""
+    key = _ledger_cache_key(spreadsheet)
+    cached = _inventory_ledger_cache.get(key)
+    if cached is None:
+        records = ledger.get_all_records()
+        cached = {"records": records, "next_row": len(records) + 2}
+        _inventory_ledger_cache[key] = cached
+    return cached["records"], cached["next_row"]
+
+
+def _append_cached_ledger_rows(spreadsheet, rows: list[list]) -> None:
+    if not rows:
+        return
+    cached = _inventory_ledger_cache[_ledger_cache_key(spreadsheet)]
+    cached["records"].extend(dict(zip(_INVENTORY_LEDGER_HEADERS, row, strict=True)) for row in rows)
+    cached["next_row"] += len(rows)
+
+
+def _ensure_ledger_capacity(ledger, last_row: int) -> None:
+    try:
+        row_count = int(ledger.row_count)
+    except (TypeError, ValueError):
+        return
+    if last_row > row_count:
+        ledger.add_rows(max(last_row - row_count, 1000))
 
 
 def _read_inventory_ledger(spreadsheet):
@@ -439,7 +475,8 @@ def _read_inventory_ledger(spreadsheet):
         raise InventoryUpdateError(
             f"Inventory ledger worksheet '{_INVENTORY_LEDGER_TITLE}' has unexpected headers."
         )
-    return ledger, ledger.get_all_records()
+    records, _ = _cached_inventory_ledger_records(spreadsheet, ledger)
+    return ledger, records
 
 
 def _ledger_operation_rows(records: list[dict], operation_id: str) -> list[dict]:
@@ -519,10 +556,10 @@ def _update_stock(
         spreadsheet = client.open_by_key(config.product_sheet_id)
         sheet = spreadsheet.sheet1
         ledger = None
-        ledger_records: list[dict] = []
+        ledger_next_row = 0
         if operation_id:
             ledger = _get_or_create_inventory_ledger(spreadsheet)
-            ledger_records = ledger.get_all_records()
+            ledger_records, ledger_next_row = _cached_inventory_ledger_records(spreadsheet, ledger)
             existing_operation = _ledger_operation_rows(ledger_records, operation_id)
             if existing_operation:
                 logger.info("Inventory operation %s was already applied", operation_id)
@@ -564,7 +601,7 @@ def _update_stock(
             row_number, record = inventory_row
             current_stock = _safe_int(record.get("Stock", 0))
             if direction == -1:
-                active = str(record.get("Active", "yes")).strip().lower()
+                active = str(record.get("Active", "")).strip().lower()
                 if active != "yes":
                     raise InventoryUpdateError(f"SKU '{sku}' is not active in Google Sheets.")
                 expected_price = next(
@@ -576,8 +613,10 @@ def _update_stock(
                     None,
                 )
                 current_price = _safe_float(record.get("Price USD"))
-                if expected_price is not None and current_price is not None and abs(current_price - expected_price) > 0.01:
-                    raise InventoryUpdateError(f"SKU '{sku}' price changed in Google Sheets.")
+                if expected_price is not None and (
+                    current_price is None or abs(current_price - expected_price) > 0.01
+                ):
+                    raise InventoryUpdateError(f"SKU '{sku}' price changed or is invalid in Google Sheets.")
             updated_stock = current_stock + direction * quantity
             if updated_stock < 0:
                 raise InventoryUpdateError(
@@ -602,8 +641,9 @@ def _update_stock(
 
         if updates:
             if operation_id:
-                next_ledger_row = len(ledger_records) + 2
-                ledger_range = f"A{next_ledger_row}:G{next_ledger_row + len(ledger_values) - 1}"
+                last_ledger_row = ledger_next_row + len(ledger_values) - 1
+                _ensure_ledger_capacity(ledger, last_ledger_row)
+                ledger_range = f"A{ledger_next_row}:G{last_ledger_row}"
                 spreadsheet.values_batch_update({
                     "valueInputOption": "RAW",
                     "data": [
@@ -611,6 +651,7 @@ def _update_stock(
                         {"range": _sheet_range(ledger, ledger_range), "values": ledger_values},
                     ],
                 })
+                _append_cached_ledger_rows(spreadsheet, ledger_values)
             else:
                 sheet.batch_update(updates, raw=True)
         for sku, updated_stock in new_stock.items():

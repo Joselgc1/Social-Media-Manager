@@ -6,6 +6,8 @@ import logging
 import re
 
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"/bot[^/\s]+")
+_KOMMO_WEBHOOK_SECRET_RE = re.compile(r"(/webhooks/kommo/events/)[^/?\s]+")
+_SENSITIVE_QUERY_RE = re.compile(r"([?&](?:token|secret|verify_token|access_token|authorization)=)[^&\s]+", re.IGNORECASE)
 _INSTALLED = False
 
 
@@ -15,6 +17,8 @@ class SecretRedactionFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         redacted = _TELEGRAM_BOT_TOKEN_RE.sub("/bot<redacted>", message)
+        redacted = _KOMMO_WEBHOOK_SECRET_RE.sub(r"\1<redacted>", redacted)
+        redacted = _SENSITIVE_QUERY_RE.sub(r"\1<redacted>", redacted)
         if redacted != message:
             record.msg = redacted
             record.args = ()

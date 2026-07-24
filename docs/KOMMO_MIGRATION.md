@@ -228,7 +228,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ```text
 [ ] Store Railway root directory is store/
-[ ] schema_migrations reports version 2
+[ ] schema_migrations contains every version through the app's EXPECTED_SCHEMA_VERSION
 [ ] CHANNEL_BACKEND=kommo is set in the store environment
 [ ] All required KOMMO_* variables are set
 [ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL

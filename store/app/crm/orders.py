@@ -40,6 +40,10 @@ RELEASE_IN_PROGRESS = "release_pending"
 RELEASED = "released"
 
 
+class InventoryReservationUncertainError(RuntimeError):
+    """The Sheets mutation outcome could not be reconciled with its ledger."""
+
+
 def _normalize_order_items(items: list[dict]) -> list[dict]:
     normalized_items: list[dict] = []
     for item in items:
@@ -242,9 +246,31 @@ def _release_operation_id(order_id: str) -> str:
     return f"order:{order_id}:release"
 
 
+async def _run_sheet_operation(operation, *args, **kwargs):
+    """Wait for a blocking Sheets call even when the request is cancelled.
+
+    The advisory lock must remain held until the worker thread has stopped mutating
+    Sheets. Cancellation is re-raised only after that point.
+    """
+    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Sheets operation failed after request cancellation")
+        raise
+
+
 async def _inventory_operation_applied(order_id: str, items: list[dict], direction: int) -> bool:
     operation_id = _reserve_operation_id(order_id) if direction == -1 else _release_operation_id(order_id)
-    return await asyncio.to_thread(
+    return await _run_sheet_operation(
         inventory_operation_applied,
         operation_id,
         items,
@@ -255,13 +281,15 @@ async def _inventory_operation_applied(order_id: str, items: list[dict], directi
 async def _deduct_order_inventory(order_id: str, items: list[dict]) -> None:
     operation_id = _reserve_operation_id(order_id)
     try:
-        await asyncio.to_thread(deduct_stock, items, operation_id=operation_id)
-    except Exception as mutation_error:
+        await _run_sheet_operation(deduct_stock, items, operation_id=operation_id)
+    except Exception:
         try:
             applied = await _inventory_operation_applied(order_id, items, -1)
         except Exception as verify_error:
             logger.exception("Failed to verify inventory reservation operation %s", operation_id)
-            raise mutation_error from verify_error
+            raise InventoryReservationUncertainError(
+                "The inventory reservation outcome could not be verified; retry the existing order later."
+            ) from verify_error
         if applied:
             logger.warning("Inventory reservation operation %s succeeded after a reported Sheets error", operation_id)
             return
@@ -271,7 +299,7 @@ async def _deduct_order_inventory(order_id: str, items: list[dict]) -> None:
 async def _restore_order_inventory(order_id: str, items: list[dict]) -> None:
     operation_id = _release_operation_id(order_id)
     try:
-        await asyncio.to_thread(restore_stock, items, operation_id=operation_id)
+        await _run_sheet_operation(restore_stock, items, operation_id=operation_id)
     except Exception as mutation_error:
         try:
             applied = await _inventory_operation_applied(order_id, items, 1)
@@ -385,7 +413,10 @@ async def create_order(
                   AND COALESCE(shipping_method, '') = COALESCE(:method, '')
                   AND payment_status IN ('pending', 'proof_received')
                   AND inventory_status IN (:reservation_pending, 'reserved')
-                  AND created_at >= NOW() - INTERVAL '30 minutes'
+                  AND (
+                      inventory_status = :reservation_pending
+                      OR created_at >= NOW() - INTERVAL '30 minutes'
+                  )
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -455,6 +486,10 @@ async def create_order(
 
         try:
             await _deduct_order_inventory(order_id, normalized_items)
+        except InventoryReservationUncertainError:
+            # The Sheets call may have committed. Keep its operation ID pending so
+            # retries and the cleanup job reconcile it rather than deducting again.
+            raise
         except Exception:
             try:
                 await _mark_inventory_reservation_failed(connection, order_id)
@@ -748,10 +783,12 @@ async def update_order_payment_status(
                 )
             replay = await db.fetch_one(
                 """
-                SELECT id
-                FROM orders
+                SELECT id FROM orders
                 WHERE id <> :oid
                   AND (payment_proof_hash = :proof_hash OR payment_reference_key = :reference_key)
+                UNION ALL
+                SELECT original_order_id AS id FROM payment_proof_replays
+                WHERE proof_hash = :proof_hash OR reference_key = :reference_key
                 LIMIT 1
                 """,
                 {
@@ -785,9 +822,17 @@ async def update_order_payment_status(
             if "inventory_status" in row
             else "legacy_unknown"
         )
+        if status in PAID_STATUSES and current_inventory_status not in {"reserved", "legacy_unknown"}:
+            message = (
+                f"Order {order_id} cannot be marked paid because its inventory state is "
+                f"'{current_inventory_status}'."
+            )
+            if not proof_metadata:
+                raise ValueError(message)
+            logger.warning(message)
+            return None
         if proof_metadata and (
             current_payment_status != "pending"
-            or current_inventory_status not in {"reserved", "legacy_unknown"}
         ):
             logger.warning(
                 "Payment proof update skipped for order %s because state changed to payment=%s inventory=%s",
@@ -990,7 +1035,8 @@ async def delete_order(order_id: str) -> dict | None:
         async with connection.transaction():
             row = await connection.fetch_one(
                 """
-                SELECT id, customer_id, total, customer_totals_applied
+                SELECT id, customer_id, total, customer_totals_applied,
+                       payment_proof_hash, payment_reference_key
                 FROM orders
                 WHERE id = :oid
                 FOR UPDATE
@@ -1002,6 +1048,26 @@ async def delete_order(order_id: str) -> dict | None:
 
             if row["customer_totals_applied"] and row["customer_id"]:
                 await _revert_paid_customer_updates(str(row["customer_id"]), float(row["total"]))
+
+            try:
+                proof_hash = row["payment_proof_hash"]
+                reference_key = row["payment_reference_key"]
+            except KeyError:
+                proof_hash = None
+                reference_key = None
+            if proof_hash or reference_key:
+                await connection.execute(
+                    """
+                    INSERT INTO payment_proof_replays (proof_hash, reference_key, original_order_id)
+                    VALUES (:proof_hash, :reference_key, :order_id)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    {
+                        "proof_hash": proof_hash,
+                        "reference_key": reference_key,
+                        "order_id": str(order_id),
+                    },
+                )
 
             await connection.execute(
                 "DELETE FROM orders WHERE id = :oid",

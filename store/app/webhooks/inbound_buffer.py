@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 from app import db
+from app.channels.meta_errors import MetaSendError
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,9 @@ MESSAGE_DEBOUNCE_SECONDS = 10
 PROCESSING_LEASE_MINUTES = 5
 PROCESSING_HEARTBEAT_SECONDS = 30
 MAX_PROCESSING_ATTEMPTS = 5
+MAX_META_SEND_ATTEMPTS = 3
+MAX_CONCURRENT_INBOUND_PROCESSORS = 3
+_inbound_processor_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INBOUND_PROCESSORS)
 
 Processor = Callable[[str, str, str | None, dict, str, str], Awaitable[None]]
 
@@ -133,21 +137,23 @@ async def enqueue_inbound_message(
 async def process_due_inbound_jobs(limit: int = 10) -> int:
     """Lease and process due batches. Safe to call concurrently."""
     await recover_stale_inbound_jobs()
-    processed = 0
+    jobs = []
     for _ in range(limit):
         job = await _claim_due_job()
         if not job:
             break
-        await _process_claimed_job(job)
-        processed += 1
-    return processed
+        jobs.append(job)
+    if jobs:
+        await asyncio.gather(*(_process_with_concurrency_limit(job) for job in jobs))
+    return len(jobs)
 
 
 async def recover_stale_inbound_jobs() -> int:
     """Return abandoned processing leases to pending without losing newer messages."""
     stale_rows = await db.fetch_all(
         """
-        SELECT id, channel, sender_id
+        SELECT id, channel, sender_id, processing_lease_token,
+               COALESCE(processing_heartbeat_at, processing_started_at) AS lease_heartbeat_at
         FROM meta_inbound_jobs
         WHERE status = 'processing'
           AND COALESCE(processing_heartbeat_at, processing_started_at) < NOW() - (:minutes * INTERVAL '1 minute')
@@ -165,12 +171,20 @@ async def recover_stale_inbound_jobs() -> int:
             stale_job = await db.fetch_one(
                 """
                 SELECT id, message_parts, media_url, customer_profile, attempt_count,
-                       outbound_started_at, outbound_message_ids
+                       outbound_started_at, outbound_message_ids, processing_lease_token
                 FROM meta_inbound_jobs
-                WHERE id = :job_id AND status = 'processing'
+                WHERE id = :job_id
+                  AND status = 'processing'
+                  AND processing_lease_token IS NOT DISTINCT FROM :lease_token
+                  AND COALESCE(processing_heartbeat_at, processing_started_at)
+                      < NOW() - (:minutes * INTERVAL '1 minute')
                 FOR UPDATE
                 """,
-                {"job_id": str(stale["id"])},
+                {
+                    "job_id": str(stale["id"]),
+                    "lease_token": _record_value(stale, "processing_lease_token"),
+                    "minutes": PROCESSING_LEASE_MINUTES,
+                },
             )
             if not stale_job:
                 continue
@@ -340,11 +354,16 @@ async def _process_claimed_job(job: dict) -> None:
             logger.warning("Skipped completion for stale Meta inbound lease job=%s", job_id)
     except Exception as exc:
         logger.exception("Durable inbound processing failed for job %s", job_id)
-        await _requeue_failed_job(job, type(exc).__name__[:100])
+        await _requeue_failed_job(job, exc)
     finally:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
+
+
+async def _process_with_concurrency_limit(job: dict) -> None:
+    async with _inbound_processor_semaphore:
+        await _process_claimed_job(job)
 
 
 async def _heartbeat_claimed_job(job_id: str, lease_token: str) -> None:
@@ -353,26 +372,29 @@ async def _heartbeat_claimed_job(job_id: str, lease_token: str) -> None:
     try:
         while True:
             await asyncio.sleep(PROCESSING_HEARTBEAT_SECONDS)
-            await db.execute(
-                """
-                UPDATE meta_inbound_jobs
-                SET processing_heartbeat_at = NOW(), updated_at = NOW()
-                WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
-                """,
-                {"job_id": job_id, "lease_token": lease_token},
-            )
+            try:
+                await db.execute(
+                    """
+                    UPDATE meta_inbound_jobs
+                    SET processing_heartbeat_at = NOW(), updated_at = NOW()
+                    WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
+                    """,
+                    {"job_id": job_id, "lease_token": lease_token},
+                )
+            except Exception:
+                logger.exception("Failed to heartbeat Meta inbound job %s", job_id)
     except asyncio.CancelledError:
         raise
-    except Exception:
-        logger.exception("Failed to heartbeat Meta inbound job %s", job_id)
 
 
-async def _requeue_failed_job(job: dict, error: str) -> None:
+async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
     """Retry a failed lease without colliding with a newer pending batch."""
     channel = job["channel"]
     sender_id = job["sender_id"]
     lease_token = str(job.get("processing_lease_token") or "")
     retry = int(job.get("attempt_count") or 0) < MAX_PROCESSING_ATTEMPTS
+    known_safe_send_failure = isinstance(error, MetaSendError) and error.retryable
+    error_name = type(error).__name__[:100] if isinstance(error, Exception) else str(error)[:100]
     async with db.get_db().transaction():
         await _lock_sender(channel, sender_id)
         current = await db.fetch_one(
@@ -388,26 +410,33 @@ async def _requeue_failed_job(job: dict, error: str) -> None:
         if not current:
             return
         outbound_ids = _json_list(_record_value(current, "outbound_message_ids", []))
-        if outbound_ids or _record_value(current, "outbound_started_at") is not None:
+        if outbound_ids:
             await db.execute(
                 """
                 UPDATE meta_inbound_jobs
-                SET status = CASE WHEN :has_outbound_ids THEN 'completed' ELSE 'failed' END,
-                    completed_at = CASE WHEN :has_outbound_ids THEN NOW() ELSE completed_at END,
+                SET status = 'failed',
                     processing_started_at = NULL, processing_heartbeat_at = NULL,
                     processing_lease_token = NULL,
-                    last_error = CASE
-                        WHEN :has_outbound_ids THEN 'completed_after_meta_accept'
-                        ELSE 'delivery_unknown_after_send_attempt'
-                    END,
+                    last_error = 'partial_delivery_requires_reconciliation',
                     updated_at = NOW()
                 WHERE id = :job_id AND processing_lease_token = :lease_token
                 """,
                 {
-                    "has_outbound_ids": bool(outbound_ids),
                     "job_id": str(current["id"]),
                     "lease_token": lease_token,
                 },
+            )
+            return
+        if _record_value(current, "outbound_started_at") is not None and not known_safe_send_failure:
+            await db.execute(
+                """
+                UPDATE meta_inbound_jobs
+                SET status = 'failed', processing_started_at = NULL,
+                    processing_heartbeat_at = NULL, processing_lease_token = NULL,
+                    last_error = 'delivery_unknown_after_send_attempt', updated_at = NOW()
+                WHERE id = :job_id AND processing_lease_token = :lease_token
+                """,
+                {"job_id": str(current["id"]), "lease_token": lease_token},
             )
             return
         pending = await db.fetch_one(
@@ -449,7 +478,7 @@ async def _requeue_failed_job(job: dict, error: str) -> None:
                     last_error = :error, updated_at = NOW()
                 WHERE id = :job_id AND processing_lease_token = :lease_token
                 """,
-                {"error": error, "job_id": str(current["id"]), "lease_token": lease_token},
+                {"error": error_name, "job_id": str(current["id"]), "lease_token": lease_token},
             )
             return
 
@@ -465,7 +494,7 @@ async def _requeue_failed_job(job: dict, error: str) -> None:
             {
                 "status": "pending" if retry else "failed",
                 "retry": retry,
-                "error": error,
+                "error": error_name,
                 "job_id": str(current["id"]),
                 "lease_token": lease_token,
             },
@@ -477,7 +506,7 @@ async def _process_after_delay(channel: str, sender_id: str) -> None:
         await asyncio.sleep(MESSAGE_DEBOUNCE_SECONDS)
         job = await _claim_sender_job(channel, sender_id)
         if job:
-            await _process_claimed_job(job)
+            await _process_with_concurrency_limit(job)
     except asyncio.CancelledError:
         return
     except Exception:
@@ -557,6 +586,27 @@ async def record_outbound_message(job_id: str, lease_token: str, response: dict 
             "message_ids": json.dumps(message_ids),
         },
     )
+
+
+async def send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
+    """Fence a Meta send and retry only failures known not to reach Meta."""
+    if inbound_job_id and lease_token:
+        marked = await mark_outbound_send_started(inbound_job_id, lease_token)
+        if not marked:
+            raise RuntimeError("Meta inbound lease is no longer active; refusing outbound send.")
+
+    for attempt in range(MAX_META_SEND_ATTEMPTS):
+        try:
+            response = await send_func(**kwargs)
+            break
+        except MetaSendError as exc:
+            if not exc.retryable or attempt + 1 >= MAX_META_SEND_ATTEMPTS:
+                raise
+            await asyncio.sleep(2**attempt)
+
+    if inbound_job_id and lease_token:
+        await record_outbound_message(inbound_job_id, lease_token, response)
+    return response
 
 
 def _extract_meta_message_ids(response: dict) -> list[str]:

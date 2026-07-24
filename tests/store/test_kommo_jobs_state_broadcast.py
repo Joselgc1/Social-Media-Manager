@@ -372,9 +372,10 @@ async def test_atomic_job_claiming_prevents_concurrent_salesbot_runs(monkeypatch
     assert "FOR UPDATE SKIP LOCKED" in query
     assert "NOT EXISTS" in query
     assert "waiting_for_salesbot" in query
-    assert "active.interaction_type = candidate.interaction_type" in query
+    assert "active.status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')" in query
     assert "active.lead_id = candidate.lead_id" in query
     assert "active.contact_id = candidate.contact_id" in query
+    assert "pg_try_advisory_xact_lock" in query
 
 
 @pytest.mark.asyncio
@@ -405,7 +406,7 @@ async def test_duplicate_callback_prevention(monkeypatch):
     assert "FOR UPDATE SKIP LOCKED" in claim_query
     assert "callback_claims" in claim_query
     assert "candidate.lead_id = :entity_id" in claim_query
-    assert "candidate.salesbot_launched_at <= to_timestamp" in claim_query
+    assert "candidate.salesbot_launched_at < to_timestamp" in claim_query
     assert "consumed.return_url = :return_url" in claim_query
     assert "CAST(:interaction_type AS text)" in claim_query
     assert claim_values["salesbot_token_jti"] == "token-id"
@@ -586,16 +587,10 @@ async def test_native_comment_callback_duplicate_uses_jti_or_stable_callback(mon
     duplicate_query, duplicate_values = create_db.fetch_one_calls[1]
     assert "salesbot_token_jti = CAST(:salesbot_token_jti AS text)" in duplicate_query
     assert "callback_claims ->> 'iat'" in duplicate_query
-    assert "created_at >= NOW() - (:dedup_seconds * INTERVAL '1 second')" in duplicate_query
-    assert "REGEXP_REPLACE" in duplicate_query
     assert "return_url = :return_url" in duplicate_query
     assert duplicate_values["salesbot_token_jti"] == "token-id"
-    assert duplicate_values["normalized_message"] == "precio?"
-    assert duplicate_values["dedup_seconds"] == 300
-    assert duplicate_values["entity_type"] == "leads"
-    assert duplicate_values["entity_id"] == "100"
     assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
-    assert len(create_db.execute_calls) == 1
+    assert not create_db.execute_calls
 
 
 @pytest.mark.asyncio
@@ -622,7 +617,7 @@ async def test_comment_callback_token_replay_is_duplicate_even_with_altered_text
     duplicate_query, duplicate_values = create_db.fetch_one_calls[1]
     assert "salesbot_token_jti = CAST(:salesbot_token_jti AS text)" in duplicate_query
     assert "_normalized_message_sql" not in duplicate_query
-    assert duplicate_values["normalized_message"] == "texto alterado"
+    assert duplicate_values["salesbot_token_iat"] == "123456"
     assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
 
 
@@ -685,9 +680,8 @@ async def test_repeated_comment_callback_is_idempotent(monkeypatch):
 
     assert result == {"status": "duplicate", "job_id": "existing-comment"}
     duplicate_values = create_db.fetch_one_calls[1][1]
-    assert duplicate_values["external_message_id"] == external_message_id
+    assert duplicate_values["salesbot_token_jti"] == "token-id"
     assert duplicate_values["salesbot_token_iat"] == "123456"
-    assert duplicate_values["normalized_message"] == "precio?"
     assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
 
 
@@ -1648,6 +1642,7 @@ async def test_scheduled_broadcast_error_marks_failed(monkeypatch):
         "execute_broadcast",
         AsyncMock(return_value={"error": "WhatsApp broadcast delivery is unavailable"}),
     )
+    monkeypatch.setattr(scheduler, "recover_stale_broadcast_deliveries", AsyncMock(return_value={}))
 
     await scheduler._check_scheduled_broadcasts()
 

@@ -30,6 +30,7 @@ def _token(**claims):
         "iss": "https://acme.kommo.com",
         "iat": now,
         "exp": now + timedelta(minutes=5),
+        "jti": "test-token-id",
         "subdomain": "acme",
         "client_uid": "client-uuid",
         "account_id": 123,

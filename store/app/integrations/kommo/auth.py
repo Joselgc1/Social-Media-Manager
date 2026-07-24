@@ -87,7 +87,7 @@ def validate_salesbot_jwt(token: str, config) -> dict:
             algorithms=KOMMO_JWT_ALGORITHMS,
             issuer=expected_issuer,
             leeway=KOMMO_JWT_LEEWAY_SECONDS,
-            options={"verify_aud": False, "require": ["exp", "iat", "iss"]},
+            options={"verify_aud": False, "require": ["exp", "iat", "iss", "jti"]},
         )
     except jwt.MissingRequiredClaimError as e:
         raise KommoAuthError("Salesbot token missing required claim", reason_code="missing_claim") from e
@@ -122,6 +122,7 @@ def validate_salesbot_jwt(token: str, config) -> dict:
     claims["entity_id"] = str(_positive_int_claim(claims, "entity_id"))
     claims["entity_type"] = _normalize_entity_type(claims.get("entity_type"))
     claims["subdomain"] = token_subdomain
+    claims["jti"] = _required_jti(claims)
 
     return claims
 
@@ -146,3 +147,10 @@ def _normalize_entity_type(value) -> str:
         return "leads"
 
     raise KommoAuthError("Salesbot token invalid entity_type", reason_code="invalid_entity_claims")
+
+
+def _required_jti(claims: dict) -> str:
+    jti = str(claims.get("jti") or "").strip()
+    if not jti:
+        raise KommoAuthError("Salesbot token missing jti", reason_code="missing_claim")
+    return jti

@@ -17,7 +17,7 @@ from app.ai.engine import generate_response
 from app.channels.whatsapp_sender import mark_as_read, send_document, send_image, send_interactive_buttons, send_text
 from app.config import get_config
 from app.crm import conversations
-from app.webhooks.inbound_buffer import enqueue_inbound_message, mark_outbound_send_started, record_outbound_message
+from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -258,14 +258,7 @@ async def _deliver_ai_response(
 
 
 async def _send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
-    if inbound_job_id and lease_token:
-        marked = await mark_outbound_send_started(inbound_job_id, lease_token)
-        if not marked:
-            raise RuntimeError("Meta inbound lease is no longer active; refusing outbound send.")
-    response = await send_func(**kwargs)
-    if inbound_job_id and lease_token:
-        await record_outbound_message(inbound_job_id, lease_token, response)
-    return response
+    return await send_with_delivery_record(send_func, inbound_job_id, lease_token, **kwargs)
 
 
 async def _store_delivered_assistant_message(result: dict, content: str, source_id: str) -> None:

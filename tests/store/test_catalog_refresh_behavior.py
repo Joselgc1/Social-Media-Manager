@@ -115,7 +115,7 @@ async def test_ensure_fresh_catalog_refreshes_stale_cache(monkeypatch, catalog_s
     refreshed = [{"sku": "NEW"}]
 
     async def refresh(force=False):
-        assert force is True
+        assert force is False
         catalog_state._catalog_cache = refreshed
         catalog_state._catalog_ts = time.time()
         return True

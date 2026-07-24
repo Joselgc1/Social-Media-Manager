@@ -212,3 +212,29 @@ async def test_delivery_ledger_is_available_for_reconciliation(monkeypatch):
     query, values = fetch_all.await_args.args
     assert "FROM broadcast_deliveries" in query
     assert values == {"broadcast_id": "broadcast-1", "limit": 1000}
+
+
+@pytest.mark.asyncio
+async def test_stale_broadcast_claims_requeue_only_before_the_meta_send(monkeypatch):
+    from app.broadcast import sender
+
+    execute = AsyncMock(side_effect=[2, 1])
+    monkeypatch.setattr(sender.db, "execute", execute)
+
+    result = await sender.recover_stale_broadcast_deliveries("broadcast-1")
+
+    assert result == {"requeued": 2, "delivery_unknown": 1}
+    before_send_query = execute.await_args_list[0].args[0]
+    attempted_query = execute.await_args_list[1].args[0]
+    assert "outbound_started_at IS NULL" in before_send_query
+    assert "status = 'pending'" in before_send_query
+    assert "outbound_started_at IS NOT NULL" in attempted_query
+    assert "status = 'delivery_unknown'" in attempted_query
+
+
+
+
+def test_broadcast_meta_message_id_extracts_graph_api_response():
+    from app.broadcast.sender import _meta_message_id
+
+    assert _meta_message_id({"messages": [{"id": "wamid.1"}]}) == "wamid.1"

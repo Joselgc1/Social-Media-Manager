@@ -880,7 +880,13 @@ async def _handle_public_instagram_comment(
     reply_text = None
     route_intent = f"public_comment_{request_kind}"
     if request_kind in {"price", "stock"}:
-        product = _resolve_public_comment_product(integration_context)
+        try:
+            await ensure_fresh_catalog()
+        except Exception:
+            logger.warning("Public comment catalog lookup skipped because the catalog is stale")
+            product = None
+        else:
+            product = _resolve_public_comment_product(integration_context)
         if product:
             reply_text = (
                 _public_comment_price_reply(product)

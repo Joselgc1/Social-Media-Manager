@@ -41,6 +41,27 @@ def _vision(**overrides) -> dict:
     return vision
 
 
+@pytest.mark.parametrize(
+    ("payment_information", "recipient_identifier", "expected_ok"),
+    [
+        ("Correo: pagos@example.com", "PAGOS@example.com", True),
+        ("Correo: pagos@example.com", "fraudepagos@example.com", False),
+        ("Cuenta: 123456", "123456", True),
+        ("Cuenta: 123456", "9912345677", False),
+        ("Teléfono: 0412-1234567", "0412 1234567", True),
+    ],
+)
+def test_payment_recipient_identifiers_require_exact_email_or_numeric_token(
+    payment_information, recipient_identifier, expected_ok
+):
+    result = verifier.validate_payment_identifier_match(
+        payment_information,
+        {"recipient_identifier": recipient_identifier},
+    )
+
+    assert result["ok"] is expected_ok
+
+
 _DEFAULT_UPDATE_RESULT = {"order_id": "order-1", "payment_status": "proof_received"}
 
 

@@ -100,6 +100,7 @@ async def test_executor_unknown_tool_returns_legacy_error_shape():
 @pytest.mark.asyncio
 async def test_executor_catalog_search_preserves_inventory_result_shape(monkeypatch):
     monkeypatch.setattr(tool_catalog, "get_cached_catalog", _catalog)
+    monkeypatch.setattr(tool_catalog, "ensure_fresh_catalog", AsyncMock(return_value=_catalog()))
 
     result = await execute_tool("check_inventory", {"product_query": "pijama satén"}, _context())
 
@@ -394,6 +395,7 @@ async def test_executor_checkout_tools_dispatch_with_context(monkeypatch):
 @pytest.mark.asyncio
 async def test_executor_product_image_payload(monkeypatch):
     monkeypatch.setattr(tool_catalog, "get_cached_catalog", _catalog)
+    monkeypatch.setattr(tool_catalog, "ensure_fresh_catalog", AsyncMock(return_value=_catalog()))
 
     result = await execute_tool(
         "send_product_image",

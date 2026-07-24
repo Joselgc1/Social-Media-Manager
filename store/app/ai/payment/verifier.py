@@ -272,11 +272,12 @@ def validate_payment_identifier_match(payment_information: str, vision_result: d
     if not info:
         return {"ok": False, "message": "El método de pago no tiene datos configurados para validar el destinatario."}
 
+    recipient_values = [
+        str(vision_result.get(key, "") or "")
+        for key in ("recipient_identifier", "recipient_name")
+    ]
     recipient_text = normalize_catalog_text(
-        " ".join(
-            str(vision_result.get(key, "") or "")
-            for key in ("recipient_identifier", "recipient_name")
-        )
+        " ".join(recipient_values)
     )
 
     expected_emails = {
@@ -284,15 +285,24 @@ def validate_payment_identifier_match(payment_information: str, vision_result: d
         for email in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", info, flags=re.IGNORECASE)
     }
     if expected_emails:
-        if any(email in recipient_text for email in expected_emails):
+        detected_emails = {
+            email.lower()
+            for value in recipient_values
+            for email in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", value, flags=re.IGNORECASE)
+        }
+        if expected_emails & detected_emails:
             return {"ok": True}
         return {"ok": False, "message": "El comprobante no muestra el correo o destinatario configurado para este método de pago."}
 
     collapsed_numeric_info = re.sub(r"(?<=\d)[\s\-]+(?=\d)", "", info)
     expected_number_tokens = set(re.findall(r"\d{6,}", collapsed_numeric_info))
     if expected_number_tokens:
-        vision_digits = re.sub(r"[^\d]", "", recipient_text)
-        if any(token in vision_digits for token in expected_number_tokens):
+        detected_number_tokens = {
+            token
+            for value in recipient_values
+            for token in re.findall(r"\d{6,}", re.sub(r"(?<=\d)[\s\-]+(?=\d)", "", value))
+        }
+        if expected_number_tokens & detected_number_tokens:
             return {"ok": True}
         return {"ok": False, "message": "El comprobante no coincide con el número o cuenta configurada para este método de pago."}
 

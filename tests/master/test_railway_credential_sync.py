@@ -35,6 +35,44 @@ async def test_railway_delete_variable_uses_exact_service_environment(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_railway_upsert_rejects_false_mutation_result(monkeypatch):
+    from app.stores import railway
+
+    monkeypatch.setattr(railway, "_graphql", AsyncMock(return_value={"variableCollectionUpsert": False}))
+
+    with pytest.raises(RuntimeError, match="did not confirm"):
+        await railway.upsert_variables("project-1", "service-1", "environment-1", {"KEY": "value"})
+
+
+@pytest.mark.asyncio
+async def test_railway_redeploy_rejects_missing_new_deployment_id(monkeypatch):
+    from app.stores import railway
+
+    monkeypatch.setattr(railway, "_graphql", AsyncMock(return_value={"deploymentRedeploy": {}}))
+
+    with pytest.raises(RuntimeError, match="new deployment ID"):
+        await railway.redeploy_service("deployment-1")
+
+
+@pytest.mark.asyncio
+async def test_railway_graphql_rejects_successful_response_without_data(monkeypatch):
+    from app.stores import railway
+
+    response = MagicMock()
+    response.is_error = False
+    response.json.return_value = {"unexpected": "payload"}
+    client = MagicMock()
+    client.post = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(railway.httpx, "AsyncClient", MagicMock(return_value=client))
+    monkeypatch.setattr(railway, "_headers", lambda: {"Authorization": "Bearer test"})
+
+    with pytest.raises(RuntimeError, match="without data"):
+        await railway._graphql("query { service { id } }")
+
+
+@pytest.mark.asyncio
 async def test_environment_resolution_requires_production_when_not_explicit(monkeypatch):
     from app.stores import api, railway
 

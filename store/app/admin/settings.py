@@ -915,14 +915,15 @@ async def update_order(order_id: str, body: OrderUpdate):
             raise ValueError(f"Invalid payment status '{body.payment_status}'")
         if body.shipping_status is not None and body.shipping_status not in orders.VALID_SHIPPING_STATUSES:
             raise ValueError(f"Invalid shipping status '{body.shipping_status}'")
-        if body.payment_status is not None:
-            updated_payment = await orders.update_order_payment_status(order_id, body.payment_status)
-        if body.shipping_status is not None or body.tracking_number is not None:
-            updated_shipping = await orders.update_order_shipping(
-                order_id,
-                shipping_status=body.shipping_status,
-                tracking_number=body.tracking_number,
-            )
+        async with db.get_db().transaction():
+            if body.payment_status is not None:
+                updated_payment = await orders.update_order_payment_status(order_id, body.payment_status)
+            if body.shipping_status is not None or body.tracking_number is not None:
+                updated_shipping = await orders.update_order_shipping(
+                    order_id,
+                    shipping_status=body.shipping_status,
+                    tracking_number=body.tracking_number,
+                )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

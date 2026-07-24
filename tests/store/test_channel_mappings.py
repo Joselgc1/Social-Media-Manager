@@ -83,3 +83,26 @@ async def test_kommo_mapping_lookup_uses_lead_only_without_specific_identity(mon
     result = await channel_mappings._lookup_existing_kommo_mapping({"lead_id": "lead-1"})
 
     assert result == {"customer_id": "lead-customer"}
+
+
+@pytest.mark.asyncio
+async def test_new_contact_on_existing_lead_inserts_its_own_mapping(monkeypatch):
+    from app.crm import channel_mappings
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[None, {"id": "contact-2-mapping"}, {"id": "contact-2-mapping"}])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(channel_mappings, "db", mock_db)
+
+    result = await channel_mappings.upsert_mapping(
+        customer_id="customer-2",
+        provider="kommo",
+        channel="whatsapp",
+        external_contact_id="contact-2",
+        external_lead_id="shared-lead",
+    )
+
+    assert result["id"] == "contact-2-mapping"
+    insert_query = mock_db.fetch_one.await_args_list[1].args[0]
+    assert "ON CONFLICT DO NOTHING" in insert_query
+    assert mock_db.execute.await_count == 0

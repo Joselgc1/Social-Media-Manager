@@ -200,9 +200,11 @@ CREATE TABLE IF NOT EXISTS broadcast_deliveries (
     channel         TEXT NOT NULL DEFAULT 'whatsapp' CHECK (channel = 'whatsapp'),
     display_name    TEXT,
     status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+                    CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'delivery_unknown')),
     attempt_count   INTEGER NOT NULL DEFAULT 0,
     claimed_at      TIMESTAMPTZ,
+    outbound_started_at TIMESTAMPTZ,
+    meta_message_id TEXT,
     sent_at         TIMESTAMPTZ,
     failed_at       TIMESTAMPTZ,
     last_error      TEXT,
@@ -436,7 +438,7 @@ DROP INDEX IF EXISTS uq_customer_channel_mappings_contact;
 CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_contact
     ON customer_channel_mappings(provider, channel, external_contact_id, updated_at DESC)
     WHERE external_contact_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_lead
+CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_lead
     ON customer_channel_mappings(provider, channel, external_lead_id)
     WHERE external_lead_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_chat
@@ -743,11 +745,19 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 
 REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC, anon, authenticated;
 
+CREATE TABLE IF NOT EXISTS payment_proof_replays (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    proof_hash TEXT UNIQUE,
+    reference_key TEXT UNIQUE,
+    original_order_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (proof_hash IS NOT NULL OR reference_key IS NOT NULL)
+);
+ALTER TABLE payment_proof_replays ENABLE ROW LEVEL SECURITY;
+REVOKE ALL PRIVILEGES ON payment_proof_replays FROM anon, authenticated;
+
 INSERT INTO schema_migrations (version, name) VALUES
-    (1, 'fresh_install_baseline'),
-    (2, 'versioned_schema_and_security_hardening'),
-    (3, 'broadcast_delivery_safety'),
-    (4, 'meta_inbound_lease_fencing')
+    (1, 'fresh_install_baseline')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

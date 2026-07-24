@@ -116,6 +116,7 @@ async def test_inventory_tool_records_only_products_returned_to_customer(monkeyp
     ]
     record = AsyncMock()
     monkeypatch.setattr(catalog, "get_cached_catalog", lambda: products)
+    monkeypatch.setattr(catalog, "ensure_fresh_catalog", AsyncMock(return_value=products))
     monkeypatch.setattr(catalog.analytics, "record_product_inquiries", record)
 
     result = await catalog.check_inventory({"product_query": "pijama"})

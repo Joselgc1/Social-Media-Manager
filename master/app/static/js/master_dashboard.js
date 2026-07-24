@@ -1576,7 +1576,8 @@ function escAttr(s) {
 }
 
 function jsArg(value) {
-    return JSON.stringify(String(value ?? '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+    // Inline handlers are HTML attributes, so escape the serialized JS string for that context.
+    return escAttr(JSON.stringify(String(value ?? '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e'));
 }
 
 function safeStoreDashboardHref(appUrl) {
