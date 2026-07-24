@@ -37,7 +37,6 @@ Usage:
 import ipaddress
 import logging
 from pathlib import Path
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -54,8 +53,7 @@ from app.crm.orders import delete_order
 logger = logging.getLogger(__name__)
 
 
-def _is_loopback_url(url: str) -> bool:
-    hostname = urlparse(url).hostname
+def _is_loopback_host(hostname: str | None) -> bool:
     if hostname == "localhost":
         return True
     try:
@@ -65,9 +63,15 @@ def _is_loopback_url(url: str) -> bool:
 
 
 async def _require_debug(request: Request):
-    """Expose destructive test routes only from a loopback debug deployment."""
+    """Expose destructive test routes only to direct loopback clients."""
     config = get_config()
-    if not config.debug or not _is_loopback_url(config.app_base_url):
+    forwarded_headers = {"forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip"}
+    client_host = request.client.host if request and request.client else None
+    if (
+        not config.debug
+        or not _is_loopback_host(client_host)
+        or any(request.headers.get(header) for header in forwarded_headers)
+    ):
         raise HTTPException(status_code=404, detail="Not found")
 
 

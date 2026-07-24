@@ -276,10 +276,6 @@ def validate_payment_identifier_match(payment_information: str, vision_result: d
         str(vision_result.get(key, "") or "")
         for key in ("recipient_identifier", "recipient_name")
     ]
-    recipient_text = normalize_catalog_text(
-        " ".join(recipient_values)
-    )
-
     expected_emails = {
         email.lower()
         for email in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", info, flags=re.IGNORECASE)
@@ -316,11 +312,8 @@ def validate_payment_identifier_match(payment_information: str, vision_result: d
         for segment in name_like_segments
         if segment and segment not in {"nombre", "correo", "telefono", "instrucciones", "pago"}
     ]
-    if name_like_segments and any(segment in recipient_text for segment in name_like_segments):
-        return {"ok": True}
-
-    normalized_info = normalize_catalog_text(info)
-    if normalized_info and normalized_info in recipient_text:
+    normalized_recipient_values = {normalize_catalog_text(value) for value in recipient_values}
+    if name_like_segments and any(segment in normalized_recipient_values for segment in name_like_segments):
         return {"ok": True}
 
     return {"ok": False, "message": "El comprobante no coincide con los datos del método de pago configurado."}

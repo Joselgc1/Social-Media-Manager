@@ -13,7 +13,16 @@ async def test_master_schema_version_accepts_exact_supported_version(monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("versions", [[], [1, 2]])
+async def test_master_schema_version_accepts_consolidated_upgrade_version(monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(db, "fetch_all", AsyncMock(return_value=[{"version": 1}, {"version": 2}]))
+
+    await db.verify_schema_version()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("versions", [[], [2], [1, 2, 3]])
 async def test_master_schema_version_rejects_missing_old_or_new_versions(monkeypatch, versions):
     from app import db
 

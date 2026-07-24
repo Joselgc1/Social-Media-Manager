@@ -229,6 +229,33 @@ def test_inventory_ledger_is_not_reloaded_after_cached_mutation():
     ledger.get_all_records.assert_called_once()
 
 
+def test_inventory_operation_verification_forces_a_fresh_ledger_read():
+    from app.catalog import sheets
+
+    client, _worksheet = _sheet([{"SKU": "SKU-S", "Stock": 3}])
+    spreadsheet = client.open_by_key.return_value
+    ledger = spreadsheet.worksheet.return_value
+    ledger.get_all_records.side_effect = [[], [{
+        "Operation ID": "order:committed:reserve",
+        "Type": "deduct",
+        "SKU": "SKU-S",
+        "Quantity": 1,
+        "Stock Before": 4,
+        "Stock After": 3,
+        "Created At": "2026-01-01T00:00:00+00:00",
+    }]]
+    with (
+        patch.object(sheets, "_get_gspread_client", return_value=client),
+        patch.object(sheets, "get_config", return_value=SimpleNamespace(product_sheet_id="fresh-ledger-sheet")),
+    ):
+        assert sheets.inventory_operation_exists("order:committed:reserve") is False
+        assert sheets.inventory_operation_applied(
+            "order:committed:reserve", [{"sku": "SKU-S", "quantity": 1}], direction=-1
+        ) is True
+
+    assert ledger.get_all_records.call_count == 2
+
+
 @pytest.mark.parametrize(
     "items",
     [

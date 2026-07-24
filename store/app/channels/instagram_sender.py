@@ -243,7 +243,8 @@ async def _send(url: str, payload: dict, access_token: str):
         )
         raise MetaSendError(
             f"Instagram API error {resp.status_code}: {error_data}",
-            retryable=resp.status_code == 429 or resp.status_code >= 500 or resp.status_code in {401, 403},
+            retryable=resp.status_code in {401, 403, 429},
+            delivery_known=resp.status_code < 500,
         )
 
     response_json = resp.json()

@@ -40,6 +40,9 @@ async def execute_broadcast(broadcast_id: str) -> dict:
 
     Returns a summary dict with recipient count and any errors.
     """
+    if not getattr(get_config(), "outbound_processing_enabled", True):
+        return {"error": "Outbound processing is disabled."}
+
     # Load the broadcast record
     broadcast = await db.fetch_one(
         "SELECT * FROM broadcasts WHERE id = :id",
@@ -130,16 +133,20 @@ async def execute_broadcast(broadcast_id: str) -> dict:
                     _mask_platform_id(delivery["platform_id"]),
                     e,
                 )
-                known_safe_failure = isinstance(e, MetaSendError)
+                known_safe_failure = isinstance(e, MetaSendError) and e.delivery_known
+                delivery_unknown = isinstance(e, MetaSendError) and not e.delivery_known
                 await db.execute(
                     """
                     UPDATE broadcast_deliveries
-                    SET status = 'failed', failed_at = NOW(), last_error = :error, updated_at = NOW()
+                    SET status = :status, failed_at = NOW(), last_error = :error, updated_at = NOW()
                     WHERE id = :id AND status = 'sending'
                     """,
                     {
                         "id": delivery["id"],
-                        "error": "known_meta_send_failure" if known_safe_failure else type(e).__name__[:100],
+                        "status": "delivery_unknown" if delivery_unknown else "failed",
+                        "error": "known_meta_send_failure" if known_safe_failure else (
+                            "delivery_unknown_meta_send" if delivery_unknown else type(e).__name__[:100]
+                        ),
                     },
                 )
 

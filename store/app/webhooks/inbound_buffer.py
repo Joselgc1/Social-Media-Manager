@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 
 from app import db
 from app.channels.meta_errors import MetaSendError
+from app.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -130,22 +131,31 @@ async def enqueue_inbound_message(
             {"channel": channel, "message_id": message_id, "job_id": job_id},
         )
 
-    asyncio.create_task(_process_after_delay(channel, sender_id))
+    if getattr(get_config(), "outbound_processing_enabled", True):
+        asyncio.create_task(_process_after_delay(channel, sender_id))
     return True
 
 
 async def process_due_inbound_jobs(limit: int = 10) -> int:
     """Lease and process due batches. Safe to call concurrently."""
+    if not getattr(get_config(), "outbound_processing_enabled", True):
+        return 0
     await recover_stale_inbound_jobs()
-    jobs = []
-    for _ in range(limit):
-        job = await _claim_due_job()
+    tasks = []
+    for _ in range(min(limit, MAX_CONCURRENT_INBOUND_PROCESSORS)):
+        await _inbound_processor_semaphore.acquire()
+        try:
+            job = await _claim_due_job()
+        except Exception:
+            _inbound_processor_semaphore.release()
+            raise
         if not job:
+            _inbound_processor_semaphore.release()
             break
-        jobs.append(job)
-    if jobs:
-        await asyncio.gather(*(_process_with_concurrency_limit(job) for job in jobs))
-    return len(jobs)
+        tasks.append(asyncio.create_task(_process_claimed_with_slot(job)))
+    if tasks:
+        await asyncio.gather(*tasks)
+    return len(tasks)
 
 
 async def recover_stale_inbound_jobs() -> int:
@@ -361,9 +371,11 @@ async def _process_claimed_job(job: dict) -> None:
             await heartbeat_task
 
 
-async def _process_with_concurrency_limit(job: dict) -> None:
-    async with _inbound_processor_semaphore:
+async def _process_claimed_with_slot(job: dict) -> None:
+    try:
         await _process_claimed_job(job)
+    finally:
+        _inbound_processor_semaphore.release()
 
 
 async def _heartbeat_claimed_job(job_id: str, lease_token: str) -> None:
@@ -504,9 +516,18 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
 async def _process_after_delay(channel: str, sender_id: str) -> None:
     try:
         await asyncio.sleep(MESSAGE_DEBOUNCE_SECONDS)
-        job = await _claim_sender_job(channel, sender_id)
-        if job:
-            await _process_with_concurrency_limit(job)
+        if not getattr(get_config(), "outbound_processing_enabled", True):
+            return
+        await _inbound_processor_semaphore.acquire()
+        try:
+            job = await _claim_sender_job(channel, sender_id)
+        except BaseException:
+            _inbound_processor_semaphore.release()
+            raise
+        if not job:
+            _inbound_processor_semaphore.release()
+            return
+        await _process_claimed_with_slot(job)
     except asyncio.CancelledError:
         return
     except Exception:

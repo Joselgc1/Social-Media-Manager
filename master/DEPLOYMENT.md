@@ -24,7 +24,7 @@ postgresql://postgres.xxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:6
 
 This goes in the master `.env` as `DATABASE_URL`.
 
-Run `master/migrations/001_master_schema.sql` once from the Supabase SQL Editor. It is the complete fresh-install schema baseline. Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`; it must return only version `1` before starting the master service.
+Run `master/migrations/001_master_schema.sql` once from the Supabase SQL Editor for a fresh database. For an existing pre-consolidation deployment, run `master/migrations/002_consolidated_upgrade.sql` once instead. Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`; it must return either version `1` alone or versions `1, 2` before starting the master service.
 
 ### 1.2 Generate the encryption key
 

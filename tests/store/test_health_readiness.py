@@ -36,6 +36,8 @@ async def test_health_is_ready_only_with_catalog_scheduler_database_and_provider
 
     monkeypatch.setattr(main, "get_config", _config)
     monkeypatch.setattr(main, "get_cached_catalog", _catalog)
+    monkeypatch.setattr(main, "catalog_cache_age_seconds", lambda: 10)
+    monkeypatch.setattr(main, "catalog_max_age_seconds", lambda: 300)
     monkeypatch.setattr(main, "get_scheduler", lambda: SimpleNamespace(running=True))
     monkeypatch.setattr(main, "list_providers", lambda: ["openai"])
     monkeypatch.setattr(
@@ -63,6 +65,8 @@ async def test_health_returns_503_for_empty_catalog_or_stopped_scheduler(
 
     monkeypatch.setattr(main, "get_config", _config)
     monkeypatch.setattr(main, "get_cached_catalog", lambda: catalog)
+    monkeypatch.setattr(main, "catalog_cache_age_seconds", lambda: 10)
+    monkeypatch.setattr(main, "catalog_max_age_seconds", lambda: 300)
     monkeypatch.setattr(main, "get_scheduler", lambda: SimpleNamespace(running=scheduler_running))
     monkeypatch.setattr(main, "list_providers", lambda: ["openai"])
     monkeypatch.setattr(main.db, "get_settings", AsyncMock(return_value={"llm_provider": "openai"}))
@@ -83,6 +87,8 @@ async def test_health_catalog_read_does_not_trigger_external_refresh(monkeypatch
     monkeypatch.setattr(sheets, "refresh_catalog_async", refresh)
     monkeypatch.setattr(main, "get_config", _config)
     monkeypatch.setattr(main, "get_cached_catalog", lambda: [])
+    monkeypatch.setattr(main, "catalog_cache_age_seconds", lambda: None)
+    monkeypatch.setattr(main, "catalog_max_age_seconds", lambda: 300)
     monkeypatch.setattr(main, "get_scheduler", lambda: SimpleNamespace(running=True))
     monkeypatch.setattr(main, "list_providers", lambda: ["openai"])
     monkeypatch.setattr(main.db, "get_settings", AsyncMock(return_value={"llm_provider": "openai"}))

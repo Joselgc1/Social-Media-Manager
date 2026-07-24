@@ -44,11 +44,11 @@ postgresql://postgres:[YOUR-PASSWORD]@db.xyzabc.supabase.co:5432/postgres
 
 Copy this. It goes in your `.env` as `DATABASE_URL`.
 
-Run `store/migrations/001_schema.sql` once from the Supabase SQL Editor. It is the complete fresh-install schema baseline and records schema version `1`.
+Run `store/migrations/001_schema.sql` once from the Supabase SQL Editor for a fresh database. It is the complete fresh-install schema baseline and records schema version `1`.
 
-The store refuses to start unless `schema_migrations` contains exactly version `1`. This baseline is for new databases; do not apply it as an upgrade to a deployed database.
+For an existing pre-consolidation deployment, back up the database and run `store/migrations/002_consolidated_upgrade.sql` once. The store accepts either fresh `{1}` or upgraded `{1,2}` migration rows. Never apply `001_schema.sql` as an upgrade.
 
-Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. It must return only version `1`. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
+Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. It must return either version `1` alone or versions `1, 2`. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
 
 ### 1.2 OpenAI API Key
 

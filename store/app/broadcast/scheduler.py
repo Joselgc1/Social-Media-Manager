@@ -20,7 +20,12 @@ from app.admin.notify import notify_owner
 from app.analytics import build_daily_aggregate
 from app.broadcast.sender import execute_broadcast, recover_stale_broadcast_deliveries
 from app.catalog.pdf_generator import ensure_catalog_pdf
-from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog_async
+from app.catalog.sheets import (
+    count_grouped_catalog_products,
+    get_cached_catalog,
+    refresh_catalog_async,
+    set_refresh_interval,
+)
 from app.config import get_config
 from app.crm import escalations, orders
 from app.data_retention import run_data_retention
@@ -416,6 +421,7 @@ async def _sync_scheduler_config():
             "catalog_refresh",
             trigger=IntervalTrigger(minutes=config["catalog_refresh_minutes"]),
         )
+        set_refresh_interval(config["catalog_refresh_minutes"] * 60)
         if scheduler.get_job("broadcast_checker"):
             scheduler.reschedule_job(
                 "broadcast_checker",

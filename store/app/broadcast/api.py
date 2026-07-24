@@ -37,6 +37,10 @@ class BroadcastPreview(BaseModel):
     target_channel: Literal["whatsapp"] = "whatsapp"
 
 
+class DeliveryRetryConfirmation(BaseModel):
+    confirmed_not_delivered: Literal[True]
+
+
 @router.post("/create")
 async def create_broadcast_endpoint(body: BroadcastCreate):
     """Create a new broadcast (defaults to draft status)."""
@@ -76,6 +80,10 @@ async def list_broadcast_deliveries_endpoint(broadcast_id: str, limit: int = 500
 @router.post("/{broadcast_id}/send")
 async def send_broadcast_endpoint(broadcast_id: str):
     """Execute a draft or scheduled broadcast immediately."""
+    from app.config import get_config
+
+    if not getattr(get_config(), "outbound_processing_enabled", True):
+        raise HTTPException(status_code=503, detail="Outbound processing is disabled.")
     result = await execute_broadcast(broadcast_id)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -123,3 +131,26 @@ async def reset_broadcast_endpoint(broadcast_id: str):
     )
     recovery["reset_known_failures"] = int(reset_known_failures or 0)
     return {"broadcast_id": broadcast_id, "status": "draft", "message": "Broadcast reset to draft", "recovery": recovery}
+
+
+@router.post("/{broadcast_id}/deliveries/{delivery_id}/retry")
+async def retry_reconciled_delivery_endpoint(
+    broadcast_id: str, delivery_id: str, body: DeliveryRetryConfirmation
+):
+    """Retry an ambiguous delivery only after an operator confirms it was not delivered."""
+    from app import db
+
+    result = await db.fetch_one(
+        """
+        UPDATE broadcast_deliveries
+        SET status = 'pending', failed_at = NULL, claimed_at = NULL,
+            outbound_started_at = NULL, last_error = 'manual_reconciliation_retry', updated_at = NOW()
+        WHERE id = :delivery_id AND broadcast_id = :broadcast_id
+          AND status = 'delivery_unknown'
+        RETURNING id
+        """,
+        {"delivery_id": delivery_id, "broadcast_id": broadcast_id},
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Ambiguous delivery not found")
+    return {"delivery_id": delivery_id, "status": "pending"}

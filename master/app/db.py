@@ -50,9 +50,9 @@ async def verify_schema_version() -> None:
         ) from e
 
     versions = {int(row["version"]) for row in rows}
-    expected_versions = {EXPECTED_SCHEMA_VERSION}
-    if versions != expected_versions:
+    accepted_versions = ({1}, {1, 2})
+    if versions not in accepted_versions:
         raise RuntimeError(
-            f"Master database schema version mismatch: expected {sorted(expected_versions)}, found {sorted(versions)}. "
-            "This project uses a single fresh-install baseline; recreate the database from the current 001 migration."
+            f"Master database schema version mismatch: expected one of {[sorted(item) for item in accepted_versions]}, found {sorted(versions)}. "
+            "Apply master/migrations/002_consolidated_upgrade.sql to an existing database."
         )

@@ -25,6 +25,21 @@ def _close_background_task(coro):
 
 
 @pytest.mark.asyncio
+async def test_due_job_claim_failure_releases_processor_slot(monkeypatch):
+    from app.webhooks import inbound_buffer
+
+    semaphore = asyncio.Semaphore(1)
+    monkeypatch.setattr(inbound_buffer, "_inbound_processor_semaphore", semaphore)
+    monkeypatch.setattr(inbound_buffer, "recover_stale_inbound_jobs", AsyncMock(return_value=0))
+    monkeypatch.setattr(inbound_buffer, "_claim_due_job", AsyncMock(side_effect=RuntimeError("database unavailable")))
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await inbound_buffer.process_due_inbound_jobs(limit=1)
+
+    assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
 async def test_enqueue_commits_dedup_receipt_before_returning_success():
     from app.webhooks import inbound_buffer
 

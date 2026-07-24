@@ -71,13 +71,11 @@ Back up these secrets separately:
 7. Verify `/health`, login, a read-only dashboard query, catalog loading, and one test conversation.
 8. Re-enable traffic and monitor errors, job queues, database connections, and delivery reconciliation rows.
 
-Current store upgrade sequence for an existing version-2 database:
+Current store upgrade sequence for an existing pre-consolidation database:
 
 ```bash
 psql "$STORE_DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -f store/migrations/003_broadcast_delivery_safety.sql
-psql "$STORE_DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -f store/migrations/004_meta_inbound_lease_fencing.sql
+   -f store/migrations/002_consolidated_upgrade.sql
 ```
 
 ## Restore Procedure
@@ -96,7 +94,7 @@ After restore:
 
 1. Verify checksums and `schema_migrations`.
 2. Run row-count and foreign-key sanity checks for customers, orders, settings, jobs, and stores.
-3. Start one application instance against the restored database with `OUTBOUND_PROCESSING_ENABLED=false`. This disables broadcast execution, Meta/Kommo job processing, and inventory reservation cleanup.
+3. Start one application instance against the restored database with `OUTBOUND_PROCESSING_ENABLED=false`. This disables scheduled and manually triggered broadcasts, Meta/Kommo accelerators and job processing, Salesbot callback continuations, and inventory reservation cleanup. Inbound webhooks may be recorded but will not send replies.
 4. Run health and read-only smoke tests.
 5. Point Railway `DATABASE_URL` to the restored database only after approval.
 6. Use the master credential deploy flow so master and Railway retain the same authoritative store URL.

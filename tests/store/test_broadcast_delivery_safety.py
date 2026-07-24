@@ -232,6 +232,56 @@ async def test_stale_broadcast_claims_requeue_only_before_the_meta_send(monkeypa
     assert "status = 'delivery_unknown'" in attempted_query
 
 
+@pytest.mark.asyncio
+async def test_meta_delivery_unknown_is_quarantined_for_manual_reconciliation(monkeypatch):
+    from app.broadcast import sender
+    from app.channels import whatsapp_sender
+    from app.channels.meta_errors import MetaSendError
+
+    fetch_one = AsyncMock(side_effect=[
+        _broadcast(),
+        _broadcast(status="sending"),
+        {"audience_seeded_at": None},
+        {"id": "delivery-1", "platform_id": "584121234567", "display_name": "Ana", "status": "sending"},
+        None,
+        {"sent": 0, "failed": 0, "sending": 0, "pending": 0},
+    ])
+    execute = AsyncMock()
+    mock_db = SimpleNamespace(fetch_one=fetch_one, execute=execute, get_db=lambda: _database())
+    monkeypatch.setattr(sender, "db", mock_db)
+    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(sender, "notify_owner", AsyncMock())
+    monkeypatch.setattr(
+        whatsapp_sender,
+        "send_template",
+        AsyncMock(side_effect=MetaSendError("5xx", retryable=False, delivery_known=False)),
+    )
+
+    await sender.execute_broadcast("broadcast-1")
+
+    update_call = next(call for call in execute.await_args_list if "SET status = :status" in call.args[0])
+    assert update_call.args[1]["status"] == "delivery_unknown"
+    assert update_call.args[1]["error"] == "delivery_unknown_meta_send"
+
+
+@pytest.mark.asyncio
+async def test_reconciled_ambiguous_delivery_can_be_explicitly_retried(monkeypatch):
+    from app import db
+    from app.broadcast import api
+
+    fetch_one = AsyncMock(return_value={"id": "delivery-1"})
+    monkeypatch.setattr(db, "fetch_one", fetch_one)
+
+    result = await api.retry_reconciled_delivery_endpoint(
+        "broadcast-1", "delivery-1", api.DeliveryRetryConfirmation(confirmed_not_delivered=True)
+    )
+
+    assert result == {"delivery_id": "delivery-1", "status": "pending"}
+    query, values = fetch_one.await_args.args
+    assert "status = 'delivery_unknown'" in query
+    assert values == {"delivery_id": "delivery-1", "broadcast_id": "broadcast-1"}
+
+
 
 
 def test_broadcast_meta_message_id_extracts_graph_api_response():

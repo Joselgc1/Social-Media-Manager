@@ -62,6 +62,19 @@ def test_payment_recipient_identifiers_require_exact_email_or_numeric_token(
     assert result["ok"] is expected_ok
 
 
+@pytest.mark.parametrize(
+    ("recipient_name", "expected_ok"),
+    [("Maria Lopez", True), ("Maria Lopez Garcia", False)],
+)
+def test_payment_recipient_name_requires_exact_normalized_match(recipient_name, expected_ok):
+    result = verifier.validate_payment_identifier_match(
+        "Maria Lopez",
+        {"recipient_name": recipient_name},
+    )
+
+    assert result["ok"] is expected_ok
+
+
 _DEFAULT_UPDATE_RESULT = {"order_id": "order-1", "payment_status": "proof_received"}
 
 

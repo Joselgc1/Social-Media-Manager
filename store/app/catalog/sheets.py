@@ -435,11 +435,11 @@ def _ledger_cache_key(spreadsheet) -> str:
     return str(getattr(spreadsheet, "id", None) or id(spreadsheet))
 
 
-def _cached_inventory_ledger_records(spreadsheet, ledger) -> tuple[list[dict], int]:
+def _cached_inventory_ledger_records(spreadsheet, ledger, *, force_reload: bool = False) -> tuple[list[dict], int]:
     """Load the durable ledger once per spreadsheet process, then append locally."""
     key = _ledger_cache_key(spreadsheet)
     cached = _inventory_ledger_cache.get(key)
-    if cached is None:
+    if cached is None or force_reload:
         records = ledger.get_all_records()
         cached = {"records": records, "next_row": len(records) + 2}
         _inventory_ledger_cache[key] = cached
@@ -463,7 +463,7 @@ def _ensure_ledger_capacity(ledger, last_row: int) -> None:
         ledger.add_rows(max(last_row - row_count, 1000))
 
 
-def _read_inventory_ledger(spreadsheet):
+def _read_inventory_ledger(spreadsheet, *, force_reload: bool = False):
     try:
         ledger = spreadsheet.worksheet(_INVENTORY_LEDGER_TITLE)
     except gspread.WorksheetNotFound:
@@ -475,7 +475,7 @@ def _read_inventory_ledger(spreadsheet):
         raise InventoryUpdateError(
             f"Inventory ledger worksheet '{_INVENTORY_LEDGER_TITLE}' has unexpected headers."
         )
-    records, _ = _cached_inventory_ledger_records(spreadsheet, ledger)
+    records, _ = _cached_inventory_ledger_records(spreadsheet, ledger, force_reload=force_reload)
     return ledger, records
 
 
@@ -674,7 +674,7 @@ def inventory_operation_exists(operation_id: str) -> bool:
         config = get_config()
         client = _get_gspread_client()
         spreadsheet = client.open_by_key(config.product_sheet_id)
-        _, records = _read_inventory_ledger(spreadsheet)
+        _, records = _read_inventory_ledger(spreadsheet, force_reload=True)
         return bool(_ledger_operation_rows(records, operation_id))
     except InventoryUpdateError:
         raise
@@ -695,7 +695,7 @@ def inventory_operation_applied(operation_id: str, items: list[dict], *, directi
         config = get_config()
         client = _get_gspread_client()
         spreadsheet = client.open_by_key(config.product_sheet_id)
-        _, records = _read_inventory_ledger(spreadsheet)
+        _, records = _read_inventory_ledger(spreadsheet, force_reload=True)
         rows = _ledger_operation_rows(records, operation_id)
         if not rows:
             return False

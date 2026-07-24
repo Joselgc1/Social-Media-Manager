@@ -83,11 +83,32 @@ async def verify_schema_version() -> None:
         ) from e
 
     versions = {int(row["version"]) for row in rows}
-    expected_versions = set(range(1, EXPECTED_SCHEMA_VERSION + 1))
-    if versions != expected_versions:
+    accepted_versions = ({1}, {1, 2})
+    if versions not in accepted_versions:
         raise RuntimeError(
-            f"Store database schema version mismatch: expected {sorted(expected_versions)}, found {sorted(versions)}. "
-            "Apply pending numbered migrations before starting the service."
+            f"Store database schema version mismatch: expected one of {[sorted(item) for item in accepted_versions]}, found {sorted(versions)}. "
+            "Apply store/migrations/002_consolidated_upgrade.sql to an existing database."
+        )
+
+    required_meta_columns = {
+        "processing_heartbeat_at",
+        "processing_lease_token",
+        "outbound_started_at",
+        "outbound_message_ids",
+    }
+    column_rows = await fetch_all(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'meta_inbound_jobs'
+        """
+    )
+    actual_meta_columns = {str(row["column_name"]) for row in column_rows}
+    missing_columns = required_meta_columns - actual_meta_columns
+    if missing_columns:
+        raise RuntimeError(
+            "Store database schema is missing Meta inbound lease-fencing columns: "
+            f"{', '.join(sorted(missing_columns))}. "
+            "Apply store/migrations/002_consolidated_upgrade.sql."
         )
 
 
