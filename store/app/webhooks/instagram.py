@@ -20,6 +20,7 @@ Key constraints:
 
 import hashlib
 import hmac
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -32,26 +33,18 @@ from app.channels.instagram_sender import (
     send_text_with_quick_replies,
 )
 from app.config import get_config
-from app.webhooks.inbound_buffer import enqueue_inbound_message
+from app.crm import conversations
+from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_APOLOGY_TEXT = "Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo? 🙏"
 
 
 def _mask_sender(sender: str) -> str:
     if len(sender) <= 4:
         return sender
     return f"{sender[:2]}***{sender[-2:]}"
-
-
-async def _safe_send_apology(sender_id: str):
-    try:
-        await send_text(
-            to=sender_id,
-            text="Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo? 🙏",
-        )
-    except Exception as send_error:
-        logger.error(f"Failed to send Instagram fallback reply to {_mask_sender(sender_id)}: {send_error}")
 
 
 async def _notify_delivery_failure(sender_id: str, detail: str):
@@ -159,23 +152,32 @@ async def _process_event(event: dict):
 
     # ── Regular messages ─────────────────────────────────────
     if "message" in event:
-        await _process_message(sender_id, event["message"], sender_profile)
+        message = event["message"]
+        message_id = message.get("mid") or _event_fingerprint(event)
+        await _process_message(sender_id, message, message_id, sender_profile)
         return
 
     # ── Postbacks (Ice Breaker taps, button clicks) ──────────
     if "postback" in event:
-        await _process_postback(sender_id, event["postback"], sender_profile)
+        postback = event["postback"]
+        message_id = postback.get("mid") or _event_fingerprint(event)
+        await _process_postback(sender_id, postback, message_id, sender_profile)
         return
 
     # ── Referrals (ad clicks, link clicks that open DM) ──────
     if "referral" in event:
-        await _process_referral(sender_id, event["referral"], sender_profile)
+        await _process_referral(sender_id, event["referral"], _event_fingerprint(event), sender_profile)
         return
 
     logger.debug(f"Instagram: unhandled event type from {sender_id}")
 
 
-async def _process_message(sender_id: str, message: dict, sender_profile: dict | None = None):
+async def _process_message(
+    sender_id: str,
+    message: dict,
+    message_id: str,
+    sender_profile: dict | None = None,
+):
     """Process a regular text or media message."""
     text = ""
     media_url = None
@@ -222,10 +224,15 @@ async def _process_message(sender_id: str, message: dict, sender_profile: dict |
         return
 
     logger.info(f"Instagram DM received from {_mask_sender(sender_id)}")
-    await _route_to_ai(sender_id, text, media_url, sender_profile)
+    await _route_to_ai(sender_id, text, message_id, media_url, sender_profile)
 
 
-async def _process_postback(sender_id: str, postback: dict, sender_profile: dict | None = None):
+async def _process_postback(
+    sender_id: str,
+    postback: dict,
+    message_id: str,
+    sender_profile: dict | None = None,
+):
     """
     Process a postback event (Ice Breaker tap or button click).
     Convert the payload into a natural language message for the AI.
@@ -243,10 +250,15 @@ async def _process_postback(sender_id: str, postback: dict, sender_profile: dict
         text = f"[Postback: {payload}]"
 
     logger.info(f"Instagram postback from {_mask_sender(sender_id)}")
-    await _route_to_ai(sender_id, text, sender_profile=sender_profile)
+    await _route_to_ai(sender_id, text, message_id, sender_profile=sender_profile)
 
 
-async def _process_referral(sender_id: str, referral: dict, sender_profile: dict | None = None):
+async def _process_referral(
+    sender_id: str,
+    referral: dict,
+    message_id: str,
+    sender_profile: dict | None = None,
+):
     """
     Process a referral event (customer came from an ad or link).
     Send a warm welcome that acknowledges where they came from.
@@ -262,7 +274,7 @@ async def _process_referral(sender_id: str, referral: dict, sender_profile: dict
         text = "Hola, quiero más información."
 
     logger.info(f"Instagram referral from {_mask_sender(sender_id)}: source={source}")
-    await _route_to_ai(sender_id, text, sender_profile=sender_profile)
+    await _route_to_ai(sender_id, text, message_id, sender_profile=sender_profile)
 
 
 # ── AI routing ───────────────────────────────────────────────
@@ -270,16 +282,17 @@ async def _process_referral(sender_id: str, referral: dict, sender_profile: dict
 async def _route_to_ai(
     sender_id: str,
     text: str,
+    message_id: str,
     media_url: str | None = None,
     sender_profile: dict | None = None,
 ):
     await enqueue_inbound_message(
         channel="instagram",
         sender_id=sender_id,
+        message_id=message_id,
         text=text,
         media_url=media_url,
         customer_profile=sender_profile or {},
-        processor=_deliver_ai_response,
     )
 
 
@@ -288,6 +301,8 @@ async def _deliver_ai_response(
     text: str,
     media_url: str | None = None,
     sender_profile: dict | None = None,
+    inbound_job_id: str = "",
+    lease_token: str = "",
 ):
     """
     Route the normalized message through the AI engine
@@ -300,10 +315,17 @@ async def _deliver_ai_response(
             message_text=text,
             media_url=media_url,
             customer_profile=sender_profile or {},
+            persist_assistant_message=False,
+            persist_user_before_response=True,
+            message_source_id=inbound_job_id or None,
         )
     except Exception as e:
         logger.exception(f"Error generating Instagram response for {_mask_sender(sender_id)}: {e}")
-        await _safe_send_apology(sender_id)
+        try:
+            await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=_APOLOGY_TEXT)
+        except Exception as send_error:
+            logger.error(f"Failed to send Instagram fallback reply to {_mask_sender(sender_id)}: {send_error}")
+            raise
         return
 
     if result.get("paused"):
@@ -313,41 +335,76 @@ async def _deliver_ai_response(
     ):
         return
 
+    delivered_parts = []
     try:
         if result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
             quick_replies = [
                 {"title": btn, "payload": btn.upper().replace(" ", "_")}
                 for btn in result["interactive"]["buttons"]
             ]
-            await send_text_with_quick_replies(
+            await _send_with_delivery_record(
+                send_text_with_quick_replies,
+                inbound_job_id,
+                lease_token,
                 to=sender_id,
                 text=result["interactive"]["body_text"],
                 quick_replies=quick_replies,
             )
+            delivered_parts.append(result["interactive"]["body_text"])
         elif result.get("product_image") and result["product_image"].get("type") == "product_image":
-            await send_image(
+            await _send_with_delivery_record(
+                send_image,
+                inbound_job_id,
+                lease_token,
                 to=sender_id,
                 image_url=result["product_image"]["image_url"],
             )
+            delivered_parts.append("[Imagen de producto enviada]")
             follow_up = (result.get("text") or result["product_image"].get("caption") or "").strip()
             if follow_up:
                 if len(follow_up.encode("utf-8")) > 950:
                     chunks = _split_message(follow_up, max_bytes=950)
                     for chunk in chunks:
-                        await send_text(to=sender_id, text=chunk)
+                        await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=chunk)
+                        delivered_parts.append(chunk)
                 else:
-                    await send_text(to=sender_id, text=follow_up)
+                    await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=follow_up)
+                    delivered_parts.append(follow_up)
         elif result.get("text"):
             reply = result["text"]
             if len(reply.encode("utf-8")) > 950:
                 chunks = _split_message(reply, max_bytes=950)
                 for chunk in chunks:
-                    await send_text(to=sender_id, text=chunk)
+                    await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=chunk)
+                    delivered_parts.append(chunk)
             else:
-                await send_text(to=sender_id, text=reply)
+                await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=reply)
+                delivered_parts.append(reply)
     except Exception as e:
         logger.exception(f"Error sending Instagram response to {_mask_sender(sender_id)}: {e}")
         await _notify_delivery_failure(sender_id, str(e))
+        raise
+
+    if delivered_parts:
+        await _store_delivered_assistant_message(result, "\n".join(delivered_parts), inbound_job_id)
+
+
+async def _send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
+    return await send_with_delivery_record(send_func, inbound_job_id, lease_token, **kwargs)
+
+
+async def _store_delivered_assistant_message(result: dict, content: str, source_id: str) -> None:
+    try:
+        await conversations.store_message(
+            customer_id=result["customer_id"],
+            role="assistant",
+            content=content,
+            channel="instagram",
+            function_calls=result.get("function_calls"),
+            source_id=source_id or None,
+        )
+    except Exception:
+        logger.exception("Failed to persist delivered Instagram response for job %s", source_id)
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -355,26 +412,45 @@ async def _deliver_ai_response(
 def _split_message(text: str, max_bytes: int = 950) -> list[str]:
     """
     Split a message into chunks that fit within Instagram's byte limit.
-    Tries to split at sentence boundaries for natural reading.
+    Prefer sentence and word boundaries, then hard-split long unbroken text.
     """
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+
     chunks = []
-    current = ""
+    remaining = text.strip()
+    while remaining:
+        byte_count = 0
+        prefix_end = 0
+        for index, char in enumerate(remaining):
+            char_bytes = len(char.encode("utf-8"))
+            if byte_count + char_bytes > max_bytes:
+                break
+            byte_count += char_bytes
+            prefix_end = index + 1
 
-    sentences = text.replace(". ", ".|").replace("! ", "!|").replace("? ", "?|").split("|")
+        if prefix_end == 0:
+            raise ValueError("max_bytes is too small for the first UTF-8 character")
+        if prefix_end == len(remaining):
+            chunks.append(remaining)
+            break
 
-    for sentence in sentences:
-        test = (current + " " + sentence).strip() if current else sentence
-        if len(test.encode("utf-8")) <= max_bytes:
-            current = test
+        prefix = remaining[:prefix_end]
+        minimum_natural_split = max(1, prefix_end // 2)
+        sentence_end = max(prefix.rfind(mark) for mark in (".", "!", "?", "\n")) + 1
+        whitespace_end = max((index + 1 for index, char in enumerate(prefix) if char.isspace()), default=0)
+
+        if sentence_end >= minimum_natural_split:
+            split_at = sentence_end
+        elif whitespace_end >= minimum_natural_split:
+            split_at = whitespace_end
         else:
-            if current:
-                chunks.append(current)
-            current = sentence
+            split_at = prefix_end
 
-    if current:
-        chunks.append(current)
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
 
-    return chunks if chunks else [text[:max_bytes]]
+    return chunks
 
 
 def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bool:
@@ -389,3 +465,9 @@ def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bo
     ).hexdigest()
 
     return hmac.compare_digest(expected, signature_header)
+
+
+def _event_fingerprint(event: dict) -> str:
+    """Provide deterministic deduplication when Meta omits a message ID."""
+    canonical = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "fallback-" + hashlib.sha256(canonical.encode()).hexdigest()

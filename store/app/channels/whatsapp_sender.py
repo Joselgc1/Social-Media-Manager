@@ -7,6 +7,7 @@ import logging
 
 import httpx
 
+from app.channels.meta_errors import MetaSendError
 from app.channels.text_formatting import format_customer_text
 from app.config import get_config
 
@@ -28,7 +29,7 @@ async def send_text(to: str, text: str):
         "text": {"body": body_text},
     }
 
-    await _send(url, payload, config.whatsapp_access_token)
+    return await _send(url, payload, config.whatsapp_access_token)
 
 
 async def send_image(to: str, image_url: str, caption: str = ""):
@@ -47,7 +48,7 @@ async def send_image(to: str, image_url: str, caption: str = ""):
         "image": image_payload,
     }
 
-    await _send(url, payload, config.whatsapp_access_token)
+    return await _send(url, payload, config.whatsapp_access_token)
 
 
 async def send_interactive_buttons(to: str, body_text: str, buttons: list[str]):
@@ -80,7 +81,7 @@ async def send_interactive_buttons(to: str, body_text: str, buttons: list[str]):
         },
     }
 
-    await _send(url, payload, config.whatsapp_access_token)
+    return await _send(url, payload, config.whatsapp_access_token)
 
 
 async def send_template(to: str, template_name: str, language: str = "es", parameters: list[str] | None = None):
@@ -109,7 +110,7 @@ async def send_template(to: str, template_name: str, language: str = "es", param
         },
     }
 
-    await _send(url, payload, config.whatsapp_access_token)
+    return await _send(url, payload, config.whatsapp_access_token)
 
 
 async def send_document(to: str, document_url: str, filename: str = "catalogo.pdf", caption: str = ""):
@@ -131,7 +132,7 @@ async def send_document(to: str, document_url: str, filename: str = "catalogo.pd
         "document": doc,
     }
 
-    await _send(url, payload, config.whatsapp_access_token)
+    return await _send(url, payload, config.whatsapp_access_token)
 
 
 async def mark_as_read(message_id: str):
@@ -145,7 +146,7 @@ async def mark_as_read(message_id: str):
         "message_id": message_id,
     }
 
-    await _send(url, payload, config.whatsapp_access_token)
+    return await _send(url, payload, config.whatsapp_access_token)
 
 
 # ── Internal helper ──────────────────────────────────────────
@@ -157,11 +158,20 @@ async def _send(url: str, payload: dict, access_token: str):
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+        raise MetaSendError("WhatsApp API connection failed before sending", retryable=True) from exc
 
     if not resp.is_success:
         logger.error(f"WhatsApp API error ({resp.status_code})")
-        raise RuntimeError(f"WhatsApp API error {resp.status_code}: {resp.text}")
+        raise MetaSendError(
+            f"WhatsApp API error {resp.status_code}: {resp.text}",
+            retryable=resp.status_code in {401, 403, 429},
+            delivery_known=resp.status_code < 500,
+        )
 
-    logger.debug(f"WhatsApp message sent: {resp.json()}")
+    response_json = resp.json()
+    logger.debug(f"WhatsApp message sent: {response_json}")
+    return response_json

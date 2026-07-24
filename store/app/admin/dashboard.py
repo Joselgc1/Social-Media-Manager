@@ -5,14 +5,20 @@ No build step, no JS frameworks. Just Tailwind CSS via CDN and fetch() calls
 to the existing admin API endpoints.
 """
 
-import json
+import html
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.admin.auth import COOKIE_NAME, _make_cookie_token, is_admin_cookie_valid
+from app.admin.auth import (
+    COOKIE_NAME,
+    SESSION_MAX_AGE_SECONDS,
+    _make_cookie_token,
+    is_admin_cookie_valid,
+    revoke_admin_session,
+)
 from app.config import get_config
 
 router = APIRouter(prefix="/admin", tags=["dashboard"])
@@ -39,17 +45,13 @@ async def login_page(request: Request):
     """Serve the admin login page."""
     config = get_config()
     if not config.admin_password:
-        if config.debug:
-            return RedirectResponse(url="/admin/dashboard", status_code=303)
         raise HTTPException(status_code=403, detail="ADMIN_PASSWORD must be set.")
 
     if is_admin_cookie_valid(request):
         return RedirectResponse(url="/admin/dashboard", status_code=303)
 
     page = (_TEMPLATES_DIR / "admin_login.html").read_text(encoding="utf-8")
-    page = page.replace("__STORE_NAME__", config.store_name)
-    error = request.query_params.get("error", "")
-    return HTMLResponse(page.replace("__ERROR__", json.dumps(error)))
+    return HTMLResponse(page.replace("__STORE_NAME__", html.escape(config.store_name)))
 
 
 @router.post("/login")
@@ -57,8 +59,6 @@ async def login(request: Request):
     """Validate the admin password and create a dashboard session."""
     config = get_config()
     if not config.admin_password:
-        if config.debug:
-            return RedirectResponse(url="/admin/dashboard", status_code=303)
         raise HTTPException(status_code=403, detail="ADMIN_PASSWORD must be set.")
 
     form = await request.form()
@@ -73,14 +73,15 @@ async def login(request: Request):
         httponly=True,
         secure=not config.debug,
         samesite="lax",
-        max_age=86400,
+        max_age=SESSION_MAX_AGE_SECONDS,
     )
     return response
 
 
 @router.post("/logout")
-async def logout():
+async def logout(request: Request):
     """Clear the dashboard session cookie."""
+    revoke_admin_session(request)
     response = RedirectResponse(url="/admin/login", status_code=303)
     response.delete_cookie(COOKIE_NAME, samesite="lax")
     return response
@@ -90,11 +91,9 @@ async def logout():
 async def dashboard(request: Request):
     """Serve the admin dashboard as a single HTML page."""
     config = get_config()
-    replacements = {"__STORE_NAME__": config.store_name}
+    replacements = {"__STORE_NAME__": html.escape(config.store_name)}
 
     if not config.admin_password:
-        if config.debug:
-            return _render_template("dashboard.html", replacements)
         raise HTTPException(status_code=403, detail="ADMIN_PASSWORD must be set.")
 
     if is_admin_cookie_valid(request):
@@ -108,13 +107,11 @@ async def order_detail_page(request: Request, order_id: str):
     """Serve the order detail page."""
     config = get_config()
     replacements = {
-        "__STORE_NAME__": config.store_name,
-        "__ORDER_ID__": json.dumps(order_id),
+        "__STORE_NAME__": html.escape(config.store_name),
+        "__ORDER_ID__": html.escape(order_id, quote=True),
     }
 
     if not config.admin_password:
-        if config.debug:
-            return _render_template("order_detail.html", replacements)
         raise HTTPException(status_code=403, detail="ADMIN_PASSWORD must be set.")
 
     if is_admin_cookie_valid(request):

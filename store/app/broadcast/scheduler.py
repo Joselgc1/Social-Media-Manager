@@ -18,17 +18,25 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app import db
 from app.admin.notify import notify_owner
 from app.analytics import build_daily_aggregate
-from app.broadcast.sender import execute_broadcast
-from app.catalog.pdf_generator import generate_catalog_pdf
-from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
+from app.broadcast.sender import execute_broadcast, recover_stale_broadcast_deliveries
+from app.catalog.pdf_generator import ensure_catalog_pdf
+from app.catalog.sheets import (
+    count_grouped_catalog_products,
+    get_cached_catalog,
+    refresh_catalog_async,
+    set_refresh_interval,
+)
 from app.config import get_config
-from app.crm import escalations
+from app.crm import escalations, orders
+from app.data_retention import run_data_retention
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
+from app.webhooks.inbound_buffer import cleanup_completed_inbound_jobs, process_due_inbound_jobs
 
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 _scheduler_schedule_signature: tuple[tuple[str, int], ...] | None = None
+_outbound_processing_enabled = True
 
 
 def get_scheduler() -> AsyncIOScheduler:
@@ -38,12 +46,24 @@ def get_scheduler() -> AsyncIOScheduler:
     return _scheduler
 
 
-def start_scheduler():
+def start_scheduler(*, outbound_processing_enabled: bool = True):
     """
     Initialize and start the background scheduler.
     Called once during app startup.
     """
+    global _outbound_processing_enabled
+    _outbound_processing_enabled = outbound_processing_enabled
     scheduler = get_scheduler()
+    if not outbound_processing_enabled:
+        for job_id in (
+            "broadcast_checker",
+            "inventory_reservation_cleanup",
+            "meta_inbound_job_processor",
+            "meta_inbound_job_cleanup",
+            "kommo_job_processor",
+        ):
+            if scheduler.get_job(job_id):
+                scheduler.remove_job(job_id)
 
     # Job 1: Refresh product catalog. Interval is synced from DB settings.
     scheduler.add_job(
@@ -54,14 +74,15 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # Job 2: Check for scheduled broadcasts. Interval is synced from DB settings.
-    scheduler.add_job(
-        _check_scheduled_broadcasts,
-        trigger=IntervalTrigger(minutes=1),
-        id="broadcast_checker",
-        name="Check and execute scheduled broadcasts",
-        replace_existing=True,
-    )
+    if outbound_processing_enabled:
+        # Job 2: Check for scheduled broadcasts. Interval is synced from DB settings.
+        scheduler.add_job(
+            _check_scheduled_broadcasts,
+            trigger=IntervalTrigger(minutes=1),
+            id="broadcast_checker",
+            name="Check and execute scheduled broadcasts",
+            replace_existing=True,
+        )
 
     # Job 3: Refresh long-lived access token reminders. Time is synced from DB settings.
     scheduler.add_job(
@@ -107,7 +128,39 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    if get_config().channel_backend == "kommo":
+    if outbound_processing_enabled:
+        scheduler.add_job(
+            _release_expired_inventory_reservations,
+            trigger=IntervalTrigger(minutes=15),
+            id="inventory_reservation_cleanup",
+            name="Release expired unpaid inventory reservations",
+            replace_existing=True,
+        )
+
+    scheduler.add_job(
+        _run_data_retention,
+        trigger=CronTrigger(hour=3, minute=30, timezone=UTC),
+        id="sensitive_data_retention",
+        name="Apply sensitive data retention policy",
+        replace_existing=True,
+    )
+
+    if outbound_processing_enabled and get_config().channel_backend == "meta":
+        scheduler.add_job(
+            _process_meta_inbound_jobs,
+            trigger=IntervalTrigger(seconds=5),
+            id="meta_inbound_job_processor",
+            name="Process durable Meta inbound jobs",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            _cleanup_meta_inbound_jobs,
+            trigger=IntervalTrigger(hours=24),
+            id="meta_inbound_job_cleanup",
+            name="Clean completed Meta inbound jobs",
+            replace_existing=True,
+        )
+    elif outbound_processing_enabled:
         scheduler.add_job(
             _process_kommo_jobs,
             trigger=IntervalTrigger(seconds=15),
@@ -118,7 +171,7 @@ def start_scheduler():
 
     scheduler.start()
     asyncio.create_task(_sync_scheduler_config())
-    logger.info("Background scheduler started.")
+    logger.info("Background scheduler started (outbound_processing_enabled=%s).", outbound_processing_enabled)
 
 
 def stop_scheduler():
@@ -134,8 +187,14 @@ def stop_scheduler():
 async def _refresh_catalog_job():
     """Refresh the product catalog from Google Sheets."""
     try:
-        refresh_catalog()
-        logger.debug("Scheduled catalog refresh completed.")
+        refreshed = await refresh_catalog_async()
+        catalog = get_cached_catalog()
+        if refreshed and catalog:
+            ensure_catalog_pdf(catalog)
+        if refreshed:
+            logger.debug("Scheduled catalog refresh completed.")
+        else:
+            logger.debug("Scheduled catalog refresh skipped or failed; cached catalog retained.")
     except Exception as e:
         logger.error(f"Scheduled catalog refresh failed: {e}")
 
@@ -146,6 +205,7 @@ async def _check_scheduled_broadcasts():
     time has passed, and execute them.
     """
     try:
+        await recover_stale_broadcast_deliveries()
         now = datetime.now(UTC)
 
         rows = await db.fetch_all(
@@ -238,7 +298,7 @@ async def _refresh_catalog_pdf():
     try:
         catalog = get_cached_catalog()
         if catalog:
-            generate_catalog_pdf(catalog)
+            ensure_catalog_pdf(catalog)
             logger.info(
                 "Scheduled catalog PDF refresh completed (%s grouped products).",
                 count_grouped_catalog_products(catalog),
@@ -260,6 +320,27 @@ async def _process_kommo_jobs():
         logger.error(f"Kommo job processor failed: {e}")
 
 
+async def _process_meta_inbound_jobs():
+    try:
+        await process_due_inbound_jobs(limit=10)
+    except Exception:
+        logger.exception("Meta inbound job processor failed")
+
+
+async def _cleanup_meta_inbound_jobs():
+    try:
+        await cleanup_completed_inbound_jobs()
+    except Exception:
+        logger.exception("Meta inbound job cleanup failed")
+
+
+async def _run_data_retention():
+    try:
+        await run_data_retention()
+    except Exception:
+        logger.exception("Sensitive data retention cleanup failed")
+
+
 async def _process_expired_escalations():
     try:
         result = await escalations.process_expired_automatic_escalations()
@@ -273,6 +354,20 @@ async def _process_expired_escalations():
             )
     except Exception as e:
         logger.error("Expired escalation processor failed: %s", e)
+
+
+async def _release_expired_inventory_reservations():
+    try:
+        result = await orders.release_expired_inventory_reservations()
+        if result.get("checked"):
+            logger.info(
+                "Inventory reservation cleanup completed: checked=%s released=%s failed=%s",
+                result.get("checked"),
+                result.get("released"),
+                result.get("failed"),
+            )
+    except Exception:
+        logger.exception("Inventory reservation cleanup failed")
 
 
 def _bounded_int(settings: dict, key: str, *, minimum: int, maximum: int) -> int:
@@ -326,10 +421,12 @@ async def _sync_scheduler_config():
             "catalog_refresh",
             trigger=IntervalTrigger(minutes=config["catalog_refresh_minutes"]),
         )
-        scheduler.reschedule_job(
-            "broadcast_checker",
-            trigger=IntervalTrigger(minutes=config["broadcast_check_interval_minutes"]),
-        )
+        set_refresh_interval(config["catalog_refresh_minutes"] * 60)
+        if scheduler.get_job("broadcast_checker"):
+            scheduler.reschedule_job(
+                "broadcast_checker",
+                trigger=IntervalTrigger(minutes=config["broadcast_check_interval_minutes"]),
+            )
         scheduler.reschedule_job(
             "token_reminder",
             trigger=CronTrigger(

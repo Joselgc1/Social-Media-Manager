@@ -7,8 +7,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
+
 from app.ai.tools import catalog, checkout, customers, messaging, orders, payments, support
 from app.ai.tools.context import ToolExecutionContext
+from app.ai.tools.registry import get_tool_specs
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,28 @@ _HANDLERS: dict[str, ToolHandler] = {
     "get_customer_profile": support.get_customer_profile,
     "get_customer_order_status": support.get_customer_order_status,
 }
+_VALIDATORS = {
+    spec.name: Draft202012Validator(spec.schema["parameters"])
+    for spec in get_tool_specs()
+}
+
+
+def _validation_error_detail(error: ValidationError) -> str:
+    field = ".".join(str(part) for part in error.absolute_path)
+    prefix = f"{field}: " if field else ""
+    if error.validator == "required":
+        return f"{prefix}{error.message}"
+    if error.validator == "type":
+        return f"{prefix}must be of type {error.validator_value}"
+    if error.validator == "enum":
+        return f"{prefix}must be one of {error.validator_value}"
+    if error.validator == "minItems":
+        return f"{prefix}must contain at least {error.validator_value} item(s)"
+    if error.validator == "minimum":
+        return f"{prefix}must be at least {error.validator_value}"
+    if error.validator == "pattern":
+        return f"{prefix}must not be blank"
+    return f"{prefix}is invalid"
 
 
 async def execute_tool(name: str, arguments: dict, context: ToolExecutionContext) -> dict:
@@ -47,4 +73,12 @@ async def execute_tool(name: str, arguments: dict, context: ToolExecutionContext
     if not handler:
         logger.warning(f"Unknown tool: {name}")
         return {"status": "error", "message": f"Unknown tool: {name}"}
+
+    validator = _VALIDATORS[name]
+    errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.absolute_path))
+    if errors:
+        detail = _validation_error_detail(errors[0])
+        logger.warning("Rejected invalid arguments for tool %s: %s", name, detail)
+        return {"status": "error", "message": f"Invalid arguments for {name}: {detail}"}
+
     return await handler(arguments, context)

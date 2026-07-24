@@ -12,7 +12,7 @@ $ARGUMENTS$
 
 ## Instructions
 
-Run a read-only SQL query against the store's Supabase PostgreSQL database.
+Run a read-only SQL query against the store's PostgreSQL database.
 
 1. Read the `DATABASE_URL` from `store/.env` (parse the file, look for `DATABASE_URL=`)
 2. **REFUSE** any query that is not a SELECT — no INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE

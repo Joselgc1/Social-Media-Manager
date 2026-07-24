@@ -3,30 +3,72 @@ Pydantic models for store management.
 """
 
 import ipaddress
-from urllib.parse import urlparse
+import socket
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+
+def _allow_loopback_app_url(hostname: str) -> bool:
+    """Allow exact loopback targets only when the master itself runs locally."""
+    if hostname != "localhost":
+        try:
+            if not ipaddress.ip_address(hostname).is_loopback:
+                return False
+        except ValueError:
+            return False
+    try:
+        from app.config import get_config
+
+        return get_config().is_local_environment
+    except Exception:
+        return False
+
+
+def resolve_host_addresses(hostname: str, port: int) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve every address advertised for a health-check hostname."""
+    records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    return {ipaddress.ip_address(record[4][0]) for record in records}
+
+
+def is_safe_app_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_loopback: bool) -> bool:
+    return address.is_global or (allow_loopback and address.is_loopback)
 
 
 def _validate_app_url(url: str) -> str:
-    """Reject URLs pointing to private/reserved IPs (SSRF prevention)."""
+    """Reject app URLs that could target internal network services."""
     if not url:
         return url
-    parsed = urlparse(url)
+    parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("app_url must use http or https scheme")
     hostname = parsed.hostname or ""
-    if hostname in ("localhost", ""):
-        return url  # localhost is allowed for local dev
+    if not hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("app_url must be an absolute base URL without credentials, query, or fragment")
     try:
-        ip = ipaddress.ip_address(hostname)
-        if ip.is_private or ip.is_reserved or ip.is_loopback or ip.is_link_local:
-            raise ValueError(f"app_url must not point to private/reserved IP: {hostname}")
-    except ValueError as e:
-        if "must not point to" in str(e):
-            raise
-        # hostname is not an IP — that's fine (e.g., "my-store.railway.app")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = resolve_host_addresses(hostname, port)
+    except (OSError, ValueError) as exc:
+        raise ValueError("app_url hostname could not be resolved safely") from exc
+    allow_loopback = _allow_loopback_app_url(hostname)
+    if not addresses or any(not is_safe_app_address(address, allow_loopback=allow_loopback) for address in addresses):
+        raise ValueError("app_url must resolve only to public IP addresses")
     return url
+
+
+def _validate_database_url(url: str) -> str:
+    """Accept only complete PostgreSQL connection URLs."""
+    value = url.strip()
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("postgresql", "postgres"):
+        raise ValueError("db_url must use postgresql or postgres scheme")
+    if not parsed.hostname or not parsed.path or parsed.path == "/" or parsed.fragment:
+        raise ValueError("db_url must be a complete PostgreSQL connection URL")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("db_url has an invalid port") from exc
+    return value
 
 
 class StoreCreate(BaseModel):
@@ -43,6 +85,11 @@ class StoreCreate(BaseModel):
     def check_app_url(cls, v: str) -> str:
         return _validate_app_url(v)
 
+    @field_validator("db_url")
+    @classmethod
+    def check_db_url(cls, v: str) -> str:
+        return _validate_database_url(v)
+
 
 class StoreUpdate(BaseModel):
     name: str | None = None
@@ -52,6 +99,7 @@ class StoreUpdate(BaseModel):
     railway_service_id: str | None = None
     railway_project_id: str | None = None
     status: str | None = None
+    db_url: str | None = None
 
     @field_validator("app_url")
     @classmethod
@@ -60,9 +108,22 @@ class StoreUpdate(BaseModel):
             return v
         return _validate_app_url(v)
 
+    @field_validator("db_url")
+    @classmethod
+    def check_db_url(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        return _validate_database_url(v)
+
 class CredentialSet(BaseModel):
     key: str
     value: str
+
+    @model_validator(mode="after")
+    def check_database_url(self):
+        if self.key == "DATABASE_URL":
+            self.value = _validate_database_url(self.value)
+        return self
 
 
 class RuntimeSettingsUpdate(BaseModel):

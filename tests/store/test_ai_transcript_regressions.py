@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -141,6 +142,7 @@ class TranscriptHarness:
         monkeypatch.setattr(engine.conversations, "get_recent_summary", AsyncMock(return_value="Resumen reciente"))
         monkeypatch.setattr(engine.conversations, "store_message", AsyncMock(side_effect=store_message))
         monkeypatch.setattr(engine.orders, "get_latest_open_order", AsyncMock(return_value=None))
+        monkeypatch.setattr(engine.orders, "get_unambiguous_open_order", AsyncMock(return_value=(None, False)))
         monkeypatch.setattr(engine.orders, "create_order", AsyncMock(return_value=_order()))
         monkeypatch.setattr(engine.orders, "update_payment_status", AsyncMock(return_value=None))
         monkeypatch.setattr(engine.orders, "update_order_payment_status", AsyncMock(return_value={"order_id": "order-1", "payment_status": "proof_received"}))
@@ -321,7 +323,8 @@ async def test_customer_cancels_checkout(monkeypatch):
 async def test_valid_payment_proof(monkeypatch):
     h = TranscriptHarness(monkeypatch)
     engine.orders.get_latest_open_order.return_value = _order()
-    engine.analyze_payment_screenshot.return_value = {"analyzed": True, "payment_method": "zelle", "amount": "28.00", "status": "completed", "recipient_identifier": "pagos@example.com", "summary": "Pago Zelle a pagos@example.com"}
+    engine.orders.get_unambiguous_open_order.return_value = (_order(), False)
+    engine.analyze_payment_screenshot.return_value = {"analyzed": True, "payment_method": "zelle", "amount": "28.00", "currency": "USD", "status": "completed", "confidence": "high", "reference": "TXN-TRANSCRIPT-123", "date": datetime.now(UTC).isoformat(), "proof_hash": "d" * 64, "recipient_identifier": "pagos@example.com", "summary": "Pago Zelle a pagos@example.com"}
 
     response = await h.run("Te mando el comprobante", media_url="media-1")
 
@@ -335,7 +338,8 @@ async def test_valid_payment_proof(monkeypatch):
 async def test_invalid_payment_proof(monkeypatch):
     h = TranscriptHarness(monkeypatch)
     engine.orders.get_latest_open_order.return_value = _order(total=28.0)
-    engine.analyze_payment_screenshot.return_value = {"analyzed": True, "payment_method": "zelle", "amount": "20.00", "status": "completed", "recipient_identifier": "pagos@example.com", "summary": "Pago Zelle por $20"}
+    engine.orders.get_unambiguous_open_order.return_value = (_order(total=28.0), False)
+    engine.analyze_payment_screenshot.return_value = {"analyzed": True, "payment_method": "zelle", "amount": "20.00", "currency": "USD", "status": "completed", "confidence": "high", "reference": "TXN-TRANSCRIPT-124", "date": datetime.now(UTC).isoformat(), "proof_hash": "e" * 64, "recipient_identifier": "pagos@example.com", "summary": "Pago Zelle por $20"}
 
     response = await h.run("Te mando el comprobante", media_url="media-1")
 
@@ -348,6 +352,7 @@ async def test_invalid_payment_proof(monkeypatch):
 async def test_payment_proof_before_order_creation(monkeypatch):
     h = TranscriptHarness(monkeypatch)
     engine.orders.get_latest_open_order.return_value = None
+    engine.orders.get_unambiguous_open_order.return_value = (None, False)
     engine.analyze_payment_screenshot.return_value = {"analyzed": True, "payment_method": "zelle", "amount": "28.00", "status": "completed", "summary": "Pago Zelle"}
 
     response = await h.run("Te mando el comprobante", media_url="media-1")

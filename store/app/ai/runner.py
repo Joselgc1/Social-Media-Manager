@@ -4,6 +4,7 @@ Generic model and tool loop for internal AI agents.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -13,6 +14,7 @@ from typing import Any
 from app.ai.agents.base import AgentDefinition
 from app.ai.providers import AVAILABLE_MODELS, get_provider
 from app.ai.providers import list_providers as _list_providers
+from app.ai.providers.base import LLMResponse
 from app.ai.safety import sanitize_customer_facing_text
 from app.ai.tools.context import ToolExecutionContext
 from app.ai.tools.executor import execute_tool
@@ -20,6 +22,7 @@ from app.ai.tools.registry import get_tool_schemas
 from app.catalog.sheets import get_cached_catalog
 
 logger = logging.getLogger(__name__)
+AI_TURN_TIMEOUT_SECONDS = 120
 
 DEFAULT_FALLBACK_TEXT = "Lo siento, no pude generar una respuesta. ¿Puedes repetir tu pregunta?"
 
@@ -71,6 +74,18 @@ class AgentRunner:
         settings: dict,
         context: AgentRunContext,
     ) -> AgentRunResult:
+        """Bound the entire provider, fallback, and tool loop for one customer turn."""
+        async with asyncio.timeout(AI_TURN_TIMEOUT_SECONDS):
+            return await self._run(agent, system_prompt, messages, settings, context)
+
+    async def _run(
+        self,
+        agent: AgentDefinition,
+        system_prompt: str,
+        messages: list[dict],
+        settings: dict,
+        context: AgentRunContext,
+    ) -> AgentRunResult:
         provider_name, model, provider, was_fallback, response = await self._initial_response(
             agent=agent,
             system_prompt=system_prompt,
@@ -89,6 +104,7 @@ class AgentRunner:
         handoff_target = None
         escalated = False
         single_use_tool_results: dict[str, dict] = {}
+        tool_history: list[dict[str, Any]] = []
         allowed_tool_names = set(agent.tool_names)
         tool_schemas = get_tool_schemas(agent.tool_names)
         tool_context = ToolExecutionContext(
@@ -136,7 +152,7 @@ class AgentRunner:
                 }
             else:
                 result = await execute_tool(name, args, tool_context)
-                if name in {"create_order", "update_payment_status", "finalize_checkout", "request_agent_handoff"} and result.get("status") != "error":
+                if name in {"create_order", "update_payment_status", "finalize_checkout", "escalate_to_human", "request_agent_handoff"} and result.get("status") != "error":
                     single_use_tool_results[name] = result
             if name == "escalate_to_human":
                 requested_handoff = True
@@ -149,8 +165,15 @@ class AgentRunner:
                     extra={"agent": agent.name, "target_agent": handoff_target, "tool_round": rounds},
                 )
             tool_log.append({"name": name, "args": args, "result": result})
+            formatted_result = format_tool_result_for_model(name, result)
+            tool_history.append({
+                "id": tc_id,
+                "name": name,
+                "arguments": args,
+                "result": formatted_result,
+            })
 
-            if authorized and name == "send_interactive_buttons" and context.channel == "whatsapp":
+            if authorized and name == "send_interactive_buttons" and context.channel in {"whatsapp", "instagram"}:
                 interactive_payload = result
             if authorized and name == "send_catalog_pdf" and result.get("type") == "catalog_pdf":
                 catalog_pdf_payload = result
@@ -158,17 +181,20 @@ class AgentRunner:
                 product_image_payload = result
 
             tools_this_round = tool_schemas if rounds < agent.max_tool_rounds else None
-            response = await provider.continue_after_tool(
+            provider_name, model, provider, continued_with_fallback, response = await self._continue_response(
+                provider_name=provider_name,
                 model=model,
+                provider=provider,
+                agent=agent,
                 system_prompt=system_prompt,
                 messages=messages,
-                tool_call_id=tc_id,
-                tool_name=name,
-                tool_result=format_tool_result_for_model(name, result),
+                settings=settings,
+                tool_history=tool_history,
                 tools=tools_this_round,
-                temperature=_temperature(settings, agent),
-                max_tokens=settings.get("llm_max_tokens", 500),
+                last_tool_name=name,
+                last_tool_result=result,
             )
+            was_fallback = was_fallback or continued_with_fallback
             _add_usage(usage, response.usage)
 
         if interactive_payload:
@@ -193,6 +219,58 @@ class AgentRunner:
             requested_handoff=requested_handoff,
             handoff_target=handoff_target,
             escalated=escalated,
+        )
+
+    async def _continue_response(
+        self,
+        *,
+        provider_name: str,
+        model: str,
+        provider,
+        agent: AgentDefinition,
+        system_prompt: str,
+        messages: list[dict],
+        settings: dict,
+        tool_history: list[dict],
+        tools: list[dict] | None,
+        last_tool_name: str,
+        last_tool_result: dict,
+    ):
+        call = tool_history[-1]
+        kwargs = {
+            "system_prompt": system_prompt,
+            "messages": messages,
+            "tool_call_id": call["id"],
+            "tool_name": call["name"],
+            "tool_result": call["result"],
+            "tool_history": tool_history,
+            "tools": tools,
+            "temperature": _temperature(settings, agent),
+            "max_tokens": settings.get("llm_max_tokens", 500),
+        }
+        try:
+            response = await provider.continue_after_tool(model=model, **kwargs)
+            return provider_name, model, provider, False, response
+        except Exception as exc:
+            logger.error("Provider continuation failed for %s/%s: %s", provider_name, model, exc)
+
+        if settings.get("auto_fallback", True):
+            fallback_name = settings.get("fallback_provider", "anthropic")
+            fallback_model = settings.get("fallback_model", "claude-haiku-4-5")
+            try:
+                fallback_provider = self._get_provider(fallback_name)
+                response = await fallback_provider.continue_after_tool(model=fallback_model, **kwargs)
+                logger.info("Tool continuation fell back to %s/%s", fallback_name, fallback_model)
+                return fallback_name, fallback_model, fallback_provider, True, response
+            except Exception as exc:
+                logger.error("Fallback provider continuation failed for %s/%s: %s", fallback_name, fallback_model, exc)
+
+        return (
+            provider_name,
+            model,
+            provider,
+            True,
+            LLMResponse(text=_committed_tool_fallback_text(last_tool_name, last_tool_result)),
         )
 
     async def _initial_response(
@@ -258,6 +336,23 @@ def format_tool_result_for_model(tool_name: str, result: dict) -> str:
         "Usa estos datos solo para redactar una respuesta natural en español.\n"
         f"{json.dumps(result, ensure_ascii=False)}"
     )
+
+
+def _committed_tool_fallback_text(tool_name: str, result: dict) -> str:
+    """Acknowledge committed side effects when no provider can continue."""
+    if tool_name in {"create_order", "finalize_checkout"} and result.get("order_id"):
+        text = "Tu pedido fue registrado correctamente."
+        instructions = str(result.get("payment_instructions") or "").strip()
+        if instructions:
+            text = f"{text} {instructions}"
+        return text
+    if tool_name == "update_payment_status" and result.get("payment_status") == "proof_received":
+        return "Recibí y validé correctamente tu comprobante de pago."
+    if tool_name == "escalate_to_human" and result.get("status") == "escalated":
+        return "Te comuniqué con una persona del equipo. Te responderán lo antes posible."
+    if tool_name == "request_agent_handoff" and result.get("type") == "agent_handoff":
+        return "Voy a continuar ayudándote con esa solicitud."
+    return DEFAULT_FALLBACK_TEXT
 
 
 def clean_assistant_reply_text(text: str, catalog: list[dict[str, Any]] | None = None) -> str:

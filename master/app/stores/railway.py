@@ -40,8 +40,11 @@ async def _graphql(query: str, variables: dict | None = None) -> dict:
         )
         try:
             data = resp.json()
-        except Exception:
-            data = {}
+        except Exception as exc:
+            raise RuntimeError("Railway returned an invalid JSON response") from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError("Railway returned an invalid response payload")
 
         if resp.is_error:
             error_msg = None
@@ -54,7 +57,10 @@ async def _graphql(query: str, variables: dict | None = None) -> dict:
         if "errors" in data:
             error_msg = data["errors"][0].get("message", str(data["errors"]))
             raise RuntimeError(f"Railway API error: {error_msg}")
-        return data.get("data", {})
+        result = data.get("data")
+        if not isinstance(result, dict):
+            raise RuntimeError("Railway returned a successful response without data")
+        return result
 
 
 async def get_service_info(service_id: str) -> dict:
@@ -73,14 +79,15 @@ async def get_service_info(service_id: str) -> dict:
     return data.get("service", {})
 
 
-async def get_variables(service_id: str, environment_id: str) -> dict:
+async def get_variables(project_id: str, service_id: str, environment_id: str) -> dict:
     """Get all environment variables for a service in a given environment."""
     query = """
-    query($serviceId: String!, $environmentId: String!) {
-        variables(serviceId: $serviceId, environmentId: $environmentId)
+    query($projectId: String!, $serviceId: String!, $environmentId: String!) {
+        variables(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId)
     }
     """
     data = await _graphql(query, {
+        "projectId": project_id,
         "serviceId": service_id,
         "environmentId": environment_id,
     })
@@ -103,7 +110,7 @@ async def upsert_variables(
         variableCollectionUpsert(input: $input)
     }
     """
-    await _graphql(query, {
+    data = await _graphql(query, {
         "input": {
             "projectId": project_id,
             "serviceId": service_id,
@@ -112,7 +119,35 @@ async def upsert_variables(
             "skipDeploys": skip_deploys,
         },
     })
+    if data.get("variableCollectionUpsert") is not True:
+        raise RuntimeError("Railway did not confirm the variable update")
     logger.info(f"Upserted {len(variables)} variables on service {service_id}")
+    return True
+
+
+async def delete_variable(
+    project_id: str,
+    service_id: str,
+    environment_id: str,
+    name: str,
+) -> bool:
+    """Delete one service variable from a specific Railway environment."""
+    query = """
+    mutation($input: VariableDeleteInput!) {
+        variableDelete(input: $input)
+    }
+    """
+    data = await _graphql(query, {
+        "input": {
+            "projectId": project_id,
+            "serviceId": service_id,
+            "environmentId": environment_id,
+            "name": name,
+        },
+    })
+    if data.get("variableDelete") is not True:
+        raise RuntimeError("Railway did not confirm the variable deletion")
+    logger.info("Deleted variable %s from service %s", name, service_id)
     return True
 
 
@@ -147,8 +182,10 @@ async def redeploy_service(deployment_id: str) -> str:
     data = await _graphql(query, {"id": deployment_id})
     result = data.get("deploymentRedeploy") or {}
     new_id = result.get("id", "") if isinstance(result, dict) else ""
+    if not isinstance(new_id, str) or not new_id:
+        raise RuntimeError("Railway did not return a new deployment ID")
     logger.info(f"Triggered redeploy for deployment {deployment_id}")
-    return new_id or deployment_id
+    return new_id
 
 
 async def get_latest_deployment(service_id: str, environment_id: str) -> dict | None:

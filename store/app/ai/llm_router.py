@@ -15,6 +15,12 @@ from app.ai.routing import RouteDecision
 logger = logging.getLogger(__name__)
 
 ALLOWED_LLM_ROUTES = {"legacy", "sales", "checkout", "support"}
+LLM_ROUTE_INTENTS = {
+    "legacy": "ambiguous_general",
+    "sales": "ambiguous_sales",
+    "checkout": "ambiguous_checkout",
+    "support": "ambiguous_support",
+}
 MIN_LLM_ROUTE_CONFIDENCE = 0.6
 
 
@@ -74,18 +80,16 @@ def parse_llm_route_response(text: str) -> RouteDecision | None:
     if route not in ALLOWED_LLM_ROUTES:
         return None
 
-    intent = str(data.get("intent") or "general").strip().lower() or "general"
-    reason = str(data.get("reason") or "LLM router classified ambiguous message.").strip()
     confidence = _clamp_confidence(data.get("confidence"))
     if confidence < MIN_LLM_ROUTE_CONFIDENCE:
         logger.info("Low-confidence LLM router response; keeping deterministic route")
         return None
     return RouteDecision(
         route=route,  # type: ignore[arg-type]
-        intent=intent,
+        intent=LLM_ROUTE_INTENTS[route],
         confidence=confidence,
         source="llm_router",
-        reason=reason,
+        reason="LLM router selected an allowlisted route for an ambiguous message.",
     )
 
 

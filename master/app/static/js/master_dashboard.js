@@ -10,6 +10,7 @@ let selectedStoreId = null;
 let currentTab = 'overview';
 let costDays = 1;
 let usageDays = 1;
+let storeDetailRequestSeq = 0;
 const MOBILE_BREAKPOINT = 768;
 let lastMobileViewport = window.innerWidth < MOBILE_BREAKPOINT;
 const exchangeRateRefreshStatusByStore = new Map();
@@ -245,7 +246,7 @@ function renderStoreCards() {
         const statusClass = s.status === 'active' ? 'active' : s.status === 'paused' ? 'paused' : 'error';
         const lastSeen = s.last_seen ? new Date(s.last_seen).toLocaleString() : 'Never';
         return `
-            <div class="card store-card fade-in" onclick="selectStore('${s.id}')">
+            <div class="card store-card fade-in" onclick="selectStore(${jsArg(s.id)})">
                 <div class="flex items-center justify-between mb-3">
                     <h3 class="font-bold text-lg">${esc(s.name)}</h3>
                     <span class="status-dot ${statusClass}" title="${s.status}"></span>
@@ -287,19 +288,25 @@ async function selectStore(storeId) {
 
 async function loadStoreDetail() {
     if (!selectedStoreId) return;
+    const storeId = selectedStoreId;
+    const requestSeq = ++storeDetailRequestSeq;
     try {
         // Fetch store info, stats, and credentials in parallel
         const [store, stats, creds] = await Promise.all([
-            api(`/api/stores/${selectedStoreId}`),
-            api(`/api/stores/${selectedStoreId}/stats`).catch(() => ({})),
-            api(`/api/stores/${selectedStoreId}/credentials`),
+            api(`/api/stores/${storeId}`),
+            api(`/api/stores/${storeId}/stats`).catch(() => ({})),
+            api(`/api/stores/${storeId}/credentials`),
         ]);
+        if (selectedStoreId !== storeId || requestSeq !== storeDetailRequestSeq) return;
+        const storeIndex = stores.findIndex(item => item.id === storeId);
+        if (storeIndex !== -1) stores[storeIndex] = store;
         renderStoreDetail(store, stats, creds);
         // Load runtime settings, usage, and Railway status in parallel
-        const secondaryLoads = [loadRuntimeSettings(selectedStoreId), loadLLMUsage(selectedStoreId)];
-        if (store.railway_service_id) secondaryLoads.push(loadRailwayStatus(selectedStoreId));
+        const secondaryLoads = [loadRuntimeSettings(storeId), loadLLMUsage(storeId)];
+        if (store.railway_service_id) secondaryLoads.push(loadRailwayStatus(storeId));
         await Promise.all(secondaryLoads);
     } catch (e) {
+        if (selectedStoreId !== storeId || requestSeq !== storeDetailRequestSeq) return;
         toast('Error loading store detail: ' + e.message, 'error');
     }
 }
@@ -314,9 +321,9 @@ function renderStoreDetail(store, stats, creds) {
                 <p class="text-gray-500 dark:text-gray-400">Owner: ${esc(store.owner_name || '—')} &bull; ${esc(store.owner_contact || '—')}</p>
             </div>
             <div class="store-detail-actions flex gap-2">
-                ${store.app_url ? `<a href="${esc(store.app_url)}/admin/dashboard" target="_blank" class="btn btn-primary">Open Store Dashboard &rarr;</a>` : ''}
-                <button onclick="showEditStoreModal('${store.id}')" class="btn btn-secondary">Edit</button>
-                <button onclick="confirmDeleteStore('${store.id}', '${esc(store.name)}')" class="btn btn-danger">Delete</button>
+                ${safeStoreDashboardHref(store.app_url) ? `<a href="${safeStoreDashboardHref(store.app_url)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary">Open Store Dashboard &rarr;</a>` : ''}
+                <button onclick="showEditStoreModal(${jsArg(store.id)})" class="btn btn-secondary">Edit</button>
+                <button onclick="confirmDeleteStore(${jsArg(store.id)}, ${jsArg(store.name)})" class="btn btn-danger">Delete</button>
             </div>
         </div>
 
@@ -336,7 +343,7 @@ function renderStoreDetail(store, stats, creds) {
                 <div class="text-sm text-gray-500">Total Customers</div>
             </div>
             <div class="card text-center">
-                <span id="ai-status-badge" class="badge ${stats.ai_enabled === 'true' || stats.ai_enabled === true ? 'badge-green' : 'badge-red'} text-base cursor-pointer" onclick="toggleStoreAi('${store.id}')" title="Click to toggle AI on/off">
+                <span id="ai-status-badge" class="badge ${stats.ai_enabled === 'true' || stats.ai_enabled === true ? 'badge-green' : 'badge-red'} text-base cursor-pointer" onclick="toggleStoreAi(${jsArg(store.id)})" title="Click to toggle AI on/off">
                     AI ${stats.ai_enabled === 'true' || stats.ai_enabled === true ? 'ON' : 'OFF'}
                 </span>
                 <div class="text-sm text-gray-500 mt-1">${esc(stats.llm_provider || '?')} / ${esc(stats.llm_model || '?')} / ${esc(stats.ai_orchestration_mode || 'legacy')}</div>
@@ -351,7 +358,7 @@ function renderStoreDetail(store, stats, creds) {
             <div class="card" id="ai-settings-panel">
                 <div class="flex items-center justify-between mb-3">
                     <h3 class="font-bold text-lg">AI Settings</h3>
-                    <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+                    <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
                 </div>
                 <div id="ai-settings-content">
                     <p class="text-gray-500">Loading AI settings...</p>
@@ -360,13 +367,13 @@ function renderStoreDetail(store, stats, creds) {
             <div class="card" id="llm-usage-panel">
                 <div class="flex items-center justify-between mb-3">
                     <h3 class="font-bold text-lg" id="llm-usage-heading">LLM Usage (Today)</h3>
-                    <button onclick="loadLLMUsage('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+                    <button onclick="loadLLMUsage(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
                 </div>
                 <div id="llm-usage-content">
                     <p class="text-gray-500">Loading usage data...</p>
                 </div>
                 <div class="mt-4">
-                    <button onclick="openConversationViewer('${store.id}')" class="btn btn-primary w-full">View details</button>
+                <button onclick="openConversationViewer(${jsArg(store.id)})" class="btn btn-primary w-full">View details</button>
                 </div>
             </div>
         </div>
@@ -374,7 +381,7 @@ function renderStoreDetail(store, stats, creds) {
         <div class="card mb-4" id="scheduler-settings-panel">
             <div class="flex items-center justify-between mb-3">
                 <h3 class="font-bold text-lg">Scheduled Jobs</h3>
-                <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+                <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
             </div>
             <div id="scheduler-settings-content">
                 <p class="text-gray-500">Loading scheduler settings...</p>
@@ -384,7 +391,7 @@ function renderStoreDetail(store, stats, creds) {
         <div class="card mb-4" id="store-profile-settings-panel">
             <div class="flex items-center justify-between mb-3">
                 <h3 class="font-bold text-lg">Store Profile</h3>
-                <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+                <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
             </div>
             <div id="store-profile-settings-content">
                 <p class="text-gray-500">Loading store profile settings...</p>
@@ -395,8 +402,8 @@ function renderStoreDetail(store, stats, creds) {
             <div class="flex items-center justify-between mb-3">
                 <h3 class="font-bold text-lg">Exchange Rates</h3>
                 <div class="flex gap-2">
-                    <button onclick="loadRuntimeSettings('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
-                    <button id="exchange-rates-refresh-btn" onclick="refreshExchangeRates('${store.id}')" class="btn btn-primary text-xs">Update Now</button>
+                    <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
+                    <button id="exchange-rates-refresh-btn" onclick="refreshExchangeRates(${jsArg(store.id)})" class="btn btn-primary text-xs">Update Now</button>
                 </div>
             </div>
             <div id="exchange-rates-content">
@@ -409,8 +416,8 @@ function renderStoreDetail(store, stats, creds) {
             <div class="flex items-center justify-between mb-4">
                 <h3 class="font-bold text-lg">Environment Variables</h3>
                 <div class="flex gap-2">
-                    <button onclick="showAddCredentialModal('${store.id}')" class="btn btn-primary">+ Add Variable</button>
-                    ${creds.length > 0 && store.railway_service_id ? `<button onclick="deployCredentials('${store.id}')" class="btn btn-success" id="deploy-btn">Deploy to Railway</button>` : ''}
+                    <button onclick="showAddCredentialModal(${jsArg(store.id)})" class="btn btn-primary">+ Add Variable</button>
+                    ${creds.length > 0 && store.railway_service_id ? `<button onclick="deployCredentials(${jsArg(store.id)})" class="btn btn-success" id="deploy-btn">Deploy to Railway</button>` : ''}
                 </div>
             </div>
             ${renderGroupedCredentials(store.id, creds)}
@@ -420,7 +427,7 @@ function renderStoreDetail(store, stats, creds) {
         <div class="card mb-4" id="railway-section">
             <div class="flex items-center justify-between mb-3">
                 <h3 class="font-bold text-lg">Railway Deployment</h3>
-                <button onclick="loadRailwayStatus('${store.id}')" class="btn btn-secondary text-xs">Refresh</button>
+                <button onclick="loadRailwayStatus(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
             </div>
             <div id="railway-status-content">
                 ${store.railway_service_id ?
@@ -466,7 +473,7 @@ function renderApiKeysPanel(store, stats, creds) {
                 <div class="text-sm text-gray-500 dark:text-gray-400 font-mono mb-3">
                     ${isSet ? esc(credObj.value_masked) : 'No key configured'}
                 </div>
-                <button onclick="showEditCredentialModal('${store.id}', '${envKey}')" class="btn ${isSet ? 'btn-secondary' : 'btn-primary'} text-xs w-full">
+                <button onclick="showEditCredentialModal(${jsArg(store.id)}, ${jsArg(envKey)})" class="btn ${isSet ? 'btn-secondary' : 'btn-primary'} text-xs w-full">
                     ${isSet ? 'Update Key' : 'Set Key'}
                 </button>
             </div>`;
@@ -522,8 +529,8 @@ function renderGroupedCredentials(storeId, creds) {
             <div class="cred-row">
                 <span class="font-mono text-sm font-semibold flex-1">${esc(c.key)}</span>
                 <span class="text-sm text-gray-500 font-mono">${esc(c.value_masked)}</span>
-                <button onclick="showEditCredentialModal('${storeId}', '${esc(c.key)}')" class="btn btn-secondary text-xs">Edit</button>
-                <button onclick="confirmDeleteCredential('${storeId}', '${esc(c.key)}')" class="btn btn-danger text-xs">Delete</button>
+                <button onclick="showEditCredentialModal(${jsArg(storeId)}, ${jsArg(c.key)})" class="btn btn-secondary text-xs">Edit</button>
+                <button onclick="confirmDeleteCredential(${jsArg(storeId)}, ${jsArg(c.key)})" class="btn btn-danger text-xs">Delete</button>
             </div>`;
     }
 
@@ -592,20 +599,23 @@ function showEditStoreModal(storeId) {
     if (!store) return;
     showModal(`
         <h3 class="font-bold text-lg mb-4">Edit Store: ${esc(store.name)}</h3>
-        <form onsubmit="submitEditStore(event, '${storeId}')">
+        <form onsubmit="submitEditStore(event, ${jsArg(storeId)})">
             <div class="grid gap-3">
                 <div><label class="block text-sm font-semibold mb-1">Store Name</label>
-                    <input name="name" class="w-full" value="${esc(store.name)}"></div>
+                    <input name="name" class="w-full" value="${escAttr(store.name)}"></div>
                 <div><label class="block text-sm font-semibold mb-1">Owner Name</label>
-                    <input name="owner_name" class="w-full" value="${esc(store.owner_name || '')}"></div>
+                    <input name="owner_name" class="w-full" value="${escAttr(store.owner_name || '')}"></div>
                 <div><label class="block text-sm font-semibold mb-1">Owner Contact</label>
-                    <input name="owner_contact" class="w-full" value="${esc(store.owner_contact || '')}"></div>
+                    <input name="owner_contact" class="w-full" value="${escAttr(store.owner_contact || '')}"></div>
                 <div><label class="block text-sm font-semibold mb-1">App URL</label>
-                    <input name="app_url" class="w-full" value="${esc(store.app_url || '')}"></div>
+                    <input name="app_url" class="w-full" value="${escAttr(store.app_url || '')}"></div>
+                <div><label class="block text-sm font-semibold mb-1">Sensitive Database Connection URL</label>
+                    <input name="db_url" type="password" class="w-full" autocomplete="new-password" placeholder="Leave blank to keep the current URL">
+                    <p class="text-xs text-gray-500 mt-1">Use the resolved Store PostgreSQL URL, never a Railway reference expression.</p></div>
                 <div><label class="block text-sm font-semibold mb-1">Railway Service ID</label>
-                    <input name="railway_service_id" class="w-full" value="${esc(store.railway_service_id || '')}"></div>
+                    <input name="railway_service_id" class="w-full" value="${escAttr(store.railway_service_id || '')}"></div>
                 <div><label class="block text-sm font-semibold mb-1">Railway Project ID</label>
-                    <input name="railway_project_id" class="w-full" value="${esc(store.railway_project_id || '')}"></div>
+                    <input name="railway_project_id" class="w-full" value="${escAttr(store.railway_project_id || '')}"></div>
                 <div><label class="block text-sm font-semibold mb-1">Status</label>
                     <select name="status" class="w-full">
                         <option value="active" ${store.status === 'active' ? 'selected' : ''}>Active</option>
@@ -628,7 +638,7 @@ async function submitEditStore(e, storeId) {
         await apiPut(`/api/stores/${storeId}`, data);
         closeModal();
         toast('Store updated!');
-        loadStores();
+        await Promise.all([loadStores(), loadStoreDetail()]);
     } catch (err) {
         toast('Error: ' + err.message, 'error');
     }
@@ -657,19 +667,19 @@ function showAddCredentialModal(storeId) {
         'KOMMO_AI_MODE_FIELD_ID', 'KOMMO_AI_ACTIVE_ENUM_ID', 'KOMMO_AI_HUMAN_ENUM_ID',
         'KOMMO_AI_PAUSED_ENUM_ID', 'KOMMO_DEFAULT_RESPONSIBLE_USER_ID',
         'GOOGLE_SHEETS_CREDENTIALS_B64', 'PRODUCT_SHEET_ID',
-        'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_CHAT_ID',
+        'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_CHAT_ID', 'TELEGRAM_WEBHOOK_SECRET',
         'STORE_NAME', 'OWNER_NAME', 'APP_BASE_URL',
         'ADMIN_PASSWORD', 'SYSTEM_PROMPT_OVERRIDE', 'LLM_MANAGED_EXTERNALLY',
     ];
     showModal(`
         <h3 class="font-bold text-lg mb-4">Add Credential</h3>
-        <form onsubmit="submitCredential(event, '${storeId}')">
+        <form onsubmit="submitCredential(event, ${jsArg(storeId)})">
             <div class="grid gap-3">
                 <div>
                     <label class="block text-sm font-semibold mb-1">Key</label>
                     <select name="key_select" class="w-full mb-2" onchange="document.querySelector('[name=key]').value = this.value">
                         <option value="">— Select common key or type below —</option>
-                        ${commonKeys.map(k => `<option value="${k}">${k}</option>`).join('')}
+                        ${commonKeys.map(k => `<option value="${escAttr(k)}">${esc(k)}</option>`).join('')}
                     </select>
                     <input name="key" required class="w-full" placeholder="ENV_VAR_NAME">
                 </div>
@@ -686,8 +696,8 @@ function showAddCredentialModal(storeId) {
 function showEditCredentialModal(storeId, key) {
     showModal(`
         <h3 class="font-bold text-lg mb-4">Update: ${esc(key)}</h3>
-        <form onsubmit="submitCredential(event, '${storeId}')">
-            <input type="hidden" name="key" value="${esc(key)}">
+        <form onsubmit="submitCredential(event, ${jsArg(storeId)})">
+            <input type="hidden" name="key" value="${escAttr(key)}">
             <div class="mb-3">
                 <label class="block text-sm font-semibold mb-1">New Value</label>
                 <textarea name="value" required class="w-full" rows="3" placeholder="New value..."></textarea>
@@ -827,6 +837,7 @@ async function refreshExchangeRates(storeId) {
 
 // ── Runtime Settings & Usage ───────────────────────────────
 async function loadRuntimeSettings(storeId) {
+    const requestStoreId = String(storeId);
     const aiContainer = document.getElementById('ai-settings-content');
     const schedulerContainer = document.getElementById('scheduler-settings-content');
     const storeProfileContainer = document.getElementById('store-profile-settings-content');
@@ -835,24 +846,25 @@ async function loadRuntimeSettings(storeId) {
 
     try {
         const data = await api(`/api/stores/${storeId}/settings`);
+        if (selectedStoreId !== requestStoreId) return;
         const s = data.settings || {};
         const models = data.available_models || {};
 
         const providerOptions = Object.keys(models).map(p =>
-            `<option value="${p}" ${(s.llm_provider || 'openai') === p ? 'selected' : ''}>${p}</option>`
+            `<option value="${escAttr(p)}" ${(s.llm_provider || 'openai') === p ? 'selected' : ''}>${esc(p)}</option>`
         ).join('');
 
         const currentProvider = s.llm_provider || 'openai';
         const modelOptions = (models[currentProvider] || []).map(m =>
-            `<option value="${m}" ${(s.llm_model || '') === m ? 'selected' : ''}>${m}</option>`
+            `<option value="${escAttr(m)}" ${(s.llm_model || '') === m ? 'selected' : ''}>${esc(m)}</option>`
         ).join('');
 
         const fbProvider = s.fallback_provider || 'anthropic';
         const fbProviderOptions = Object.keys(models).map(p =>
-            `<option value="${p}" ${fbProvider === p ? 'selected' : ''}>${p}</option>`
+            `<option value="${escAttr(p)}" ${fbProvider === p ? 'selected' : ''}>${esc(p)}</option>`
         ).join('');
         const fbModelOptions = (models[fbProvider] || []).map(m =>
-            `<option value="${m}" ${(s.fallback_model || '') === m ? 'selected' : ''}>${m}</option>`
+            `<option value="${escAttr(m)}" ${(s.fallback_model || '') === m ? 'selected' : ''}>${esc(m)}</option>`
         ).join('');
         const orchestrationMode = s.ai_orchestration_mode || 'legacy';
 
@@ -913,7 +925,7 @@ async function loadRuntimeSettings(storeId) {
                     </select>
                     <p class="text-xs text-gray-500 mt-1">Roll out in order: legacy, shadow, then multi_agent. Legacy is the rollback path.</p>
                 </div>
-                <button onclick="saveAiSettings('${storeId}')" class="btn btn-primary w-full">Save AI Settings</button>
+                <button onclick="saveAiSettings(${jsArg(storeId)})" class="btn btn-primary w-full">Save AI Settings</button>
             </div>`;
         }
 
@@ -951,7 +963,7 @@ async function loadRuntimeSettings(storeId) {
                         </div>
                     </div>
                 </div>
-                <button onclick="saveSchedulerSettings('${storeId}')" class="btn btn-primary w-full">Save Scheduled Jobs</button>
+                <button onclick="saveSchedulerSettings(${jsArg(storeId)})" class="btn btn-primary w-full">Save Scheduled Jobs</button>
             </div>`;
         }
 
@@ -960,10 +972,10 @@ async function loadRuntimeSettings(storeId) {
             <div class="space-y-3">
                 <div>
                     <label class="block text-xs text-gray-500 mb-1">Public WhatsApp Number</label>
-                    <input id="store-phone-number" type="text" value="${esc(s.store_phone_number || '')}" class="w-full" placeholder="+58 412-1234567">
+                    <input id="store-phone-number" type="text" value="${escAttr(s.store_phone_number || '')}" class="w-full" placeholder="+58 412-1234567">
                     <p class="text-xs text-gray-500 mt-1">Used in public Instagram comment fallback replies. Leave empty to invite only to DM.</p>
                 </div>
-                <button onclick="saveStoreProfileSettings('${storeId}')" class="btn btn-primary w-full">Save Store Profile</button>
+                <button onclick="saveStoreProfileSettings(${jsArg(storeId)})" class="btn btn-primary w-full">Save Store Profile</button>
             </div>`;
         }
 
@@ -977,6 +989,7 @@ async function loadRuntimeSettings(storeId) {
         // Store available models globally for provider change handlers
         window._llmModels = models;
     } catch (e) {
+        if (selectedStoreId !== requestStoreId) return;
         if (aiContainer) {
             aiContainer.innerHTML = `<p class="text-red-500">Could not load AI settings: ${esc(e.message)}</p>`;
         }
@@ -1095,6 +1108,7 @@ function setUsageDays(d) {
 }
 
 async function loadLLMUsage(storeId) {
+    const requestStoreId = String(storeId);
     const container = document.getElementById('llm-usage-content');
     const heading = document.getElementById('llm-usage-heading');
     if (!container) return;
@@ -1104,6 +1118,7 @@ async function loadLLMUsage(storeId) {
 
     try {
         const data = await api(`/api/stores/${storeId}/llm-usage?days=${usageDays}`);
+        if (selectedStoreId !== requestStoreId) return;
 
         if (data.error) {
             container.innerHTML = `<p class="text-red-500">${esc(data.error)}</p>`;
@@ -1145,6 +1160,7 @@ async function loadLLMUsage(storeId) {
                 </tfoot>
             </table>`;
     } catch (e) {
+        if (selectedStoreId !== requestStoreId) return;
         container.innerHTML = `<p class="text-red-500">Could not load usage: ${esc(e.message)}</p>`;
     }
 }
@@ -1168,11 +1184,13 @@ async function deployCredentials(storeId) {
 }
 
 async function loadRailwayStatus(storeId) {
+    const requestStoreId = String(storeId);
     const container = document.getElementById('railway-status-content');
     if (!container) return;
 
     try {
         const data = await api(`/api/stores/${storeId}/railway/status`);
+        if (selectedStoreId !== requestStoreId) return;
 
         if (data.status === 'not_configured') {
             container.innerHTML = `<p class="text-yellow-600">Railway API token not configured. Set RAILWAY_API_TOKEN in master .env.</p>`;
@@ -1201,6 +1219,7 @@ async function loadRailwayStatus(storeId) {
                 ${warning ? `<p class="mt-3 text-sm text-yellow-600">${esc(warning)}</p>` : ''}`;
         }
     } catch (e) {
+        if (selectedStoreId !== requestStoreId) return;
         container.innerHTML = `<p class="text-red-500">Could not load Railway status: ${esc(e.message)}</p>`;
     }
 }
@@ -1555,6 +1574,26 @@ function esc(s) {
     const d = document.createElement('div');
     d.textContent = s || '';
     return d.innerHTML;
+}
+
+function escAttr(s) {
+    return esc(String(s ?? '')).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function jsArg(value) {
+    // Inline handlers are HTML attributes, so escape the serialized JS string for that context.
+    return escAttr(JSON.stringify(String(value ?? '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e'));
+}
+
+function safeStoreDashboardHref(appUrl) {
+    if (!appUrl) return '';
+    try {
+        const url = new URL('/admin/dashboard', String(appUrl));
+        if (!['http:', 'https:'].includes(url.protocol)) return '';
+        return escAttr(url.toString());
+    } catch (_) {
+        return '';
+    }
 }
 
 // ── Init ────────────────────────────────────────────────────

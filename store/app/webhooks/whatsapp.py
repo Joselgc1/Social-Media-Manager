@@ -6,8 +6,8 @@ normalizes them, and routes them through the AI engine.
 
 import hashlib
 import hmac
+import json
 import logging
-import time
 from contextlib import suppress
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -16,47 +16,18 @@ from app.admin.notify import notify_owner
 from app.ai.engine import generate_response
 from app.channels.whatsapp_sender import mark_as_read, send_document, send_image, send_interactive_buttons, send_text
 from app.config import get_config
-from app.webhooks.inbound_buffer import enqueue_inbound_message
+from app.crm import conversations
+from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-_PROCESSED_MESSAGE_IDS: dict[str, float] = {}
-_PROCESSED_MESSAGE_TTL_SECONDS = 1800
+_APOLOGY_TEXT = "Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo en un momento? 🙏"
 
 
 def _mask_sender(sender: str) -> str:
     if len(sender) <= 4:
         return sender
     return f"{sender[:2]}***{sender[-2:]}"
-
-
-def _is_duplicate_message(message_id: str) -> bool:
-    if not message_id:
-        return False
-
-    now = time.time()
-    expired = [
-        mid for mid, seen_at in _PROCESSED_MESSAGE_IDS.items()
-        if (now - seen_at) > _PROCESSED_MESSAGE_TTL_SECONDS
-    ]
-    for mid in expired:
-        _PROCESSED_MESSAGE_IDS.pop(mid, None)
-
-    if message_id in _PROCESSED_MESSAGE_IDS:
-        return True
-
-    _PROCESSED_MESSAGE_IDS[message_id] = now
-    return False
-
-
-async def _safe_send_apology(sender: str):
-    try:
-        await send_text(
-            to=sender,
-            text="Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo en un momento? 🙏",
-        )
-    except Exception as send_error:
-        logger.error(f"Failed to send WhatsApp fallback reply to {_mask_sender(sender)}: {send_error}")
 
 
 async def _notify_delivery_failure(sender: str, detail: str):
@@ -132,12 +103,8 @@ async def _process_message(message: dict, value: dict):
     Extracts the sender, text, and media, then routes to the AI engine.
     """
     sender = message.get("from", "")  # Phone number (e.g., "58412XXXXXXX")
-    msg_id = message.get("id", "")
+    msg_id = message.get("id", "") or _message_fingerprint(message)
     msg_type = message.get("type", "")
-
-    if _is_duplicate_message(msg_id):
-        logger.info(f"Ignoring duplicate WhatsApp message {msg_id} from {_mask_sender(sender)}")
-        return
 
     # Extract the display name from contacts if available
     contacts = value.get("contacts", [])
@@ -179,24 +146,34 @@ async def _process_message(message: dict, value: dict):
 
     logger.info(f"WhatsApp message received from {_mask_sender(sender)} ({msg_type})")
 
-    # Mark the message as read (blue checkmarks)
-    with suppress(Exception):
-        await mark_as_read(msg_id)
-
-    await enqueue_inbound_message(
+    created = await enqueue_inbound_message(
         channel="whatsapp",
         sender_id=sender,
+        message_id=msg_id,
         text=text,
         media_url=media_url,
         customer_profile={
             "display_name": display_name,
             "phone": sender,
         },
-        processor=_deliver_ai_response,
     )
+    if not created:
+        logger.info("Ignoring duplicate WhatsApp message %s from %s", msg_id, _mask_sender(sender))
+        return
+
+    # Mark read only after the delivery is durably committed.
+    with suppress(Exception):
+        await mark_as_read(msg_id)
 
 
-async def _deliver_ai_response(sender: str, text: str, media_url: str | None, customer_profile: dict):
+async def _deliver_ai_response(
+    sender: str,
+    text: str,
+    media_url: str | None,
+    customer_profile: dict,
+    inbound_job_id: str = "",
+    lease_token: str = "",
+):
     # Route through the AI engine
     try:
         result = await generate_response(
@@ -205,10 +182,17 @@ async def _deliver_ai_response(sender: str, text: str, media_url: str | None, cu
             message_text=text,
             media_url=media_url,
             customer_profile=customer_profile,
+            persist_assistant_message=False,
+            persist_user_before_response=True,
+            message_source_id=inbound_job_id or None,
         )
     except Exception as e:
         logger.exception(f"Error generating WhatsApp response for {_mask_sender(sender)}: {e}")
-        await _safe_send_apology(sender)
+        try:
+            await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=_APOLOGY_TEXT)
+        except Exception as send_error:
+            logger.error(f"Failed to send WhatsApp fallback reply to {_mask_sender(sender)}: {send_error}")
+            raise
         return
 
     if result.get("paused"):
@@ -218,39 +202,77 @@ async def _deliver_ai_response(sender: str, text: str, media_url: str | None, cu
     ):
         return
 
+    delivered_parts = []
     try:
         if result.get("catalog_pdf") and result["catalog_pdf"].get("type") == "catalog_pdf":
             pdf_url = f"{get_config().app_base_url}/static/catalog/catalog.pdf"
             follow_up = (result.get("text") or result["catalog_pdf"].get("caption") or "").strip()
-            await send_document(
+            await _send_with_delivery_record(
+                send_document,
+                inbound_job_id,
+                lease_token,
                 to=sender,
                 document_url=pdf_url,
                 filename="Catalogo VS.pdf",
                 caption="",
             )
+            delivered_parts.append("[Catálogo PDF enviado]")
             if follow_up:
-                await send_text(to=sender, text=follow_up)
+                await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=follow_up)
+                delivered_parts.append(follow_up)
         elif result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
-            await send_interactive_buttons(
+            await _send_with_delivery_record(
+                send_interactive_buttons,
+                inbound_job_id,
+                lease_token,
                 to=sender,
                 body_text=result["interactive"]["body_text"],
                 buttons=result["interactive"]["buttons"],
             )
+            delivered_parts.append(result["interactive"]["body_text"])
         elif result.get("product_image") and result["product_image"].get("type") == "product_image":
             caption = result["product_image"].get("caption", "")
-            await send_image(
+            await _send_with_delivery_record(
+                send_image,
+                inbound_job_id,
+                lease_token,
                 to=sender,
                 image_url=result["product_image"]["image_url"],
                 caption=caption,
             )
+            delivered_parts.append(caption.strip() or "[Imagen de producto enviada]")
             follow_up = (result.get("text") or "").strip()
             if follow_up and follow_up != caption.strip():
-                await send_text(to=sender, text=follow_up)
+                await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=follow_up)
+                delivered_parts.append(follow_up)
         elif result.get("text"):
-            await send_text(to=sender, text=result["text"])
+            await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender, text=result["text"])
+            delivered_parts.append(result["text"])
     except Exception as e:
         logger.exception(f"Error sending WhatsApp response to {_mask_sender(sender)}: {e}")
         await _notify_delivery_failure(sender, str(e))
+        raise
+
+    if delivered_parts:
+        await _store_delivered_assistant_message(result, "\n".join(delivered_parts), inbound_job_id)
+
+
+async def _send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
+    return await send_with_delivery_record(send_func, inbound_job_id, lease_token, **kwargs)
+
+
+async def _store_delivered_assistant_message(result: dict, content: str, source_id: str) -> None:
+    try:
+        await conversations.store_message(
+            customer_id=result["customer_id"],
+            role="assistant",
+            content=content,
+            channel="whatsapp",
+            function_calls=result.get("function_calls"),
+            source_id=source_id or None,
+        )
+    except Exception:
+        logger.exception("Failed to persist delivered WhatsApp response for job %s", source_id)
 
 
 # ── Signature verification ───────────────────────────────────
@@ -270,3 +292,8 @@ def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bo
     ).hexdigest()
 
     return hmac.compare_digest(expected, signature_header)
+
+
+def _message_fingerprint(message: dict) -> str:
+    canonical = json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "fallback-" + hashlib.sha256(canonical.encode()).hexdigest()

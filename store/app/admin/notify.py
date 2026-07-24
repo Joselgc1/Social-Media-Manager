@@ -8,6 +8,7 @@ import logging
 import httpx
 
 from app.config import get_config
+from app.log_redaction import install_secret_redaction_filter
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ async def notify_owner(message: str):
     Silently skips if Telegram is not configured or unreachable.
     """
     config = get_config()
+    install_secret_redaction_filter()
 
     if not config.telegram_bot_token or not config.telegram_admin_chat_id:
         logger.debug("Telegram not configured, skipping notification.")

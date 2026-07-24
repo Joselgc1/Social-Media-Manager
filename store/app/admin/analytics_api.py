@@ -64,7 +64,9 @@ async def daily_trends(days: int = 14):
                SUM(unique_customers) as unique_customers,
                SUM(total_orders) as orders,
                SUM(total_revenue) as revenue,
-               AVG(avg_response_ms)::int as avg_response_ms,
+               AVG(avg_response_ms) FILTER (
+                   WHERE provider != 'all' AND avg_response_ms > 0
+               )::int as avg_response_ms,
                SUM(estimated_cost_usd) as llm_cost
         FROM daily_analytics
         WHERE date >= :since

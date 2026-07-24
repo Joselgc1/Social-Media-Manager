@@ -12,19 +12,15 @@ This guide has 7 parts. Part 1 sets up the master service infrastructure. Part 2
 
 The master service needs its own database, encryption key, and authentication secret. It does NOT share a database with any store.
 
-### 1.1 Master database (Supabase)
+### 1.1 Master Railway PostgreSQL Database
 
-Go to supabase.com and create a **new project** (separate from any store project). Name it something like "master-control-plane." Pick the same region as your store deployments.
-
-Once created, go to Settings > Database and copy the connection string. Use the **Session Pooler** URL (port 6543) to avoid network issues:
+In the same Railway project and environment, add a separate PostgreSQL service named `MasterPostgres`. Deploy Master with root directory `master/`, then set:
 
 ```text
-postgresql://postgres.xxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+DATABASE_URL=${{MasterPostgres.DATABASE_URL}}
 ```
 
-This goes in the master `.env` as `DATABASE_URL`.
-
-Now run the master schema migration. Go to the SQL Editor in Supabase and paste the entire contents of `master/migrations/001_master_schema.sql`. Click "Run." This creates three tables: `stores`, `store_credentials`, and `master_audit_log`.
+`master/railway.toml` runs `python scripts/migrate.py` before every deployment. The idempotent migration failure blocks activation of the new deployment. Run `cd master && python scripts/migrate.py` locally with a normal PostgreSQL URL. Store and Master schemas remain separate. See [Railway PostgreSQL Deployment](../docs/RAILWAY_POSTGRES.md) for the full four-service setup, backups, and cutover procedure.
 
 ### 1.2 Generate the encryption key
 
@@ -48,6 +44,8 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 Copy the output. This goes in `.env` as `MASTER_SECRET_KEY`.
 
+The master fails startup if this secret is empty, is a documented placeholder, or is shorter than 32 characters. It also validates `ENCRYPTION_KEY` as a Fernet key before connecting to the database.
+
 ### 1.4 Configure master environment
 
 ```bash
@@ -58,7 +56,7 @@ cp .env.example .env
 Fill in the values:
 
 ```ini
-DATABASE_URL=postgresql://postgres.xxxx:password@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+DATABASE_URL=postgresql://postgres:password@localhost:5432/master_db
 MASTER_SECRET_KEY=your-generated-secret-key
 ENCRYPTION_KEY=your-generated-fernet-key
 RAILWAY_API_TOKEN=             # Optional unless using Railway deploys from master
@@ -145,7 +143,7 @@ Verify:
 
 ### 2.4 Test endpoints reference
 
-> **Note:** Test endpoints (`/test/`) are only available when `APP_BASE_URL` contains `localhost` or `127.0.0.1`. They return 404 in production.
+> **Note:** Test endpoints (`/test/`) are only available when the required `APP_BASE_URL` uses an exact loopback hostname. They return 404 in production.
 
 ```bash
 # Quick checks (no auth required — localhost only)
@@ -216,17 +214,17 @@ Add environment variables in the Variables tab:
 
 | Variable                        | Value                                              |
 | ------------------------------- | -------------------------------------------------- |
-| `DATABASE_URL`                  | Your master Supabase connection string (port 6543) |
+| `DATABASE_URL`                  | `${{MasterPostgres.DATABASE_URL}}`                 |
 | `MASTER_SECRET_KEY`             | Your generated secret key                          |
 | `ENCRYPTION_KEY`                | Your generated Fernet key                          |
 | `RAILWAY_API_TOKEN`             | Your Railway API token (see Part 5.6)              |
-| `APP_BASE_URL`                  | Will be set after first deploy (Railway URL)       |
+| `APP_BASE_URL`                  | Your generated Railway service URL (required)      |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `300`                                              |
+| `HEALTH_CHECK_MAX_CONCURRENT`   | `10`                                               |
 
 
-Deploy. Once live, get the Railway URL (e.g., `https://master-control-plane-production.up.railway.app`).
-
-Update `APP_BASE_URL` in Railway variables to this URL.
+Set `APP_BASE_URL` to the Railway-generated service URL (for example,
+`https://master-control-plane-production.up.railway.app`) before deploying.
 
 ### 3.3 Verify deployment
 
@@ -262,7 +260,7 @@ You need:
 - **Owner name**: e.g., "Carlos"
 - **Owner contact**: Phone number or email
 - **App URL**: The Railway URL of the store (e.g., `https://vs-chatbot-production.up.railway.app`)
-- **Database URL**: The store's Supabase connection string (from the store's `.env`)
+- **Database URL**: The resolved StorePostgres connection URL, never a literal Railway reference expression
 
 ### 4.2 Register via the dashboard
 
@@ -273,7 +271,7 @@ You need:
     - Owner Name: `Carlos`
     - Owner Contact: `+58 412 123 4567`
     - App URL: `https://vs-chatbot-production.up.railway.app`
-    - Database URL: `postgresql://postgres:...@db.xyz.supabase.co:6543/postgres`
+    - Database URL: the resolved private StorePostgres URL
 4. Click **"Add Store"**
 
 The store card should appear on the overview with live stats (today's chats, orders, customers, AI status).
@@ -291,7 +289,7 @@ Click **"+ Add Credential"** and add each one:
 | `OPENAI_API_KEY` | sk-... |
 | `ANTHROPIC_API_KEY` | sk-ant-... |
 | `ADMIN_PASSWORD` | Store dashboard password |
-| `DATABASE_URL` | Store Supabase URL |
+| `DATABASE_URL` | Resolved StorePostgres URL |
 | `GOOGLE_SHEETS_CREDENTIALS_B64` | Catalog service account JSON, base64 encoded |
 | `PRODUCT_SHEET_ID` | Store catalog sheet ID |
 | `STORE_NAME` | Store display name |
@@ -343,7 +341,7 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), plus either the Meta section 1.7 or the Kommo migration guide, but for the new store's accounts:
 
-1. **New Supabase project** (e.g., "store-maria"). Run the consolidated `store/migrations/001_schema.sql`.
+1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `store/migrations/001_schema.sql`. Use `002_consolidated_upgrade.sql` only for a pre-consolidation recovery case.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
 4. **Channel backend:** choose either direct Meta credentials or Kommo channel/private integration credentials for this store.
@@ -357,12 +355,13 @@ Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.
 Either way, set the Railway service root directory to `store/`, and add all environment variables for the new store. Key variables to customize:
 
 ```ini
-DATABASE_URL=postgresql://...          # NEW Supabase project
+DATABASE_URL=${{StorePostgres.DATABASE_URL}}
 CHANNEL_BACKEND=meta                   # Or kommo
 WHATSAPP_ACCESS_TOKEN=...              # NEW phone number token
 WHATSAPP_PHONE_NUMBER_ID=...           # NEW phone number ID
 TELEGRAM_BOT_TOKEN=...                 # NEW Telegram bot
 TELEGRAM_ADMIN_CHAT_ID=...             # Store owner's Telegram ID
+TELEGRAM_WEBHOOK_SECRET=...            # Random URL-safe secret sent by Telegram
 GOOGLE_SHEETS_CREDENTIALS_B64=...      # Same or new service account
 PRODUCT_SHEET_ID=...                   # NEW Google Sheet
 STORE_NAME=Tienda de Maria             # Customized per store
@@ -583,7 +582,7 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 [ ] Master dashboard login accepts MASTER_SECRET_KEY -> sets cookie and redirects to /dashboard
 [ ] Master dashboard with valid cookie -> loads cleanly
 [ ] Master API without Bearer header -> 401
-[ ] Credentials in master DB are encrypted (check directly in Supabase)
+[ ] Credentials in master DB are encrypted (check with approved PostgreSQL administration tooling)
 [ ] Store dashboards with ADMIN_PASSWORD are protected (cookie-based after first login)
 [ ] Store admin API endpoints require Bearer header or session cookie
 [ ] Credential values are never returned in plaintext via API (only masked)
@@ -654,13 +653,13 @@ Testing (localhost only — returns 404 in production):
 
 ```text
 Master Control Plane (1 deployment)
-  ├── Master Supabase DB (stores registry, encrypted credentials, audit log)
+  ├── Master PostgreSQL database (stores registry, encrypted credentials, audit log)
   ├── Dashboard: monitor all stores, manage AI settings, view costs, deploy changes
   ├── LLM control: set provider/model/orchestration per store, track platform-wide costs
   └── Health checker: pings each store every 5 minutes
 
 Store A (1 deployment)                   Store B (1 deployment)
-  ├── Own Supabase DB                    ├── Own Supabase DB
+  ├── Own PostgreSQL database             ├── Own PostgreSQL database
   ├── Own channel backend                ├── Own channel backend
   │   (Meta or Kommo)                    │   (Meta or Kommo)
   ├── Own Telegram bot                   ├── Own Telegram bot
@@ -676,11 +675,11 @@ Store A (1 deployment)                   Store B (1 deployment)
 | Service                        | Monthly cost |
 | ------------------------------ | ------------ |
 | Railway deployment             | $5-10        |
-| Supabase (free tier)           | $0           |
+| Railway PostgreSQL             | Railway plan |
 | LLM APIs (6-60 msgs/day)       | $5-10        |
 | **Total per store**            | **$10-20**   |
 | Master Control Plane (Railway) | $5           |
-| Master Supabase (free tier)    | $0           |
+| MasterPostgres                 | Railway plan |
 
 
 ---
@@ -688,13 +687,13 @@ Store A (1 deployment)                   Store B (1 deployment)
 ## Common issues and fixes
 
 - **"401 Invalid or missing authentication token"** on master dashboard: Open `/login`, sign in with `MASTER_SECRET_KEY`, and let the browser create the session cookie. If the cookie expired (24 hours), sign in again. API calls still require `Authorization: Bearer YOUR_MASTER_SECRET_KEY`.
-- **Store card shows "Stats unavailable"**: The master can't connect to the store's database. Verify the DB URL is correct. Use the Session Pooler URL (port 6543). Check that the store's Supabase project allows connections from the master's IP/network.
-- **"MaxClientsInSessionMode" / "max clients reached" when loading the dashboard**: The dashboard requests stats for every store at once, and each request opens a short-lived connection to that store's database. Supabase's **Session** pooler only allows a small number of concurrent clients per pool. If the store app is also running (it holds its own pool slots), parallel stats calls can exceed the limit. The master caps concurrent stats queries and uses a single connection per request; if you still hit the limit, set `STORE_STATS_MAX_CONCURRENT=1` or `2` in the master's `.env`, or register fewer simultaneous stores during local testing.
+- **Store card shows "Stats unavailable"**: The master cannot connect to the registered Store PostgreSQL URL. Confirm it is resolved rather than `${{StorePostgres.DATABASE_URL}}`; use the private URL in the same Railway project or the public URL only when private networking is unavailable.
+- **Database connections are exhausted when loading the dashboard**: Lower `STORE_STATS_MAX_CONCURRENT` to `1` or `2` for the configured PostgreSQL provider's connection limits.
 - **Store status shows red (error)**: The store's `/health` endpoint is unreachable. Check that the store's Railway deployment is running. Verify the `app_url` is correct in the master dashboard.
 - **"Cannot decrypt store database URL"**: The `ENCRYPTION_KEY` in the master `.env` has changed since the store was registered. If you rotated the key, you need to re-register all stores with the new key.
 - **Store dashboard returns 401**: `ADMIN_PASSWORD` is set but you don't have a valid session cookie. Visit `/admin/login` and sign in. For API calls, use `Authorization: Bearer YOUR_PASSWORD`.
 - **Store admin API returns 403**: `ADMIN_PASSWORD` is not set and `DEBUG=false`. Set `ADMIN_PASSWORD` in the store's Railway variables and redeploy.
-- **Test endpoints return 404**: This is expected in production. Test endpoints are only available when `DEBUG=true` (store app) or when `APP_BASE_URL` contains `localhost` (master).
+- **Test endpoints return 404**: This is expected in production. Test endpoints are only available when `DEBUG=true` (store app) or when `APP_BASE_URL` uses an exact loopback hostname (master).
 - **AI responds with wrong persona**: Check if `SYSTEM_PROMPT_OVERRIDE` is set for that store. If it is, verify the content is correct and uses the right placeholders.
 - **Health checks not updating**: The background task runs every `HEALTH_CHECK_INTERVAL_SECONDS` (default 300 = 5 minutes). Wait for the next cycle or restart the master service. Stores with status "paused" are skipped.
 - **"Deploy Changes" button not visible"**: The button only appears when a store has both credentials and a Railway Service ID configured. Add the service ID via the Edit button on the store detail page.

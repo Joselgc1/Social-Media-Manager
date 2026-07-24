@@ -16,6 +16,7 @@ async def store_message(
     channel: str,
     media_url: str | None = None,
     function_calls: list[dict] | None = None,
+    source_id: str | None = None,
 ):
     """
     Store a single message in the conversation history.
@@ -31,8 +32,11 @@ async def store_message(
     """
     await db.execute(
         """
-        INSERT INTO conversations (customer_id, role, content, channel, media_url, function_calls)
-        VALUES (:cid, :role, :content, :channel, :media, :fc)
+        INSERT INTO conversations (
+            customer_id, role, content, channel, media_url, function_calls, source_id
+        )
+        VALUES (:cid, :role, :content, :channel, :media, :fc, :source_id)
+        ON CONFLICT (channel, role, source_id) WHERE source_id IS NOT NULL DO NOTHING
         """,
         {
             "cid": customer_id,
@@ -41,6 +45,7 @@ async def store_message(
             "channel": channel,
             "media": media_url,
             "fc": json.dumps(function_calls) if function_calls else None,
+            "source_id": source_id,
         },
     )
 

@@ -1,0 +1,6 @@
+[build]
+builder = "RAILPACK"
+
+[deploy]
+preDeployCommand = ["python scripts/migrate.py"]
+startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"

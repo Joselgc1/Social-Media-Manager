@@ -33,8 +33,8 @@ from app.ai.tools.context import ToolExecutionContext
 from app.ai.tools.executor import execute_tool
 from app.ai.tools.registry import get_tool_schemas
 from app.ai.vision import analyze_payment_screenshot
-from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
-from app.catalog.sheets import get_cached_catalog, group_catalog_products
+from app.catalog.pdf_generator import ensure_catalog_pdf
+from app.catalog.sheets import ensure_fresh_catalog, get_cached_catalog, group_catalog_products
 from app.config import get_config
 from app.crm import conversations, customers, escalations, orders, sessions
 from app.exchange_rates import build_customer_exchange_rate_reply
@@ -114,6 +114,8 @@ async def generate_response(
     customer_id: str | None = None,
     integration_context: dict | None = None,
     persist_assistant_message: bool = True,
+    persist_user_before_response: bool = False,
+    message_source_id: str | None = None,
 ) -> dict:
     """
     Full pipeline: message in -> AI response out.
@@ -169,6 +171,7 @@ async def generate_response(
             content=message_text,
             channel=channel,
             media_url=media_url,
+            source_id=message_source_id,
         )
         # Only notify the owner on the first unanswered message.
         last_msg = await db.fetch_one(
@@ -210,6 +213,7 @@ async def generate_response(
                 orchestration_mode=orchestration_mode,
                 route_intent="hostile_message",
                 persist_assistant_message=persist_assistant_message,
+                message_source_id=message_source_id,
             )
         t_start = time.monotonic()
         await conversations.store_message(
@@ -218,6 +222,7 @@ async def generate_response(
             content=message_text,
             channel=channel,
             media_url=media_url,
+            source_id=message_source_id,
         )
         await escalations.escalate_customer_automatically(customer["id"], settings=settings)
         summary = await conversations.get_recent_summary(customer["id"], limit=5)
@@ -244,8 +249,9 @@ async def generate_response(
             await conversations.store_message(
                 customer_id=customer["id"],
                 role="assistant",
-                content=handoff_text,
-                channel=channel,
+                    content=handoff_text,
+                    channel=channel,
+                    source_id=message_source_id,
             )
         response_time_ms = int((time.monotonic() - t_start) * 1000)
         logger.info(
@@ -301,6 +307,7 @@ async def generate_response(
                 orchestration_mode=orchestration_mode,
                 route_intent="human_request",
                 persist_assistant_message=persist_assistant_message,
+                message_source_id=message_source_id,
             )
         t_start = time.monotonic()
         await conversations.store_message(
@@ -309,6 +316,7 @@ async def generate_response(
             content=message_text,
             channel=channel,
             media_url=media_url,
+            source_id=message_source_id,
         )
         await escalations.escalate_customer_automatically(customer["id"], settings=settings)
         summary = await conversations.get_recent_summary(customer["id"], limit=5)
@@ -332,8 +340,9 @@ async def generate_response(
             await conversations.store_message(
                 customer_id=customer["id"],
                 role="assistant",
-                content=handoff_text,
-                channel=channel,
+                    content=handoff_text,
+                    channel=channel,
+                    source_id=message_source_id,
             )
         response_time_ms = int((time.monotonic() - t_start) * 1000)
         await analytics.log_ai_run(
@@ -376,14 +385,24 @@ async def generate_response(
             integration_context=integration_context,
             orchestration_mode=orchestration_mode,
             persist_assistant_message=persist_assistant_message,
+            message_source_id=message_source_id,
         )
 
     # ── 3. Load conversation history ─────────────────────────
+    original_message_text = message_text
+    if persist_user_before_response:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="user",
+            content=original_message_text,
+            channel=channel,
+            media_url=media_url,
+            source_id=message_source_id,
+        )
     max_history = settings.get("max_conversation_history", 20)
     stored_history = [] if is_public_comment else await conversations.get_history(customer["id"], limit=max_history)
     has_previous_context = bool(stored_history)
     history = conversations.prepare_history_for_generation(stored_history, latest_user_message=message_text)
-    original_message_text = message_text
 
     open_order = None if is_public_comment else await orders.get_latest_open_order(customer["id"])
 
@@ -424,6 +443,8 @@ async def generate_response(
             vision_result=vision_result or {},
             orchestration_mode=orchestration_mode,
             persist_assistant_message=persist_assistant_message,
+            persist_user_message=not persist_user_before_response,
+            message_source_id=message_source_id,
         )
 
     if _detect_exchange_rate_question(message_text, stored_history):
@@ -445,6 +466,8 @@ async def generate_response(
             settings=settings,
             orchestration_mode=orchestration_mode,
             persist_assistant_message=persist_assistant_message,
+            persist_user_message=not persist_user_before_response,
+            message_source_id=message_source_id,
         )
 
     # ── 5. Resolve orchestration route and build prompt ──────
@@ -466,7 +489,11 @@ async def generate_response(
         session = await _record_active_route(customer["id"], orchestration)
     _log_route_decision(orchestration)
 
-    catalog = get_cached_catalog()
+    try:
+        catalog = await ensure_fresh_catalog()
+    except Exception:
+        logger.exception("Catalog is stale and could not be refreshed before prompt generation")
+        catalog = []
     catalog_md = format_catalog_as_markdown(catalog)
     catalog_pdf_supported = _catalog_pdf_supported(channel, integration_context, config)
     system_prompt = build_agent_prompt(
@@ -583,13 +610,15 @@ async def generate_response(
     )
 
     # ── 7. Store messages ────────────────────────────────────
-    await conversations.store_message(
-        customer_id=customer["id"],
-        role="user",
-        content=message_text,
-        channel=channel,
-        media_url=media_url,
-    )
+    if not persist_user_before_response:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="user",
+            content=message_text,
+            channel=channel,
+            media_url=media_url,
+            source_id=message_source_id,
+        )
 
     safe_tool_log = _safe_tool_log_for_persistence(agent_result.tool_log)
     if persist_assistant_message:
@@ -599,6 +628,7 @@ async def generate_response(
             content=agent_result.text,
             channel=channel,
             function_calls=safe_tool_log,
+            source_id=message_source_id,
         )
 
     response = {
@@ -632,16 +662,20 @@ async def _handle_payment_proof_attempt(
     vision_result: dict,
     orchestration_mode: str,
     persist_assistant_message: bool = True,
+    persist_user_message: bool = True,
+    message_source_id: str | None = None,
 ) -> dict:
     """Validate payment screenshots deterministically before any LLM sees them."""
     t_start = time.monotonic()
-    await conversations.store_message(
-        customer_id=customer["id"],
-        role="user",
-        content=message_text,
-        channel=channel,
-        media_url=media_url,
-    )
+    if persist_user_message:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="user",
+            content=message_text,
+            channel=channel,
+            media_url=media_url,
+            source_id=message_source_id,
+        )
     result = await verify_payment_proof(
         customer_id=customer["id"],
         payment_methods=payment_methods,
@@ -679,6 +713,7 @@ async def _handle_payment_proof_attempt(
             content=reply_text,
             channel=channel,
             function_calls=function_calls,
+            source_id=message_source_id,
         )
     response = {
         "text": reply_text,
@@ -702,16 +737,20 @@ async def _handle_exchange_rate_question(
     settings: dict,
     orchestration_mode: str,
     persist_assistant_message: bool = True,
+    persist_user_message: bool = True,
+    message_source_id: str | None = None,
 ) -> dict:
     """Answer exchange-rate questions without routing through catalog-focused agents."""
     t_start = time.monotonic()
-    await conversations.store_message(
-        customer_id=customer["id"],
-        role="user",
-        content=message_text,
-        channel=channel,
-        media_url=media_url,
-    )
+    if persist_user_message:
+        await conversations.store_message(
+            customer_id=customer["id"],
+            role="user",
+            content=message_text,
+            channel=channel,
+            media_url=media_url,
+            source_id=message_source_id,
+        )
     reply_text = _exchange_rate_reply(settings, message_text)
     response_time_ms = int((time.monotonic() - t_start) * 1000)
     await analytics.log_ai_run(
@@ -740,6 +779,7 @@ async def _handle_exchange_rate_question(
             role="assistant",
             content=reply_text,
             channel=channel,
+            source_id=message_source_id,
         )
     return {
         "text": reply_text,
@@ -761,6 +801,7 @@ async def _handle_public_comment_private_invite(
     orchestration_mode: str,
     route_intent: str,
     persist_assistant_message: bool = True,
+    message_source_id: str | None = None,
 ) -> dict:
     """Answer public comments without changing private customer or escalation state."""
     t_start = time.monotonic()
@@ -770,6 +811,7 @@ async def _handle_public_comment_private_invite(
         content=message_text,
         channel=channel,
         media_url=media_url,
+        source_id=message_source_id,
     )
     reply_text = _public_comment_private_invite_text(settings)
     response_time_ms = int((time.monotonic() - t_start) * 1000)
@@ -799,6 +841,7 @@ async def _handle_public_comment_private_invite(
             role="assistant",
             content=reply_text,
             channel=channel,
+            source_id=message_source_id,
         )
     return {
         "text": reply_text,
@@ -820,6 +863,7 @@ async def _handle_public_instagram_comment(
     integration_context: dict | None,
     orchestration_mode: str,
     persist_assistant_message: bool = True,
+    message_source_id: str | None = None,
 ) -> dict:
     """Deterministically answer safe public Instagram comment intents."""
     t_start = time.monotonic()
@@ -829,13 +873,20 @@ async def _handle_public_instagram_comment(
         content=message_text,
         channel=channel,
         media_url=media_url,
+        source_id=message_source_id,
     )
 
     request_kind = _classify_public_comment_request(message_text)
     reply_text = None
     route_intent = f"public_comment_{request_kind}"
     if request_kind in {"price", "stock"}:
-        product = _resolve_public_comment_product(integration_context)
+        try:
+            await ensure_fresh_catalog()
+        except Exception:
+            logger.warning("Public comment catalog lookup skipped because the catalog is stale")
+            product = None
+        else:
+            product = _resolve_public_comment_product(integration_context)
         if product:
             reply_text = (
                 _public_comment_price_reply(product)
@@ -874,6 +925,7 @@ async def _handle_public_instagram_comment(
             role="assistant",
             content=reply_text,
             channel=channel,
+            source_id=message_source_id,
         )
     return {
         "text": reply_text,
@@ -1362,15 +1414,14 @@ async def _tool_send_catalog_pdf(args: dict, channel: str, integration_context: 
             "status": "error",
             "message": "Catalog PDF delivery is unavailable here. Describe catalog categories in text instead.",
         }
-    if not PDF_PATH.exists():
-        catalog = get_cached_catalog()
-        if not catalog:
-            return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
-        try:
-            generate_catalog_pdf(catalog)
-        except Exception as e:
-            logger.error(f"Auto-generate catalog PDF failed: {e}")
-            return {"status": "error", "message": "Could not generate catalog PDF."}
+    catalog = get_cached_catalog()
+    if not catalog:
+        return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
+    try:
+        ensure_catalog_pdf(catalog)
+    except Exception as e:
+        logger.error(f"Auto-generate catalog PDF failed: {e}")
+        return {"status": "error", "message": "Could not generate catalog PDF."}
     return {
         "type": "catalog_pdf",
         "caption": args.get("caption", "Aqui tienes nuestro catalogo de productos 📖"),

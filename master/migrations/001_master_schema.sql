@@ -1,5 +1,15 @@
 -- Master Control Plane — Database Schema
--- Run this in the master Supabase project's SQL Editor
+-- Run this against the Master PostgreSQL database.
+
+BEGIN;
+
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- Store registry
 CREATE TABLE IF NOT EXISTS stores (
@@ -58,3 +68,30 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON master_audit_log(created_
 
 -- Index for exchange-rate freshness checks
 CREATE INDEX IF NOT EXISTS idx_exchange_rates_fetched_at ON exchange_rates(fetched_at DESC);
+
+-- Database privilege hardening. The master service uses a direct PostgreSQL
+-- connection; none of these control-plane records are public API tables.
+ALTER TABLE stores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE store_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE master_audit_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE exchange_rates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+INSERT INTO schema_migrations (version, name) VALUES
+    (1, 'fresh_install_baseline')
+ON CONFLICT (version) DO NOTHING;
+
+COMMIT;
