@@ -1198,8 +1198,9 @@ def _with_conversation_continuity_guidance(system_prompt: str, has_previous_cont
     if has_previous_context:
         guidance = (
             "Esta conversacion ya tiene contexto previo almacenado. "
-            "No abras con un saludo inicial y responde solo el ultimo mensaje del cliente, "
-            "sin volver a contestar preguntas anteriores ya atendidas."
+            "No abras con un saludo inicial. Usa el historial para entender a que producto, "
+            "preferencia o paso de compra se refiere el ultimo mensaje y responde con continuidad natural. "
+            "No repitas preguntas ni respuestas que ya quedaron claras, ni reinicies el flujo de venta."
         )
     else:
         guidance = "No hay contexto previo almacenado. Puedes saludar brevemente al iniciar la conversacion."

@@ -64,6 +64,8 @@ def test_specialist_prompts_keep_legacy_business_rules():
         "do not restart every reply with \"hola\"",
         "NEVER output raw JSON",
         "NEVER assume the payment method from old tags",
+        "Treat the conversation history as a real ongoing chat",
+        "Never volunteer that you are an AI, bot, or automated system",
         "The payment method is the LAST checkout question",
         "Do not call BCV rates Binance",
         "Prices do NOT include shipping",
