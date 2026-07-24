@@ -279,7 +279,7 @@ function renderOrder(order) {
 }
 
 async function loadOrderDetail() {
-  const resp = await apiFetch(ORDER_API + encodeURIComponent(document.body.dataset.orderId));
+  const resp = await apiFetch(ORDER_API + encodeURIComponent(window.ORDER_DETAIL_ID));
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
     document.getElementById('order-detail-loading').textContent = data.detail || 'No se pudo cargar el pedido.';

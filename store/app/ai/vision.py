@@ -8,7 +8,6 @@ and bank transfer (bolívares) confirmations.
 """
 
 import base64
-import hashlib
 import ipaddress
 import json
 import logging
@@ -43,7 +42,7 @@ PAYMENT_ANALYSIS_PROMPT = """Analyze this payment screenshot. Extract the follow
 4. Recipient name (if visible)
 5. Sender name (if visible)
 6. Reference number or transaction ID (if visible)
-7. Date/time of transaction (if visible; normalize to ISO 8601, including timezone when shown)
+7. Date/time of transaction (if visible)
 8. Status (completed, pending, failed, or unclear)
 
 Respond in JSON format only, no additional text:
@@ -55,7 +54,7 @@ Respond in JSON format only, no additional text:
   "recipient_name": "name or null",
   "sender_name": "name or null",
   "reference": "reference number or null",
-  "date": "ISO 8601 date/time or null",
+  "date": "date string or null",
   "status": "completed|pending|failed|unclear",
   "confidence": "high|medium|low",
   "summary": "Brief one-line description in Spanish"
@@ -93,8 +92,6 @@ async def analyze_payment_screenshot(
         if not image_bytes:
             return {"error": "Failed to download image."}
 
-        proof_hash = hashlib.sha256(image_bytes).hexdigest()
-
         # Step 2: Encode to base64
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
@@ -122,13 +119,11 @@ async def analyze_payment_screenshot(
             try:
                 result = json.loads(text)
                 result["analyzed"] = True
-                result["proof_hash"] = proof_hash
                 result["tokens_used"] = response.usage
                 return result
             except json.JSONDecodeError:
                 return {
                     "analyzed": True,
-                    "proof_hash": proof_hash,
                     "raw_response": response.text,
                     "error": "Could not parse structured response",
                     "summary": response.text[:200],

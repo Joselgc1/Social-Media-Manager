@@ -18,12 +18,11 @@ Commands:
     /usage          - Today's LLM token usage and cost
 """
 
-import hmac
 import json
 import logging
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
 
 from app import db
 from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
@@ -36,7 +35,6 @@ from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
 from app.crm import orders
 from app.crm.customers import add_tags, remove_tag
-from app.log_redaction import install_secret_redaction_filter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -51,13 +49,6 @@ async def handle_telegram(request: Request):
     Only processes messages from the configured admin chat ID.
     """
     config = get_config()
-    provided_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if not config.telegram_webhook_secret or not hmac.compare_digest(
-        provided_secret,
-        config.telegram_webhook_secret,
-    ):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
     body = await request.json()
 
     message = body.get("message", {})
@@ -667,17 +658,13 @@ async def _cmd_tag_edit(args: str) -> str:
 
 # -- Telegram webhook setup helper ------------------------------------
 
-async def setup_telegram_webhook(bot_token: str, webhook_url: str, webhook_secret: str):
+async def setup_telegram_webhook(bot_token: str, webhook_url: str):
     """
     Register the Telegram webhook URL with the Telegram Bot API.
     Call this once after deployment.
     """
-    install_secret_redaction_filter()
     url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            url,
-            json={"url": webhook_url, "secret_token": webhook_secret},
-        )
+        resp = await client.post(url, json={"url": webhook_url})
         logger.info(f"Telegram webhook setup: {resp.json()}")
         return resp.json()

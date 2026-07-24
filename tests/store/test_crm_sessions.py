@@ -6,19 +6,6 @@ import pytest
 from app.crm import sessions
 
 
-class _Tx:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
-class _DBHandle:
-    def transaction(self):
-        return _Tx()
-
-
 def _row(**overrides) -> dict:
     row = {
         "customer_id": "customer-1",
@@ -78,7 +65,6 @@ async def test_set_active_agent_normalizes_uuid_customer_id(monkeypatch):
 async def test_partial_draft_updates_preserve_existing_fields(monkeypatch):
     fetch_one = AsyncMock(side_effect=[
         _row(checkout_draft={"items": [{"product_query": "pijama", "size": "S"}]}),
-        {"checkout_draft": {"items": [{"product_query": "pijama", "size": "S"}]}},
         _row(
             active_agent="checkout",
             workflow_stage="checkout_collecting",
@@ -86,12 +72,10 @@ async def test_partial_draft_updates_preserve_existing_fields(monkeypatch):
         ),
     ])
     monkeypatch.setattr(sessions.db, "fetch_one", fetch_one)
-    monkeypatch.setattr(sessions.db, "get_db", lambda: _DBHandle())
 
     session = await sessions.update_checkout_draft("customer-1", {"shipping_method": "mrw"})
 
-    assert "FOR UPDATE" in fetch_one.await_args_list[1].args[0]
-    update_values = fetch_one.await_args_list[2].args[1]
+    update_values = fetch_one.await_args_list[1].args[1]
     persisted = json.loads(update_values["checkout_draft"])
 
     assert persisted["items"][0]["product_query"] == "pijama"

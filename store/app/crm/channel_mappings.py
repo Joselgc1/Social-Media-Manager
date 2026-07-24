@@ -215,20 +215,16 @@ async def resolve_customer_from_kommo_event(event, lead: dict | None = None) -> 
 
 
 async def _lookup_existing_kommo_mapping(job: dict) -> dict | None:
-    specific_identifiers = (
+    for key, value in (
         ("external_contact_id", job.get("contact_id")),
+        ("external_lead_id", job.get("lead_id")),
         ("external_chat_id", job.get("chat_id")),
         ("external_talk_id", job.get("talk_id")),
         ("external_author_id", job.get("author_id")),
-    )
-    for key, value in specific_identifiers:
+    ):
         if not value:
             continue
         mapping = await _lookup_one("kommo", key, str(value))
-        if mapping:
-            return mapping
-    if job.get("lead_id") and not any(value for _, value in specific_identifiers):
-        mapping = await _lookup_one("kommo", "external_lead_id", str(job["lead_id"]))
         if mapping:
             return mapping
     return None
@@ -252,14 +248,12 @@ async def _lookup_one(provider: str, column: str, value: str) -> dict | None:
 async def _find_mapping_for_upsert(values: dict[str, Any]) -> dict | None:
     lookup_order = (
         ("external_contact_id", values.get("external_contact_id")),
+        ("external_lead_id", values.get("external_lead_id")),
         ("external_chat_id", values.get("external_chat_id")),
         ("external_talk_id", values.get("external_talk_id")),
     )
     if not any(value for _, value in lookup_order):
-        lookup_order += (
-            ("external_author_id", values.get("external_author_id")),
-            ("external_lead_id", values.get("external_lead_id")),
-        )
+        lookup_order += (("external_author_id", values.get("external_author_id")),)
 
     for column, value in lookup_order:
         if not value:

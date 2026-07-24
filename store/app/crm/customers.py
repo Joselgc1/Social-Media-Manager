@@ -97,42 +97,40 @@ async def add_tags(customer_id: str, new_tags: list[str]):
     Append tags to a customer's tag list (deduplicated).
     Tags are stored as a JSONB array.
     """
-    async with db.get_db().transaction():
-        row = await db.fetch_one(
-            "SELECT tags FROM customers WHERE id = :id FOR UPDATE",
-            {"id": customer_id},
-        )
-        if not row:
-            return
+    row = await db.fetch_one(
+        "SELECT tags FROM customers WHERE id = :id",
+        {"id": customer_id},
+    )
+    if not row:
+        return
 
-        existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
-        merged = normalize_tags(existing + (new_tags or []))
+    existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
+    merged = normalize_tags(existing + (new_tags or []))
 
-        await db.execute(
-            "UPDATE customers SET tags = :tags WHERE id = :id",
-            {"tags": json.dumps(merged), "id": customer_id},
-        )
+    await db.execute(
+        "UPDATE customers SET tags = :tags WHERE id = :id",
+        {"tags": json.dumps(merged), "id": customer_id},
+    )
 
 
 async def remove_tag(customer_id: str, tag: str):
     """Remove a single tag from a customer."""
-    async with db.get_db().transaction():
-        row = await db.fetch_one(
-            "SELECT tags FROM customers WHERE id = :id FOR UPDATE",
-            {"id": customer_id},
-        )
-        if not row:
-            return
+    row = await db.fetch_one(
+        "SELECT tags FROM customers WHERE id = :id",
+        {"id": customer_id},
+    )
+    if not row:
+        return
 
-        existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
-        normalized_target = _normalize_tag(tag)
-        filtered = [normalized for normalized in (_normalize_tag(t) for t in existing) if normalized and normalized != normalized_target]
-        filtered = _dedupe_preserve_order(filtered)
+    existing = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
+    normalized_target = _normalize_tag(tag)
+    filtered = [normalized for normalized in (_normalize_tag(t) for t in existing) if normalized and normalized != normalized_target]
+    filtered = _dedupe_preserve_order(filtered)
 
-        await db.execute(
-            "UPDATE customers SET tags = :tags WHERE id = :id",
-            {"tags": json.dumps(filtered), "id": customer_id},
-        )
+    await db.execute(
+        "UPDATE customers SET tags = :tags WHERE id = :id",
+        {"tags": json.dumps(filtered), "id": customer_id},
+    )
 
 
 async def set_conversation_state(customer_id: str, state: str):
@@ -169,44 +167,7 @@ async def decrement_orders(customer_id: str, amount: float):
     )
 
 
-async def sync_purchase_tier_tags(customer_id: str):
-    """Reconcile derived purchase-tier tags with the customer's current totals."""
-    row = await db.fetch_one(
-        "SELECT total_orders, total_spent, tags FROM customers WHERE id = :id",
-        {"id": customer_id},
-    )
-    if not row:
-        return
-
-    total_orders = int(row["total_orders"] or 0)
-    total_spent = float(row["total_spent"] or 0)
-    desired = set()
-    if total_orders >= 2:
-        desired.add("repeat_buyer")
-    if total_orders >= 3 or total_spent >= 100:
-        desired.add("vip")
-
-    raw_tags = json.loads(row["tags"]) if isinstance(row["tags"], str) else (row["tags"] or [])
-    existing = normalize_tags(raw_tags)
-    tier_tags = {"repeat_buyer", "vip"}
-    updated = [tag for tag in existing if tag not in tier_tags or tag in desired]
-    for tag in ("repeat_buyer", "vip"):
-        if tag in desired and tag not in updated:
-            updated.append(tag)
-
-    if updated != existing:
-        await db.execute(
-            "UPDATE customers SET tags = :tags WHERE id = :id",
-            {"tags": json.dumps(updated), "id": customer_id},
-        )
-
-
-async def update_customer(
-    customer_id: str,
-    channel: str | None = None,
-    conversation_state: str | None = None,
-    marketing_opt_in: bool | None = None,
-) -> dict | None:
+async def update_customer(customer_id: str, channel: str | None = None, conversation_state: str | None = None) -> dict | None:
     row = await db.fetch_one(
         "SELECT * FROM customers WHERE id::text = :id",
         {"id": customer_id},
@@ -224,14 +185,6 @@ async def update_customer(
     if conversation_state is not None:
         updates["state"] = conversation_state
         set_clauses.append("conversation_state = :state")
-
-    if marketing_opt_in is not None:
-        updates["marketing_opt_in"] = marketing_opt_in
-        set_clauses.extend([
-            "marketing_opt_in = :marketing_opt_in",
-            "marketing_opt_in_at = CASE WHEN :marketing_opt_in THEN NOW() ELSE marketing_opt_in_at END",
-            "marketing_opt_out_at = CASE WHEN :marketing_opt_in THEN NULL ELSE NOW() END",
-        ])
 
     if not set_clauses:
         return dict(row)
@@ -284,20 +237,20 @@ def _normalize_tag(tag: str | None) -> str:
         return ""
 
     if ":" not in raw:
-        return _slugify_tag_value(raw)
+        return raw.lower()
 
     prefix, value = raw.split(":", 1)
-    prefix = _slugify_tag_value(prefix)[:32]
+    prefix = prefix.strip().lower()
     value = value.strip()
-    if not prefix:
-        return ""
 
     if prefix == "size":
-        value = _slugify_tag_value(value).upper()
+        return f"{prefix}:{value.upper()}"
+
+    if prefix in {"payment", "city", "interested"}:
+        value = _slugify_tag_value(value)
         return f"{prefix}:{value}" if value else ""
 
-    value = _slugify_tag_value(value)
-    return f"{prefix}:{value}" if value else ""
+    return f"{prefix}:{value.lower()}"
 
 
 def _slugify_tag_value(value: str) -> str:
@@ -307,4 +260,4 @@ def _slugify_tag_value(value: str) -> str:
     ascii_text = re.sub(r"\s+", "_", ascii_text)
     ascii_text = re.sub(r"[^a-z0-9_]+", "_", ascii_text)
     ascii_text = re.sub(r"_+", "_", ascii_text).strip("_")
-    return ascii_text[:64]
+    return ascii_text

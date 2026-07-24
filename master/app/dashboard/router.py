@@ -2,19 +2,14 @@
 Master dashboard HTML and login routes.
 """
 
+import json
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.auth import (
-    COOKIE_NAME,
-    SESSION_MAX_AGE_SECONDS,
-    _make_cookie_token,
-    is_master_cookie_valid,
-    revoke_master_session,
-)
+from app.auth import COOKIE_NAME, _make_cookie_token, is_master_cookie_valid
 from app.config import get_config
 
 router = APIRouter(tags=["dashboard"])
@@ -39,7 +34,9 @@ async def login_page(request: Request):
     if is_master_cookie_valid(request):
         return RedirectResponse(url="/dashboard", status_code=303)
 
-    return _render_template("master_login.html")
+    page = (_TEMPLATES_DIR / "master_login.html").read_text(encoding="utf-8")
+    error = request.query_params.get("error", "")
+    return HTMLResponse(page.replace("__ERROR__", json.dumps(error)))
 
 
 @router.post("/login")
@@ -51,22 +48,22 @@ async def login(request: Request):
     if token != config.master_secret_key:
         return _redirect_to_login("Clave incorrecta.")
 
+    is_localhost = "localhost" in config.app_base_url or "127.0.0.1" in config.app_base_url
     response = RedirectResponse(url="/dashboard", status_code=303)
     response.set_cookie(
         key=COOKIE_NAME,
         value=_make_cookie_token(config.master_secret_key),
         httponly=True,
-        secure=not config.is_local_environment,
+        secure=not is_localhost,
         samesite="lax",
-        max_age=SESSION_MAX_AGE_SECONDS,
+        max_age=86400,
     )
     return response
 
 
 @router.post("/logout")
-async def logout(request: Request):
+async def logout():
     """Clear the master dashboard session."""
-    revoke_master_session(request)
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(COOKIE_NAME, samesite="lax")
     return response

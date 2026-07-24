@@ -46,15 +46,14 @@ class LLMProvider(ABC):
         tool_call_id: str,
         tool_name: str,
         tool_result: str,
-        tool_history: list[dict] | None = None,
         tools: list[dict] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 500,
     ) -> LLMResponse:
         """
         Continue the conversation after the engine executed a tool call.
-        Appends the accumulated assistant tool calls and results to messages,
-        then asks the LLM for its next reply.
+        Appends the assistant's tool_call and the tool result to messages,
+        then asks the LLM for its final reply.
         """
         ...
 

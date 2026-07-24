@@ -133,7 +133,9 @@ unless you are absolutely sure Pydantic will parse them the way you expect.
 
 ### 4.1. Store database
 
-For a presentation database, run `cd store && python scripts/migrate.py`. For a pre-consolidation recovery case, back up first and apply `store/migrations/002_consolidated_upgrade.sql` as directed by the schema-version error. Confirm `schema_migrations` is supported by `store/app/db.py`.
+Run the consolidated store schema:
+
+1. `store/migrations/001_schema.sql`
 
 After that, verify the `settings` table contains at least:
 

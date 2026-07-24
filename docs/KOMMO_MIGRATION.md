@@ -137,7 +137,7 @@ KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
 
 ## Database Migration
 
-For a fresh database, run `store/migrations/001_schema.sql` once. For an existing pre-consolidation store database, back it up and run `store/migrations/002_consolidated_upgrade.sql` once; never rerun `001_schema.sql` as an upgrade. Confirm `schema_migrations` contains either `{1}` or `{1,2}` before enabling Kommo mode.
+Run `store/migrations/001_schema.sql` manually in Supabase SQL Editor. The consolidated schema includes `customer_channel_mappings`, `kommo_message_jobs`, `kommo_message_receipts`, `interaction_type` persistence for private messages versus public comments, callback claim storage, continuation tracking, `delivery_unknown`, assistant-history idempotency, and lead-safe contact mappings.
 
 ## Widget Build
 
@@ -216,7 +216,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ## Kommo Mode Activation
 
-1. Apply the correct migration: `001_schema.sql` for a fresh database, or `002_consolidated_upgrade.sql` for an existing database.
+1. Run the consolidated `store/migrations/001_schema.sql`.
 2. Upload the widget.
 3. Create and test the private-message Salesbot and native comment-triggered Salesbot.
 4. Register the general webhook.
@@ -228,7 +228,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ```text
 [ ] Store Railway root directory is store/
-[ ] schema_migrations contains every version through the app's EXPECTED_SCHEMA_VERSION
+[ ] 001_schema.sql has already been run
 [ ] CHANNEL_BACKEND=kommo is set in the store environment
 [ ] All required KOMMO_* variables are set
 [ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL

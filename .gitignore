@@ -195,15 +195,6 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
-# Store-specific generated catalog artifacts
-store/app/static/catalog/catalog.pdf
-store/app/static/catalog/catalog_meta.json
-
-# PostgreSQL backup artifacts
-*.dump
-*.sql.gz
-database-backups/
-
 # PyPI configuration file
 .pypirc
 

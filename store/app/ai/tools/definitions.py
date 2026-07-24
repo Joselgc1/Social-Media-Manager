@@ -112,15 +112,14 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "properties": {
                     "items": {
                         "type": "array",
-                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "product_name": {"type": "string", "pattern": "\\S"},
-                                "sku": {"type": "string", "pattern": "\\S"},
-                                "size": {"type": "string", "pattern": "\\S"},
+                                "product_name": {"type": "string"},
+                                "sku": {"type": "string"},
+                                "size": {"type": "string"},
                                 "quantity": {"type": "integer", "minimum": 1},
-                                "unit_price": {"type": "number", "minimum": 0},
+                                "unit_price": {"type": "number"},
                             },
                             "required": ["product_name", "sku", "size", "quantity", "unit_price"],
                         },
@@ -128,17 +127,14 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "payment_method": {
                         "type": "string",
-                        "pattern": "\\S",
                         "description": "The customer's chosen payment method name, exactly as configured by the store",
                     },
                     "shipping_city": {
                         "type": "string",
-                        "pattern": "\\S",
                         "description": "City for delivery",
                     },
                     "shipping_address": {
                         "type": "string",
-                        "pattern": "\\S",
                         "description": "Exact delivery address. Collect the city separately; do not ask for state or ZIP/postal code.",
                     },
                     "shipping_method": {
@@ -147,7 +143,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "description": "Preferred shipping courier",
                     },
                 },
-                "required": ["items", "payment_method", "shipping_city", "shipping_method", "shipping_address"],
+                "required": ["items", "payment_method", "shipping_method", "shipping_address"],
             },
         },
     ),

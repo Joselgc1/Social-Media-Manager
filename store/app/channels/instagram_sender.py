@@ -16,7 +16,6 @@ import logging
 
 import httpx
 
-from app.channels.meta_errors import MetaSendError
 from app.channels.text_formatting import format_customer_text
 from app.config import get_config
 
@@ -45,7 +44,7 @@ async def send_text(to: str, text: str):
         "message": {"text": body_text[:1000]},  # Enforce 1000-byte limit
     }
 
-    return await _send(url, payload, config.instagram_access_token)
+    await _send(url, payload, config.instagram_access_token)
 
 
 async def send_text_with_quick_replies(to: str, text: str, quick_replies: list[dict]):
@@ -80,7 +79,7 @@ async def send_text_with_quick_replies(to: str, text: str, quick_replies: list[d
         },
     }
 
-    return await _send(url, payload, config.instagram_access_token)
+    await _send(url, payload, config.instagram_access_token)
 
 
 async def send_image(to: str, image_url: str):
@@ -98,7 +97,7 @@ async def send_image(to: str, image_url: str):
         },
     }
 
-    return await _send(url, payload, config.instagram_access_token)
+    await _send(url, payload, config.instagram_access_token)
 
 
 async def send_generic_template(to: str, elements: list[dict]):
@@ -133,7 +132,7 @@ async def send_generic_template(to: str, elements: list[dict]):
         },
     }
 
-    return await _send(url, payload, config.instagram_access_token)
+    await _send(url, payload, config.instagram_access_token)
 
 
 async def send_private_reply(comment_id: str, text: str):
@@ -151,7 +150,7 @@ async def send_private_reply(comment_id: str, text: str):
         "message": {"text": body_text[:1000]},
     }
 
-    return await _send(url, payload, config.instagram_access_token)
+    await _send(url, payload, config.instagram_access_token)
 
 
 # ── Ice Breakers ─────────────────────────────────────────────
@@ -182,7 +181,7 @@ async def setup_ice_breakers(ig_user_id: str, ice_breakers: list[dict] | None = 
     url = f"{GRAPH_API}/{ig_user_id}/ice_breakers"
     payload = {"ice_breakers": ice_breakers[:4]}
 
-    return await _send(url, payload, config.instagram_access_token)
+    await _send(url, payload, config.instagram_access_token)
     logger.info(f"Ice Breakers configured: {[ib['question'] for ib in ice_breakers]}")
 
 
@@ -228,11 +227,8 @@ async def _send(url: str, payload: dict, access_token: str):
         "Content-Type": "application/json",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
-        raise MetaSendError("Instagram API connection failed before sending", retryable=True) from exc
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=payload, headers=headers)
 
     if not resp.is_success:
         logger.error(f"Instagram API error ({resp.status_code})")
@@ -241,12 +237,6 @@ async def _send(url: str, payload: dict, access_token: str):
             if resp.headers.get("content-type", "").startswith("application/json")
             else resp.text
         )
-        raise MetaSendError(
-            f"Instagram API error {resp.status_code}: {error_data}",
-            retryable=resp.status_code in {401, 403, 429},
-            delivery_known=resp.status_code < 500,
-        )
+        raise RuntimeError(f"Instagram API error {resp.status_code}: {error_data}")
 
-    response_json = resp.json()
-    logger.debug(f"Instagram message sent: {response_json}")
-    return response_json
+    logger.debug(f"Instagram message sent: {resp.json()}")

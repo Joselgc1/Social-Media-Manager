@@ -42,9 +42,9 @@ logger = logging.getLogger(__name__)
 
 
 async def _require_debug():
-    """Block all test endpoints unless APP_BASE_URL is an exact loopback URL."""
+    """Block all test endpoints when APP_BASE_URL is not localhost (i.e., production)."""
     config = get_config()
-    if not config.is_local_environment:
+    if "localhost" not in config.app_base_url and "127.0.0.1" not in config.app_base_url:
         raise HTTPException(status_code=404, detail="Not found")
 
 
@@ -212,8 +212,6 @@ async def seed_test_data():
             "OWNER_NAME": store_data["owner_name"],
             "WHATSAPP_ACCESS_TOKEN": "EAAG-test-token-demo",
             "TELEGRAM_BOT_TOKEN": "123456789:ABCtest-demo-token",
-            "TELEGRAM_ADMIN_CHAT_ID": "123456789",
-            "TELEGRAM_WEBHOOK_SECRET": "test-telegram-webhook-secret",
         }
         for key, value in sample_creds.items():
             await db.execute(

@@ -23,7 +23,6 @@ from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 _db: databases.Database | None = None
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_VERSION = 1
 
 
 async def connect():
@@ -71,45 +70,6 @@ async def execute(query: str, values: dict | None = None):
     except Exception as e:
         _log_query_error("execute", query, values, e)
         raise
-
-
-async def verify_schema_version() -> None:
-    """Fail startup before application queries run against an old schema."""
-    try:
-        rows = await fetch_all("SELECT version FROM schema_migrations ORDER BY version")
-    except Exception as e:
-        raise RuntimeError(
-                "Store database schema is unversioned. Apply store/migrations/001_schema.sql to a fresh database."
-        ) from e
-
-    versions = {int(row["version"]) for row in rows}
-    accepted_versions = ({1}, {1, 2})
-    if versions not in accepted_versions:
-        raise RuntimeError(
-            f"Store database schema version mismatch: expected one of {[sorted(item) for item in accepted_versions]}, found {sorted(versions)}. "
-            "Apply store/migrations/002_consolidated_upgrade.sql to an existing database."
-        )
-
-    required_meta_columns = {
-        "processing_heartbeat_at",
-        "processing_lease_token",
-        "outbound_started_at",
-        "outbound_message_ids",
-    }
-    column_rows = await fetch_all(
-        """
-        SELECT column_name FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = 'meta_inbound_jobs'
-        """
-    )
-    actual_meta_columns = {str(row["column_name"]) for row in column_rows}
-    missing_columns = required_meta_columns - actual_meta_columns
-    if missing_columns:
-        raise RuntimeError(
-            "Store database schema is missing Meta inbound lease-fencing columns: "
-            f"{', '.join(sorted(missing_columns))}. "
-            "Apply store/migrations/002_consolidated_upgrade.sql."
-        )
 
 
 def _log_query_error(operation: str, query: str, values: dict | None, error: Exception) -> None:

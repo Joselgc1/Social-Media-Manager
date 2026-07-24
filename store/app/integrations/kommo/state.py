@@ -95,11 +95,6 @@ async def ensure_ai_mode_initialized(client: KommoClient, lead_id: str, lead: di
     if current_enum is not None:
         return current_enum, False
 
-    refreshed_before_write = await client.get_lead(lead_id)
-    refreshed_before_enum = extract_ai_mode_enum_from_lead(refreshed_before_write, config)
-    if refreshed_before_enum is not None:
-        return refreshed_before_enum, False
-
     await client.update_ai_mode(lead_id, int(config.kommo_ai_active_enum_id))
     refreshed = await client.get_lead(lead_id)
     refreshed_enum = extract_ai_mode_enum_from_lead(refreshed, config)

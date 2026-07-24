@@ -46,12 +46,12 @@ async def finalize_checkout(
     payment_methods = payment_methods or []
     session = await sessions.get_or_create_session(customer_id)
 
-    if session.current_order_id and session.workflow_stage == "waiting_for_payment":
+    if session.current_order_id:
         existing = await orders.get_order(session.current_order_id)
         if existing:
             return _finalized_response(existing, payment_methods, already_finalized=True)
 
-    open_order = await orders.get_latest_pending_order(customer_id)
+    open_order = await orders.get_latest_open_order(customer_id)
     if open_order and not start_new_order:
         return {
             "status": "existing_unpaid_order",

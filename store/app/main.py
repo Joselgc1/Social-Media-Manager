@@ -15,7 +15,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -27,17 +26,8 @@ from app.admin.telegram_bot import router as telegram_router
 from app.ai.providers import init_providers, list_providers
 from app.broadcast.api import router as broadcast_router
 from app.broadcast.scheduler import get_scheduler, start_scheduler, stop_scheduler
-from app.catalog.pdf_generator import ensure_catalog_pdf, invalidate_catalog_pdf
-from app.catalog.sheets import (
-    catalog_cache_age_seconds,
-    catalog_max_age_seconds,
-    count_grouped_catalog_products,
-    get_cached_catalog,
-    refresh_catalog_async,
-)
+from app.catalog.sheets import count_grouped_catalog_products, get_cached_catalog, refresh_catalog
 from app.config import get_config
-from app.log_redaction import install_secret_redaction_filter
-from app.request_limits import RequestBodyLimitMiddleware
 from app.test_endpoint import router as test_router
 
 # ── Logging ──────────────────────────────────────────────────
@@ -46,71 +36,23 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-install_secret_redaction_filter()
 logger = logging.getLogger(__name__)
 
 # ── Rate limiter ─────────────────────────────────────────────
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
-_DOCUMENTED_PLACEHOLDERS = {
-    "change-me",
-    "any_random_string_you_choose",
-    "your_meta_app_secret_here",
-    "your_whatsapp_permanent_token_here",
-    "your_phone_number_id_here",
-    "your_google_sheet_id_here",
-    "your_numeric_chat_id",
-    "your-account-subdomain",
-    "your-random-path-secret",
-}
-
-
-def _is_documented_placeholder(value) -> bool:
-    """Detect sample values shipped in environment templates."""
-    if value in (None, ""):
-        return False
-    text = str(value).strip().lower()
-    return (
-        text in _DOCUMENTED_PLACEHOLDERS
-        or text.endswith("...")
-        or "yourpassword" in text
-        or "yourproject" in text
-    )
-
-
-def _is_configured(value) -> bool:
-    return value not in (None, "") and not _is_documented_placeholder(value)
-
 
 def _validate_startup_config(config):
     """Fail fast on incomplete production configuration."""
     errors = []
 
-    llm_keys = {
-        "OPENAI_API_KEY": config.openai_api_key,
-        "ANTHROPIC_API_KEY": config.anthropic_api_key,
-    }
-    placeholder_llm_keys = [name for name, value in llm_keys.items() if _is_documented_placeholder(value)]
-    if placeholder_llm_keys:
-        errors.append("LLM API keys contain documented placeholders: " + ", ".join(placeholder_llm_keys))
-    if not any(_is_configured(value) for value in llm_keys.values()):
+    if not (config.openai_api_key or config.anthropic_api_key):
         errors.append("At least one LLM API key must be configured.")
 
     if not config.debug:
-        if not _is_configured(config.admin_password) or len(config.admin_password.strip()) < 12:
-            errors.append(
-                "ADMIN_PASSWORD must be a non-placeholder password of at least 12 characters when DEBUG is false."
-            )
-
-        required_core = {
-            "DATABASE_URL": config.database_url,
-            "GOOGLE_SHEETS_CREDENTIALS_B64": config.google_sheets_credentials_b64,
-            "PRODUCT_SHEET_ID": config.product_sheet_id,
-        }
-        invalid_core = [name for name, value in required_core.items() if not _is_configured(value)]
-        if invalid_core:
-            errors.append("Required settings are missing or placeholders: " + ", ".join(invalid_core))
+        if not config.admin_password:
+            errors.append("ADMIN_PASSWORD must be set when DEBUG is false.")
 
         if config.channel_backend == "meta":
             required_whatsapp = {
@@ -119,11 +61,10 @@ def _validate_startup_config(config):
                 "WHATSAPP_PHONE_NUMBER_ID": config.whatsapp_phone_number_id,
                 "WHATSAPP_VERIFY_TOKEN": config.whatsapp_verify_token,
             }
-            missing_whatsapp = [name for name, value in required_whatsapp.items() if not _is_configured(value)]
+            missing_whatsapp = [name for name, value in required_whatsapp.items() if not value]
             if missing_whatsapp:
                 errors.append(
-                    "WhatsApp is required for Meta mode. Missing or placeholder: "
-                    + ", ".join(missing_whatsapp)
+                    "WhatsApp is required for Meta mode. Missing: " + ", ".join(missing_whatsapp)
                 )
 
         if config.channel_backend == "kommo":
@@ -141,10 +82,10 @@ def _validate_startup_config(config):
                 "KOMMO_AI_HUMAN_ENUM_ID": config.kommo_ai_human_enum_id,
                 "KOMMO_AI_PAUSED_ENUM_ID": config.kommo_ai_paused_enum_id,
             }
-            missing_kommo = [name for name, value in required_kommo.items() if not _is_configured(value)]
+            missing_kommo = [name for name, value in required_kommo.items() if value in (None, "")]
             if missing_kommo:
                 errors.append(
-                    "Kommo mode has missing or placeholder settings: " + ", ".join(missing_kommo)
+                    "Kommo mode is missing required settings: " + ", ".join(missing_kommo)
                 )
             else:
                 try:
@@ -156,7 +97,6 @@ def _validate_startup_config(config):
             "Telegram": {
                 "TELEGRAM_BOT_TOKEN": config.telegram_bot_token,
                 "TELEGRAM_ADMIN_CHAT_ID": config.telegram_admin_chat_id,
-                "TELEGRAM_WEBHOOK_SECRET": config.telegram_webhook_secret,
             },
         }
         if config.channel_backend == "meta":
@@ -165,12 +105,9 @@ def _validate_startup_config(config):
                 "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
             }
         for label, fields in optional_integrations.items():
-            placeholders = [name for name, value in fields.items() if _is_documented_placeholder(value)]
-            if placeholders:
-                errors.append(f"{label} contains documented placeholders: {', '.join(placeholders)}")
-            present = [name for name, value in fields.items() if _is_configured(value)]
+            present = [name for name, value in fields.items() if value]
             if present and len(present) != len(fields):
-                missing = [name for name, value in fields.items() if not _is_configured(value)]
+                missing = [name for name, value in fields.items() if not value]
                 errors.append(
                     f"{label} is partially configured. Missing: {', '.join(missing)}"
                 )
@@ -227,11 +164,7 @@ async def lifespan(app: FastAPI):
     await db.connect()
     logger.info("Database connected.")
 
-    # 1b. Refuse to run application queries against an incompatible schema.
-    await db.verify_schema_version()
-    logger.info("Database schema version verified.")
-
-    # 1c. Ensure runtime settings exist without replacing schema migrations.
+    # 1b. Ensure runtime settings exist for old databases
     await db.ensure_default_settings()
     logger.info("Runtime settings verified.")
 
@@ -243,21 +176,12 @@ async def lifespan(app: FastAPI):
     logger.info(f"LLM providers initialized: {list_providers()}")
 
     # 3. Load the product catalog from Google Sheets
-    invalidate_catalog_pdf()
     try:
-        if not await refresh_catalog_async(force=True):
-            raise RuntimeError("Google Sheets refresh did not complete.")
+        refresh_catalog()
         logger.info("Product catalog loaded.")
     except Exception as e:
         logger.warning(f"Could not load catalog on startup: {e}")
         logger.warning("The catalog will be loaded on the first message.")
-    else:
-        catalog = get_cached_catalog()
-        if catalog:
-            try:
-                ensure_catalog_pdf(catalog)
-            except Exception as e:
-                logger.warning("Could not generate catalog PDF on startup: %s", e)
 
     # 4. Load settings into cache
     settings = await db.get_settings()
@@ -265,8 +189,8 @@ async def lifespan(app: FastAPI):
     model = settings.get("llm_model", "gpt-5.4-nano")
     logger.info(f"Active LLM: {active}/{model}")
 
-    # 5. Start safe maintenance jobs; restore mode omits all outbound processing.
-    start_scheduler(outbound_processing_enabled=config.outbound_processing_enabled)
+    # 5. Start background scheduler (catalog refresh + broadcast checker)
+    start_scheduler()
 
     logger.info("Chatbot is ready! Waiting for messages...")
 
@@ -313,8 +237,6 @@ app = FastAPI(
 # Rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(RequestBodyLimitMiddleware)
-app.add_middleware(SlowAPIMiddleware)
 
 # Security headers
 app.add_middleware(SecurityHeadersMiddleware)
@@ -370,38 +292,19 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Readiness check using only local cache, scheduler, and database state."""
+    """Detailed health check for monitoring."""
     config = get_config()
     catalog = get_cached_catalog()
+    settings = await db.get_settings()
     scheduler = get_scheduler()
-    catalog_count = count_grouped_catalog_products(catalog)
-    scheduler_status = "running" if scheduler.running else "stopped"
-    database_status = "connected"
-    settings = {}
-    pending_broadcasts = None
-    try:
-        settings = await db.get_settings()
-        pending_broadcasts = await db.fetch_one(
-            "SELECT COUNT(*) as cnt FROM broadcasts WHERE status IN ('draft', 'scheduled')"
-        )
-    except Exception:
-        logger.exception("Health check database probe failed")
-        database_status = "error"
 
-    providers = list_providers()
-    active_provider = settings.get("llm_provider")
-    ready = (
-        database_status == "connected"
-        and scheduler_status == "running"
-        and catalog_count > 0
-        and catalog_cache_age_seconds() is not None
-        and catalog_cache_age_seconds() <= catalog_max_age_seconds()
-        and bool(providers)
-        and active_provider in providers
+    pending_broadcasts = await db.fetch_one(
+        "SELECT COUNT(*) as cnt FROM broadcasts WHERE status IN ('draft', 'scheduled')"
     )
-    payload = {
-        "status": "healthy" if ready else "unhealthy",
-        "database": database_status,
+
+    return {
+        "status": "healthy",
+        "database": "connected",
         "scheduler": "running" if scheduler.running else "stopped",
         "channels": {
             "backend": config.channel_backend,
@@ -411,13 +314,10 @@ async def health():
             "whatsapp_via_kommo": config.channel_backend == "kommo",
             "instagram_via_kommo": config.channel_backend == "kommo",
         },
-        "providers": providers,
-        "active_provider": active_provider,
+        "providers": list_providers(),
+        "active_provider": settings.get("llm_provider"),
         "active_model": settings.get("llm_model"),
         "auto_fallback": settings.get("auto_fallback"),
-        "catalog_products": catalog_count,
-        "catalog_age_seconds": catalog_cache_age_seconds(),
-        "catalog_max_age_seconds": catalog_max_age_seconds(),
+        "catalog_products": count_grouped_catalog_products(catalog),
         "pending_broadcasts": pending_broadcasts["cnt"] if pending_broadcasts else 0,
     }
-    return JSONResponse(status_code=200 if ready else 503, content=payload)

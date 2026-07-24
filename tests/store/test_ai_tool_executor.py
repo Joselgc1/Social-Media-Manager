@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -100,7 +99,6 @@ async def test_executor_unknown_tool_returns_legacy_error_shape():
 @pytest.mark.asyncio
 async def test_executor_catalog_search_preserves_inventory_result_shape(monkeypatch):
     monkeypatch.setattr(tool_catalog, "get_cached_catalog", _catalog)
-    monkeypatch.setattr(tool_catalog, "ensure_fresh_catalog", AsyncMock(return_value=_catalog()))
 
     result = await execute_tool("check_inventory", {"product_query": "pijama satén"}, _context())
 
@@ -155,7 +153,6 @@ async def test_executor_create_order_returns_catalog_validation_error(monkeypatc
         {
             "items": [{"product_name": "Inventado", "sku": "fake", "size": "M", "quantity": 1, "unit_price": 1}],
             "payment_method": "Zelle",
-            "shipping_city": "Caracas",
             "shipping_address": "Av Principal",
             "shipping_method": "mrw",
         },
@@ -165,57 +162,6 @@ async def test_executor_create_order_returns_catalog_validation_error(monkeypatc
     assert result == {"status": "error", "message": "Product or size was not found in the current catalog."}
     notify_new_order.assert_not_awaited()
     add_tags.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "invalid_args",
-    [
-        {
-            "items": [],
-            "payment_method": "Zelle",
-            "shipping_city": "Caracas",
-            "shipping_address": "Av Principal",
-            "shipping_method": "mrw",
-        },
-        {
-            "items": [{"product_name": "Pijama", "sku": "PJ-001-S", "size": "S", "quantity": 1, "unit_price": 28}],
-            "payment_method": "Zelle",
-            "shipping_address": "Av Principal",
-            "shipping_method": "mrw",
-        },
-    ],
-)
-async def test_executor_rejects_invalid_create_order_arguments_before_dispatch(monkeypatch, invalid_args):
-    create_order = AsyncMock()
-    monkeypatch.setattr(tool_orders.orders, "create_order", create_order)
-
-    result = await execute_tool("create_order", invalid_args, _context())
-
-    assert result["status"] == "error"
-    assert result["message"].startswith("Invalid arguments for create_order:")
-    create_order.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_executor_rejects_unconfigured_create_order_payment_method(monkeypatch):
-    create_order = AsyncMock(side_effect=ValueError("Payment method is not configured for this store."))
-    monkeypatch.setattr(tool_orders.orders, "create_order", create_order)
-
-    result = await execute_tool(
-        "create_order",
-        {
-            "items": [{"product_name": "Pijama", "sku": "PJ-001-S", "size": "S", "quantity": 1, "unit_price": 28}],
-            "payment_method": "Inventado",
-            "shipping_city": "Caracas",
-            "shipping_address": "Av Principal",
-            "shipping_method": "mrw",
-        },
-        _context(),
-    )
-
-    assert result == {"status": "error", "message": "Payment method is not configured for this store."}
-    create_order.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -241,15 +187,11 @@ async def test_executor_escalation_notifies_owner_and_sets_state(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_payment_validation_success(monkeypatch):
-    get_unambiguous_open_order = AsyncMock(return_value=(_order(), False))
+    get_latest_open_order = AsyncMock(return_value=_order())
     get_customer_open_order_by_id = AsyncMock(return_value=None)
     update_order_payment_status = AsyncMock(return_value={"order_id": "order-1", "payment_status": "proof_received"})
     set_current_order = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        tool_payments.payment_verifier.orders,
-        "get_unambiguous_open_order",
-        get_unambiguous_open_order,
-    )
+    monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_latest_open_order", get_latest_open_order)
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_customer_open_order_by_id", get_customer_open_order_by_id)
     monkeypatch.setattr(tool_payments.payment_verifier.sessions, "get_session", AsyncMock(return_value=None))
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "update_order_payment_status", update_order_payment_status)
@@ -261,12 +203,7 @@ async def test_executor_payment_validation_success(monkeypatch):
             "analyzed": True,
             "payment_method": "zelle",
             "amount": "28.00",
-            "currency": "USD",
             "status": "completed",
-            "confidence": "high",
-            "reference": "TXN-TOOL-123",
-            "date": datetime.now(UTC).isoformat(),
-            "proof_hash": "f" * 64,
             "recipient_identifier": "pagos@example.com",
             "summary": "Pago Zelle a pagos@example.com por $28",
         },
@@ -277,14 +214,14 @@ async def test_executor_payment_validation_success(monkeypatch):
     assert result["payment_status"] == "proof_received"
     assert result["validated_amount"] == 28.0
     assert result["validated_payment_method"] == "Zelle"
-    update_order_payment_status.assert_awaited_once()
-    payment_update = update_order_payment_status.await_args
-    assert payment_update.args == ("order-1",)
-    assert payment_update.kwargs["status"] == "proof_received"
-    assert payment_update.kwargs["note"] == "Comprobante Zelle"
+    update_order_payment_status.assert_awaited_once_with(
+        "order-1",
+        status="proof_received",
+        note="Comprobante Zelle",
+    )
     set_current_order.assert_awaited_once_with(
         "customer-1",
-        None,
+        "order-1",
         workflow_stage="completed",
         active_agent="payment",
     )
@@ -292,14 +229,10 @@ async def test_executor_payment_validation_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_payment_validation_failure_does_not_update_order(monkeypatch):
-    get_unambiguous_open_order = AsyncMock(return_value=(_order(), False))
+    get_latest_open_order = AsyncMock(return_value=_order())
     get_customer_open_order_by_id = AsyncMock(return_value=None)
     update_order_payment_status = AsyncMock(return_value={"order_id": "order-1"})
-    monkeypatch.setattr(
-        tool_payments.payment_verifier.orders,
-        "get_unambiguous_open_order",
-        get_unambiguous_open_order,
-    )
+    monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_latest_open_order", get_latest_open_order)
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "get_customer_open_order_by_id", get_customer_open_order_by_id)
     monkeypatch.setattr(tool_payments.payment_verifier.sessions, "get_session", AsyncMock(return_value=None))
     monkeypatch.setattr(tool_payments.payment_verifier.orders, "update_order_payment_status", update_order_payment_status)
@@ -310,12 +243,7 @@ async def test_executor_payment_validation_failure_does_not_update_order(monkeyp
             "analyzed": True,
             "payment_method": "zelle",
             "amount": "20.00",
-            "currency": "USD",
             "status": "completed",
-            "confidence": "high",
-            "reference": "TXN-TOOL-124",
-            "date": datetime.now(UTC).isoformat(),
-            "proof_hash": "1" * 64,
             "recipient_identifier": "pagos@example.com",
             "summary": "Pago Zelle a pagos@example.com por $20",
         },
@@ -395,7 +323,6 @@ async def test_executor_checkout_tools_dispatch_with_context(monkeypatch):
 @pytest.mark.asyncio
 async def test_executor_product_image_payload(monkeypatch):
     monkeypatch.setattr(tool_catalog, "get_cached_catalog", _catalog)
-    monkeypatch.setattr(tool_catalog, "ensure_fresh_catalog", AsyncMock(return_value=_catalog()))
 
     result = await execute_tool(
         "send_product_image",
@@ -429,7 +356,7 @@ async def test_executor_support_order_status_is_scoped_to_current_customer(monke
 
     result = await execute_tool(
         "get_customer_order_status",
-        {"customer_id": "attacker-controlled", "limit": 5},
+        {"customer_id": "attacker-controlled", "limit": 99},
         _context(),
     )
 
@@ -440,9 +367,10 @@ async def test_executor_support_order_status_is_scoped_to_current_customer(monke
 
 
 @pytest.mark.asyncio
-async def test_executor_catalog_pdf_generation_failure(monkeypatch):
+async def test_executor_catalog_pdf_generation_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(tool_messaging, "PDF_PATH", tmp_path / "missing.pdf")
     monkeypatch.setattr(tool_messaging, "get_cached_catalog", _catalog)
-    monkeypatch.setattr(tool_messaging, "ensure_catalog_pdf", MagicMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(tool_messaging, "generate_catalog_pdf", MagicMock(side_effect=RuntimeError("boom")))
 
     result = await execute_tool("send_catalog_pdf", {"caption": "Catálogo"}, _context())
 

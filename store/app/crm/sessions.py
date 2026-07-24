@@ -315,35 +315,25 @@ async def set_workflow_stage(customer_id: str, workflow_stage: str) -> Conversat
 
 async def update_checkout_draft(customer_id: str, partial_update: dict) -> ConversationSession:
     customer_id = _customer_id_text(customer_id)
-    await get_or_create_session(customer_id)
-    async with db.get_db().transaction():
-        current = await db.fetch_one(
-            """
-            SELECT checkout_draft
-            FROM conversation_sessions
-            WHERE customer_id = :customer_id
-            FOR UPDATE
-            """,
-            {"customer_id": customer_id},
-        )
-        draft = merge_checkout_draft(current["checkout_draft"] if current else None, partial_update)
-        row = await db.fetch_one(
-            """
-            UPDATE conversation_sessions
-            SET checkout_draft = CAST(:checkout_draft AS jsonb),
-                active_agent = 'checkout',
-                workflow_stage = :workflow_stage,
-                updated_at = NOW()
-            WHERE customer_id = :customer_id
-            RETURNING customer_id, active_agent, active_intent, workflow_stage, checkout_draft,
-                      current_order_id, last_route_confidence, created_at, updated_at
-            """,
-            {
-                "customer_id": customer_id,
-                "checkout_draft": json.dumps(draft.public_dict(), ensure_ascii=False),
-                "workflow_stage": "checkout_ready" if not draft.missing_fields() else "checkout_collecting",
-            },
-        )
+    session = await get_or_create_session(customer_id)
+    draft = merge_checkout_draft(session.checkout_draft, partial_update)
+    row = await db.fetch_one(
+        """
+        UPDATE conversation_sessions
+        SET checkout_draft = CAST(:checkout_draft AS jsonb),
+            active_agent = 'checkout',
+            workflow_stage = :workflow_stage,
+            updated_at = NOW()
+        WHERE customer_id = :customer_id
+        RETURNING customer_id, active_agent, active_intent, workflow_stage, checkout_draft,
+                  current_order_id, last_route_confidence, created_at, updated_at
+        """,
+        {
+            "customer_id": customer_id,
+            "checkout_draft": json.dumps(draft.public_dict(), ensure_ascii=False),
+            "workflow_stage": "checkout_ready" if not draft.missing_fields() else "checkout_collecting",
+        },
+    )
     logger.info(
         "AI checkout draft updated",
         extra={"workflow_stage": "checkout_ready" if not draft.missing_fields() else "checkout_collecting"},

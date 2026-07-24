@@ -10,7 +10,7 @@ import unicodedata
 
 from app.admin.notify import notify_escalation
 from app.ai.tools.context import ToolExecutionContext
-from app.catalog.pdf_generator import ensure_catalog_pdf
+from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
 from app.crm import conversations, escalations
@@ -74,14 +74,15 @@ async def send_catalog_pdf(args: dict, context: ToolExecutionContext) -> dict:
             "status": "error",
             "message": "Catalog PDF delivery is unavailable here. Describe catalog categories in text instead.",
         }
-    catalog = get_cached_catalog()
-    if not catalog:
-        return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
-    try:
-        ensure_catalog_pdf(catalog)
-    except Exception as e:
-        logger.error(f"Auto-generate catalog PDF failed: {e}")
-        return {"status": "error", "message": "Could not generate catalog PDF."}
+    if not PDF_PATH.exists():
+        catalog = get_cached_catalog()
+        if not catalog:
+            return {"status": "error", "message": "Catalog is empty, cannot generate PDF."}
+        try:
+            generate_catalog_pdf(catalog)
+        except Exception as e:
+            logger.error(f"Auto-generate catalog PDF failed: {e}")
+            return {"status": "error", "message": "Could not generate catalog PDF."}
     return {
         "type": "catalog_pdf",
         "caption": args.get("caption", "Aqui tienes nuestro catalogo de productos 📖"),

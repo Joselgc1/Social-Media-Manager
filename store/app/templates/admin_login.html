@@ -30,7 +30,7 @@
     </form>
   </div>
   <script>
-    const error = new URLSearchParams(window.location.search).get('error');
+    const error = __ERROR__;
     if (error) {
       const box = document.getElementById('error-box');
       box.textContent = error;

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class OpenAIProvider(LLMProvider):
     def __init__(self, api_key: str):
-        self.client = AsyncOpenAI(api_key=api_key, timeout=90.0)
+        self.client = AsyncOpenAI(api_key=api_key)
 
     # ── Main chat call ───────────────────────────────────────
 
@@ -56,7 +56,6 @@ class OpenAIProvider(LLMProvider):
         tool_call_id: str,
         tool_name: str,
         tool_result: str,
-        tool_history: list[dict] | None = None,
         tools: list[dict] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 500,
@@ -64,29 +63,22 @@ class OpenAIProvider(LLMProvider):
 
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
-        history = tool_history or [{
-            "id": tool_call_id,
-            "name": tool_name,
-            "arguments": {},
-            "result": tool_result,
-        }]
-        for entry in history:
-            full_messages.append({
-                "role": "assistant",
-                "tool_calls": [{
-                    "id": entry["id"],
-                    "type": "function",
-                    "function": {
-                        "name": entry["name"],
-                        "arguments": json.dumps(entry.get("arguments") or {}, ensure_ascii=False),
-                    },
-                }],
-            })
-            full_messages.append({
-                "role": "tool",
-                "tool_call_id": entry["id"],
-                "content": entry["result"],
-            })
+        # Append the assistant's tool_call message
+        full_messages.append({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {"name": tool_name, "arguments": "{}"},
+            }],
+        })
+
+        # Append the tool result
+        full_messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": tool_result,
+        })
 
         kwargs = {
             "model": model,

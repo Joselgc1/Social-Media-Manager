@@ -32,17 +32,25 @@ The guide has 11 parts:
 
 You need the core service accounts before touching the code. Then choose one customer-channel backend: direct Meta or Kommo.
 
-### 1.1 Railway PostgreSQL Database
+### 1.1 Supabase (Database)
 
-In the Railway project, add a PostgreSQL service named `StorePostgres`. Deploy the Store service from this repository with root directory `store/`, then set:
+Go to [supabase.com](https://supabase.com) and create a free account. Click **New Project**, pick a region close to your deployment server (US East if deploying on Railway), and set a strong database password. **Save this password!**
+
+Once the project is created, go to **Settings > Database**. You'll find your connection string under **Connection string > URI**. It looks like:
 
 ```text
-DATABASE_URL=${{StorePostgres.DATABASE_URL}}
+postgresql://postgres:[YOUR-PASSWORD]@db.xyzabc.supabase.co:5432/postgres
 ```
 
-`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The migration is idempotent and records schema version `1`; a failure blocks the deployment. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`.
+Copy this. It goes in your `.env` as `DATABASE_URL`.
 
-Back up before changing an existing database. See [Railway PostgreSQL Deployment](../docs/RAILWAY_POSTGRES.md) for Store/Master setup, legacy recovery migrations, backup, and cutover instructions.
+Run the migrations. Go to the SQL Editor in Supabase's dashboard:
+
+1. Paste the entire contents of `store/migrations/001_schema.sql` and click **Run**.
+
+This creates all tables and seeds the runtime settings used by the store dashboard and the master control plane.
+
+Verify by going to Table Editor. You should see the `settings` table pre-populated with the AI defaults, `ai_orchestration_mode=legacy`, the scheduler defaults (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`), Kommo transport formatting defaults (`kommo_emoji_mode_*`, `kommo_strip_emoji`), an empty `payment_methods` row, exchange-rate defaults, an empty `store_phone_number` row, and automatic order discount defaults. The same consolidated schema also creates the multi-agent workflow and AI observability tables. For existing stores created from an older schema, re-run this consolidated file in a maintenance window to create any missing tables and default settings before enabling multi-agent mode.
 
 ### 1.2 OpenAI API Key
 
@@ -141,7 +149,7 @@ Set exactly one channel backend per store:
 | `kommo` | You want Kommo to own WhatsApp/Instagram channel connections and shared inbox. | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | Kommo Salesbot        |
 
 
-For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) after the core PostgreSQL, LLM, Google Sheets, and Telegram setup is complete.
+For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) after the core Supabase, LLM, Google Sheets, and Telegram setup is complete.
 
 ### 1.7 Meta Developer App (WhatsApp + Instagram APIs)
 
@@ -214,12 +222,11 @@ INSTAGRAM_ACCESS_TOKEN=          # Leave empty until App Review approval
 INSTAGRAM_VERIFY_TOKEN=my_secret_verify_2026
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
-DATABASE_URL=postgresql://postgres:password@localhost:5432/store_db
+DATABASE_URL=postgresql://postgres:yourpass@db.xyz.supabase.co:5432/postgres
 GOOGLE_SHEETS_CREDENTIALS_B64=eyJ0eXBlIjoi...
 PRODUCT_SHEET_ID=1abc2def3ghi...
 TELEGRAM_BOT_TOKEN=123456789:ABC...
 TELEGRAM_ADMIN_CHAT_ID=987654321
-TELEGRAM_WEBHOOK_SECRET=
 STORE_NAME="Zona Pink"
 OWNER_NAME=Carlos
 APP_BASE_URL=https://your-app.railway.app
@@ -283,7 +290,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 open http://localhost:8000/admin/login
 ```
 
-> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters and at least one real LLM API key. Documented sample credentials are rejected. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
+> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires `ADMIN_PASSWORD` and at least one LLM API key. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide both Telegram variables.
 
 ---
 
@@ -333,7 +340,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 Only do this when `CHANNEL_BACKEND=kommo`.
 
-1. Confirm the correct numbered migration path has been completed and the latest `schema_migrations` version matches `EXPECTED_SCHEMA_VERSION` in `store/app/db.py`.
+1. Confirm `store/migrations/001_schema.sql` has been run in the store Supabase database.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
 3. Create the private-message Kommo Salesbot with the `Ask Eva AI for DMs` widget step pointing to `https://abc123.ngrok-free.app/webhooks/kommo/salesbot`, ending in a Message step with `{{json.message}}`.
 4. Create the public-comment Kommo Salesbot with Kommo's native `When a comment is received` trigger, the `Ask Eva AI for Instagram comments` widget step, and a Comment step with `{{json.message}}`.
@@ -377,7 +384,7 @@ Minimum production variables shared by both backends:
 | `CHANNEL_BACKEND`                                   | `meta` or `kommo`                                                     |
 | `ADMIN_PASSWORD`                                    | Required when `DEBUG=false`                                           |
 | `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`             | At least one is required                                              |
-| `DATABASE_URL`                                      | `${{StorePostgres.DATABASE_URL}}` Railway reference variable          |
+| `DATABASE_URL`                                      | Store Supabase URL, preferably session pooler if direct DB is blocked |
 | `GOOGLE_SHEETS_CREDENTIALS_B64`                     | Base64 service-account JSON                                           |
 | `PRODUCT_SHEET_ID`                                  | Google Sheets catalog ID                                              |
 | `STORE_NAME`, `OWNER_NAME`, `APP_BASE_URL`, `DEBUG` | Store metadata/runtime                                                |
@@ -447,10 +454,6 @@ For Kommo mode, update:
 
 
 ### 6.1 Telegram Admin Bot
-
-Configure `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and a random
-`TELEGRAM_WEBHOOK_SECRET` first. Generate the secret with
-`python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
 Register the Telegram webhook (run once, requires admin auth):
 
@@ -575,7 +578,7 @@ All tables in Clientes, Pedidos, and Broadcasts are sortable by clicking column 
 
 Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto-detects OS preference on first visit.
 
-**Dashboard and API protection:** A non-placeholder `ADMIN_PASSWORD` of at least 12 characters is **required** in production. Browser access goes through `/admin/login`, which sets an HTTP-only session cookie. All `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API endpoints accept either that cookie or `Authorization: Bearer YOUR_PASSWORD`. Without a valid `ADMIN_PASSWORD` in production (`DEBUG=false`), startup fails fast.
+**Dashboard and API protection:** `ADMIN_PASSWORD` is **required** in production. Browser access goes through `/admin/login`, which sets an HTTP-only session cookie. All `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API endpoints accept either that cookie or `Authorization: Bearer YOUR_PASSWORD`. Without `ADMIN_PASSWORD` set in production (`DEBUG=false`), startup fails fast.
 
 **Custom AI persona:** Set `SYSTEM_PROMPT_OVERRIDE` to replace the default `store/prompts/system_prompt.md` template for a specific store deployment. Must use the same `{store_name}`, `{product_catalog}`, etc. placeholders.
 
@@ -794,7 +797,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 ### 9.5b Kommo Mode
 
 ```text
-[ ] Store schema_migrations reports version 2 (001 for fresh DB, 002 for existing DB)
+[ ] 001_schema.sql has been run in the store DB
 [ ] Widget ZIP uploaded to private Kommo integration
 [ ] Salesbot contains widget step pointing to /webhooks/kommo/salesbot
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>
@@ -837,7 +840,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] /usage -> API costs (~$0.15-0.30/day at normal volume)
 [ ] /conversion -> Customers moving through funnel
 [ ] /performance -> No response times above 5000ms
-[ ] Check stored conversations for incorrect AI responses
+[ ] Check Supabase conversations for incorrect AI responses
 [ ] Check orders table for stuck orders (pending >24h)
 [ ] Verify Telegram escalation and order notifications arrive
 [ ] /products -> Address frequently asked-for products you don't carry

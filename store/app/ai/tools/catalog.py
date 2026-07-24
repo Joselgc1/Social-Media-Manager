@@ -7,13 +7,11 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from app import analytics
-from app.catalog.sheets import ensure_fresh_catalog, get_cached_catalog, get_product_sizes, group_catalog_products
+from app.catalog.sheets import get_cached_catalog, get_product_sizes, group_catalog_products
 
 
 async def check_inventory(args: dict) -> dict:
     """Search the cached product catalog for matching products."""
-    await ensure_fresh_catalog()
     matches = find_catalog_matches(
         product_query=args.get("product_query", ""),
         size_filter=args.get("size"),
@@ -43,8 +41,6 @@ async def check_inventory(args: dict) -> dict:
             ],
         })
 
-    await analytics.record_product_inquiries(result_products[:5])
-
     if not result_products:
         return {
             "found": False,
@@ -61,7 +57,6 @@ async def check_inventory(args: dict) -> dict:
 
 async def send_product_image(args: dict) -> dict:
     """Return a product-image payload for the first matching catalog item with an image."""
-    await ensure_fresh_catalog()
     matches = find_catalog_matches(product_query=args.get("product_query", ""))
     if not matches:
         return {

@@ -108,14 +108,17 @@ async def test_kommo_catalog_request_returns_normal_text_response(monkeypatch):
 async def test_direct_meta_pdf_tool_behavior_remains_available(monkeypatch, tmp_path):
     from app.ai import engine
 
+    pdf_path = tmp_path / "catalog.pdf"
     generated = []
+    monkeypatch.setattr(engine, "PDF_PATH", pdf_path)
     monkeypatch.setattr(engine, "get_cached_catalog", lambda: [{"product_name": "Pijama"}])
 
-    def ensure(catalog):
+    def generate(catalog):
         generated.append(catalog)
-        return tmp_path / "catalog.pdf"
+        pdf_path.write_bytes(b"pdf")
+        return pdf_path
 
-    monkeypatch.setattr(engine, "ensure_catalog_pdf", ensure)
+    monkeypatch.setattr(engine, "generate_catalog_pdf", generate)
     monkeypatch.setattr(engine, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
 
     result = await engine._execute_tool(
@@ -156,15 +159,12 @@ async def test_manual_admin_pdf_generation_still_works_without_kommo(monkeypatch
 
 @pytest.mark.asyncio
 async def test_pdf_status_and_download_endpoints_still_work(monkeypatch, tmp_path):
-    from app.admin import settings
     from fastapi.responses import FileResponse
+    from app.admin import settings
 
     pdf_path = tmp_path / "catalog.pdf"
     pdf_path.write_bytes(b"pdf")
     monkeypatch.setattr(settings, "PDF_PATH", pdf_path)
-    monkeypatch.setattr(settings, "get_cached_catalog", lambda: [{"product_name": "Pijama"}])
-    monkeypatch.setattr(settings, "is_catalog_pdf_current", lambda catalog: True)
-    monkeypatch.setattr(settings, "ensure_catalog_pdf", lambda catalog: pdf_path)
     monkeypatch.setattr(
         settings,
         "get_pdf_metadata",
@@ -189,7 +189,7 @@ async def test_scheduled_pdf_generation_does_not_call_kommo(monkeypatch):
     imports = _fail_if_kommo_files_imported(monkeypatch)
     generated = []
     monkeypatch.setattr(scheduler, "get_cached_catalog", lambda: [{"product_name": "Pijama"}])
-    monkeypatch.setattr(scheduler, "ensure_catalog_pdf", lambda catalog: generated.append(catalog))
+    monkeypatch.setattr(scheduler, "generate_catalog_pdf", lambda catalog: generated.append(catalog))
     monkeypatch.setattr(scheduler, "count_grouped_catalog_products", lambda catalog: 1)
 
     await scheduler._refresh_catalog_pdf()

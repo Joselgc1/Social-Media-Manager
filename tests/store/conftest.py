@@ -82,7 +82,6 @@ def mock_config():
     config.product_sheet_id = "test-sheet-id"
     config.telegram_bot_token = "test-bot-token"
     config.telegram_admin_chat_id = "12345"
-    config.telegram_webhook_secret = "test-telegram-webhook-secret"
     config.store_name = "Test Store"
     config.owner_name = "Test Owner"
     config.app_base_url = "http://localhost:8000"

@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -151,7 +150,6 @@ def engine_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(engine.conversations, "get_recent_summary", AsyncMock(return_value="Resumen reciente"))
     monkeypatch.setattr(engine.conversations, "store_message", AsyncMock(return_value=None))
     monkeypatch.setattr(engine.orders, "get_latest_open_order", AsyncMock(return_value=None))
-    monkeypatch.setattr(engine.orders, "get_unambiguous_open_order", AsyncMock(return_value=(None, False)))
     monkeypatch.setattr(engine.orders, "create_order", AsyncMock(return_value=_sample_order()))
     monkeypatch.setattr(engine.orders, "update_payment_status", AsyncMock(return_value=None))
     monkeypatch.setattr(engine.orders, "update_order_payment_status", AsyncMock(return_value=None))
@@ -162,16 +160,15 @@ def engine_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_runner, "get_provider", lambda name: provider)
     monkeypatch.setattr(engine, "get_config", lambda: SimpleNamespace(store_name="Tienda Rosa"))
     monkeypatch.setattr(engine, "get_cached_catalog", lambda: catalog)
-    monkeypatch.setattr(engine, "ensure_fresh_catalog", AsyncMock(return_value=catalog))
     monkeypatch.setattr(tool_catalog, "get_cached_catalog", lambda: catalog)
-    monkeypatch.setattr(tool_catalog, "ensure_fresh_catalog", AsyncMock(return_value=catalog))
     monkeypatch.setattr(tool_messaging, "get_cached_catalog", lambda: catalog)
     monkeypatch.setattr(engine, "notify_incoming_message", AsyncMock(return_value=None))
     monkeypatch.setattr(engine, "notify_escalation", AsyncMock(return_value=None))
     monkeypatch.setattr(tool_messaging, "notify_escalation", AsyncMock(return_value=None))
     monkeypatch.setattr(tool_orders, "notify_new_order", AsyncMock(return_value=None))
     monkeypatch.setattr(engine, "analyze_payment_screenshot", AsyncMock(return_value={"analyzed": False}))
-    monkeypatch.setattr(tool_messaging, "ensure_catalog_pdf", MagicMock(return_value=tmp_path / "catalog.pdf"))
+    monkeypatch.setattr(tool_messaging, "PDF_PATH", tmp_path / "catalog.pdf")
+    monkeypatch.setattr(tool_messaging, "generate_catalog_pdf", MagicMock(return_value=tmp_path / "catalog.pdf"))
 
     return SimpleNamespace(
         settings=settings,
@@ -296,49 +293,6 @@ async def test_generate_response_contract_for_normal_text(engine_harness):
 
 
 @pytest.mark.asyncio
-async def test_delivery_aware_user_history_survives_provider_failure(engine_harness):
-    engine_harness.provider.chat.side_effect = RuntimeError("provider unavailable")
-
-    with pytest.raises(RuntimeError, match="provider unavailable"):
-        await engine.generate_response(
-            "whatsapp",
-            "584121234567",
-            "Quiero ver pijamas",
-            persist_assistant_message=False,
-            persist_user_before_response=True,
-            message_source_id="meta-job-1",
-        )
-
-    persisted = engine.conversations.store_message.await_args_list
-    assert len(persisted) == 1
-    assert persisted[0].kwargs["role"] == "user"
-    assert persisted[0].kwargs["content"] == "Quiero ver pijamas"
-    assert persisted[0].kwargs["source_id"] == "meta-job-1"
-
-
-@pytest.mark.asyncio
-async def test_delivery_aware_user_history_precedes_vision_failure(engine_harness):
-    engine.analyze_payment_screenshot.side_effect = RuntimeError("vision unavailable")
-
-    with pytest.raises(RuntimeError, match="vision unavailable"):
-        await engine.generate_response(
-            "instagram",
-            "ig-user",
-            "Te envío el comprobante",
-            media_url="https://cdn.test/proof.jpg",
-            persist_assistant_message=False,
-            persist_user_before_response=True,
-            message_source_id="meta-job-vision",
-        )
-
-    engine.conversations.store_message.assert_awaited_once()
-    persisted = engine.conversations.store_message.await_args.kwargs
-    assert persisted["role"] == "user"
-    assert persisted["content"] == "Te envío el comprobante"
-    assert persisted["source_id"] == "meta-job-vision"
-
-
-@pytest.mark.asyncio
 async def test_exchange_rate_question_is_answered_without_llm(engine_harness):
     response = await engine.generate_response("whatsapp", "584121234567", "¿A qué tasa reciben?")
 
@@ -398,7 +352,7 @@ async def test_generate_response_contract_for_catalog_pdf(engine_harness):
     assert response["catalog_pdf"] == {"type": "catalog_pdf", "caption": "Te envío el catálogo."}
     assert response["interactive"] is None
     assert response["product_image"] is None
-    tool_messaging.ensure_catalog_pdf.assert_called_once_with(engine_harness.catalog)
+    tool_messaging.generate_catalog_pdf.assert_called_once_with(engine_harness.catalog)
 
 
 @pytest.mark.asyncio
@@ -612,12 +566,7 @@ async def test_payment_proof_without_existing_order_does_not_create_order(engine
         "analyzed": True,
         "payment_method": "zelle",
         "amount": "28.00",
-        "currency": "USD",
         "status": "completed",
-        "confidence": "high",
-        "reference": "TXN-ENGINE-123",
-        "date": datetime.now(UTC).isoformat(),
-        "proof_hash": "b" * 64,
         "summary": "Comprobante Zelle completado por $28",
     }
 
@@ -642,10 +591,6 @@ async def test_payment_proof_without_existing_order_does_not_create_order(engine
 @pytest.mark.asyncio
 async def test_valid_payment_proof_short_circuits_llm_and_updates_existing_order(engine_harness, monkeypatch):
     engine.orders.get_latest_open_order.return_value = _sample_order(total=28.0, payment_method="Zelle")
-    engine.orders.get_unambiguous_open_order.return_value = (
-        _sample_order(total=28.0, payment_method="Zelle"),
-        False,
-    )
     engine.orders.update_order_payment_status.return_value = {"order_id": "order-1", "payment_status": "proof_received"}
     set_current_order = AsyncMock(return_value=None)
     monkeypatch.setattr(engine.sessions, "set_current_order", set_current_order)
@@ -653,12 +598,7 @@ async def test_valid_payment_proof_short_circuits_llm_and_updates_existing_order
         "analyzed": True,
         "payment_method": "zelle",
         "amount": "28.00",
-        "currency": "USD",
         "status": "completed",
-        "confidence": "high",
-        "reference": "TXN-ENGINE-125",
-        "date": datetime.now(UTC).isoformat(),
-        "proof_hash": "2" * 64,
         "recipient_identifier": "pagos@example.com",
         "summary": "Pago Zelle a pagos@example.com por $28",
     }
@@ -674,14 +614,14 @@ async def test_valid_payment_proof_short_circuits_llm_and_updates_existing_order
     engine_harness.provider.chat.assert_not_awaited()
     engine.orders.create_order.assert_not_awaited()
     engine.orders.update_payment_status.assert_not_awaited()
-    engine.orders.update_order_payment_status.assert_awaited_once()
-    payment_update = engine.orders.update_order_payment_status.await_args
-    assert payment_update.args == ("order-1",)
-    assert payment_update.kwargs["status"] == "proof_received"
-    assert payment_update.kwargs["note"] == "Pago Zelle a pagos@example.com por $28"
+    engine.orders.update_order_payment_status.assert_awaited_once_with(
+        "order-1",
+        status="proof_received",
+        note="Pago Zelle a pagos@example.com por $28",
+    )
     set_current_order.assert_awaited_once_with(
         "customer-1",
-        None,
+        "order-1",
         workflow_stage="completed",
         active_agent="payment",
     )
@@ -690,10 +630,6 @@ async def test_valid_payment_proof_short_circuits_llm_and_updates_existing_order
 @pytest.mark.asyncio
 async def test_unreadable_payment_proof_image_short_circuits_llm_without_update(engine_harness):
     engine.orders.get_latest_open_order.return_value = _sample_order(total=28.0, payment_method="Zelle")
-    engine.orders.get_unambiguous_open_order.return_value = (
-        _sample_order(total=28.0, payment_method="Zelle"),
-        False,
-    )
     engine.analyze_payment_screenshot.return_value = {"analyzed": False}
 
     response = await engine.generate_response(
@@ -711,10 +647,6 @@ async def test_unreadable_payment_proof_image_short_circuits_llm_without_update(
 @pytest.mark.asyncio
 async def test_failed_payment_validation_does_not_mark_payment_as_confirmed(engine_harness):
     engine.orders.get_latest_open_order.return_value = _sample_order(total=28.0, payment_method="Zelle")
-    engine.orders.get_unambiguous_open_order.return_value = (
-        _sample_order(total=28.0, payment_method="Zelle"),
-        False,
-    )
 
     result = await engine._execute_tool(
         "update_payment_status",
@@ -726,12 +658,7 @@ async def test_failed_payment_validation_does_not_mark_payment_as_confirmed(engi
             "analyzed": True,
             "payment_method": "zelle",
             "amount": "20.00",
-            "currency": "USD",
             "status": "completed",
-            "confidence": "high",
-            "reference": "TXN-ENGINE-124",
-            "date": datetime.now(UTC).isoformat(),
-            "proof_hash": "c" * 64,
             "recipient_identifier": "pagos@example.com",
             "summary": "Pago Zelle a pagos@example.com por $20",
         },

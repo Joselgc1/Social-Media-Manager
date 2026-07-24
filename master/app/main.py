@@ -16,14 +16,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import db
 from app.config import get_config
 from app.dashboard.router import router as dashboard_router
-from app.request_limits import RequestBodyLimitMiddleware
 from app.stores.api import cleanup_idle_pools, refresh_and_sync_exchange_rates
 from app.stores.api import router as stores_router
 from app.stores.health import check_all_stores
@@ -106,8 +104,6 @@ async def lifespan(app: FastAPI):
     # Connect to master database
     await db.connect()
     logger.info("Master database connected.")
-    await db.verify_schema_version()
-    logger.info("Master database schema version verified.")
 
     # Start background tasks
     _health_task = asyncio.create_task(_health_check_loop())
@@ -142,7 +138,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         config = get_config()
-        if not config.is_local_environment:
+        is_localhost = "localhost" in config.app_base_url or "127.0.0.1" in config.app_base_url
+        if not is_localhost:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
@@ -166,8 +163,6 @@ app = FastAPI(
 # Rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(RequestBodyLimitMiddleware)
-app.add_middleware(SlowAPIMiddleware)
 
 # Security headers
 app.add_middleware(SecurityHeadersMiddleware)
@@ -186,7 +181,8 @@ app.add_middleware(
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception):
     config = get_config()
-    if config.is_local_environment:
+    is_localhost = "localhost" in config.app_base_url or "127.0.0.1" in config.app_base_url
+    if is_localhost:
         raise exc
     logger.exception(f"Unhandled error on {request.method} {request.url.path}")
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
@@ -198,8 +194,7 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 # Register routers
 app.include_router(stores_router)
 app.include_router(dashboard_router)
-if get_config().is_local_environment:
-    app.include_router(test_router)
+app.include_router(test_router)
 
 
 @app.get("/")

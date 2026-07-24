@@ -17,15 +17,8 @@ from app import db
 from app.auth import require_auth
 from app.config import get_config
 from app.stores import exchange_rates as exchange_rate_service
-from app.stores.crypto import decrypt, encrypt, mask, mask_database_url
-from app.stores.models import (
-    CredentialSet,
-    LLMSettingsUpdate,
-    RuntimeSettingsUpdate,
-    StoreCreate,
-    StoreUpdate,
-    _validate_database_url,
-)
+from app.stores.crypto import decrypt, encrypt, mask
+from app.stores.models import CredentialSet, LLMSettingsUpdate, RuntimeSettingsUpdate, StoreCreate, StoreUpdate
 from app.stores.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
     MASTER_EDITABLE_RUNTIME_SETTING_KEYS,
@@ -46,8 +39,8 @@ BLOCKED_PAYMENT_SETTING_KEYS = {
 }
 _PHONE_ALLOWED_RE = re.compile(r"^[+0-9 ().-]*$")
 
-# Serialize cross-DB queries so dashboard loads respect configured database
-# connection-pool limits while store apps hold their own connections.
+# Serialize cross-DB stats queries so we do not burst past Supabase Session pooler limits
+# when the dashboard loads many stores in parallel (and store apps already hold pool slots).
 _store_stats_semaphore: asyncio.Semaphore | None = None
 
 
@@ -91,15 +84,6 @@ async def cleanup_idle_pools():
                 await pool.disconnect()
 
 
-async def _disconnect_store_pool(store_db_url: str) -> None:
-    """Evict a replaced Store database pool so future reads use the new URL."""
-    async with _pool_lock:
-        entry = _store_pools.pop(store_db_url, None)
-    if entry:
-        with suppress(Exception):
-            await entry[0].disconnect()
-
-
 # ── Audit helper ─────────────────────────────────────────────
 
 async def _audit(action: str, store_id: str | None = None, detail: str = ""):
@@ -132,7 +116,7 @@ async def get_store(store_id: str):
     if result.get("db_url_encrypted"):
         try:
             decrypted = decrypt(result["db_url_encrypted"])
-            result["db_url_masked"] = mask_database_url(decrypted)
+            result["db_url_masked"] = mask(decrypted, 20)
         except Exception:
             result["db_url_masked"] = "****"
     del result["db_url_encrypted"]
@@ -144,30 +128,22 @@ async def create_store(store: StoreCreate):
     """Register a new store."""
     encrypted_db_url = encrypt(store.db_url)
 
-    async with db.get_db().transaction():
-        row = await db.fetch_one(
-            """INSERT INTO stores (name, owner_name, owner_contact, app_url,
-                                   railway_service_id, railway_project_id, db_url_encrypted)
-               VALUES (:name, :owner_name, :owner_contact, :app_url,
-                       :railway_service_id, :railway_project_id, :db_url_encrypted)
-               RETURNING id""",
-            {
-                "name": store.name,
-                "owner_name": store.owner_name,
-                "owner_contact": store.owner_contact,
-                "app_url": store.app_url,
-                "railway_service_id": store.railway_service_id,
-                "railway_project_id": store.railway_project_id,
-                "db_url_encrypted": encrypted_db_url,
-            },
-        )
-        await db.execute(
-            """
-            INSERT INTO store_credentials (store_id, key, value_encrypted)
-            VALUES (:store_id, 'DATABASE_URL', :value_encrypted)
-            """,
-            {"store_id": str(row["id"]), "value_encrypted": encrypted_db_url},
-        )
+    row = await db.fetch_one(
+        """INSERT INTO stores (name, owner_name, owner_contact, app_url,
+                               railway_service_id, railway_project_id, db_url_encrypted)
+           VALUES (:name, :owner_name, :owner_contact, :app_url,
+                   :railway_service_id, :railway_project_id, :db_url_encrypted)
+           RETURNING id""",
+        {
+            "name": store.name,
+            "owner_name": store.owner_name,
+            "owner_contact": store.owner_contact,
+            "app_url": store.app_url,
+            "railway_service_id": store.railway_service_id,
+            "railway_project_id": store.railway_project_id,
+            "db_url_encrypted": encrypted_db_url,
+        },
+    )
     store_id = str(row["id"])
     await _audit("create_store", store_id, f"Created store: {store.name}")
     logger.info(f"Store created: {store.name} ({store_id})")
@@ -183,16 +159,13 @@ _ALLOWED_STORE_UPDATE_COLUMNS = {
 
 @router.put("/{store_id}")
 async def update_store(store_id: str, update: StoreUpdate):
-    """Update store metadata and, optionally, its encrypted database URL."""
-    existing = await db.fetch_one(
-        "SELECT id, db_url_encrypted FROM stores WHERE id = :id", {"id": store_id}
-    )
+    """Update store metadata (not credentials)."""
+    existing = await db.fetch_one("SELECT id FROM stores WHERE id = :id", {"id": store_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Store not found")
 
     fields = {k: v for k, v in update.model_dump().items() if v is not None}
-    database_url = fields.pop("db_url", None)
-    if not fields and database_url is None:
+    if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
 
     # Only allow whitelisted column names
@@ -200,41 +173,11 @@ async def update_store(store_id: str, update: StoreUpdate):
     if invalid:
         raise HTTPException(status_code=400, detail=f"Invalid fields: {sorted(invalid)}")
 
-    encrypted_database_url = encrypt(database_url) if database_url is not None else None
-    old_database_url = ""
-    if encrypted_database_url:
-        try:
-            old_database_url = decrypt(existing["db_url_encrypted"])
-        except Exception:
-            logger.warning("Could not decrypt previous database URL for store %s pool cleanup", store_id)
+    set_clause = ", ".join(f"{k} = :{k}" for k in fields)
+    fields["id"] = store_id
+    await db.execute(f"UPDATE stores SET {set_clause} WHERE id = :id", fields)
 
-    async with db.get_db().transaction():
-        if fields:
-            set_clause = ", ".join(f"{key} = :{key}" for key in fields)
-            await db.execute(
-                f"UPDATE stores SET {set_clause} WHERE id = :id",
-                {**fields, "id": store_id},
-            )
-        if encrypted_database_url:
-            await db.execute(
-                "UPDATE stores SET db_url_encrypted = :value WHERE id = :id",
-                {"value": encrypted_database_url, "id": store_id},
-            )
-            await db.execute(
-                """INSERT INTO store_credentials (store_id, key, value_encrypted, updated_at)
-                   VALUES (:store_id, 'DATABASE_URL', :value_encrypted, NOW())
-                   ON CONFLICT (store_id, key) DO UPDATE
-                   SET value_encrypted = :value_encrypted, updated_at = NOW()""",
-                {"store_id": store_id, "value_encrypted": encrypted_database_url},
-            )
-
-    if old_database_url and old_database_url != database_url:
-        await _disconnect_store_pool(old_database_url)
-
-    updated_fields = list(fields)
-    if database_url is not None:
-        updated_fields.append("database URL")
-    await _audit("update_store", store_id, f"Updated fields: {updated_fields}")
+    await _audit("update_store", store_id, f"Updated fields: {list(fields.keys())}")
     return {"ok": True}
 
 
@@ -279,114 +222,31 @@ async def list_credentials(store_id: str):
 @router.post("/{store_id}/credentials")
 async def set_credential(store_id: str, cred: CredentialSet):
     """Set or update a credential for a store."""
-    existing = await db.fetch_one(
-        "SELECT id, db_url_encrypted FROM stores WHERE id = :id", {"id": store_id}
-    )
+    existing = await db.fetch_one("SELECT id FROM stores WHERE id = :id", {"id": store_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Store not found")
 
-    database_url = _validate_database_url(cred.value) if cred.key == "DATABASE_URL" else None
-    encrypted_value = encrypt(database_url if database_url is not None else cred.value)
-    old_database_url = ""
-    if database_url is not None:
-        try:
-            old_database_url = decrypt(existing["db_url_encrypted"])
-        except Exception:
-            logger.warning("Could not decrypt previous database URL for store %s pool cleanup", store_id)
+    encrypted_value = encrypt(cred.value)
 
-    async with db.get_db().transaction():
-        await db.execute(
-            """INSERT INTO store_credentials (store_id, key, value_encrypted, updated_at)
-               VALUES (:store_id, :key, :value_encrypted, NOW())
-               ON CONFLICT (store_id, key) DO UPDATE SET value_encrypted = :value_encrypted, updated_at = NOW()""",
-            {"store_id": store_id, "key": cred.key, "value_encrypted": encrypted_value},
-        )
-        if cred.key == "DATABASE_URL":
-            await db.execute(
-                "UPDATE stores SET db_url_encrypted = :value WHERE id = :id",
-                {"value": encrypted_value, "id": store_id},
-            )
-    if old_database_url and old_database_url != database_url:
-        await _disconnect_store_pool(old_database_url)
+    await db.execute(
+        """INSERT INTO store_credentials (store_id, key, value_encrypted, updated_at)
+           VALUES (:store_id, :key, :value_encrypted, NOW())
+           ON CONFLICT (store_id, key) DO UPDATE SET value_encrypted = :value_encrypted, updated_at = NOW()""",
+        {"store_id": store_id, "key": cred.key, "value_encrypted": encrypted_value},
+    )
     await _audit("set_credential", store_id, f"Updated credential: {cred.key}")
     return {"ok": True, "key": cred.key}
 
 
 @router.delete("/{store_id}/credentials/{key}")
 async def delete_credential(store_id: str, key: str):
-    """Delete a credential from Railway first, then remove local state."""
-    if key == "DATABASE_URL":
-        raise HTTPException(status_code=400, detail="DATABASE_URL is required by the master control plane and cannot be deleted.")
-
-    store = await db.fetch_one(
-        """
-        SELECT s.railway_service_id, s.railway_project_id, sc.id AS credential_id
-        FROM stores s
-        LEFT JOIN store_credentials sc ON sc.store_id = s.id AND sc.key = :key
-        WHERE s.id = :store_id
-        """,
-        {"store_id": store_id, "key": key},
-    )
-    if not store:
-        raise HTTPException(status_code=404, detail="Store not found")
-    if not store["credential_id"]:
-        raise HTTPException(status_code=404, detail="Credential not found")
-
-    project_id = str(store["railway_project_id"] or "").strip()
-    service_id = str(store["railway_service_id"] or "").strip()
-    if project_id and service_id:
-        if not get_config().railway_api_token:
-            raise HTTPException(status_code=400, detail="RAILWAY_API_TOKEN is required to remove the deployed credential.")
-        from app.stores.railway import delete_variable, get_environments, get_variables
-
-        try:
-            environments = await get_environments(project_id)
-            if not environments:
-                raise RuntimeError("Railway project has no environments.")
-            for environment in environments:
-                environment_id = str(environment.get("id") or "")
-                if not environment_id:
-                    continue
-                variables = await get_variables(project_id, service_id, environment_id)
-                if key in variables:
-                    await delete_variable(project_id, service_id, environment_id, key)
-        except Exception as e:
-            logger.error("Railway credential deletion failed for store %s: %s", store_id, e)
-            await _audit("delete_credential_failed", store_id, f"Railway deletion failed for credential: {key}")
-            raise HTTPException(status_code=502, detail="Could not remove credential from Railway; local credential was preserved.") from e
-
+    """Delete a credential."""
     await db.execute(
         "DELETE FROM store_credentials WHERE store_id = :store_id AND key = :key",
         {"store_id": store_id, "key": key},
     )
     await _audit("delete_credential", store_id, f"Deleted credential: {key}")
     return {"ok": True}
-
-
-async def _resolve_railway_environment_id(project_id: str, environment_id: str = "") -> str:
-    """Resolve an explicit environment or require the project's production environment."""
-    from app.stores.railway import get_environments
-
-    environments = await get_environments(project_id)
-    if environment_id:
-        if not any(str(environment.get("id")) == environment_id for environment in environments):
-            raise HTTPException(status_code=400, detail="Railway environment does not belong to this project.")
-        return environment_id
-
-    production = next(
-        (
-            environment
-            for environment in environments
-            if str(environment.get("name") or "").strip().lower() == "production"
-        ),
-        None,
-    )
-    if not production:
-        raise HTTPException(
-            status_code=400,
-            detail="Railway project has no production environment. Create one or provide environment_id explicitly.",
-        )
-    return str(production["id"])
 
 
 # ── Store DB helpers ─────────────────────────────────────────
@@ -620,13 +480,12 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
 
 
 async def _write_store_runtime_settings(store_db: db_lib.Database, fields: dict):
-    async with store_db.transaction():
-        for key, value in fields.items():
-            await store_db.execute(
-                """INSERT INTO settings (key, value) VALUES (:key, :val)
-                   ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()""",
-                {"key": key, "val": json.dumps(value)},
-            )
+    for key, value in fields.items():
+        await store_db.execute(
+            """INSERT INTO settings (key, value) VALUES (:key, :val)
+               ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()""",
+            {"key": key, "val": json.dumps(value)},
+        )
 
 
 async def sync_exchange_rates_to_store(
@@ -1164,7 +1023,7 @@ async def get_railway_status(store_id: str):
     config = get_config()
 
     store = await db.fetch_one(
-        "SELECT railway_service_id, railway_project_id, name, db_url_encrypted FROM stores WHERE id = :id",
+        "SELECT railway_service_id, railway_project_id, name FROM stores WHERE id = :id",
         {"id": store_id},
     )
     if not store:
@@ -1228,7 +1087,7 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
         raise HTTPException(status_code=400, detail="RAILWAY_API_TOKEN not configured")
 
     store = await db.fetch_one(
-        "SELECT railway_service_id, railway_project_id, name, db_url_encrypted FROM stores WHERE id = :id",
+        "SELECT railway_service_id, railway_project_id, name FROM stores WHERE id = :id",
         {"id": store_id},
     )
     if not store:
@@ -1238,16 +1097,27 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
     if not store["railway_project_id"]:
         raise HTTPException(status_code=400, detail="No Railway project ID configured for this store")
 
-    environment_id = await _resolve_railway_environment_id(
-        str(store["railway_project_id"]),
-        environment_id,
-    )
+    # Get environment ID — use provided one, or find production env
+    if not environment_id and store["railway_project_id"]:
+        from app.stores.railway import get_environments
+        envs = await get_environments(store["railway_project_id"])
+        prod_env = next((e for e in envs if e["name"].lower() == "production"), None)
+        if prod_env:
+            environment_id = prod_env["id"]
+        elif envs:
+            environment_id = envs[0]["id"]
+
+    if not environment_id:
+        raise HTTPException(status_code=400, detail="Could not determine Railway environment. Provide environment_id or set railway_project_id on the store.")
 
     # Decrypt all credentials
     cred_rows = await db.fetch_all(
         "SELECT key, value_encrypted FROM store_credentials WHERE store_id = :store_id",
         {"store_id": store_id},
     )
+
+    if not cred_rows:
+        raise HTTPException(status_code=400, detail="No credentials to deploy")
 
     variables = {}
     for row in cred_rows:
@@ -1256,25 +1126,6 @@ async def deploy_credentials(store_id: str, environment_id: str = ""):
         except Exception as e:
             logger.error(f"Failed to decrypt credential {row['key']} for store {store_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to decrypt credential: {row['key']}") from e
-
-    try:
-        authoritative_db_url = decrypt(store["db_url_encrypted"])
-    except Exception as e:
-        logger.error("Failed to decrypt authoritative DATABASE_URL for store %s: %s", store_id, e)
-        raise HTTPException(status_code=500, detail="Failed to decrypt the store database URL") from e
-    variables["DATABASE_URL"] = authoritative_db_url
-    await db.execute(
-        """
-        INSERT INTO store_credentials (store_id, key, value_encrypted, updated_at)
-        VALUES (:store_id, 'DATABASE_URL', :value_encrypted, NOW())
-        ON CONFLICT (store_id, key) DO UPDATE
-        SET value_encrypted = :value_encrypted, updated_at = NOW()
-        """,
-        {
-            "store_id": store_id,
-            "value_encrypted": store["db_url_encrypted"],
-        },
-    )
 
     # Push to Railway
     from app.stores.railway import get_latest_deployment, redeploy_service, upsert_variables

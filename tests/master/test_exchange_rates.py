@@ -8,14 +8,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 
-class _Tx:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
 def _rate(rate_key="usd_bcv", rate="736.9339"):
     from app.stores.dolarvzla import BCV_CURRENT_URL, USDT_EXCHANGE_RATE_URL, NormalizedExchangeRate
 
@@ -343,7 +335,7 @@ def test_store_rate_settings_omit_invalid_rows_instead_of_emptying_values():
 async def test_store_sync_after_partial_failure_only_writes_successful_source(monkeypatch):
     from app.stores import api
 
-    store_db = SimpleNamespace(execute=AsyncMock(), transaction=lambda: _Tx())
+    store_db = SimpleNamespace(execute=AsyncMock())
     monkeypatch.setattr(api, "_get_store_row", AsyncMock(return_value={"id": "store-1", "name": "Store", "db_url_encrypted": "encrypted"}))
     monkeypatch.setattr(api, "decrypt", lambda value: "postgresql://store")
     monkeypatch.setattr(api, "_get_store_db", AsyncMock(return_value=store_db))

@@ -2,8 +2,6 @@
 Encrypt/decrypt store credentials using Fernet symmetric encryption.
 """
 
-from urllib.parse import urlparse
-
 from cryptography.fernet import Fernet
 
 from app.config import get_config
@@ -34,12 +32,3 @@ def mask(value: str, visible_chars: int = 4) -> str:
     if len(value) <= visible_chars:
         return "****"
     return value[:visible_chars] + "****"
-
-
-def mask_database_url(value: str) -> str:
-    """Expose only non-secret database location metadata."""
-    parsed = urlparse(value)
-    if parsed.scheme and parsed.hostname:
-        database = parsed.path.rsplit("/", 1)[-1]
-        return f"{parsed.scheme}://<redacted>@{parsed.hostname}/{database}"
-    return "****"

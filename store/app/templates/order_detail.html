@@ -12,9 +12,10 @@
         (localStorage.getItem('darkMode') === null && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
       document.documentElement.classList.add('dark');
     }
+    window.ORDER_DETAIL_ID = __ORDER_ID__;
   </script>
 </head>
-<body data-order-id="__ORDER_ID__" class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors duration-200">
+<body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors duration-200">
   <div class="max-w-6xl mx-auto px-4 py-8">
     <div class="detail-page-header flex items-start justify-between gap-4 mb-8">
       <div class="min-w-0">

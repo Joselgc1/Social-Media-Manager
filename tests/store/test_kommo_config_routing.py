@@ -11,12 +11,9 @@ def _base_config(**overrides):
     data = {
         "channel_backend": "meta",
         "debug": False,
-        "admin_password": "test-admin-password",
+        "admin_password": "admin",
         "openai_api_key": "sk-test",
         "anthropic_api_key": "",
-        "database_url": "postgresql://test:test@localhost:5432/test",
-        "google_sheets_credentials_b64": "e30=",
-        "product_sheet_id": "test-sheet",
         "meta_app_secret": "meta-secret",
         "whatsapp_access_token": "wa-token",
         "whatsapp_phone_number_id": "phone-id",
@@ -25,7 +22,6 @@ def _base_config(**overrides):
         "instagram_verify_token": "",
         "telegram_bot_token": "",
         "telegram_admin_chat_id": "",
-        "telegram_webhook_secret": "",
         "kommo_subdomain": "store",
         "kommo_access_token": "kommo-token",
         "kommo_integration_id": "client-uuid",
@@ -47,60 +43,6 @@ def test_meta_mode_startup_validation_requires_meta_credentials():
 
     with pytest.raises(RuntimeError, match="WHATSAPP_ACCESS_TOKEN"):
         _validate_startup_config(_base_config(whatsapp_access_token=""))
-
-
-@pytest.mark.parametrize("password", ["", "change-me", "short"])
-def test_production_startup_rejects_empty_placeholder_or_short_admin_password(password):
-    from app.main import _validate_startup_config
-
-    with pytest.raises(RuntimeError, match="ADMIN_PASSWORD"):
-        _validate_startup_config(_base_config(admin_password=password))
-
-
-def test_debug_startup_does_not_require_admin_password():
-    from app.main import _validate_startup_config
-
-    _validate_startup_config(_base_config(debug=True, admin_password=""))
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "expected"),
-    [
-        ("openai_api_key", "sk-...", "OPENAI_API_KEY"),
-        ("meta_app_secret", "your_meta_app_secret_here", "META_APP_SECRET"),
-        ("database_url", "postgresql://postgres:yourpassword@db.example.com/postgres", "DATABASE_URL"),
-        ("telegram_bot_token", "123456:ABC-DEF...", "TELEGRAM_BOT_TOKEN"),
-    ],
-)
-def test_startup_rejects_documented_credential_placeholders(field, value, expected):
-    from app.main import _validate_startup_config
-
-    with pytest.raises(RuntimeError, match=expected):
-        _validate_startup_config(_base_config(**{field: value}))
-
-
-def test_production_startup_requires_telegram_webhook_secret_with_bot():
-    from app.main import _validate_startup_config
-
-    with pytest.raises(RuntimeError, match="TELEGRAM_WEBHOOK_SECRET"):
-        _validate_startup_config(
-            _base_config(
-                telegram_bot_token="123456:real-token",
-                telegram_admin_chat_id="123456",
-                telegram_webhook_secret="",
-            )
-        )
-
-
-def test_telegram_webhook_secret_rejects_unsupported_characters():
-    with pytest.raises(ValidationError, match="telegram_webhook_secret"):
-        Settings(
-            database_url="postgresql://test:test@localhost:5432/test",
-            google_sheets_credentials_b64="e30=",
-            product_sheet_id="sheet",
-            telegram_webhook_secret="secret with spaces",
-            _env_file=None,
-        )
 
 
 def test_kommo_mode_startup_validation_does_not_require_meta_credentials():

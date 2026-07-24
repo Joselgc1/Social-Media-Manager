@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class AnthropicProvider(LLMProvider):
     def __init__(self, api_key: str):
-        self.client = AsyncAnthropic(api_key=api_key, timeout=90.0)
+        self.client = AsyncAnthropic(api_key=api_key)
 
     # ── Main chat call ───────────────────────────────────────
 
@@ -59,28 +59,22 @@ class AnthropicProvider(LLMProvider):
         tool_call_id: str,
         tool_name: str,
         tool_result: str,
-        tool_history: list[dict] | None = None,
         tools: list[dict] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 500,
     ) -> LLMResponse:
 
-        history = tool_history or [{
-            "id": tool_call_id,
-            "name": tool_name,
-            "arguments": {},
-            "result": tool_result,
-        }]
-        extended_messages = list(messages)
-        for entry in history:
-            extended_messages.extend([{
+        # Anthropic expects the assistant's tool_use block followed by
+        # a user message containing the tool_result block
+        extended_messages = messages + [
+            {
                 "role": "assistant",
                 "content": [
                     {
                         "type": "tool_use",
-                        "id": entry["id"],
-                        "name": entry["name"],
-                        "input": entry.get("arguments") or {},
+                        "id": tool_call_id,
+                        "name": tool_name,
+                        "input": {},
                     }
                 ],
             },
@@ -89,11 +83,12 @@ class AnthropicProvider(LLMProvider):
                 "content": [
                     {
                         "type": "tool_result",
-                        "tool_use_id": entry["id"],
-                        "content": entry["result"],
+                        "tool_use_id": tool_call_id,
+                        "content": tool_result,
                     }
                 ],
-            }])
+            },
+        ]
 
         kwargs = {
             "model": model,

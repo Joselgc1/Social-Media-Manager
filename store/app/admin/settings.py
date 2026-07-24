@@ -17,13 +17,7 @@ from app.admin.auth import require_admin
 from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
 from app.admin.telegram_bot import setup_telegram_webhook
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs
-from app.catalog.pdf_generator import (
-    PDF_PATH,
-    ensure_catalog_pdf,
-    generate_catalog_pdf,
-    get_pdf_metadata,
-    is_catalog_pdf_current,
-)
+from app.catalog.pdf_generator import PDF_PATH, generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
 from app.crm import customers as customer_crm
@@ -50,10 +44,6 @@ class SettingUpdate(BaseModel):
     value: str | float | bool | int
 
 
-class SettingsBatchUpdate(BaseModel):
-    settings: dict[str, str | float | bool | int]
-
-
 class PaymentMethodItem(BaseModel):
     id: str | None = None
     name: str
@@ -73,7 +63,6 @@ class OrderUpdate(BaseModel):
 class CustomerUpdate(BaseModel):
     channel: str | None = None
     conversation_state: str | None = None
-    marketing_opt_in: bool | None = None
 
 
 VALID_CUSTOMER_CHANNELS = {"whatsapp", "instagram"}
@@ -252,51 +241,6 @@ def _validate_setting_value(key: str, value, current_settings: dict):
 
 # ── Endpoints ────────────────────────────────────────────────
 
-async def _apply_settings_batch(raw_settings: dict) -> dict:
-    if not raw_settings:
-        raise HTTPException(status_code=400, detail="At least one setting is required.")
-
-    config = get_config()
-    managed_keys = sorted(set(raw_settings) & LLM_MANAGED_KEYS)
-    if config.llm_managed_externally and managed_keys:
-        raise HTTPException(
-            status_code=403,
-            detail=f"LLM settings are managed by the master admin: {', '.join(managed_keys)}.",
-        )
-
-    current_settings = dict(await db.get_settings())
-    validated = {}
-    ordered_keys = [
-        key for key in ("llm_provider", "fallback_provider")
-        if key in raw_settings
-    ]
-    ordered_keys.extend(key for key in raw_settings if key not in ordered_keys)
-    for key in ordered_keys:
-        try:
-            value = _validate_setting_value(key, raw_settings[key], current_settings)
-        except HTTPException:
-            raise
-        except (TypeError, ValueError) as e:
-            raise HTTPException(status_code=400, detail=f"Invalid value for setting '{key}'.") from e
-        validated[key] = value
-        current_settings[key] = value
-
-    async with db.get_db().transaction():
-        await db.execute(
-            """
-            INSERT INTO settings (key, value)
-            SELECT item.key, item.value
-            FROM jsonb_each(CAST(:updates AS jsonb)) AS item(key, value)
-            ON CONFLICT (key) DO UPDATE
-            SET value = EXCLUDED.value, updated_at = NOW()
-            """,
-            {"updates": json.dumps(validated, ensure_ascii=False)},
-        )
-
-    db.invalidate_settings_cache()
-    logger.info("Settings updated atomically: %s", sorted(validated))
-    return validated
-
 @router.get("/")
 async def get_all_settings():
     """Return all current settings."""
@@ -436,20 +380,42 @@ async def update_payment_methods(body: PaymentMethodsUpdate):
     return {"status": "updated", "payment_methods": payment_methods}
 
 
-@router.put("/batch")
-async def update_settings_batch(body: SettingsBatchUpdate):
-    """Validate and update a related group of settings atomically."""
-    validated = await _apply_settings_batch(body.settings)
-    return {"status": "updated", "settings": validated}
-
-
 @router.put("/{key}")
 async def update_setting(key: str, body: SettingUpdate):
     """
     Update a single setting by key.
     Validates provider/model combinations to prevent misconfigurations.
     """
-    value = (await _apply_settings_batch({key: body.value}))[key]
+    config = get_config()
+    if config.llm_managed_externally and key in LLM_MANAGED_KEYS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"LLM setting '{key}' is managed by the master admin. Contact your administrator.",
+        )
+
+    settings = await db.get_settings()
+    value = _validate_setting_value(key, body.value, settings)
+
+    # ── Write to database ────────────────────────────────────
+    existing = await db.fetch_one(
+        "SELECT key FROM settings WHERE key = :key", {"key": key}
+    )
+
+    if existing:
+        await db.execute(
+            "UPDATE settings SET value = :val, updated_at = NOW() WHERE key = :key",
+            {"val": json.dumps(value), "key": key},
+        )
+    else:
+        await db.execute(
+            "INSERT INTO settings (key, value) VALUES (:key, :val)",
+            {"key": key, "val": json.dumps(value)},
+        )
+
+    # Bust the cache so the change takes effect immediately
+    db.invalidate_settings_cache()
+
+    logger.info(f"Setting updated: {key}")
     return {"key": key, "value": value, "status": "updated"}
 
 
@@ -492,7 +458,17 @@ async def quick_switch_provider(provider: str, model: str | None = None):
                    f"Available: {provider_model_ids}",
         )
 
-    await _apply_settings_batch({"llm_provider": provider, "llm_model": model})
+    # Update both settings
+    await db.execute(
+        "UPDATE settings SET value = :val, updated_at = NOW() WHERE key = 'llm_provider'",
+        {"val": json.dumps(provider)},
+    )
+    await db.execute(
+        "UPDATE settings SET value = :val, updated_at = NOW() WHERE key = 'llm_model'",
+        {"val": json.dumps(model)},
+    )
+
+    db.invalidate_settings_cache()
 
     logger.info(f"Provider switched to {provider}/{model}")
     return {
@@ -649,8 +625,7 @@ async def list_customers(tag: str | None = None, limit: int = 200):
         rows = await db.fetch_all(
             """
             SELECT id, channel, platform_id, display_name, phone, instagram_handle, tags,
-                    total_orders, total_spent, conversation_state, marketing_opt_in,
-                    marketing_opt_in_at, marketing_opt_out_at, last_active
+                   total_orders, total_spent, conversation_state, last_active
             FROM customers
             WHERE tags::text LIKE :pattern
             ORDER BY last_active DESC NULLS LAST
@@ -662,8 +637,7 @@ async def list_customers(tag: str | None = None, limit: int = 200):
         rows = await db.fetch_all(
             """
             SELECT id, channel, platform_id, display_name, phone, instagram_handle, tags,
-                    total_orders, total_spent, conversation_state, marketing_opt_in,
-                    marketing_opt_in_at, marketing_opt_out_at, last_active
+                   total_orders, total_spent, conversation_state, last_active
             FROM customers
             ORDER BY last_active DESC NULLS LAST
             LIMIT :limit
@@ -785,10 +759,9 @@ async def list_orders(limit: int = 50):
         SELECT o.id, o.items, o.total, o.payment_method, o.payment_status,
                o.shipping_method, o.shipping_city, o.shipping_address,
                o.shipping_status, o.tracking_number, o.created_at,
-               CASE WHEN c.id IS NULL THEN 'Cliente eliminado' ELSE c.display_name END AS display_name,
-               c.platform_id, c.channel
+               c.display_name, c.platform_id, c.channel
         FROM orders o
-        LEFT JOIN customers c ON o.customer_id = c.id
+        JOIN customers c ON o.customer_id = c.id
         ORDER BY o.created_at DESC
         LIMIT :limit
         """,
@@ -818,7 +791,7 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
     if not row:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    updates: dict[str, str | bool] = {}
+    updates: dict[str, str] = {}
 
     if body.channel is not None:
         channel = body.channel.strip().lower()
@@ -853,9 +826,6 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
             raise HTTPException(status_code=400, detail="Invalid conversation state")
         updates["conversation_state"] = state
 
-    if body.marketing_opt_in is not None:
-        updates["marketing_opt_in"] = body.marketing_opt_in
-
     if not updates:
         existing = await db.fetch_one("SELECT * FROM customers WHERE id::text = :cid", {"cid": customer_id})
         return {"status": "unchanged", "customer": dict(existing) if existing else None}
@@ -865,13 +835,7 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
             result = await activate_customer_for_admin(dict(row), channel=updates.get("channel"))
         except ManualActivationError as e:
             raise HTTPException(status_code=502, detail=e.safe_detail) from e
-        customer = result.customer
-        if body.marketing_opt_in is not None:
-            customer = await customer_crm.update_customer(
-                customer_id=str(row["id"]),
-                marketing_opt_in=body.marketing_opt_in,
-            )
-        return {"status": "updated", "customer": customer, "activation_status": result.status}
+        return {"status": "updated", "customer": result.customer, "activation_status": result.status}
 
     requested_state = updates.get("conversation_state")
     if requested_state == "escalated":
@@ -883,12 +847,6 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
             customer_id=str(row["id"]),
             channel=updates.get("channel"),
             conversation_state=requested_state,
-            marketing_opt_in=updates.get("marketing_opt_in"),
-        )
-    if requested_state in {"escalated", "blocked"} and body.marketing_opt_in is not None:
-        updated = await customer_crm.update_customer(
-            customer_id=str(row["id"]),
-            marketing_opt_in=body.marketing_opt_in,
         )
     return {"status": "updated", "customer": updated}
 
@@ -911,19 +869,14 @@ async def update_order(order_id: str, body: OrderUpdate):
     updated_shipping = None
 
     try:
-        if body.payment_status is not None and body.payment_status not in orders.VALID_PAYMENT_STATUSES:
-            raise ValueError(f"Invalid payment status '{body.payment_status}'")
-        if body.shipping_status is not None and body.shipping_status not in orders.VALID_SHIPPING_STATUSES:
-            raise ValueError(f"Invalid shipping status '{body.shipping_status}'")
-        async with db.get_db().transaction():
-            if body.payment_status is not None:
-                updated_payment = await orders.update_order_payment_status(order_id, body.payment_status)
-            if body.shipping_status is not None or body.tracking_number is not None:
-                updated_shipping = await orders.update_order_shipping(
-                    order_id,
-                    shipping_status=body.shipping_status,
-                    tracking_number=body.tracking_number,
-                )
+        if body.payment_status is not None:
+            updated_payment = await orders.update_order_payment_status(order_id, body.payment_status)
+        if body.shipping_status is not None or body.tracking_number is not None:
+            updated_shipping = await orders.update_order_shipping(
+                order_id,
+                shipping_status=body.shipping_status,
+                tracking_number=body.tracking_number,
+            )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -951,25 +904,9 @@ async def setup_telegram_webhook_endpoint():
     Call this once after deployment.
     """
     config = get_config()
-    if not (
-        config.telegram_bot_token
-        and config.telegram_admin_chat_id
-        and config.telegram_webhook_secret
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, and "
-                "TELEGRAM_WEBHOOK_SECRET must all be configured."
-            ),
-        )
     webhook_url = f"{config.app_base_url}/webhooks/telegram"
 
-    result = await setup_telegram_webhook(
-        config.telegram_bot_token,
-        webhook_url,
-        config.telegram_webhook_secret,
-    )
+    result = await setup_telegram_webhook(config.telegram_bot_token, webhook_url)
     return {"webhook_url": webhook_url, "telegram_response": result}
 
 
@@ -1000,27 +937,19 @@ async def generate_catalog_pdf_endpoint():
 async def catalog_pdf_status():
     """Return the current status of the catalog PDF (last generated, product count)."""
     meta = get_pdf_metadata()
-    catalog = get_cached_catalog()
-    current = is_catalog_pdf_current(catalog) if catalog else False
     return {
-        "exists": current,
+        "exists": PDF_PATH.exists(),
         "generated_at": meta.get("generated_at"),
         "product_count": meta.get("product_count", 0),
-        "pdf_url": "/static/catalog/catalog.pdf" if current else None,
+        "pdf_url": "/static/catalog/catalog.pdf" if PDF_PATH.exists() else None,
     }
 
 
 @router.get("/catalog/download-pdf")
 async def download_catalog_pdf():
     """Download the current catalog PDF."""
-    catalog = get_cached_catalog()
-    if not catalog:
-        raise HTTPException(status_code=404, detail="Catalog is empty. Check Google Sheets connection.")
-    try:
-        ensure_catalog_pdf(catalog)
-    except Exception as e:
-        logger.error("Could not prepare catalog PDF download: %s", e)
-        raise HTTPException(status_code=500, detail="Could not generate catalog PDF.") from e
+    if not PDF_PATH.exists():
+        raise HTTPException(status_code=404, detail="Catalog PDF not generated yet. Use /generate-pdf first.")
     return FileResponse(
         path=str(PDF_PATH),
         media_type="application/pdf",

@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock
 
 import pytest
+
 from app.crm.conversations import prepare_history_for_generation
 
 

@@ -77,11 +77,11 @@ class NormalizedKommoEvent(BaseModel):
 
     @property
     def stable_entity_id(self) -> str | None:
-        return self.chat_id or self.contact_id or self.talk_id or self.entity_id or self.lead_id
+        return self.lead_id or self.entity_id or self.contact_id or self.chat_id or self.talk_id
 
     @property
     def correlation_id(self) -> str:
-        stable = self.chat_id or self.contact_id or self.talk_id or self.entity_id or self.lead_id
+        stable = self.lead_id or self.entity_id or self.chat_id or self.contact_id or self.talk_id
         return f"kommo:{self.interaction_type}:{stable or self.message_id or 'unknown'}"
 
 
@@ -214,8 +214,6 @@ class PersistentKommoJob(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     processing_started_at: datetime | None = None
-    processing_lease_id: str | None = None
-    ai_started_at: datetime | None = None
     completed_at: datetime | None = None
 
 

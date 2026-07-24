@@ -76,11 +76,7 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
                 continue
             result = await record_incoming_event(event)
             logger.info("Kommo incoming message persisted result: %s", _safe_job_result(result))
-            if (
-                getattr(config, "outbound_processing_enabled", True)
-                and result.get("status") in {"created", "merged"}
-                and not launched_processing_task
-            ):
+            if result.get("status") in {"created", "merged"} and not launched_processing_task:
                 asyncio.create_task(schedule_due_job_processing())
                 launched_processing_task = True
             continue
@@ -124,7 +120,7 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
         logger.warning("Rejected invalid Kommo Salesbot callback identity: %s", sanitize_job_error(e))
         raise HTTPException(status_code=400, detail="Invalid Salesbot callback body") from e
 
-    if getattr(config, "outbound_processing_enabled", True) and result.get("status") == "ready":
+    if result.get("status") == "ready":
         background_tasks.add_task(process_ready_jobs, 3)
 
     return {"status": "accepted"}

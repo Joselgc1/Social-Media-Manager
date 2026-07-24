@@ -13,9 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/master_test")
-os.environ.setdefault("MASTER_SECRET_KEY", "test-master-secret-at-least-32-chars")
+os.environ.setdefault("MASTER_SECRET_KEY", "test-master-secret")
 os.environ.setdefault("ENCRYPTION_KEY", "dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3ODkwMTI=")
-os.environ.setdefault("APP_BASE_URL", "http://localhost:9000")
 
 
 @pytest.fixture(autouse=True)
@@ -67,11 +66,10 @@ def mock_config():
     """Mock MasterSettings object with test values."""
     config = MagicMock()
     config.database_url = "postgresql://test:test@localhost:5432/master_test"
-    config.master_secret_key = "test-master-secret-at-least-32-chars"
+    config.master_secret_key = "test-master-secret"
     config.encryption_key = "dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3ODkwMTI="
     config.railway_api_token = ""
     config.app_base_url = "http://localhost:9000"
-    config.is_local_environment = True
     config.health_check_interval_seconds = 300
     config.store_stats_max_concurrent = 1
     return config
@@ -80,7 +78,7 @@ def mock_config():
 @pytest.fixture
 def auth_headers():
     """Authorization headers for master API requests."""
-    return {"Authorization": "Bearer test-master-secret-at-least-32-chars"}
+    return {"Authorization": "Bearer test-master-secret"}
 
 
 @pytest.fixture
