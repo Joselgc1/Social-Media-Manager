@@ -9,7 +9,7 @@ from urllib.parse import urlparse, urlunparse
 
 import jwt
 
-KOMMO_JWT_ALGORITHMS = ["HS256"]
+KOMMO_JWT_ALGORITHMS = ["HS256", "HS512"]
 KOMMO_JWT_LEEWAY_SECONDS = 10
 _SUBDOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
