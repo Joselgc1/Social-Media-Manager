@@ -298,6 +298,8 @@ async function loadStoreDetail() {
             api(`/api/stores/${storeId}/credentials`),
         ]);
         if (selectedStoreId !== storeId || requestSeq !== storeDetailRequestSeq) return;
+        const storeIndex = stores.findIndex(item => item.id === storeId);
+        if (storeIndex !== -1) stores[storeIndex] = store;
         renderStoreDetail(store, stats, creds);
         // Load runtime settings, usage, and Railway status in parallel
         const secondaryLoads = [loadRuntimeSettings(storeId), loadLLMUsage(storeId)];
@@ -607,6 +609,9 @@ function showEditStoreModal(storeId) {
                     <input name="owner_contact" class="w-full" value="${escAttr(store.owner_contact || '')}"></div>
                 <div><label class="block text-sm font-semibold mb-1">App URL</label>
                     <input name="app_url" class="w-full" value="${escAttr(store.app_url || '')}"></div>
+                <div><label class="block text-sm font-semibold mb-1">Sensitive Database Connection URL</label>
+                    <input name="db_url" type="password" class="w-full" autocomplete="new-password" placeholder="Leave blank to keep the current URL">
+                    <p class="text-xs text-gray-500 mt-1">Use the resolved Store PostgreSQL URL, never a Railway reference expression.</p></div>
                 <div><label class="block text-sm font-semibold mb-1">Railway Service ID</label>
                     <input name="railway_service_id" class="w-full" value="${escAttr(store.railway_service_id || '')}"></div>
                 <div><label class="block text-sm font-semibold mb-1">Railway Project ID</label>
@@ -633,7 +638,7 @@ async function submitEditStore(e, storeId) {
         await apiPut(`/api/stores/${storeId}`, data);
         closeModal();
         toast('Store updated!');
-        loadStores();
+        await Promise.all([loadStores(), loadStoreDetail()]);
     } catch (err) {
         toast('Error: ' + err.message, 'error');
     }

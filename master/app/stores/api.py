@@ -18,7 +18,14 @@ from app.auth import require_auth
 from app.config import get_config
 from app.stores import exchange_rates as exchange_rate_service
 from app.stores.crypto import decrypt, encrypt, mask, mask_database_url
-from app.stores.models import CredentialSet, LLMSettingsUpdate, RuntimeSettingsUpdate, StoreCreate, StoreUpdate
+from app.stores.models import (
+    CredentialSet,
+    LLMSettingsUpdate,
+    RuntimeSettingsUpdate,
+    StoreCreate,
+    StoreUpdate,
+    _validate_database_url,
+)
 from app.stores.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
     MASTER_EDITABLE_RUNTIME_SETTING_KEYS,
@@ -39,8 +46,8 @@ BLOCKED_PAYMENT_SETTING_KEYS = {
 }
 _PHONE_ALLOWED_RE = re.compile(r"^[+0-9 ().-]*$")
 
-# Serialize cross-DB stats queries so we do not burst past Supabase Session pooler limits
-# when the dashboard loads many stores in parallel (and store apps already hold pool slots).
+# Serialize cross-DB queries so dashboard loads respect configured database
+# connection-pool limits while store apps hold their own connections.
 _store_stats_semaphore: asyncio.Semaphore | None = None
 
 
@@ -82,6 +89,15 @@ async def cleanup_idle_pools():
             pool, _ = _store_pools.pop(url)
             with suppress(Exception):
                 await pool.disconnect()
+
+
+async def _disconnect_store_pool(store_db_url: str) -> None:
+    """Evict a replaced Store database pool so future reads use the new URL."""
+    async with _pool_lock:
+        entry = _store_pools.pop(store_db_url, None)
+    if entry:
+        with suppress(Exception):
+            await entry[0].disconnect()
 
 
 # ── Audit helper ─────────────────────────────────────────────
@@ -167,13 +183,16 @@ _ALLOWED_STORE_UPDATE_COLUMNS = {
 
 @router.put("/{store_id}")
 async def update_store(store_id: str, update: StoreUpdate):
-    """Update store metadata (not credentials)."""
-    existing = await db.fetch_one("SELECT id FROM stores WHERE id = :id", {"id": store_id})
+    """Update store metadata and, optionally, its encrypted database URL."""
+    existing = await db.fetch_one(
+        "SELECT id, db_url_encrypted FROM stores WHERE id = :id", {"id": store_id}
+    )
     if not existing:
         raise HTTPException(status_code=404, detail="Store not found")
 
     fields = {k: v for k, v in update.model_dump().items() if v is not None}
-    if not fields:
+    database_url = fields.pop("db_url", None)
+    if not fields and database_url is None:
         raise HTTPException(status_code=400, detail="No fields to update")
 
     # Only allow whitelisted column names
@@ -181,11 +200,41 @@ async def update_store(store_id: str, update: StoreUpdate):
     if invalid:
         raise HTTPException(status_code=400, detail=f"Invalid fields: {sorted(invalid)}")
 
-    set_clause = ", ".join(f"{k} = :{k}" for k in fields)
-    fields["id"] = store_id
-    await db.execute(f"UPDATE stores SET {set_clause} WHERE id = :id", fields)
+    encrypted_database_url = encrypt(database_url) if database_url is not None else None
+    old_database_url = ""
+    if encrypted_database_url:
+        try:
+            old_database_url = decrypt(existing["db_url_encrypted"])
+        except Exception:
+            logger.warning("Could not decrypt previous database URL for store %s pool cleanup", store_id)
 
-    await _audit("update_store", store_id, f"Updated fields: {list(fields.keys())}")
+    async with db.get_db().transaction():
+        if fields:
+            set_clause = ", ".join(f"{key} = :{key}" for key in fields)
+            await db.execute(
+                f"UPDATE stores SET {set_clause} WHERE id = :id",
+                {**fields, "id": store_id},
+            )
+        if encrypted_database_url:
+            await db.execute(
+                "UPDATE stores SET db_url_encrypted = :value WHERE id = :id",
+                {"value": encrypted_database_url, "id": store_id},
+            )
+            await db.execute(
+                """INSERT INTO store_credentials (store_id, key, value_encrypted, updated_at)
+                   VALUES (:store_id, 'DATABASE_URL', :value_encrypted, NOW())
+                   ON CONFLICT (store_id, key) DO UPDATE
+                   SET value_encrypted = :value_encrypted, updated_at = NOW()""",
+                {"store_id": store_id, "value_encrypted": encrypted_database_url},
+            )
+
+    if old_database_url and old_database_url != database_url:
+        await _disconnect_store_pool(old_database_url)
+
+    updated_fields = list(fields)
+    if database_url is not None:
+        updated_fields.append("database URL")
+    await _audit("update_store", store_id, f"Updated fields: {updated_fields}")
     return {"ok": True}
 
 
@@ -230,11 +279,20 @@ async def list_credentials(store_id: str):
 @router.post("/{store_id}/credentials")
 async def set_credential(store_id: str, cred: CredentialSet):
     """Set or update a credential for a store."""
-    existing = await db.fetch_one("SELECT id FROM stores WHERE id = :id", {"id": store_id})
+    existing = await db.fetch_one(
+        "SELECT id, db_url_encrypted FROM stores WHERE id = :id", {"id": store_id}
+    )
     if not existing:
         raise HTTPException(status_code=404, detail="Store not found")
 
-    encrypted_value = encrypt(cred.value)
+    database_url = _validate_database_url(cred.value) if cred.key == "DATABASE_URL" else None
+    encrypted_value = encrypt(database_url if database_url is not None else cred.value)
+    old_database_url = ""
+    if database_url is not None:
+        try:
+            old_database_url = decrypt(existing["db_url_encrypted"])
+        except Exception:
+            logger.warning("Could not decrypt previous database URL for store %s pool cleanup", store_id)
 
     async with db.get_db().transaction():
         await db.execute(
@@ -248,6 +306,8 @@ async def set_credential(store_id: str, cred: CredentialSet):
                 "UPDATE stores SET db_url_encrypted = :value WHERE id = :id",
                 {"value": encrypted_value, "id": store_id},
             )
+    if old_database_url and old_database_url != database_url:
+        await _disconnect_store_pool(old_database_url)
     await _audit("set_credential", store_id, f"Updated credential: {cred.key}")
     return {"ok": True, "key": cred.key}
 

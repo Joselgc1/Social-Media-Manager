@@ -6,7 +6,7 @@ import ipaddress
 import socket
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 def _allow_loopback_app_url(hostname: str) -> bool:
@@ -56,6 +56,21 @@ def _validate_app_url(url: str) -> str:
     return url
 
 
+def _validate_database_url(url: str) -> str:
+    """Accept only complete PostgreSQL connection URLs."""
+    value = url.strip()
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("postgresql", "postgres"):
+        raise ValueError("db_url must use postgresql or postgres scheme")
+    if not parsed.hostname or not parsed.path or parsed.path == "/" or parsed.fragment:
+        raise ValueError("db_url must be a complete PostgreSQL connection URL")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("db_url has an invalid port") from exc
+    return value
+
+
 class StoreCreate(BaseModel):
     name: str
     owner_name: str = ""
@@ -70,6 +85,11 @@ class StoreCreate(BaseModel):
     def check_app_url(cls, v: str) -> str:
         return _validate_app_url(v)
 
+    @field_validator("db_url")
+    @classmethod
+    def check_db_url(cls, v: str) -> str:
+        return _validate_database_url(v)
+
 
 class StoreUpdate(BaseModel):
     name: str | None = None
@@ -79,6 +99,7 @@ class StoreUpdate(BaseModel):
     railway_service_id: str | None = None
     railway_project_id: str | None = None
     status: str | None = None
+    db_url: str | None = None
 
     @field_validator("app_url")
     @classmethod
@@ -87,9 +108,22 @@ class StoreUpdate(BaseModel):
             return v
         return _validate_app_url(v)
 
+    @field_validator("db_url")
+    @classmethod
+    def check_db_url(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        return _validate_database_url(v)
+
 class CredentialSet(BaseModel):
     key: str
     value: str
+
+    @model_validator(mode="after")
+    def check_database_url(self):
+        if self.key == "DATABASE_URL":
+            self.value = _validate_database_url(self.value)
+        return self
 
 
 class RuntimeSettingsUpdate(BaseModel):

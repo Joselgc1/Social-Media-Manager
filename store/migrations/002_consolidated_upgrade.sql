@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS payment_proof_replays (
     CHECK (proof_hash IS NOT NULL OR reference_key IS NOT NULL)
 );
 ALTER TABLE payment_proof_replays ENABLE ROW LEVEL SECURITY;
-REVOKE ALL PRIVILEGES ON payment_proof_replays FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON payment_proof_replays FROM PUBLIC;
 
 INSERT INTO schema_migrations (version, name)
 VALUES (1, 'legacy_pre_consolidation')

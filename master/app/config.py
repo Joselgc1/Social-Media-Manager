@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings
 
 
 class MasterSettings(BaseSettings):
-    # Master database (its own Supabase project)
+    # Master database (separate PostgreSQL database)
     database_url: str  # postgresql://...
 
     # Authentication
@@ -30,7 +30,7 @@ class MasterSettings(BaseSettings):
     health_check_interval_seconds: int = 300  # 5 minutes
     health_check_max_concurrent: int = 10
 
-    # Cap parallel /stats connections to each store DB (Supabase session pooler limits)
+    # Cap parallel /stats connections to each store DB (provider pool limits)
     store_stats_max_concurrent: int = 5
 
     # DolarVZLA exchange-rate refresh (master-only credential)

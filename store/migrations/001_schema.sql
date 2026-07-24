@@ -1,7 +1,7 @@
 -- Full store schema
 -- Single consolidated schema for fresh installs, including multi-agent workflow state,
 -- AI run observability, Kommo integration tables, and hardening.
--- Run this against your Supabase PostgreSQL instance
+-- Run this against your PostgreSQL database.
 
 BEGIN;
 
@@ -705,11 +705,11 @@ COMMENT ON TABLE kommo_message_receipts IS 'Durable Kommo inbound message receip
 COMMENT ON COLUMN kommo_message_receipts.receipt_status IS 'created when the receipt opened a new job, merged when it was appended to an existing buffered job.';
 
 -- ============================================================
--- Supabase Data API lockdown
+-- Database privilege hardening
 -- ============================================================
 -- The application connects directly as the database owner. No store table is
--- intended for browser access through PostgREST, so anon/authenticated receive
--- no policies or object privileges.
+-- intended for direct browser access, so public roles receive no policies or
+-- object privileges.
 ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
@@ -728,22 +728,22 @@ ALTER TABLE kommo_message_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kommo_message_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
 
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM anon, authenticated;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated;
-REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM anon, authenticated;
-REVOKE ALL PRIVILEGES ON SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 -- PostgreSQL grants EXECUTE on new functions to PUBLIC by default. Remove that
--- default as well as Supabase's Data API role defaults for future objects.
+-- default for future objects.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    REVOKE ALL PRIVILEGES ON TABLES FROM anon, authenticated;
+    REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    REVOKE ALL PRIVILEGES ON SEQUENCES FROM anon, authenticated;
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon, authenticated;
+    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
-REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS payment_proof_replays (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -754,7 +754,7 @@ CREATE TABLE IF NOT EXISTS payment_proof_replays (
     CHECK (proof_hash IS NOT NULL OR reference_key IS NOT NULL)
 );
 ALTER TABLE payment_proof_replays ENABLE ROW LEVEL SECURITY;
-REVOKE ALL PRIVILEGES ON payment_proof_replays FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON payment_proof_replays FROM PUBLIC;
 
 INSERT INTO schema_migrations (version, name) VALUES
     (1, 'fresh_install_baseline')

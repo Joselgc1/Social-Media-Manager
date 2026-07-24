@@ -199,6 +199,11 @@ cython_debug/
 store/app/static/catalog/catalog.pdf
 store/app/static/catalog/catalog_meta.json
 
+# PostgreSQL backup artifacts
+*.dump
+*.sql.gz
+database-backups/
+
 # PyPI configuration file
 .pypirc
 

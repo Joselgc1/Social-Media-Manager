@@ -22,9 +22,8 @@ pip install -r store/requirements.txt
 cp store/.env.example store/.env
 # Edit store/.env with your actual API keys and credentials
 
-# 3. Set up the database
-# Run this SQL file manually against your Supabase PostgreSQL instance:
-#   store/migrations/001_schema.sql
+# 3. Set up the database and apply the idempotent migration
+python store/scripts/migrate.py
 
 # 4. Run locally
 cd store
@@ -46,6 +45,20 @@ ngrok http 8000
 | Back up, restore, migrate, roll back, and review retention | [`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md) |
 
 Use `CHANNEL_BACKEND=meta` for direct Meta WhatsApp/Instagram webhooks. Use `CHANNEL_BACKEND=kommo` when Kommo owns the official WhatsApp/Instagram channel integrations and this backend only receives Kommo events plus Salesbot callbacks.
+
+## Railway PostgreSQL
+
+Production runs on four Railway services in one project:
+
+```text
+Railway project
+├── Store
+├── StorePostgres
+├── Master
+└── MasterPostgres
+```
+
+Set `Store.DATABASE_URL=${{StorePostgres.DATABASE_URL}}` and `Master.DATABASE_URL=${{MasterPostgres.DATABASE_URL}}`. Each service runs its migration in Railway pre-deploy using the service-local `railway.toml`. See [Railway PostgreSQL Deployment](docs/RAILWAY_POSTGRES.md) for provisioning, Store registration, backups, and existing-data migration.
 
 ## Architecture
 
@@ -318,14 +331,14 @@ A **Master Control Plane** (`master/`) sits on top:
 
 ```txt
 Master Control Plane (1 deployment, port 9000)
-  ├── Master Supabase DB (store registry, encrypted credentials, audit log)
+  ├── Master PostgreSQL database (store registry, encrypted credentials, audit log)
   ├── Dashboard: monitor all stores, manage runtime settings, view costs, deploy changes
   ├── Runtime settings: set provider/model/fallback/orchestration per store
   ├── Railway API integration: push env vars + trigger redeploys
   └── Health checker: pings each store every 5 minutes
 
 Store A (port 8000)          Store B (port 8001)          Store C ...
-  ├── Own Supabase DB          ├── Own Supabase DB
+  ├── Own PostgreSQL database  ├── Own PostgreSQL database
   ├── Own channel backend      ├── Own channel backend
   │   (Meta or Kommo)          │   (Meta or Kommo)
   ├── Own Telegram bot         ├── Own Telegram bot

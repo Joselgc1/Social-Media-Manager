@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
         ROOT / "master/migrations/001_master_schema.sql",
     ],
 )
-def test_every_application_table_has_rls_and_data_api_roles_are_revoked(migration):
+def test_every_application_table_has_rls_and_public_privileges_are_revoked(migration):
     sql = migration.read_text(encoding="utf-8")
     tables = set(re.findall(r"^CREATE TABLE IF NOT EXISTS ([a-z_]+)", sql, re.MULTILINE))
 
@@ -21,14 +21,14 @@ def test_every_application_table_has_rls_and_data_api_roles_are_revoked(migratio
     for table in tables:
         assert f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;" in sql
 
-    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM anon, authenticated;" in sql
-    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated;" in sql
-    assert "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM anon, authenticated;" in sql
-    assert "REVOKE ALL PRIVILEGES ON SCHEMA public FROM anon, authenticated;" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;" in sql
+    assert "REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;" in sql
     assert "REVOKE CREATE ON SCHEMA public FROM PUBLIC;" in sql
-    assert "REVOKE ALL PRIVILEGES ON TABLES FROM anon, authenticated;" in sql
-    assert "REVOKE ALL PRIVILEGES ON SEQUENCES FROM anon, authenticated;" in sql
-    assert "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon, authenticated;" in sql
+    assert "REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC;" in sql
+    assert "REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;" in sql
+    assert "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;" in sql
 
 
 @pytest.mark.parametrize(

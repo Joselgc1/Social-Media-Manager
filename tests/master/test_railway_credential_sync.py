@@ -172,13 +172,21 @@ async def test_database_url_credential_updates_master_connection_source(monkeypa
     from app.stores.models import CredentialSet
 
     execute = AsyncMock()
-    monkeypatch.setattr(api.db, "fetch_one", AsyncMock(return_value={"id": "store-1"}))
+    monkeypatch.setattr(
+        api.db,
+        "fetch_one",
+        AsyncMock(return_value={"id": "store-1", "db_url_encrypted": "old-ciphertext"}),
+    )
     monkeypatch.setattr(api.db, "execute", execute)
     monkeypatch.setattr(api.db, "get_db", lambda: _database())
     monkeypatch.setattr(api, "encrypt", lambda value: "encrypted-new-url")
+    monkeypatch.setattr(api, "decrypt", lambda value: "postgresql://old@db/old")
+    monkeypatch.setattr(api, "_disconnect_store_pool", AsyncMock())
     monkeypatch.setattr(api, "_audit", AsyncMock())
 
-    await api.set_credential("store-1", CredentialSet(key="DATABASE_URL", value="postgresql://new"))
+    await api.set_credential(
+        "store-1", CredentialSet(key="DATABASE_URL", value="postgresql://new@db/store")
+    )
 
     assert execute.await_count == 2
     assert "INSERT INTO store_credentials" in execute.await_args_list[0].args[0]

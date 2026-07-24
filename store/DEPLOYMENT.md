@@ -32,23 +32,17 @@ The guide has 11 parts:
 
 You need the core service accounts before touching the code. Then choose one customer-channel backend: direct Meta or Kommo.
 
-### 1.1 Supabase (Database)
+### 1.1 Railway PostgreSQL Database
 
-Go to [supabase.com](https://supabase.com) and create a free account. Click **New Project**, pick a region close to your deployment server (US East if deploying on Railway), and set a strong database password. **Save this password!**
-
-Once the project is created, go to **Settings > Database**. You'll find your connection string under **Connection string > URI**. It looks like:
+In the Railway project, add a PostgreSQL service named `StorePostgres`. Deploy the Store service from this repository with root directory `store/`, then set:
 
 ```text
-postgresql://postgres:[YOUR-PASSWORD]@db.xyzabc.supabase.co:5432/postgres
+DATABASE_URL=${{StorePostgres.DATABASE_URL}}
 ```
 
-Copy this. It goes in your `.env` as `DATABASE_URL`.
+`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The migration is idempotent and records schema version `1`; a failure blocks the deployment. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`.
 
-Run `store/migrations/001_schema.sql` once from the Supabase SQL Editor for a fresh database. It is the complete fresh-install schema baseline and records schema version `1`.
-
-For an existing pre-consolidation deployment, back up the database and run `store/migrations/002_consolidated_upgrade.sql` once. The store accepts either fresh `{1}` or upgraded `{1,2}` migration rows. Never apply `001_schema.sql` as an upgrade.
-
-Verify with `SELECT version, name, applied_at FROM schema_migrations ORDER BY version;`. It must return either version `1` alone or versions `1, 2`. Then confirm the `settings` table contains the runtime defaults used by the dashboard and scheduler.
+Back up before changing an existing database. See [Railway PostgreSQL Deployment](../docs/RAILWAY_POSTGRES.md) for Store/Master setup, legacy recovery migrations, backup, and cutover instructions.
 
 ### 1.2 OpenAI API Key
 
@@ -147,7 +141,7 @@ Set exactly one channel backend per store:
 | `kommo` | You want Kommo to own WhatsApp/Instagram channel connections and shared inbox. | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | Kommo Salesbot        |
 
 
-For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) after the core Supabase, LLM, Google Sheets, and Telegram setup is complete.
+For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) after the core PostgreSQL, LLM, Google Sheets, and Telegram setup is complete.
 
 ### 1.7 Meta Developer App (WhatsApp + Instagram APIs)
 
@@ -220,7 +214,7 @@ INSTAGRAM_ACCESS_TOKEN=          # Leave empty until App Review approval
 INSTAGRAM_VERIFY_TOKEN=my_secret_verify_2026
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
-DATABASE_URL=postgresql://postgres:yourpass@db.xyz.supabase.co:5432/postgres
+DATABASE_URL=postgresql://postgres:password@localhost:5432/store_db
 GOOGLE_SHEETS_CREDENTIALS_B64=eyJ0eXBlIjoi...
 PRODUCT_SHEET_ID=1abc2def3ghi...
 TELEGRAM_BOT_TOKEN=123456789:ABC...
@@ -383,7 +377,7 @@ Minimum production variables shared by both backends:
 | `CHANNEL_BACKEND`                                   | `meta` or `kommo`                                                     |
 | `ADMIN_PASSWORD`                                    | Required when `DEBUG=false`                                           |
 | `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`             | At least one is required                                              |
-| `DATABASE_URL`                                      | Store Supabase URL, preferably session pooler if direct DB is blocked |
+| `DATABASE_URL`                                      | `${{StorePostgres.DATABASE_URL}}` Railway reference variable          |
 | `GOOGLE_SHEETS_CREDENTIALS_B64`                     | Base64 service-account JSON                                           |
 | `PRODUCT_SHEET_ID`                                  | Google Sheets catalog ID                                              |
 | `STORE_NAME`, `OWNER_NAME`, `APP_BASE_URL`, `DEBUG` | Store metadata/runtime                                                |
@@ -843,7 +837,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] /usage -> API costs (~$0.15-0.30/day at normal volume)
 [ ] /conversion -> Customers moving through funnel
 [ ] /performance -> No response times above 5000ms
-[ ] Check Supabase conversations for incorrect AI responses
+[ ] Check stored conversations for incorrect AI responses
 [ ] Check orders table for stuck orders (pending >24h)
 [ ] Verify Telegram escalation and order notifications arrive
 [ ] /products -> Address frequently asked-for products you don't carry

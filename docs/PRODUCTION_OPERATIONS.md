@@ -3,7 +3,7 @@
 ## Ownership And Schedule
 
 - Assign one operator for production database changes and one reviewer.
-- Enable automated Supabase backups for both the store and master projects.
+- Enable automated Railway PostgreSQL backups for both StorePostgres and MasterPostgres.
 - Take an operator-controlled backup before every schema migration.
 - Perform and document a restore drill at least quarterly.
 - Keep store and master backups separate and label them with service, UTC timestamp, schema version, and commit SHA.
@@ -31,7 +31,7 @@ Retention is irreversible in the live database. Do not restore expired personal 
 
 ## Backup Before Migration
 
-Use direct PostgreSQL or Supabase session-pooler URLs supplied through a secure environment, not command history.
+Use PostgreSQL URLs supplied through a secure environment, not command history.
 
 ```bash
 export STORE_DATABASE_URL='postgresql://...'
@@ -65,7 +65,7 @@ Back up these secrets separately:
 1. Confirm the backup checksums and record the current commit SHA.
 2. Confirm no broadcast is `sending` and reconcile Kommo `delivery_unknown` jobs.
 3. Pause deploys and scheduled traffic. Keep the store single-instance.
-4. Apply only the next numbered migration. Never rerun `001` on an existing database.
+4. Run the service migration runner for the normal deployment path. It reapplies the idempotent `001` baseline; use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case.
 5. Query `schema_migrations` and verify the exact version expected by `app/db.py`.
 6. Deploy the matching application revision.
 7. Verify `/health`, login, a read-only dashboard query, catalog loading, and one test conversation.

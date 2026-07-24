@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 );
 CREATE INDEX IF NOT EXISTS idx_exchange_rates_fetched_at ON exchange_rates(fetched_at DESC);
 ALTER TABLE exchange_rates ENABLE ROW LEVEL SECURITY;
-REVOKE ALL PRIVILEGES ON exchange_rates FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON exchange_rates FROM PUBLIC;
 
 DELETE FROM schema_migrations WHERE version > 1;
 INSERT INTO schema_migrations (version, name)
