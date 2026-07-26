@@ -1429,7 +1429,7 @@ async function savePaymentSettings() {
 }
 
 function shippingRateCard(content) {
-  return `<div class="shipping-rate-card border border-gray-200 dark:border-gray-700 rounded-xl p-3">${content}</div>`;
+  return `<div class="shipping-rate-card rounded-lg border border-gray-200/80 dark:border-gray-700 bg-white/80 dark:bg-gray-900/40 p-3">${content}</div>`;
 }
 
 function renderShippingPolicy(policy = {}) {
@@ -1442,58 +1442,164 @@ function renderShippingPolicy(policy = {}) {
   if (!citiesList || !zonesList || !ratesList) return;
 
   citiesList.innerHTML = cities.map(city => homeDeliveryCityMarkup(city)).join('');
-  zonesList.innerHTML = zones.map(zone => homeDeliveryZoneMarkup(zone)).join('');
+  zonesList.innerHTML = zones.map(zone => homeDeliveryZoneMarkup(zone, cities)).join('');
   ratesList.innerHTML = rates.map(rate => courierDestinationRateMarkup(rate)).join('');
+  updateShippingCollectionStates();
 }
 
 function homeDeliveryCityMarkup(city = {}) {
   return shippingRateCard(`
-    <div class="flex justify-end mb-2"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="this.closest('.shipping-rate-card').remove()" title="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button></div>
-    <label class="block text-xs text-gray-500 mb-1">Ciudad o municipio</label>
-    <input class="w-full shipping-home-city-name" value="${escapeHtml(city.name || '')}" placeholder="Ej. Valencia">
-    <label class="block text-xs text-gray-500 mt-2 mb-1">Alias separados por coma</label>
-    <input class="w-full shipping-home-city-aliases" value="${escapeHtml((city.aliases || []).join(', '))}" placeholder="Ej. Valencia, Carabobo">
+    <div class="flex items-start gap-3">
+      <div class="flex-1 grid sm:grid-cols-[minmax(160px,1fr)_minmax(220px,1.25fr)] gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Ciudad o municipio</label>
+          <input class="w-full shipping-home-city-name" value="${escapeHtml(city.name || '')}" placeholder="Ej. Valencia" oninput="refreshHomeDeliveryZoneCityOptions()">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Alias <span class="font-normal text-gray-400">opcional, separados por coma</span></label>
+          <input class="w-full shipping-home-city-aliases" value="${escapeHtml((city.aliases || []).join(', '))}" placeholder="Ej. Valencia, Carabobo">
+        </div>
+      </div>
+      <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeHomeDeliveryCity(this)" title="Eliminar ciudad" aria-label="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button>
+    </div>
   `);
 }
 
-function homeDeliveryZoneMarkup(zone = {}) {
+function homeDeliveryZoneMarkup(zone = {}, cities = homeDeliveryCitiesFromInputs()) {
   return shippingRateCard(`
-    <div class="flex justify-end mb-2"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="this.closest('.shipping-rate-card').remove()" title="Eliminar zona">${renderDeleteIcon('Eliminar zona')}</button></div>
-    <div class="grid grid-cols-2 gap-2">
-      <div><label class="block text-xs text-gray-500 mb-1">Ciudad</label><input class="w-full shipping-zone-city" value="${escapeHtml(zone.city || '')}" placeholder="Valencia"></div>
-      <div><label class="block text-xs text-gray-500 mb-1">Zona</label><input class="w-full shipping-zone-name" value="${escapeHtml(zone.name || '')}" placeholder="El Viñedo"></div>
+    <div class="flex items-start gap-3">
+      <div class="flex-1 grid sm:grid-cols-[minmax(145px,.8fr)_minmax(145px,1fr)_minmax(100px,.55fr)] gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Ciudad</label>
+          <select class="w-full shipping-zone-city">${homeDeliveryCityOptions(cities, zone.city)}</select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Zona</label>
+          <input class="w-full shipping-zone-name" value="${escapeHtml(zone.name || '')}" placeholder="Ej. El Viñedo">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">USD</label>
+          <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zone-fee" value="${escapeHtml(zone.fee_usd ?? '')}" placeholder="0.00">
+        </div>
+      </div>
+      <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeShippingRateCard(this)" title="Eliminar zona" aria-label="Eliminar zona">${renderDeleteIcon('Eliminar zona')}</button>
     </div>
-    <label class="block text-xs text-gray-500 mt-2 mb-1">Alias separados por coma</label>
-    <input class="w-full shipping-zone-aliases" value="${escapeHtml((zone.aliases || []).join(', '))}" placeholder="Opcional">
-    <label class="block text-xs text-gray-500 mt-2 mb-1">Tarifa USD</label>
-    <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zone-fee" value="${escapeHtml(zone.fee_usd ?? '')}" placeholder="0.00">
+    <div class="mt-3">
+      <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Alias <span class="font-normal text-gray-400">opcional, separados por coma</span></label>
+      <input class="w-full shipping-zone-aliases" value="${escapeHtml((zone.aliases || []).join(', '))}" placeholder="Ej. El Vinedo">
+    </div>
   `);
 }
 
 function courierDestinationRateMarkup(rate = {}) {
   return shippingRateCard(`
-    <div class="flex justify-end mb-2"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="this.closest('.shipping-rate-card').remove()" title="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button></div>
-    <label class="block text-xs text-gray-500 mb-1">Ciudad de destino</label>
-    <input class="w-full shipping-courier-city" value="${escapeHtml(rate.city || '')}" placeholder="Ej. Caracas">
-    <label class="block text-xs text-gray-500 mt-2 mb-1">Alias separados por coma</label>
-    <input class="w-full shipping-courier-aliases" value="${escapeHtml((rate.aliases || []).join(', '))}" placeholder="Distrito Capital">
-    <div class="grid grid-cols-2 gap-2 mt-2">
-      <div><label class="block text-xs text-gray-500 mb-1">MRW USD</label><input type="number" min="0" max="100000" step="0.01" class="w-full shipping-mrw-fee" value="${escapeHtml(rate.mrw_fee_usd ?? '')}" placeholder="0.00"></div>
-      <div><label class="block text-xs text-gray-500 mb-1">Zoom USD</label><input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zoom-fee" value="${escapeHtml(rate.zoom_fee_usd ?? '')}" placeholder="0.00"></div>
+    <div class="flex items-start gap-3">
+      <div class="flex-1 grid sm:grid-cols-[minmax(145px,1fr)_minmax(90px,.55fr)_minmax(90px,.55fr)] gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Ciudad de destino</label>
+          <input class="w-full shipping-courier-city" value="${escapeHtml(rate.city || '')}" placeholder="Ej. Caracas">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">MRW USD</label>
+          <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-mrw-fee" value="${escapeHtml(rate.mrw_fee_usd ?? '')}" placeholder="0.00">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Zoom USD</label>
+          <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zoom-fee" value="${escapeHtml(rate.zoom_fee_usd ?? '')}" placeholder="0.00">
+        </div>
+      </div>
+      <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeShippingRateCard(this)" title="Eliminar ciudad" aria-label="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button>
+    </div>
+    <div class="mt-3">
+      <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Alias <span class="font-normal text-gray-400">opcional, separados por coma</span></label>
+      <input class="w-full shipping-courier-aliases" value="${escapeHtml((rate.aliases || []).join(', '))}" placeholder="Ej. Distrito Capital">
     </div>
   `);
 }
 
 function addHomeDeliveryCity(city = {}) {
-  document.getElementById('home-delivery-cities-list')?.insertAdjacentHTML('beforeend', homeDeliveryCityMarkup(city));
+  const list = document.getElementById('home-delivery-cities-list');
+  if (!list) return;
+  list.insertAdjacentHTML('beforeend', homeDeliveryCityMarkup(city));
+  refreshHomeDeliveryZoneCityOptions();
+  list.lastElementChild?.querySelector('.shipping-home-city-name')?.focus();
 }
 
 function addHomeDeliveryZone(zone = {}) {
-  document.getElementById('home-delivery-zones-list')?.insertAdjacentHTML('beforeend', homeDeliveryZoneMarkup(zone));
+  const cities = homeDeliveryCitiesFromInputs();
+  if (!cities.length) {
+    toast('Primero agrega una ciudad con entrega a domicilio', '#dc2626');
+    return;
+  }
+  const list = document.getElementById('home-delivery-zones-list');
+  if (!list) return;
+  list.insertAdjacentHTML('beforeend', homeDeliveryZoneMarkup({city: cities[0].name, ...zone}, cities));
+  updateShippingCollectionStates();
+  list.lastElementChild?.querySelector('.shipping-zone-name')?.focus();
 }
 
 function addCourierDestinationRate(rate = {}) {
-  document.getElementById('courier-destination-rates-list')?.insertAdjacentHTML('beforeend', courierDestinationRateMarkup(rate));
+  const list = document.getElementById('courier-destination-rates-list');
+  if (!list) return;
+  list.insertAdjacentHTML('beforeend', courierDestinationRateMarkup(rate));
+  updateShippingCollectionStates();
+  list.lastElementChild?.querySelector('.shipping-courier-city')?.focus();
+}
+
+function removeHomeDeliveryCity(trigger) {
+  trigger.closest('.shipping-rate-card')?.remove();
+  refreshHomeDeliveryZoneCityOptions();
+}
+
+function removeShippingRateCard(trigger) {
+  trigger.closest('.shipping-rate-card')?.remove();
+  updateShippingCollectionStates();
+}
+
+function homeDeliveryCitiesFromInputs() {
+  return Array.from(document.querySelectorAll('#home-delivery-cities-list .shipping-rate-card'))
+    .map(card => ({
+      name: card.querySelector('.shipping-home-city-name')?.value?.trim() || '',
+      aliases: shippingAliases(card.querySelector('.shipping-home-city-aliases')?.value),
+    }))
+    .filter(city => city.name);
+}
+
+function homeDeliveryCityOptions(cities, selectedCity) {
+  const selected = String(selectedCity || '').trim();
+  const selectedExists = cities.some(city => city.name === selected);
+  const placeholder = selected && !selectedExists
+    ? `Ciudad eliminada: ${selected}`
+    : 'Selecciona una ciudad';
+  const options = cities.map(city => `<option value="${escapeHtml(city.name)}" ${city.name === selected ? 'selected' : ''}>${escapeHtml(city.name)}</option>`).join('');
+  return `<option value="" ${selectedExists ? '' : 'selected'}>${escapeHtml(placeholder)}</option>${options}`;
+}
+
+function refreshHomeDeliveryZoneCityOptions() {
+  const cities = homeDeliveryCitiesFromInputs();
+  document.querySelectorAll('.shipping-zone-city').forEach(select => {
+    const selected = select.value;
+    select.innerHTML = homeDeliveryCityOptions(cities, selected);
+  });
+  updateShippingCollectionStates();
+}
+
+function updateShippingCollectionStates() {
+  const cityCount = document.querySelectorAll('#home-delivery-cities-list .shipping-rate-card').length;
+  const zoneCount = document.querySelectorAll('#home-delivery-zones-list .shipping-rate-card').length;
+  const rateCount = document.querySelectorAll('#courier-destination-rates-list .shipping-rate-card').length;
+  const hasCities = homeDeliveryCitiesFromInputs().length > 0;
+  const zoneButton = document.getElementById('add-home-delivery-zone-btn');
+
+  const setVisible = (id, visible) => {
+    const element = document.getElementById(id);
+    if (element) element.style.display = visible ? '' : 'none';
+  };
+
+  setVisible('home-delivery-cities-empty', cityCount === 0);
+  setVisible('home-delivery-zones-empty', zoneCount === 0);
+  setVisible('courier-destination-rates-empty', rateCount === 0);
+  if (zoneButton) zoneButton.disabled = !hasCities;
 }
 
 function shippingAliases(value) {
@@ -1534,9 +1640,10 @@ function collectShippingPolicy() {
 
 async function saveShippingPolicy() {
   const policy = collectShippingPolicy();
+  const homeCityNames = new Set(policy.home_delivery_cities.map(city => city.name));
   const invalid = [
     ...policy.home_delivery_cities.filter(city => !city.name),
-    ...policy.home_delivery_zones.filter(zone => !zone.city || !zone.name || zone.fee_usd === null),
+    ...policy.home_delivery_zones.filter(zone => !zone.city || !homeCityNames.has(zone.city) || !zone.name || zone.fee_usd === null),
     ...policy.courier_destination_rates.filter(rate => !rate.city || rate.mrw_fee_usd === null || rate.zoom_fee_usd === null),
   ];
   if (invalid.length) {
@@ -1765,7 +1872,7 @@ async function loadSettings() {
   const section = document.getElementById('llm-settings-section');
   if (settings._llm_managed_externally) {
     if (section) {
-      section.innerHTML = '<div class="card md:col-span-2"><p class="text-gray-500 dark:text-gray-400 text-center py-4">Para cualquier cambio en la configuracion de AI, contacta a tu administrador.</p></div>';
+      section.innerHTML = '<div class="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30 lg:col-span-2"><p class="text-gray-500 dark:text-gray-400 text-center py-8">La configuración de AI está gestionada desde el panel master.</p></div>';
     }
   } else if (section && !section.querySelector('#set-provider')) {
     window.location.reload();

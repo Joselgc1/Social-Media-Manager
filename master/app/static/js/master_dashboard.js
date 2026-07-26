@@ -350,14 +350,17 @@ function renderStoreDetail(store, stats, creds) {
             </div>
         </div>`}
 
-        <!-- API Keys -->
-        ${renderApiKeysPanel(store, stats, creds)}
-
         <!-- AI + Usage -->
         <div class="grid md:grid-cols-2 gap-4 mb-4">
-            <div class="card" id="ai-settings-panel">
-                <div class="flex items-center justify-between mb-3">
-                    <h3 class="font-bold text-lg">AI Settings</h3>
+            <div class="card master-config-card master-config-purple" id="ai-settings-panel">
+                <div class="flex items-start justify-between gap-3 mb-4">
+                    <div class="flex items-start gap-3">
+                        <span class="master-config-number master-config-number-purple">1</span>
+                        <div>
+                            <h3 class="font-bold text-lg">AI Settings</h3>
+                            <p class="text-sm text-gray-600 dark:text-gray-400 mt-0.5">Choose the model configuration used by this store.</p>
+                        </div>
+                    </div>
                     <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
                 </div>
                 <div id="ai-settings-content">
@@ -378,9 +381,64 @@ function renderStoreDetail(store, stats, creds) {
             </div>
         </div>
 
-        <div class="card mb-4" id="scheduler-settings-panel">
-            <div class="flex items-center justify-between mb-3">
-                <h3 class="font-bold text-lg">Scheduled Jobs</h3>
+        <section class="card master-settings-section mb-4 overflow-hidden">
+            <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 pb-5 border-b border-gray-100 dark:border-gray-800">
+                <div>
+                    <div class="flex items-center gap-2 mb-1">
+                        <h3 class="font-bold text-lg">Store Configuration</h3>
+                        <span class="text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">Managed centrally</span>
+                    </div>
+                    <p class="text-sm text-gray-600 dark:text-gray-400 max-w-3xl">Manage the store's public contact, exchange-rate information, and background job schedule from one place.</p>
+                </div>
+            </div>
+
+            <div class="grid xl:grid-cols-2 gap-5 pt-5">
+                <div class="master-config-card master-config-amber" id="store-profile-settings-panel">
+                    <div class="flex items-start justify-between gap-3 mb-4">
+                        <div class="flex items-start gap-3">
+                            <span class="master-config-number master-config-number-amber">1</span>
+                            <div>
+                                <h4 class="font-semibold text-gray-900 dark:text-gray-100">Store Profile</h4>
+                                <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Public contact information for customer-facing fallbacks.</p>
+                            </div>
+                        </div>
+                        <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
+                    </div>
+                    <div id="store-profile-settings-content">
+                        <p class="text-gray-500">Loading store profile settings...</p>
+                    </div>
+                </div>
+
+                <div class="master-config-card master-config-sky" id="exchange-rates-panel">
+                    <div class="flex items-start justify-between gap-3 mb-4">
+                        <div class="flex items-start gap-3">
+                            <span class="master-config-number master-config-number-sky">2</span>
+                            <div>
+                                <h4 class="font-semibold text-gray-900 dark:text-gray-100">Exchange Rates</h4>
+                                <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Rates synced to this store for customer payment references.</p>
+                            </div>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
+                            <button id="exchange-rates-refresh-btn" onclick="refreshExchangeRates(${jsArg(store.id)})" class="btn btn-primary text-xs">Update Now</button>
+                        </div>
+                    </div>
+                    <div id="exchange-rates-content">
+                        <p class="text-gray-500">Loading exchange rates...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div class="card master-config-card master-config-orange mb-4" id="scheduler-settings-panel">
+            <div class="flex items-start justify-between gap-3 mb-4">
+                <div class="flex items-start gap-3">
+                    <span class="master-config-number master-config-number-orange">3</span>
+                    <div>
+                        <h3 class="font-bold text-lg">Scheduled Jobs</h3>
+                        <p class="text-sm text-gray-600 dark:text-gray-400 mt-0.5">Set the refresh and reporting cadence for this store.</p>
+                    </div>
+                </div>
                 <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
             </div>
             <div id="scheduler-settings-content">
@@ -388,33 +446,16 @@ function renderStoreDetail(store, stats, creds) {
             </div>
         </div>
 
-        <div class="card mb-4" id="store-profile-settings-panel">
-            <div class="flex items-center justify-between mb-3">
-                <h3 class="font-bold text-lg">Store Profile</h3>
-                <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
-            </div>
-            <div id="store-profile-settings-content">
-                <p class="text-gray-500">Loading store profile settings...</p>
-            </div>
-        </div>
-
-        <div class="card mb-4" id="exchange-rates-panel">
-            <div class="flex items-center justify-between mb-3">
-                <h3 class="font-bold text-lg">Exchange Rates</h3>
-                <div class="flex gap-2">
-                    <button onclick="loadRuntimeSettings(${jsArg(store.id)})" class="btn btn-secondary text-xs">Refresh</button>
-                    <button id="exchange-rates-refresh-btn" onclick="refreshExchangeRates(${jsArg(store.id)})" class="btn btn-primary text-xs">Update Now</button>
-                </div>
-            </div>
-            <div id="exchange-rates-content">
-                <p class="text-gray-500">Loading exchange rates...</p>
-            </div>
-        </div>
-
         <!-- Credentials (grouped) -->
-        <div class="card mb-4">
-            <div class="flex items-center justify-between mb-4">
-                <h3 class="font-bold text-lg">Environment Variables</h3>
+        <div class="card master-config-card master-config-indigo mb-4">
+            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
+                <div class="flex items-start gap-3">
+                    <span class="master-config-number master-config-number-indigo">4</span>
+                    <div>
+                        <h3 class="font-bold text-lg">Environment Variables</h3>
+                        <p class="text-sm text-gray-600 dark:text-gray-400 mt-0.5">Manage API keys, channel credentials, and deployment variables together.</p>
+                    </div>
+                </div>
                 <div class="flex gap-2">
                     <button onclick="showAddCredentialModal(${jsArg(store.id)})" class="btn btn-primary">+ Add Variable</button>
                     ${creds.length > 0 && store.railway_service_id ? `<button onclick="deployCredentials(${jsArg(store.id)})" class="btn btn-success" id="deploy-btn">Deploy to Railway</button>` : ''}
@@ -446,48 +487,6 @@ function renderStoreDetail(store, stats, creds) {
                 <div><span class="text-gray-500">Railway Project:</span> <span class="font-mono">${esc(store.railway_project_id || '—')}</span></div>
                 <div><span class="text-gray-500">Status:</span> <span class="badge badge-${store.status === 'active' ? 'green' : store.status === 'paused' ? 'yellow' : 'red'}">${store.status}</span></div>
                 <div><span class="text-gray-500">Created:</span> ${new Date(store.created_at).toLocaleString()}</div>
-            </div>
-        </div>`;
-}
-
-// ── API Keys Panel ─────────────────────────────────────────
-function renderApiKeysPanel(store, stats, creds) {
-    const openaiKey = creds.find(c => c.key === 'OPENAI_API_KEY');
-    const anthropicKey = creds.find(c => c.key === 'ANTHROPIC_API_KEY');
-    const activeProvider = (stats.llm_provider || '').replace(/"/g, '');
-
-    function keyCard(providerName, providerKey, credObj) {
-        const isActive = activeProvider === providerKey;
-        const isSet = !!credObj;
-        const statusClass = isActive ? 'active' : isSet ? 'configured' : 'not-set';
-        const badgeClass = isActive ? 'badge-green' : isSet ? 'badge-blue' : 'badge-red';
-        const badgeText = isActive ? 'Active' : isSet ? 'Configured' : 'Not Set';
-        const envKey = providerKey === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
-
-        return `
-            <div class="api-key-card ${statusClass}">
-                <div class="flex items-center justify-between mb-2">
-                    <span class="font-bold">${providerName}</span>
-                    <span class="badge ${badgeClass}">${badgeText}</span>
-                </div>
-                <div class="text-sm text-gray-500 dark:text-gray-400 font-mono mb-3">
-                    ${isSet ? esc(credObj.value_masked) : 'No key configured'}
-                </div>
-                <button onclick="showEditCredentialModal(${jsArg(store.id)}, ${jsArg(envKey)})" class="btn ${isSet ? 'btn-secondary' : 'btn-primary'} text-xs w-full">
-                    ${isSet ? 'Update Key' : 'Set Key'}
-                </button>
-            </div>`;
-    }
-
-    return `
-        <div class="card mb-6">
-            <div class="flex items-center justify-between mb-4">
-                <h3 class="font-bold text-lg">LLM API Keys</h3>
-                <span class="text-xs text-gray-400">Deploy to Railway after changes</span>
-            </div>
-            <div class="grid md:grid-cols-2 gap-4">
-                ${keyCard('OpenAI', 'openai', openaiKey)}
-                ${keyCard('Anthropic', 'anthropic', anthropicKey)}
             </div>
         </div>`;
 }

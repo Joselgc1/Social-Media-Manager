@@ -40,11 +40,19 @@ select, input, textarea { border: 1px solid #d1d5db; border-radius: 8px; padding
 .exchange-rate-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid #f3f4f6; }
 .exchange-rate-row:last-child { border-bottom: 0; }
 
-/* API Keys panel */
-.api-key-card { border-left: 4px solid #d1d5db; padding: 16px; border-radius: 8px; background: #f9fafb; }
-.api-key-card.active { border-left-color: #22c55e; }
-.api-key-card.configured { border-left-color: #3b82f6; }
-.api-key-card.not-set { border-left-color: #d1d5db; }
+/* Store configuration panels */
+.master-config-card { border: 1px solid transparent; border-radius: 12px; padding: 16px; }
+.master-config-amber { border-color: #fde68a; background: rgba(255, 251, 235, 0.72); }
+.master-config-sky { border-color: #bae6fd; background: rgba(240, 249, 255, 0.72); }
+.master-config-orange { border-color: #fed7aa; background: rgba(255, 247, 237, 0.72); }
+.master-config-purple { border-color: #ddd6fe; background: rgba(245, 243, 255, 0.72); }
+.master-config-indigo { border-color: #c7d2fe; background: rgba(238, 242, 255, 0.72); }
+.master-config-number { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 24px; height: 24px; border-radius: 999px; color: #fff; font-size: 0.75rem; font-weight: 700; }
+.master-config-number-amber { background: #f59e0b; }
+.master-config-number-sky { background: #0284c7; }
+.master-config-number-orange { background: #ea580c; }
+.master-config-number-purple { background: #7c3aed; }
+.master-config-number-indigo { background: #4f46e5; }
 
 /* Time range toggle */
 .range-toggle { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid #d1d5db; }
@@ -81,9 +89,11 @@ select, input, textarea { border: 1px solid #d1d5db; border-radius: 8px; padding
 .dark .modal { background: #1e293b; }
 .dark .cred-row { border-color: #334155; }
 .dark .exchange-rate-row { border-color: #334155; }
-.dark .api-key-card { background: #0f172a; border-left-color: #475569; }
-.dark .api-key-card.active { border-left-color: #22c55e; }
-.dark .api-key-card.configured { border-left-color: #3b82f6; }
+.dark .master-config-amber { border-color: #78350f; background: rgba(120, 53, 15, 0.16); }
+.dark .master-config-sky { border-color: #0c4a6e; background: rgba(12, 74, 110, 0.18); }
+.dark .master-config-orange { border-color: #7c2d12; background: rgba(124, 45, 18, 0.18); }
+.dark .master-config-purple { border-color: #4c1d95; background: rgba(76, 29, 149, 0.18); }
+.dark .master-config-indigo { border-color: #3730a3; background: rgba(55, 48, 163, 0.18); }
 .dark .range-toggle { border-color: #475569; }
 .dark .range-btn { color: #94a3b8; }
 .dark .range-btn.active { background: #6366f1; color: white; }

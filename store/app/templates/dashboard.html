@@ -211,213 +211,308 @@
       <!-- Settings tab -->
       <div id="tab-settings" class="tab-panel fade-in" style="display:none">
         <!-- Catalog PDF card (full width) -->
-        <div class="card mb-4">
-          <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-3">Catalogo PDF</h3>
-          <div class="flex items-center justify-between">
-            <div id="pdf-status" class="text-sm text-gray-600 dark:text-gray-400">Cargando...</div>
-            <div class="flex gap-2">
-              <a id="pdf-download-btn" href="/admin/settings/catalog/download-pdf" target="_blank"
-                class="btn btn-secondary text-sm" style="display:none">Descargar</a>
-              <button class="btn btn-primary text-sm" onclick="generateCatalogPdf()">Generar PDF ahora</button>
-            </div>
-          </div>
-          <div class="mt-3 space-y-2">
-            <div class="text-sm text-gray-600 dark:text-gray-400">
-              Auto-actualizar cada: <span id="pdf-interval-display" class="font-semibold text-gray-800 dark:text-gray-200">Cargando...</span>
-            </div>
-            <div class="text-xs text-gray-500 dark:text-gray-500">
-              La programación de trabajos se configura desde el panel master.
-            </div>
-          </div>
-        </div>
-        <div class="card mb-4">
-          <div class="flex items-start justify-between gap-4 mb-4">
+        <section class="card mb-4 overflow-hidden">
+          <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 pb-5 border-b border-gray-100 dark:border-gray-800">
             <div>
-              <h3 class="font-semibold text-gray-900 dark:text-gray-100">Tarifas de entrega</h3>
-              <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                Valencia metropolitana se entrega a domicilio por zona. Las demás ciudades se envían a la agencia MRW o Zoom indicada por el cliente. Todas las tarifas se cobran con el pedido en USD.
+              <div class="flex items-center gap-2 mb-1">
+                <h3 class="font-semibold text-gray-900 dark:text-gray-100">Catálogo y contenido</h3>
+                <span class="text-xs font-medium text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded-full">WhatsApp</span>
+              </div>
+              <p class="text-sm text-gray-600 dark:text-gray-400">Mantén disponible un catálogo PDF actualizado para compartirlo cuando el cliente lo pida.</p>
+            </div>
+            <div class="flex gap-2">
+              <a id="pdf-download-btn" href="/admin/settings/catalog/download-pdf" target="_blank" class="btn btn-secondary text-sm" style="display:none">Descargar PDF</a>
+              <button class="btn btn-primary text-sm" onclick="generateCatalogPdf()">Generar ahora</button>
+            </div>
+          </div>
+          <div class="grid md:grid-cols-[minmax(0,1fr)_auto] gap-4 pt-5 items-center">
+            <div id="pdf-status" class="text-sm text-gray-700 dark:text-gray-300">Cargando...</div>
+            <div class="text-xs text-gray-500 dark:text-gray-400 md:text-right">
+              Actualización automática: <span id="pdf-interval-display" class="font-semibold text-gray-800 dark:text-gray-200">Cargando...</span><br>
+              La programación se configura desde el panel master.
+            </div>
+          </div>
+        </section>
+
+        <section class="card mb-4 overflow-hidden">
+          <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 pb-5 border-b border-gray-100 dark:border-gray-800">
+            <div>
+              <div class="flex items-center gap-2 mb-1">
+                <h3 class="font-semibold text-gray-900 dark:text-gray-100">Operación de la tienda</h3>
+                <span class="text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">Configuración local</span>
+              </div>
+              <p class="text-sm text-gray-600 dark:text-gray-400 max-w-3xl">Define el contacto público, referencia de pago, promociones y el comportamiento cuando una conversación pasa al equipo.</p>
+            </div>
+          </div>
+
+          <div class="settings-mobile-stack grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-5 pt-5 items-start">
+            <div class="space-y-4">
+              <div class="rounded-xl border border-amber-100 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/15 p-4">
+                <div class="flex items-start gap-3 mb-4">
+                  <span class="flex items-center justify-center h-6 w-6 rounded-full bg-amber-500 text-white text-xs font-bold">1</span>
+                  <div>
+                    <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Contacto público</h4>
+                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Para llevar comentarios de Instagram a una conversación privada.</p>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">WhatsApp de la tienda</label>
+                  <input id="set-store-phone-number" type="text" class="w-full" placeholder="+58 412-1234567">
+                </div>
+                <div class="mt-4 pt-3 border-t border-amber-100 dark:border-amber-900/60 flex justify-end">
+                  <button class="btn btn-primary text-sm" onclick="saveStorePhoneSetting()">Guardar contacto</button>
+                </div>
+              </div>
+
+              <div class="rounded-xl border border-orange-100 dark:border-orange-900/60 bg-orange-50/50 dark:bg-orange-950/15 p-4">
+                <div class="flex items-start gap-3 mb-4">
+                  <span class="flex items-center justify-center h-6 w-6 rounded-full bg-orange-500 text-white text-xs font-bold">2</span>
+                  <div>
+                    <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Pausa después de escalar</h4>
+                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Evita que Eva responda mientras el equipo atiende el caso.</p>
+                  </div>
+                </div>
+                <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Minutos de pausa</label>
+                <input id="set-automatic-escalation-timeout" type="number" step="5" min="0" max="10080" class="w-full" placeholder="180">
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">Usa 0 para mantenerla pausada hasta una reactivación manual.</p>
+                <div class="mt-4 pt-3 border-t border-orange-100 dark:border-orange-900/60 flex justify-end">
+                  <button class="btn btn-primary text-sm" onclick="saveEscalationTimeoutSetting()">Guardar pausa</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="space-y-4">
+              <div class="rounded-xl border border-sky-100 dark:border-sky-900/60 bg-sky-50/50 dark:bg-sky-950/15 p-4">
+                <div class="flex items-start gap-3 mb-4">
+                  <span class="flex items-center justify-center h-6 w-6 rounded-full bg-sky-600 text-white text-xs font-bold">3</span>
+                  <div>
+                    <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Tasa de referencia</h4>
+                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">La tasa que Eva muestra cuando preguntan cómo se calcula el pago en bolívares.</p>
+                  </div>
+                </div>
+                <div class="grid lg:grid-cols-[minmax(180px,.7fr)_minmax(0,1.3fr)] gap-4 items-start">
+                  <div class="space-y-3">
+                    <div>
+                      <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Referencia usada por Eva</label>
+                      <select id="set-exchange-rate-reference" class="w-full" onchange="toggleManualExchangeRateInput()">
+                        <option value="usd_bcv">Dólar BCV</option>
+                        <option value="eur_bcv">Euro BCV</option>
+                        <option value="usdt_binance">USDT Binance</option>
+                        <option value="manual">Tasa manual</option>
+                      </select>
+                    </div>
+                    <div id="manual-exchange-rate-wrap" style="display:none">
+                      <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Tasa manual</label>
+                      <input id="set-manual-exchange-rate" type="number" step="0.01" min="0" class="w-full" placeholder="760">
+                    </div>
+                  </div>
+                  <div id="exchange-rate-summary" class="text-xs text-gray-600 dark:text-gray-400 space-y-1 rounded-lg border border-sky-100 dark:border-sky-900/60 bg-white/70 dark:bg-gray-900/30 p-3">Cargando tasas...</div>
+                </div>
+                <div class="mt-4 pt-3 border-t border-sky-100 dark:border-sky-900/60 flex justify-end">
+                  <button class="btn btn-primary text-sm" onclick="saveExchangeRateSetting()">Guardar referencia</button>
+                </div>
+              </div>
+
+              <div class="rounded-xl border border-emerald-100 dark:border-emerald-900/60 bg-emerald-50/50 dark:bg-emerald-950/15 p-4">
+                <div class="flex items-start gap-3 mb-4">
+                  <span class="flex items-center justify-center h-6 w-6 rounded-full bg-emerald-600 text-white text-xs font-bold">4</span>
+                  <div>
+                    <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Descuento automático</h4>
+                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Se aplica al subtotal de productos; no modifica la tarifa de entrega.</p>
+                  </div>
+                </div>
+                <div class="grid sm:grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Porcentaje de descuento</label>
+                    <input id="set-order-discount-percent" type="number" step="0.01" min="0" max="100" class="w-full" placeholder="10">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Subtotal mínimo en USD</label>
+                    <input id="set-order-discount-threshold" type="number" step="0.01" min="0" class="w-full" placeholder="350">
+                  </div>
+                </div>
+                <div class="mt-4 pt-3 border-t border-emerald-100 dark:border-emerald-900/60 flex justify-end">
+                  <button class="btn btn-primary text-sm" onclick="saveDiscountSettings()">Guardar descuento</button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+          <div class="mt-5 rounded-xl border border-indigo-100 dark:border-indigo-900/60 bg-indigo-50/50 dark:bg-indigo-950/15 p-4">
+            <div class="flex items-start justify-between gap-4 mb-4">
+              <div class="flex items-start gap-3">
+                <span class="flex items-center justify-center h-6 w-6 rounded-full bg-indigo-600 text-white text-xs font-bold">5</span>
+                <div>
+                  <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Métodos de pago</h4>
+                  <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">El nombre lo ve el cliente; la información se envía cuando el pedido está listo para pagar.</p>
+                </div>
+              </div>
+              <button class="btn btn-secondary text-xs whitespace-nowrap" onclick="addPaymentMethod()">+ Agregar método</button>
+            </div>
+            <div id="payment-methods-empty" class="text-sm text-gray-500 dark:text-gray-400 py-3" style="display:none">No hay métodos configurados. Agrega los que quieras ofrecer en esta tienda.</div>
+            <div id="payment-methods-list" class="space-y-3"></div>
+            <div class="mt-4 pt-3 border-t border-indigo-100 dark:border-indigo-900/60 flex justify-end">
+              <button class="btn btn-primary text-sm" onclick="savePaymentSettings()">Guardar métodos de pago</button>
+            </div>
+          </div>
+        </section>
+        <section class="card mb-4 overflow-hidden">
+          <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 pb-5 border-b border-gray-100 dark:border-gray-800">
+            <div>
+              <div class="flex items-center gap-2 mb-1">
+                <h3 class="font-semibold text-gray-900 dark:text-gray-100">Entrega y tarifas</h3>
+                <span class="text-xs font-medium text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-full">USD prepago</span>
+              </div>
+              <p class="text-sm text-gray-600 dark:text-gray-400 max-w-3xl">
+                Configura cuándo entregas a domicilio y cuánto cuesta cada ruta. Eva cotiza estas tarifas antes de pedir el pago.
               </p>
             </div>
-          </div>
-          <div class="grid xl:grid-cols-3 gap-4">
-            <div>
-              <div class="flex items-center justify-between gap-2 mb-2">
-                <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Ciudades con entrega a domicilio</h4>
-                <button class="btn btn-secondary text-xs" type="button" onclick="addHomeDeliveryCity()">+ Ciudad</button>
-              </div>
-              <div id="home-delivery-cities-list" class="space-y-3"></div>
-            </div>
-            <div>
-              <div class="flex items-center justify-between gap-2 mb-2">
-                <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Zonas de entrega a domicilio</h4>
-                <button class="btn btn-secondary text-xs" type="button" onclick="addHomeDeliveryZone()">+ Zona</button>
-              </div>
-              <div id="home-delivery-zones-list" class="space-y-3"></div>
-            </div>
-            <div>
-              <div class="flex items-center justify-between gap-2 mb-2">
-                <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Envíos a agencia</h4>
-                <button class="btn btn-secondary text-xs" type="button" onclick="addCourierDestinationRate()">+ Ciudad</button>
-              </div>
-              <div id="courier-destination-rates-list" class="space-y-3"></div>
+            <div class="text-xs text-gray-500 dark:text-gray-400 lg:text-right leading-relaxed">
+              <span class="font-medium text-gray-700 dark:text-gray-300">Flujo del cliente:</span><br>
+              Ciudad → modalidad → tarifa
             </div>
           </div>
-          <div class="mt-4">
-            <button class="btn btn-primary" type="button" onclick="saveShippingPolicy()">Guardar tarifas de entrega</button>
-          </div>
-        </div>
-        <div class="settings-mobile-stack grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-4 mb-4 items-start">
-          <div class="space-y-4">
-            <div class="card h-full">
-              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Contacto público</h3>
-              <div class="space-y-3">
+
+          <div class="grid xl:grid-cols-12 gap-5 pt-5">
+            <div class="xl:col-span-7 rounded-xl border border-sky-100 dark:border-sky-900/60 bg-sky-50/50 dark:bg-sky-950/15 p-4">
+              <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
                 <div>
-                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">WhatsApp para comentarios públicos</label>
-                  <input id="set-store-phone-number" type="text" class="w-full" placeholder="+58 412-1234567">
-                  <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">Eva lo usa solo para invitar desde comentarios públicos de Instagram al DM o WhatsApp.</p>
+                  <div class="flex items-center gap-2">
+                    <span class="flex items-center justify-center h-6 w-6 rounded-full bg-sky-600 text-white text-xs font-bold">1</span>
+                    <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Entrega a domicilio</h4>
+                  </div>
+                  <p class="text-xs text-gray-600 dark:text-gray-400 mt-1 ml-8">Disponible solo en las ciudades y zonas que definas aquí.</p>
                 </div>
-                <button class="btn btn-primary w-full" onclick="saveStorePhoneSetting()">Guardar contacto</button>
+                <button class="btn btn-secondary text-xs whitespace-nowrap" type="button" onclick="addHomeDeliveryCity()">+ Agregar ciudad</button>
+              </div>
+
+              <div id="home-delivery-cities-empty" class="text-sm text-gray-500 dark:text-gray-400 rounded-lg border border-dashed border-sky-200 dark:border-sky-900 px-3 py-4 text-center" style="display:none">
+                Agrega una ciudad para habilitar la entrega a domicilio.
+              </div>
+              <div id="home-delivery-cities-list" class="space-y-2"></div>
+
+              <div class="mt-5 pt-5 border-t border-sky-100 dark:border-sky-900/60">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+                  <div>
+                    <h5 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Zonas y tarifa local</h5>
+                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Cada zona queda vinculada a una de las ciudades anteriores.</p>
+                  </div>
+                  <button id="add-home-delivery-zone-btn" class="btn btn-secondary text-xs whitespace-nowrap" type="button" onclick="addHomeDeliveryZone()">+ Agregar zona</button>
+                </div>
+                <div id="home-delivery-zones-empty" class="text-sm text-gray-500 dark:text-gray-400 py-3" style="display:none">Aún no hay zonas configuradas.</div>
+                <div id="home-delivery-zones-list" class="space-y-2"></div>
               </div>
             </div>
-            <div class="card h-full">
-              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Tasa del día</h3>
-              <div class="space-y-3">
+
+            <div class="xl:col-span-5 rounded-xl border border-violet-100 dark:border-violet-900/60 bg-violet-50/50 dark:bg-violet-950/15 p-4">
+              <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
                 <div>
-                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Referencia usada por Eva</label>
-                  <select id="set-exchange-rate-reference" class="w-full" onchange="toggleManualExchangeRateInput()">
-                    <option value="usd_bcv">Dólar BCV</option>
-                    <option value="eur_bcv">Euro BCV</option>
-                    <option value="usdt_binance">USDT Binance</option>
-                    <option value="manual">Tasa manual</option>
+                  <div class="flex items-center gap-2">
+                    <span class="flex items-center justify-center h-6 w-6 rounded-full bg-violet-600 text-white text-xs font-bold">2</span>
+                    <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Retiro en agencia</h4>
+                  </div>
+                  <p class="text-xs text-gray-600 dark:text-gray-400 mt-1 ml-8">Para otras ciudades, el cliente elige MRW o Zoom y retira en la agencia.</p>
+                </div>
+                <button class="btn btn-secondary text-xs whitespace-nowrap" type="button" onclick="addCourierDestinationRate()">+ Agregar ciudad</button>
+              </div>
+              <div id="courier-destination-rates-empty" class="text-sm text-gray-500 dark:text-gray-400 py-3" style="display:none">Aún no hay tarifas para retiro en agencia.</div>
+              <div id="courier-destination-rates-list" class="space-y-2"></div>
+            </div>
+          </div>
+
+          <div class="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <p class="text-xs text-gray-500 dark:text-gray-400">Las tarifas se aplican al total del pedido y se validan antes de enviar los datos de pago.</p>
+            <button class="btn btn-primary whitespace-nowrap" type="button" onclick="saveShippingPolicy()">Guardar entrega y tarifas</button>
+          </div>
+        </section>
+        <section class="card mb-4 overflow-hidden">
+          <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 pb-5 border-b border-gray-100 dark:border-gray-800">
+            <div>
+              <div class="flex items-center gap-2 mb-1">
+                <h3 class="font-semibold text-gray-900 dark:text-gray-100">Comportamiento de Eva</h3>
+                <span class="text-xs font-medium text-fuchsia-700 dark:text-fuchsia-300 bg-fuchsia-50 dark:bg-fuchsia-950/40 px-2 py-0.5 rounded-full">AI</span>
+              </div>
+              <p class="text-sm text-gray-600 dark:text-gray-400 max-w-3xl">Ajusta el modelo principal, el contexto de conversación y el respaldo automático si el proveedor principal no responde.</p>
+            </div>
+          </div>
+          <div id="llm-settings-section" class="grid lg:grid-cols-[minmax(0,1.45fr)_minmax(300px,.8fr)] gap-5 pt-5">
+            <div class="rounded-xl border border-fuchsia-100 dark:border-fuchsia-900/60 bg-fuchsia-50/50 dark:bg-fuchsia-950/15 p-4">
+              <div class="flex items-start gap-3 mb-4">
+                <span class="flex items-center justify-center h-6 w-6 rounded-full bg-fuchsia-600 text-white text-xs font-bold">1</span>
+                <div>
+                  <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Modelo principal</h4>
+                  <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Es el modelo que responde los mensajes de clientes.</p>
+                </div>
+              </div>
+              <div class="grid md:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Proveedor activo</label>
+                  <select id="set-provider" class="w-full" onchange="onProviderChange()">
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
                   </select>
                 </div>
-                <div id="manual-exchange-rate-wrap" style="display:none">
-                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tasa manual</label>
-                  <input id="set-manual-exchange-rate" type="number" step="0.01" min="0" class="w-full" placeholder="760">
-                  <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">Solo se usa cuando seleccionas “Tasa manual”.</p>
-                </div>
-                <div id="exchange-rate-summary" class="text-xs text-gray-600 dark:text-gray-400 space-y-1 rounded-lg border border-gray-200 dark:border-gray-700 p-3">
-                  Cargando tasas...
-                </div>
-                <p class="text-xs text-gray-500 dark:text-gray-500">
-                  Eva usará la referencia seleccionada cuando pregunten “¿a qué tasa recibes?” o algo similar.
-                </p>
-                <button class="btn btn-primary w-full" onclick="saveExchangeRateSetting()">Guardar referencia</button>
-              </div>
-            </div>
-            <div class="card h-full">
-              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Descuento automático</h3>
-              <div class="space-y-3">
                 <div>
-                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Porcentaje de descuento</label>
-                  <input id="set-order-discount-percent" type="number" step="0.01" min="0" max="100" class="w-full" placeholder="10">
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Modelo</label>
+                  <select id="set-model" class="w-full"></select>
                 </div>
                 <div>
-                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Subtotal mínimo en USD</label>
-                  <input id="set-order-discount-threshold" type="number" step="0.01" min="0" class="w-full" placeholder="350">
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Creatividad <span class="font-normal text-gray-400">0.0 - 1.0</span></label>
+                  <input id="set-temp" type="number" step="0.1" min="0" max="1" class="w-full">
                 </div>
-                <p class="text-xs text-gray-500 dark:text-gray-500">
-                  Si el subtotal de productos supera este monto, Eva y el sistema aplican el descuento automáticamente. Usa 0% para desactivarlo.
-                </p>
-                <button class="btn btn-primary w-full" onclick="saveDiscountSettings()">Guardar descuento</button>
-              </div>
-            </div>
-            <div class="card h-full">
-              <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Pausa automática por escalación</h3>
-              <div class="space-y-3">
                 <div>
-                  <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Tiempo de pausa después de escalar al equipo</label>
-                  <input id="set-automatic-escalation-timeout" type="number" step="5" min="0" max="10080" class="w-full" placeholder="180">
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Máximo de tokens <span class="font-normal text-gray-400">100 - 2000</span></label>
+                  <input id="set-max-tokens" type="number" step="50" min="100" max="2000" class="w-full">
                 </div>
-                <p class="text-xs text-gray-500 dark:text-gray-500">
-                  180 significa tres horas. Usa 0 para mantener las escalaciones pausadas hasta que un administrador reactive al cliente manualmente.
-                </p>
-                <button class="btn btn-primary w-full" onclick="saveEscalationTimeoutSetting()">Guardar pausa</button>
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Historial <span class="font-normal text-gray-400">5 - 50 mensajes</span></label>
+                  <input id="set-max-history" type="number" step="1" min="5" max="50" class="w-full">
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Modo de orquestación</label>
+                  <select id="set-orchestration-mode" class="w-full">
+                    <option value="legacy">Legacy</option>
+                    <option value="shadow">Shadow</option>
+                    <option value="multi_agent">Multi-agent</option>
+                  </select>
+                </div>
+              </div>
+              <p class="text-xs text-gray-500 dark:text-gray-400 mt-3">Legacy es el modo de respaldo seguro. Shadow evalúa especialistas sin alterar la respuesta enviada.</p>
+              <div class="mt-4 pt-3 border-t border-fuchsia-100 dark:border-fuchsia-900/60 flex justify-end">
+                <button class="btn btn-primary text-sm" onclick="saveProviderSettings()">Guardar modelo principal</button>
               </div>
             </div>
-          </div>
-          <div class="card h-full">
-            <div class="flex items-start justify-between gap-4 mb-4">
-              <div>
-                <h3 class="font-semibold text-gray-900 dark:text-gray-100">Métodos de pago</h3>
-                <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                  El nombre es lo que verá el cliente. La información es lo que el bot enviará cuando elija ese método.
-                </p>
+            <div class="rounded-xl border border-purple-100 dark:border-purple-900/60 bg-purple-50/50 dark:bg-purple-950/15 p-4">
+              <div class="flex items-start gap-3 mb-4">
+                <span class="flex items-center justify-center h-6 w-6 rounded-full bg-purple-600 text-white text-xs font-bold">2</span>
+                <div>
+                  <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Respaldo automático</h4>
+                  <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">Entra en acción si el proveedor principal falla.</p>
+                </div>
               </div>
-              <button class="btn btn-secondary text-sm whitespace-nowrap" onclick="addPaymentMethod()">+ Agregar método</button>
-            </div>
-            <div id="payment-methods-empty" class="text-sm text-gray-600 dark:text-gray-400 mb-4" style="display:none">
-              No hay métodos configurados. Agrega los que quieras ofrecer en esta tienda.
-            </div>
-            <div id="payment-methods-list" class="space-y-4"></div>
-            <div class="mt-4 flex gap-2">
-              <button class="btn btn-primary" onclick="savePaymentSettings()">Guardar métodos de pago</button>
-            </div>
-          </div>
-        </div>
-        <div id="llm-settings-section" class="grid md:grid-cols-2 gap-4">
-          <div class="card">
-            <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Proveedor LLM</h3>
-            <div class="space-y-3">
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Proveedor activo</label>
-                <select id="set-provider" class="w-full" onchange="onProviderChange()">
-                  <option value="openai">OpenAI</option>
-                  <option value="anthropic">Anthropic</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Modelo</label>
-                <select id="set-model" class="w-full"></select>
-              </div>
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Temperatura (0.0 - 1.0)</label>
-                <input id="set-temp" type="number" step="0.1" min="0" max="1" class="w-full">
-              </div>
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Max tokens (100 - 2000)</label>
-                <input id="set-max-tokens" type="number" step="50" min="100" max="2000" class="w-full">
-              </div>
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Historial de conversacion (5 - 50 mensajes)</label>
-                <input id="set-max-history" type="number" step="1" min="5" max="50" class="w-full">
-              </div>
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Modo de orquestacion AI</label>
-                <select id="set-orchestration-mode" class="w-full">
-                  <option value="legacy">Legacy</option>
-                  <option value="shadow">Shadow</option>
-                  <option value="multi_agent">Multi-agent</option>
-                </select>
-                <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">Usa legacy para rollback seguro. Shadow evalua sin efectos de especialistas.</p>
-              </div>
-              <button class="btn btn-primary w-full" onclick="saveProviderSettings()">Guardar cambios</button>
-            </div>
-          </div>
-          <div class="card">
-            <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Fallback automatico</h3>
-            <div class="space-y-3">
-              <div>
-                <label class="flex items-center gap-2 cursor-pointer">
+              <div class="space-y-4">
+                <label class="flex items-center justify-between gap-3 cursor-pointer rounded-lg border border-purple-100 dark:border-purple-900/60 bg-white/70 dark:bg-gray-900/30 p-3">
+                  <span class="text-sm font-medium text-gray-700 dark:text-gray-200">Activar respaldo automático</span>
                   <input id="set-fallback" type="checkbox">
-                  <span class="text-sm dark:text-gray-300">Activar fallback automatico</span>
                 </label>
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Proveedor de respaldo</label>
+                  <select id="set-fb-provider" class="w-full" onchange="onFallbackProviderChange()">
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Modelo de respaldo</label>
+                  <select id="set-fb-model" class="w-full"></select>
+                </div>
               </div>
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Proveedor fallback</label>
-                <select id="set-fb-provider" class="w-full" onchange="onFallbackProviderChange()">
-                  <option value="openai">OpenAI</option>
-                  <option value="anthropic">Anthropic</option>
-                </select>
+              <div class="mt-4 pt-3 border-t border-purple-100 dark:border-purple-900/60 flex justify-end">
+                <button class="btn btn-primary text-sm" onclick="saveFallbackSettings()">Guardar respaldo</button>
               </div>
-              <div>
-                <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Modelo fallback</label>
-                <select id="set-fb-model" class="w-full"></select>
-              </div>
-              <button class="btn btn-primary w-full" onclick="saveFallbackSettings()">Guardar fallback</button>
             </div>
           </div>
-        </div>
+        </section>
       </div>
 
     </div>
