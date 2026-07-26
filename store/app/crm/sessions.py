@@ -26,6 +26,7 @@ VALID_WORKFLOW_STAGES = {
     "cancelled",
 }
 VALID_SHIPPING_METHODS = {"mrw", "zoom"}
+VALID_FULFILLMENT_TYPES = {"home_delivery", "courier_agency_pickup"}
 
 
 class CheckoutDraftItem(BaseModel):
@@ -72,6 +73,9 @@ class CheckoutDraft(BaseModel):
     shipping_method: str | None = None
     shipping_city: str | None = None
     shipping_address: str | None = None
+    fulfillment_type: str | None = None
+    shipping_zone: str | None = None
+    pickup_agency: str | None = None
     payment_method: str | None = None
 
     @field_validator("items", mode="before")
@@ -85,7 +89,13 @@ class CheckoutDraft(BaseModel):
         text = str(value or "").strip().lower()
         return text if text in VALID_SHIPPING_METHODS else None
 
-    @field_validator("shipping_city", "shipping_address", "payment_method", mode="before")
+    @field_validator("fulfillment_type", mode="before")
+    @classmethod
+    def _clean_fulfillment_type(cls, value):
+        text = str(value or "").strip().lower()
+        return text if text in VALID_FULFILLMENT_TYPES else None
+
+    @field_validator("shipping_city", "shipping_address", "shipping_zone", "pickup_agency", "payment_method", mode="before")
     @classmethod
     def _clean_optional_text(cls, value):
         text = str(value or "").strip()
@@ -104,12 +114,24 @@ class CheckoutDraft(BaseModel):
                     missing.append(f"{prefix}.size")
                 if not item.quantity:
                     missing.append(f"{prefix}.quantity")
-        if not self.shipping_method:
-            missing.append("shipping_method")
         if not self.shipping_city:
             missing.append("shipping_city")
-        if not self.shipping_address:
-            missing.append("shipping_address")
+        if self.fulfillment_type == "home_delivery":
+            if not self.shipping_zone:
+                missing.append("shipping_zone")
+            if not self.shipping_address:
+                missing.append("shipping_address")
+        elif self.fulfillment_type == "courier_agency_pickup":
+            if not self.shipping_method:
+                missing.append("shipping_method")
+            if not self.pickup_agency:
+                missing.append("pickup_agency")
+        else:
+            # Preserve legacy drafts until the delivery policy resolves their city.
+            if not self.shipping_method:
+                missing.append("shipping_method")
+            if not self.shipping_address:
+                missing.append("shipping_address")
         if not self.payment_method:
             missing.append("payment_method")
         return missing
@@ -215,7 +237,15 @@ def merge_checkout_draft(existing: CheckoutDraft | dict | str | None, partial_up
             items[0] = first_item
             draft_data["items"] = items
 
-    for key in ("shipping_method", "shipping_city", "shipping_address", "payment_method"):
+    for key in (
+        "shipping_method",
+        "shipping_city",
+        "shipping_address",
+        "fulfillment_type",
+        "shipping_zone",
+        "pickup_agency",
+        "payment_method",
+    ):
         if key in update:
             draft_data[key] = update[key]
 

@@ -148,6 +148,14 @@ function renderItems(items, total, pricing = {}) {
     </tr>`;
   }
 
+  const shippingFee = Number(pricing.shipping_fee || 0);
+  if (shippingFee > 0) {
+    html += `<tr class="border-t border-gray-100 dark:border-gray-700">
+      <td class="py-3 font-semibold text-gray-900 dark:text-gray-100" colspan="4">Entrega</td>
+      <td class="py-3 font-semibold text-gray-900 dark:text-gray-100">${money(shippingFee)}</td>
+    </tr>`;
+  }
+
   html += `<tr class="border-t border-gray-200 dark:border-gray-600">
     <td class="py-3 font-semibold text-gray-900 dark:text-gray-100" colspan="4">Total</td>
     <td class="py-3 font-semibold text-gray-900 dark:text-gray-100">${money(total)}</td>
@@ -259,17 +267,25 @@ function renderOrder(order) {
     discount_applied: order.discount_applied,
     discount_amount: order.discount_amount,
     discount_percent: order.discount_percent,
+    shipping_fee: order.shipping_fee,
   });
   renderCustomer(customer);
   renderInfoGrid('payment-shipping-grid', [
-    { label: 'Método de envío', value: order.shipping_method || '—' },
+    { label: 'Tipo de entrega', value: order.fulfillment_type === 'home_delivery' ? 'Entrega a domicilio' : order.fulfillment_type === 'courier_agency_pickup' ? 'Retiro en agencia' : '—' },
+    { label: 'Método de envío', value: order.shipping_method ? order.shipping_method.toUpperCase() : 'Entrega local' },
     { label: 'Ciudad', value: order.shipping_city || '—' },
+    { label: 'Zona', value: order.shipping_zone || '—' },
     { label: 'Dirección', value: order.shipping_address || '—' },
+    { label: 'Agencia de retiro', value: order.pickup_agency || '—' },
+    { label: 'Productos', value: money(order.merchandise_total ?? order.total) },
+    { label: 'Entrega prepagada', value: money(order.shipping_fee || 0) },
     { label: 'Tracking', value: order.tracking_number || '—' },
     { label: 'Nota / comprobante', value: order.payment_proof || '—' },
     { label: 'Última dirección cliente', value: customer?.last_shipping_address || '—' },
     { label: 'Última ciudad cliente', value: customer?.last_shipping_city || '—' },
     { label: 'Último envío cliente', value: customer?.last_shipping_method || '—' },
+    { label: 'Última zona cliente', value: customer?.last_shipping_zone || '—' },
+    { label: 'Última agencia cliente', value: customer?.last_pickup_agency || '—' },
   ]);
   renderRecentOrders(order.recent_customer_orders || [], order.id);
   populateSelectors(order);

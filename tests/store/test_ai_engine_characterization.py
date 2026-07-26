@@ -61,6 +61,14 @@ def _sample_settings(**overrides) -> dict:
         "store_phone_number": "+58 412-1234567",
         "order_discount_percent": 10,
         "order_discount_threshold_usd": 350,
+        "shipping_policy": {
+            "currency": "USD",
+            "home_delivery_cities": [],
+            "home_delivery_zones": [],
+            "courier_destination_rates": [
+                {"city": "Caracas", "aliases": [], "mrw_fee_usd": 6.0, "zoom_fee_usd": 7.0},
+            ],
+        },
     }
     settings.update(overrides)
     return settings
@@ -758,8 +766,8 @@ async def test_duplicate_create_order_tool_call_does_not_create_duplicate_side_e
         ],
         "payment_method": "Zelle",
         "shipping_city": "Caracas",
-        "shipping_address": "Av Principal, Casa 8",
         "shipping_method": "mrw",
+        "pickup_agency": "MRW Chacao",
     }
     engine_harness.provider.chat.return_value = LLMResponse(
         tool_calls=[_tool_call("create_order", create_args, tool_id="create-1")]

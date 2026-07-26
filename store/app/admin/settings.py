@@ -32,6 +32,7 @@ from app.crm.customers import add_tags, normalize_tags, remove_tag
 from app.exchange_rates import ALLOWED_EXCHANGE_RATE_REFERENCES, normalize_rate_setting_value
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY, normalize_payment_methods
 from app.runtime_settings import LLM_MANAGED_KEYS, STORE_EDITABLE_SETTING_KEYS
+from app.shipping import normalize_shipping_policy
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/settings", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -62,6 +63,10 @@ class PaymentMethodItem(BaseModel):
 
 class PaymentMethodsUpdate(BaseModel):
     payment_methods: list[PaymentMethodItem]
+
+
+class ShippingPolicyUpdate(BaseModel):
+    shipping_policy: dict
 
 
 class OrderUpdate(BaseModel):
@@ -317,6 +322,16 @@ async def get_payment_methods():
     return {"payment_methods": payment_methods}
 
 
+@router.get("/shipping-policy")
+async def get_shipping_policy():
+    settings = dict(await db.get_settings())
+    try:
+        shipping_policy = normalize_shipping_policy(settings.get("shipping_policy"))
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=f"Stored shipping policy is invalid: {e}") from e
+    return {"shipping_policy": shipping_policy}
+
+
 @router.get("/providers")
 async def list_available_providers():
     """Return available providers and their models (for the admin dropdown)."""
@@ -441,6 +456,25 @@ async def update_settings_batch(body: SettingsBatchUpdate):
     """Validate and update a related group of settings atomically."""
     validated = await _apply_settings_batch(body.settings)
     return {"status": "updated", "settings": validated}
+
+@router.put("/shipping-policy")
+async def update_shipping_policy(body: ShippingPolicyUpdate):
+    try:
+        shipping_policy = normalize_shipping_policy(body.shipping_policy)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    await db.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES (:key, :val)
+        ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()
+        """,
+        {"key": "shipping_policy", "val": json.dumps(shipping_policy, ensure_ascii=False)},
+    )
+    db.invalidate_settings_cache()
+    logger.info("Shipping policy updated.")
+    return {"status": "updated", "shipping_policy": shipping_policy}
 
 
 @router.put("/{key}")
@@ -782,8 +816,9 @@ async def list_orders(limit: int = 50):
     """Return recent orders with customer info."""
     rows = await db.fetch_all(
         """
-        SELECT o.id, o.items, o.total, o.payment_method, o.payment_status,
-               o.shipping_method, o.shipping_city, o.shipping_address,
+        SELECT o.id, o.items, o.total, o.merchandise_total, o.shipping_fee, o.shipping_currency,
+               o.payment_method, o.payment_status, o.fulfillment_type, o.shipping_method,
+               o.shipping_city, o.shipping_address, o.shipping_zone, o.pickup_agency,
                o.shipping_status, o.tracking_number, o.created_at,
                CASE WHEN c.id IS NULL THEN 'Cliente eliminado' ELSE c.display_name END AS display_name,
                c.platform_id, c.channel

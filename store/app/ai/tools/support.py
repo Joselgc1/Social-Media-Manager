@@ -23,6 +23,9 @@ async def get_customer_profile(args: dict, context: ToolExecutionContext) -> dic
             "total_spent": _safe_float(customer.get("total_spent")),
             "last_shipping_city": customer.get("last_shipping_city"),
             "last_shipping_method": customer.get("last_shipping_method"),
+            "last_fulfillment_type": customer.get("last_fulfillment_type"),
+            "last_shipping_zone": customer.get("last_shipping_zone"),
+            "last_pickup_agency": customer.get("last_pickup_agency"),
             "has_saved_shipping_address": bool(customer.get("last_shipping_address")),
         },
     }
