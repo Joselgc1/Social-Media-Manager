@@ -1428,6 +1428,135 @@ async function savePaymentSettings() {
   await loadSettings();
 }
 
+function shippingRateCard(content) {
+  return `<div class="shipping-rate-card border border-gray-200 dark:border-gray-700 rounded-xl p-3">${content}</div>`;
+}
+
+function renderShippingPolicy(policy = {}) {
+  const cities = policy.home_delivery_cities || [];
+  const zones = policy.home_delivery_zones || [];
+  const rates = policy.courier_destination_rates || [];
+  const citiesList = document.getElementById('home-delivery-cities-list');
+  const zonesList = document.getElementById('home-delivery-zones-list');
+  const ratesList = document.getElementById('courier-destination-rates-list');
+  if (!citiesList || !zonesList || !ratesList) return;
+
+  citiesList.innerHTML = cities.map(city => homeDeliveryCityMarkup(city)).join('');
+  zonesList.innerHTML = zones.map(zone => homeDeliveryZoneMarkup(zone)).join('');
+  ratesList.innerHTML = rates.map(rate => courierDestinationRateMarkup(rate)).join('');
+}
+
+function homeDeliveryCityMarkup(city = {}) {
+  return shippingRateCard(`
+    <div class="flex justify-end mb-2"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="this.closest('.shipping-rate-card').remove()" title="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button></div>
+    <label class="block text-xs text-gray-500 mb-1">Ciudad o municipio</label>
+    <input class="w-full shipping-home-city-name" value="${escapeHtml(city.name || '')}" placeholder="Ej. Valencia">
+    <label class="block text-xs text-gray-500 mt-2 mb-1">Alias separados por coma</label>
+    <input class="w-full shipping-home-city-aliases" value="${escapeHtml((city.aliases || []).join(', '))}" placeholder="Ej. Valencia, Carabobo">
+  `);
+}
+
+function homeDeliveryZoneMarkup(zone = {}) {
+  return shippingRateCard(`
+    <div class="flex justify-end mb-2"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="this.closest('.shipping-rate-card').remove()" title="Eliminar zona">${renderDeleteIcon('Eliminar zona')}</button></div>
+    <div class="grid grid-cols-2 gap-2">
+      <div><label class="block text-xs text-gray-500 mb-1">Ciudad</label><input class="w-full shipping-zone-city" value="${escapeHtml(zone.city || '')}" placeholder="Valencia"></div>
+      <div><label class="block text-xs text-gray-500 mb-1">Zona</label><input class="w-full shipping-zone-name" value="${escapeHtml(zone.name || '')}" placeholder="El Viñedo"></div>
+    </div>
+    <label class="block text-xs text-gray-500 mt-2 mb-1">Alias separados por coma</label>
+    <input class="w-full shipping-zone-aliases" value="${escapeHtml((zone.aliases || []).join(', '))}" placeholder="Opcional">
+    <label class="block text-xs text-gray-500 mt-2 mb-1">Tarifa USD</label>
+    <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zone-fee" value="${escapeHtml(zone.fee_usd ?? '')}" placeholder="0.00">
+  `);
+}
+
+function courierDestinationRateMarkup(rate = {}) {
+  return shippingRateCard(`
+    <div class="flex justify-end mb-2"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="this.closest('.shipping-rate-card').remove()" title="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button></div>
+    <label class="block text-xs text-gray-500 mb-1">Ciudad de destino</label>
+    <input class="w-full shipping-courier-city" value="${escapeHtml(rate.city || '')}" placeholder="Ej. Caracas">
+    <label class="block text-xs text-gray-500 mt-2 mb-1">Alias separados por coma</label>
+    <input class="w-full shipping-courier-aliases" value="${escapeHtml((rate.aliases || []).join(', '))}" placeholder="Distrito Capital">
+    <div class="grid grid-cols-2 gap-2 mt-2">
+      <div><label class="block text-xs text-gray-500 mb-1">MRW USD</label><input type="number" min="0" max="100000" step="0.01" class="w-full shipping-mrw-fee" value="${escapeHtml(rate.mrw_fee_usd ?? '')}" placeholder="0.00"></div>
+      <div><label class="block text-xs text-gray-500 mb-1">Zoom USD</label><input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zoom-fee" value="${escapeHtml(rate.zoom_fee_usd ?? '')}" placeholder="0.00"></div>
+    </div>
+  `);
+}
+
+function addHomeDeliveryCity(city = {}) {
+  document.getElementById('home-delivery-cities-list')?.insertAdjacentHTML('beforeend', homeDeliveryCityMarkup(city));
+}
+
+function addHomeDeliveryZone(zone = {}) {
+  document.getElementById('home-delivery-zones-list')?.insertAdjacentHTML('beforeend', homeDeliveryZoneMarkup(zone));
+}
+
+function addCourierDestinationRate(rate = {}) {
+  document.getElementById('courier-destination-rates-list')?.insertAdjacentHTML('beforeend', courierDestinationRateMarkup(rate));
+}
+
+function shippingAliases(value) {
+  return String(value || '').split(',').map(alias => alias.trim()).filter(Boolean);
+}
+
+function shippingFee(input) {
+  const raw = input?.value?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function collectShippingPolicy() {
+  const homeDeliveryCities = Array.from(document.querySelectorAll('#home-delivery-cities-list .shipping-rate-card')).map(card => ({
+    name: card.querySelector('.shipping-home-city-name')?.value?.trim() || '',
+    aliases: shippingAliases(card.querySelector('.shipping-home-city-aliases')?.value),
+  }));
+  const homeDeliveryZones = Array.from(document.querySelectorAll('#home-delivery-zones-list .shipping-rate-card')).map(card => ({
+    city: card.querySelector('.shipping-zone-city')?.value?.trim() || '',
+    name: card.querySelector('.shipping-zone-name')?.value?.trim() || '',
+    aliases: shippingAliases(card.querySelector('.shipping-zone-aliases')?.value),
+    fee_usd: shippingFee(card.querySelector('.shipping-zone-fee')),
+  }));
+  const courierDestinationRates = Array.from(document.querySelectorAll('#courier-destination-rates-list .shipping-rate-card')).map(card => ({
+    city: card.querySelector('.shipping-courier-city')?.value?.trim() || '',
+    aliases: shippingAliases(card.querySelector('.shipping-courier-aliases')?.value),
+    mrw_fee_usd: shippingFee(card.querySelector('.shipping-mrw-fee')),
+    zoom_fee_usd: shippingFee(card.querySelector('.shipping-zoom-fee')),
+  }));
+  return {
+    currency: 'USD',
+    home_delivery_cities: homeDeliveryCities,
+    home_delivery_zones: homeDeliveryZones,
+    courier_destination_rates: courierDestinationRates,
+  };
+}
+
+async function saveShippingPolicy() {
+  const policy = collectShippingPolicy();
+  const invalid = [
+    ...policy.home_delivery_cities.filter(city => !city.name),
+    ...policy.home_delivery_zones.filter(zone => !zone.city || !zone.name || zone.fee_usd === null),
+    ...policy.courier_destination_rates.filter(rate => !rate.city || rate.mrw_fee_usd === null || rate.zoom_fee_usd === null),
+  ];
+  if (invalid.length) {
+    toast('Completa los nombres y tarifas de todas las filas', '#dc2626');
+    return;
+  }
+  const response = await apiFetch(API + '/shipping-policy', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({shipping_policy: policy}),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    toast(data.detail || 'No se pudieron guardar las tarifas', '#dc2626');
+    return;
+  }
+  toast('Tarifas de entrega guardadas');
+  await loadSettings();
+}
+
 function exchangeRateDefinitions() {
   return [
     { key: 'usd_bcv', label: 'Dólar BCV', setting: 'exchange_rate_usd_bcv', effective: 'exchange_rate_usd_bcv_effective_at', fetched: 'exchange_rate_usd_bcv_fetched_at', source: 'exchange_rate_usd_bcv_source', unit: 'USD' },
@@ -1592,9 +1721,10 @@ async function saveEscalationTimeoutSetting() {
 
 // -- Settings --
 async function loadSettings() {
-  const [settings, paymentData] = await Promise.all([
+  const [settings, paymentData, shippingData] = await Promise.all([
     apiFetch(API + '/').then(r => r.json()),
     apiFetch(API + '/payment-methods').then(r => r.json()),
+    apiFetch(API + '/shipping-policy').then(r => r.json()),
   ]);
   const pdfInterval = settings.catalog_pdf_interval_hours || 24;
   const pdfIntervalDisplay = document.getElementById('pdf-interval-display');
@@ -1628,6 +1758,7 @@ async function loadSettings() {
     storePhoneInput.value = settings.store_phone_number || '';
   }
   renderPaymentMethods(paymentData.payment_methods || []);
+  renderShippingPolicy(shippingData.shipping_policy || {});
   loadCatalogPdfStatus();
 
   // Hide LLM controls when managed from master

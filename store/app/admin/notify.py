@@ -103,14 +103,17 @@ async def notify_new_order(
     order_total: float,
     payment_method: str,
     items_summary: str,
+    delivery_summary: str | None = None,
 ):
     """Notify the owner when a new order is created."""
+    delivery_line = f"\n*Entrega:* {delivery_summary}" if delivery_summary else ""
     message = (
         f"🛒 *NUEVA ORDEN*\n\n"
         f"*Cliente:* {customer_name or 'Desconocido'}\n"
         f"*Total:* ${order_total:.2f}\n"
         f"*Pago:* {payment_method}\n"
         f"*Productos:* {items_summary}"
+        f"{delivery_line}"
     )
 
     await notify_owner(message)

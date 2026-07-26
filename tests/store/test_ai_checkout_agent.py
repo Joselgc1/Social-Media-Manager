@@ -57,11 +57,28 @@ def _complete_draft(**overrides) -> dict:
         "items": [{"product_query": "Pijama satén azul", "size": "M", "quantity": 1}],
         "shipping_method": "mrw",
         "shipping_city": "Caracas",
-        "shipping_address": "Av Principal, Casa 8",
+        "pickup_agency": "MRW Chacao",
         "payment_method": "Zelle",
     }
     draft.update(overrides)
     return draft
+
+
+@pytest.fixture(autouse=True)
+def _shipping_policy(monkeypatch):
+    async def get_policy():
+        return {
+            "currency": "USD",
+            "home_delivery_cities": [{"name": "Valencia", "aliases": []}],
+            "home_delivery_zones": [
+                {"city": "Valencia", "name": "El Viñedo", "aliases": [], "fee_usd": 4.0},
+            ],
+            "courier_destination_rates": [
+                {"city": "Caracas", "aliases": [], "mrw_fee_usd": 6.0, "zoom_fee_usd": 7.0},
+            ],
+        }
+
+    monkeypatch.setattr(service, "_get_shipping_policy", get_policy)
 
 
 def _patch_catalog(monkeypatch, catalog: list[dict]) -> None:
@@ -103,11 +120,12 @@ async def test_progressive_field_collection_does_not_ask_for_known_fields(monkey
 
     assert "items" not in result["missing_fields"]
     assert "shipping_method" not in result["missing_fields"]
+    assert "shipping_zone" in result["missing_fields"]
     assert "shipping_address" in result["missing_fields"]
 
 
 @pytest.mark.asyncio
-async def test_missing_quantity_and_missing_address(monkeypatch):
+async def test_missing_quantity_and_missing_pickup_agency(monkeypatch):
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session({
         "items": [{"product_query": "Pijama satén azul", "size": "M"}],
         "shipping_method": "mrw",
@@ -120,24 +138,30 @@ async def test_missing_quantity_and_missing_address(monkeypatch):
 
     assert result["status"] == "missing_fields"
     assert "items[0].quantity" in result["missing_fields"]
-    assert "shipping_address" in result["missing_fields"]
+    assert "pickup_agency" in result["missing_fields"]
 
 
 @pytest.mark.asyncio
 async def test_saved_address_confirmation(monkeypatch):
     update_session = AsyncMock(return_value=_session({
         "shipping_address": "Av Principal, Casa 8",
-        "shipping_city": "Caracas",
-        "shipping_method": "mrw",
+        "shipping_city": "Valencia",
+        "shipping_zone": "El Viñedo",
+        "fulfillment_type": "home_delivery",
     }))
     monkeypatch.setattr(service.sessions, "update_checkout_draft", update_session)
 
-    await service.update_checkout_draft(_customer(), {"use_saved_address": True})
+    await service.update_checkout_draft(_customer(
+        last_shipping_city="Valencia",
+        last_shipping_method="",
+        last_fulfillment_type="home_delivery",
+        last_shipping_zone="El Viñedo",
+    ), {"use_saved_address": True})
 
     update = update_session.await_args.args[1]
     assert update["shipping_address"] == "Av Principal, Casa 8"
-    assert update["shipping_city"] == "Caracas"
-    assert update["shipping_method"] == "mrw"
+    assert update["shipping_city"] == "Valencia"
+    assert update["shipping_zone"] == "El Viñedo"
 
 
 @pytest.mark.asyncio

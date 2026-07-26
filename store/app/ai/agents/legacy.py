@@ -13,6 +13,9 @@ LEGACY_TOOL_NAMES = (
     "send_catalog_pdf",
     "send_product_image",
     "send_interactive_buttons",
+    "update_checkout_draft",
+    "finalize_checkout",
+    "cancel_checkout",
 )
 
 LEGACY_AGENT = AgentDefinition(

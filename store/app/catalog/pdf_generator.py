@@ -213,7 +213,7 @@ def _render_footer_note(pdf: "FPDF"):
     pdf.set_text_color(*_GRAY)
     generated = datetime.now().strftime("%d/%m/%Y %H:%M")
     pdf.cell(0, 5,
-             f"Actualizado: {generated}  |  Envíos por MRW o Zoom con cobro a destino  "
+             f"Actualizado: {generated}  |  Entrega a domicilio en Valencia metropolitana y agencias MRW/Zoom  "
              f"|  Consulta disponibilidad antes de confirmar",
              align="C")
 

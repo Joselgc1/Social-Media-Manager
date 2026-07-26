@@ -96,8 +96,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Create a new order when the customer CONFIRMS they want to purchase. "
                 "Only call this AFTER you have collected and confirmed ALL of these: "
-                "the specific product(s), size(s), quantity, shipping method, "
-                "full shipping address, and payment method. "
+                "the specific product(s), size(s), quantity, city, and either the home-delivery "
+                "zone/address or the MRW/Zoom pickup agency, plus payment method. "
                 "The chosen payment method is the final checkout step. As soon as the customer chooses it "
                 "and the other checkout information is already complete, create the order immediately BEFORE "
                 "sending the payment details. "
@@ -133,21 +133,27 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "shipping_city": {
                         "type": "string",
-                        "pattern": "\\S",
-                        "description": "City for delivery",
+                        "description": "Customer city. The backend decides whether it is home delivery or agency pickup.",
                     },
                     "shipping_address": {
                         "type": "string",
-                        "pattern": "\\S",
-                        "description": "Exact delivery address. Collect the city separately; do not ask for state or ZIP/postal code.",
+                        "description": "Exact home-delivery address. Required only for a configured Metro Valencia home-delivery zone.",
                     },
                     "shipping_method": {
                         "type": "string",
                         "enum": ["mrw", "zoom"],
-                        "description": "Preferred shipping courier",
+                        "description": "Preferred courier for agency pickup outside Metro Valencia",
+                    },
+                    "shipping_zone": {
+                        "type": "string",
+                        "description": "Configured zone for Metro Valencia home delivery",
+                    },
+                    "pickup_agency": {
+                        "type": "string",
+                        "description": "MRW or Zoom agency where the customer will pick up the order outside Metro Valencia",
                     },
                 },
-                "required": ["items", "payment_method", "shipping_city", "shipping_method", "shipping_address"],
+                "required": ["items", "payment_method", "shipping_city"],
             },
         },
     ),
@@ -364,6 +370,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "shipping_method": {"type": "string", "enum": ["mrw", "zoom"]},
                     "shipping_city": {"type": "string"},
                     "shipping_address": {"type": "string"},
+                    "shipping_zone": {"type": "string"},
+                    "pickup_agency": {"type": "string"},
                     "payment_method": {"type": "string"},
                     "use_saved_address": {
                         "type": "boolean",

@@ -43,7 +43,7 @@ def test_support_prompt_is_specialized():
     assert "get_customer_order_status" in prompt
     assert "Do not create orders" in prompt
     assert "Pijama satén azul" in prompt
-    assert "Prices do NOT include shipping" in prompt
+    assert "Product prices do not include delivery" in prompt
 
 
 def test_support_tool_allowlist_is_read_only_except_escalation():

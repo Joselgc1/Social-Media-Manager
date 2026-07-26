@@ -360,9 +360,22 @@ def _build_customer_context(customer: dict | None, open_order: dict | None = Non
     parts.append("Importante: no asumas el método de pago por tags o compras anteriores; debes preguntarlo en la compra actual si el cliente aún no lo dijo.")
 
     last_addr = customer.get("last_shipping_address")
-    if last_addr:
+    last_city = customer.get("last_shipping_city")
+    last_fulfillment_type = customer.get("last_fulfillment_type")
+    if last_fulfillment_type == "home_delivery" and last_addr:
+        parts.append(f"Última entrega: domicilio en {last_city or 'ciudad no registrada'}")
         parts.append(f"Última dirección de envío: {last_addr}")
-        last_city = customer.get("last_shipping_city")
+        if customer.get("last_shipping_zone"):
+            parts.append(f"Última zona: {customer['last_shipping_zone']}")
+    elif last_fulfillment_type == "courier_agency_pickup" and customer.get("last_pickup_agency"):
+        parts.append(f"Última entrega: retiro en agencia en {last_city or 'ciudad no registrada'}")
+        parts.append(f"Última agencia: {customer['last_pickup_agency']}")
+        last_method = customer.get("last_shipping_method")
+        if last_method:
+            parts.append(f"Último courier: {last_method}")
+    elif last_addr:
+        # Legacy customer records have no fulfillment type yet.
+        parts.append(f"Última dirección de envío: {last_addr}")
         if last_city:
             parts.append(f"Última ciudad: {last_city}")
         last_method = customer.get("last_shipping_method")

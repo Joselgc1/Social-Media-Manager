@@ -121,14 +121,24 @@ async def test_executor_create_order_uses_server_owned_customer_context(monkeypa
     monkeypatch.setattr(tool_orders, "notify_new_order", notify_new_order)
     monkeypatch.setattr(tool_orders.customers, "add_tags", add_tags)
     monkeypatch.setattr(tool_orders.db, "execute", db_execute)
+    monkeypatch.setattr(tool_orders.checkout_service, "validate_legacy_delivery", AsyncMock(return_value={
+        "status": "ok",
+        "quote": {
+            "fulfillment_type": "courier_agency_pickup",
+            "shipping_city": "Caracas",
+            "shipping_method": "mrw",
+            "shipping_fee": 6.0,
+            "shipping_currency": "USD",
+        },
+    }))
 
     args = {
         "customer_id": "attacker-controlled",
         "items": [{"product_name": "Pijama satén azul", "sku": "PJ-001-S", "size": "S", "quantity": 1, "unit_price": 28}],
         "payment_method": "Zelle",
         "shipping_city": "Caracas",
-        "shipping_address": "Av Principal, Casa 8",
         "shipping_method": "mrw",
+        "pickup_agency": "MRW Chacao",
     }
 
     result = await execute_tool("create_order", args, _context())
@@ -149,6 +159,16 @@ async def test_executor_create_order_returns_catalog_validation_error(monkeypatc
     monkeypatch.setattr(tool_orders.orders, "create_order", create_order)
     monkeypatch.setattr(tool_orders, "notify_new_order", notify_new_order)
     monkeypatch.setattr(tool_orders.customers, "add_tags", add_tags)
+    monkeypatch.setattr(tool_orders.checkout_service, "validate_legacy_delivery", AsyncMock(return_value={
+        "status": "ok",
+        "quote": {
+            "fulfillment_type": "courier_agency_pickup",
+            "shipping_city": "Caracas",
+            "shipping_method": "mrw",
+            "shipping_fee": 6.0,
+            "shipping_currency": "USD",
+        },
+    }))
 
     result = await execute_tool(
         "create_order",
@@ -156,8 +176,8 @@ async def test_executor_create_order_returns_catalog_validation_error(monkeypatc
             "items": [{"product_name": "Inventado", "sku": "fake", "size": "M", "quantity": 1, "unit_price": 1}],
             "payment_method": "Zelle",
             "shipping_city": "Caracas",
-            "shipping_address": "Av Principal",
             "shipping_method": "mrw",
+            "pickup_agency": "MRW Chacao",
         },
         _context(),
     )
@@ -201,6 +221,16 @@ async def test_executor_rejects_invalid_create_order_arguments_before_dispatch(m
 async def test_executor_rejects_unconfigured_create_order_payment_method(monkeypatch):
     create_order = AsyncMock(side_effect=ValueError("Payment method is not configured for this store."))
     monkeypatch.setattr(tool_orders.orders, "create_order", create_order)
+    monkeypatch.setattr(tool_orders.checkout_service, "validate_legacy_delivery", AsyncMock(return_value={
+        "status": "ok",
+        "quote": {
+            "fulfillment_type": "courier_agency_pickup",
+            "shipping_city": "Caracas",
+            "shipping_method": "mrw",
+            "shipping_fee": 6.0,
+            "shipping_currency": "USD",
+        },
+    }))
 
     result = await execute_tool(
         "create_order",
@@ -208,8 +238,8 @@ async def test_executor_rejects_unconfigured_create_order_payment_method(monkeyp
             "items": [{"product_name": "Pijama", "sku": "PJ-001-S", "size": "S", "quantity": 1, "unit_price": 28}],
             "payment_method": "Inventado",
             "shipping_city": "Caracas",
-            "shipping_address": "Av Principal",
             "shipping_method": "mrw",
+            "pickup_agency": "MRW Chacao",
         },
         _context(),
     )

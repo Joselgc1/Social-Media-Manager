@@ -230,6 +230,42 @@
             </div>
           </div>
         </div>
+        <div class="card mb-4">
+          <div class="flex items-start justify-between gap-4 mb-4">
+            <div>
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100">Tarifas de entrega</h3>
+              <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                Valencia metropolitana se entrega a domicilio por zona. Las demás ciudades se envían a la agencia MRW o Zoom indicada por el cliente. Todas las tarifas se cobran con el pedido en USD.
+              </p>
+            </div>
+          </div>
+          <div class="grid xl:grid-cols-3 gap-4">
+            <div>
+              <div class="flex items-center justify-between gap-2 mb-2">
+                <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Ciudades con entrega a domicilio</h4>
+                <button class="btn btn-secondary text-xs" type="button" onclick="addHomeDeliveryCity()">+ Ciudad</button>
+              </div>
+              <div id="home-delivery-cities-list" class="space-y-3"></div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between gap-2 mb-2">
+                <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Zonas de entrega a domicilio</h4>
+                <button class="btn btn-secondary text-xs" type="button" onclick="addHomeDeliveryZone()">+ Zona</button>
+              </div>
+              <div id="home-delivery-zones-list" class="space-y-3"></div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between gap-2 mb-2">
+                <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Envíos a agencia</h4>
+                <button class="btn btn-secondary text-xs" type="button" onclick="addCourierDestinationRate()">+ Ciudad</button>
+              </div>
+              <div id="courier-destination-rates-list" class="space-y-3"></div>
+            </div>
+          </div>
+          <div class="mt-4">
+            <button class="btn btn-primary" type="button" onclick="saveShippingPolicy()">Guardar tarifas de entrega</button>
+          </div>
+        </div>
         <div class="settings-mobile-stack grid xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] gap-4 mb-4 items-start">
           <div class="space-y-4">
             <div class="card h-full">

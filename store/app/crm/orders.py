@@ -134,18 +134,36 @@ def _hydrate_order_pricing(order: dict) -> dict:
         2,
     )
     total = round(float(order.get("total") or 0), 2)
-    discount_amount = round(max(subtotal - total, 0.0), 2)
+    shipping_fee = round(float(order.get("shipping_fee") or 0), 2)
+    stored_merchandise_total = order.get("merchandise_total")
+    merchandise_total = round(
+        float(stored_merchandise_total) if stored_merchandise_total is not None else max(total - shipping_fee, 0.0),
+        2,
+    )
+    discount_amount = round(max(subtotal - merchandise_total, 0.0), 2)
     discount_applied = discount_amount > 0
     discount_percent = round((discount_amount / subtotal) * 100, 2) if discount_applied and subtotal > 0 else 0.0
     discount_rate = round(discount_percent / 100.0, 4) if discount_applied else 0.0
 
     order["items"] = items
     order["subtotal"] = subtotal
+    order["merchandise_total"] = merchandise_total
+    order["shipping_fee"] = shipping_fee
+    order["shipping_currency"] = order.get("shipping_currency") or "USD"
     order["discount_applied"] = discount_applied
     order["discount_amount"] = discount_amount
     order["discount_percent"] = discount_percent
     order["discount_rate"] = discount_rate
     return order
+
+
+def _customer_spend_amount(order) -> float:
+    """Exclude prepaid delivery from lifetime product spend when available."""
+    try:
+        merchandise_total = order["merchandise_total"]
+    except KeyError:
+        merchandise_total = None
+    return float(merchandise_total) if merchandise_total is not None else float(order["total"])
 
 
 def _resolve_catalog_variant(sku: str, product_name: str, size: str) -> dict | None:
@@ -341,6 +359,11 @@ async def create_order(
     shipping_city: str | None = None,
     shipping_address: str | None = None,
     shipping_method: str | None = None,
+    fulfillment_type: str | None = None,
+    shipping_zone: str | None = None,
+    pickup_agency: str | None = None,
+    shipping_fee: float | int | str = 0,
+    shipping_currency: str = "USD",
 ) -> dict:
     """
     Create a new order and return it as a dict.
@@ -350,16 +373,20 @@ async def create_order(
     if not isinstance(items, list) or not items or any(not isinstance(item, dict) for item in items):
         raise ValueError("Order must contain at least one item.")
 
-    required_fields = {
-        "payment method": payment_method,
-        "shipping city": shipping_city,
-        "shipping address": shipping_address,
-        "shipping method": shipping_method,
-    }
+    required_fields = {"payment method": payment_method, "shipping city": shipping_city}
+    if fulfillment_type == "home_delivery":
+        required_fields["shipping address"] = shipping_address
+        required_fields["shipping zone"] = shipping_zone
+    elif fulfillment_type == "courier_agency_pickup":
+        required_fields["shipping method"] = shipping_method
+        required_fields["pickup agency"] = pickup_agency
+    else:
+        required_fields["shipping address"] = shipping_address
+        required_fields["shipping method"] = shipping_method
     missing_fields = [name for name, value in required_fields.items() if not isinstance(value, str) or not value.strip()]
     if missing_fields:
         raise ValueError(f"Missing required order field: {missing_fields[0]}.")
-    if shipping_method.strip().lower() not in {"mrw", "zoom"}:
+    if shipping_method and shipping_method.strip().lower() not in {"mrw", "zoom"}:
         raise ValueError("Shipping method must be MRW or Zoom.")
 
     settings = await db.get_settings()
@@ -378,12 +405,17 @@ async def create_order(
 
     payment_method = matching_method
     shipping_city = shipping_city.strip()
-    shipping_address = shipping_address.strip()
-    shipping_method = shipping_method.strip().lower()
+    shipping_address = (shipping_address or "").strip() or None
+    shipping_method = (shipping_method or "").strip().lower() or None
+    shipping_zone = (shipping_zone or "").strip() or None
+    pickup_agency = (pickup_agency or "").strip() or None
     await ensure_fresh_catalog()
     normalized_items = _normalize_order_items(items)
     pricing = _calculate_order_amounts(normalized_items, settings=settings)
-    total = pricing["total"]
+    merchandise_total = pricing["total"]
+    delivery_fee = _coerce_non_negative_float(shipping_fee, 0.0)
+    total = round(merchandise_total + delivery_fee, 2)
+    currency = str(shipping_currency or "USD").strip().upper() or "USD"
     items_json = json.dumps(normalized_items, ensure_ascii=False, sort_keys=True)
 
     customer_exists = await db.fetch_one(
@@ -411,6 +443,10 @@ async def create_order(
                   AND COALESCE(shipping_city, '') = COALESCE(:city, '')
                   AND COALESCE(shipping_address, '') = COALESCE(:addr, '')
                   AND COALESCE(shipping_method, '') = COALESCE(:method, '')
+                  AND COALESCE(fulfillment_type, '') = COALESCE(:fulfillment_type, '')
+                  AND COALESCE(shipping_zone, '') = COALESCE(:shipping_zone, '')
+                  AND COALESCE(pickup_agency, '') = COALESCE(:pickup_agency, '')
+                  AND COALESCE(shipping_fee, 0) = :shipping_fee
                   AND payment_status IN ('pending', 'proof_received')
                   AND inventory_status IN (:reservation_pending, 'reserved')
                   AND (
@@ -427,6 +463,10 @@ async def create_order(
                     "city": shipping_city,
                     "addr": shipping_address,
                     "method": shipping_method,
+                    "fulfillment_type": fulfillment_type,
+                    "shipping_zone": shipping_zone,
+                    "pickup_agency": pickup_agency,
+                    "shipping_fee": delivery_fee,
                     "reservation_pending": RESERVATION_IN_PROGRESS,
                 },
             )
@@ -441,11 +481,13 @@ async def create_order(
                     """
                     INSERT INTO orders (
                         customer_id, items, total, payment_method, shipping_city,
-                        shipping_address, shipping_method, inventory_status
+                        shipping_address, shipping_method, fulfillment_type, shipping_zone,
+                        pickup_agency, merchandise_total, shipping_fee, shipping_currency, inventory_status
                     )
                     VALUES (
                         :cid, CAST(:items AS jsonb), :total, :pm, :city,
-                        :addr, :sm, :inventory_status
+                        :addr, :sm, :fulfillment_type, :shipping_zone,
+                        :pickup_agency, :merchandise_total, :shipping_fee, :shipping_currency, :inventory_status
                     )
                     RETURNING id
                     """,
@@ -457,6 +499,12 @@ async def create_order(
                         "city": shipping_city,
                         "addr": shipping_address,
                         "sm": shipping_method,
+                        "fulfillment_type": fulfillment_type,
+                        "shipping_zone": shipping_zone,
+                        "pickup_agency": pickup_agency,
+                        "merchandise_total": merchandise_total,
+                        "shipping_fee": delivery_fee,
+                        "shipping_currency": currency,
                         "inventory_status": RESERVATION_IN_PROGRESS,
                     },
                 ))
@@ -468,6 +516,9 @@ async def create_order(
                 "items": normalized_items,
                 "total": order_total,
                 "subtotal": pricing["subtotal"],
+                "merchandise_total": merchandise_total,
+                "shipping_fee": delivery_fee,
+                "shipping_currency": currency,
                 "discount_applied": pricing["discount_applied"],
                 "discount_rate": pricing["discount_rate"],
                 "discount_percent": pricing["discount_percent"],
@@ -475,6 +526,11 @@ async def create_order(
                 "discount_amount": pricing["discount_amount"],
                 "payment_method": payment_method,
                 "shipping_city": shipping_city,
+                "shipping_address": shipping_address,
+                "shipping_method": shipping_method,
+                "fulfillment_type": fulfillment_type,
+                "shipping_zone": shipping_zone,
+                "pickup_agency": pickup_agency,
                 "status": order_status,
                 "created_new": False,
             }
@@ -537,6 +593,9 @@ async def create_order(
         "items": normalized_items,
         "total": order_total,
         "subtotal": pricing["subtotal"],
+        "merchandise_total": merchandise_total,
+        "shipping_fee": delivery_fee,
+        "shipping_currency": currency,
         "discount_applied": pricing["discount_applied"],
         "discount_rate": pricing["discount_rate"],
         "discount_percent": pricing["discount_percent"],
@@ -544,6 +603,11 @@ async def create_order(
         "discount_amount": pricing["discount_amount"],
         "payment_method": payment_method,
         "shipping_city": shipping_city,
+        "shipping_address": shipping_address,
+        "shipping_method": shipping_method,
+        "fulfillment_type": fulfillment_type,
+        "shipping_zone": shipping_zone,
+        "pickup_agency": pickup_agency,
         "status": order_status,
         "created_new": created_new,
     }
@@ -564,8 +628,9 @@ async def _revert_paid_customer_updates(customer_id: str, amount: float):
 async def get_order(order_id: str) -> dict | None:
     row = await db.fetch_one(
         """
-        SELECT id, customer_id, items, total, currency, payment_method, payment_status,
-               customer_totals_applied, shipping_method, shipping_city, shipping_address,
+        SELECT id, customer_id, items, total, currency, merchandise_total, shipping_fee, shipping_currency,
+               payment_method, payment_status, customer_totals_applied, shipping_method, shipping_city, shipping_address,
+               fulfillment_type, shipping_zone, pickup_agency,
                shipping_status, tracking_number, created_at, updated_at
         FROM orders
         WHERE id = :oid
@@ -586,13 +651,16 @@ async def get_order(order_id: str) -> dict | None:
 async def get_order_detail(order_id: str) -> dict | None:
     row = await db.fetch_one(
         """
-        SELECT o.id, o.customer_id, o.items, o.total, o.payment_method, o.payment_status,
-               o.payment_proof, o.customer_totals_applied, o.shipping_method, o.shipping_city,
-               o.shipping_address, o.shipping_status, o.tracking_number, o.created_at, o.updated_at,
+        SELECT o.id, o.customer_id, o.items, o.total, o.currency, o.merchandise_total, o.shipping_fee,
+               o.shipping_currency, o.payment_method, o.payment_status, o.payment_proof,
+               o.customer_totals_applied, o.shipping_method, o.shipping_city, o.shipping_address,
+               o.fulfillment_type, o.shipping_zone, o.pickup_agency, o.shipping_status,
+               o.tracking_number, o.created_at, o.updated_at,
                c.id AS customer_record_id, c.channel, c.platform_id, c.display_name, c.phone,
                c.instagram_handle, c.tags, c.total_orders, c.total_spent, c.first_contact,
                c.last_active, c.notes, c.conversation_state, c.last_shipping_address,
-               c.last_shipping_city, c.last_shipping_method
+               c.last_shipping_city, c.last_shipping_method, c.last_fulfillment_type,
+               c.last_shipping_zone, c.last_pickup_agency
         FROM orders o
         LEFT JOIN customers c ON o.customer_id = c.id
         WHERE o.id = :oid
@@ -632,6 +700,9 @@ async def get_order_detail(order_id: str) -> dict | None:
             "last_shipping_address": detail.get("last_shipping_address"),
             "last_shipping_city": detail.get("last_shipping_city"),
             "last_shipping_method": detail.get("last_shipping_method"),
+            "last_fulfillment_type": detail.get("last_fulfillment_type"),
+            "last_shipping_zone": detail.get("last_shipping_zone"),
+            "last_pickup_agency": detail.get("last_pickup_agency"),
         }
 
     recent_orders: list[dict] = []
@@ -674,6 +745,9 @@ async def get_order_detail(order_id: str) -> dict | None:
         "last_shipping_address",
         "last_shipping_city",
         "last_shipping_method",
+        "last_fulfillment_type",
+        "last_shipping_zone",
+        "last_pickup_agency",
     ):
         detail.pop(key, None)
 
@@ -806,7 +880,7 @@ async def update_order_payment_status(
 
         row = await db.fetch_one(
             """
-            SELECT id, customer_id, total, payment_status, inventory_status, customer_totals_applied
+            SELECT id, customer_id, total, merchandise_total, payment_status, inventory_status, customer_totals_applied
             FROM orders
             WHERE id = :oid
             FOR UPDATE
@@ -889,7 +963,7 @@ async def update_order_payment_status(
             and not totals_applied
             and customer_id is not None
         ):
-            await _apply_paid_customer_updates(customer_id, float(row["total"]))
+            await _apply_paid_customer_updates(customer_id, _customer_spend_amount(row))
             await db.execute(
                 """
                 UPDATE orders
@@ -901,7 +975,7 @@ async def update_order_payment_status(
             totals_applied = True
         elif status not in PAID_STATUSES and totals_applied:
             if customer_id is not None:
-                await _revert_paid_customer_updates(customer_id, float(row["total"]))
+                await _revert_paid_customer_updates(customer_id, _customer_spend_amount(row))
             await db.execute(
                 """
                 UPDATE orders
@@ -1035,7 +1109,7 @@ async def delete_order(order_id: str) -> dict | None:
         async with connection.transaction():
             row = await connection.fetch_one(
                 """
-                SELECT id, customer_id, total, customer_totals_applied,
+                SELECT id, customer_id, total, merchandise_total, customer_totals_applied,
                        payment_proof_hash, payment_reference_key
                 FROM orders
                 WHERE id = :oid
@@ -1047,7 +1121,7 @@ async def delete_order(order_id: str) -> dict | None:
                 return None
 
             if row["customer_totals_applied"] and row["customer_id"]:
-                await _revert_paid_customer_updates(str(row["customer_id"]), float(row["total"]))
+                await _revert_paid_customer_updates(str(row["customer_id"]), _customer_spend_amount(row))
 
             try:
                 proof_hash = row["payment_proof_hash"]

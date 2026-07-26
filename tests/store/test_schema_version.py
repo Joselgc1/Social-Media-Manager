@@ -32,14 +32,14 @@ async def test_store_schema_version_accepts_consolidated_upgrade_version(monkeyp
     monkeypatch.setattr(
         db,
         "fetch_all",
-        AsyncMock(side_effect=[[{"version": 1}, {"version": 2}], META_LEASE_COLUMNS]),
+        AsyncMock(side_effect=[[{"version": 1}, {"version": 2}, {"version": 3}], META_LEASE_COLUMNS]),
     )
 
     await db.verify_schema_version()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("versions", [[], [2], [1, 2, 3]])
+@pytest.mark.parametrize("versions", [[], [1], [2], [1, 2], [1, 3, 4]])
 async def test_store_schema_version_rejects_missing_old_or_new_versions(monkeypatch, versions):
     monkeypatch.setattr(db, "fetch_all", AsyncMock(return_value=[{"version": version} for version in versions]))
 
@@ -60,7 +60,7 @@ async def test_store_schema_version_rejects_historical_upgrade_without_meta_leas
     monkeypatch.setattr(
         db,
         "fetch_all",
-        AsyncMock(side_effect=[[{"version": 1}, {"version": 2}], [{"column_name": "outbound_started_at"}]]),
+        AsyncMock(side_effect=[[{"version": 1}, {"version": 2}, {"version": 3}], [{"column_name": "outbound_started_at"}]]),
     )
 
     with pytest.raises(RuntimeError, match="lease-fencing columns"):

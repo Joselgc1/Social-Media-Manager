@@ -10,6 +10,7 @@ from app.exchange_rates import (
     PROVIDER_EXCHANGE_RATE_SETTING_KEYS,
 )
 from app.payment_methods import PAYMENT_METHODS_SETTING_KEY
+from app.shipping import DEFAULT_SHIPPING_POLICY
 
 RUNTIME_SETTING_DEFAULTS = {
     "llm_provider": "openai",
@@ -49,6 +50,7 @@ RUNTIME_SETTING_DEFAULTS = {
     "store_phone_number": "",
     "order_discount_percent": 10.0,
     "order_discount_threshold_usd": 350.0,
+    "shipping_policy": DEFAULT_SHIPPING_POLICY,
     "kommo_strip_emoji": False,
     "kommo_emoji_mode_whatsapp": "safe",
     "kommo_emoji_mode_instagram": "safe",
