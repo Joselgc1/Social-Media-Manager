@@ -5,6 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 
@@ -72,27 +73,28 @@ def test_bcv_usd_and_eur_response_is_parsed_with_decimal_values():
     assert all(not isinstance(rate.rate, float) for rate in rates)
 
 
-def test_usdt_response_follows_current_openapi_shape_and_uses_average():
-    from app.stores.dolarvzla import USDT_AUTH_HEADER, USDT_EXCHANGE_RATE_URL, parse_usdt_response
+def test_usdt_response_uses_public_binance_buy_rate_and_capture_timestamp():
+    from app.stores.dolarvzla import USDT_EXCHANGE_RATE_URL, parse_usdt_response
 
     rate = parse_usdt_response(
         {
-            "current": {"buy": "779.10", "sell": "781.90", "average": "780.50", "date": "2026-07-20 21:00:03.932Z"},
-            "previous": {"buy": "770.00", "sell": "774.00", "average": "772.00", "date": "2026-07-19 21:00:03.932Z"},
-            "changePercentage": {"buy": "1.18", "sell": "1.02", "average": "1.10"},
+            "success": True,
+            "data": {
+                "binance": {"buy_rate": "779.10", "sell_rate": "781.90", "spread": "0.36"},
+                "captured_at": "2026-07-20T21:00:03.932Z",
+            },
         },
         fetched_at=datetime(2026, 7, 20, 12, tzinfo=UTC),
     )
 
-    assert USDT_EXCHANGE_RATE_URL == "https://api.dolarvzla.com/public/usdt/exchange-rate"
-    assert USDT_AUTH_HEADER == "x-dolarvzla-key"
+    assert USDT_EXCHANGE_RATE_URL == "https://www.usdt.com.ve/api/v1/rates/current"
     assert rate.rate_key == "usdt_binance"
     assert rate.currency_code == "USDT"
     assert rate.market == "binance"
-    assert rate.rate == Decimal("780.50")
+    assert rate.rate == Decimal("779.10")
     assert rate.effective_at == datetime(2026, 7, 20, 21, 0, 3, 932000, tzinfo=UTC)
-    assert rate.previous_rate == Decimal("772.00")
-    assert rate.change_percentage == Decimal("1.10")
+    assert rate.previous_rate == Decimal("779.10")
+    assert rate.change_percentage == Decimal("0")
     assert rate.source == USDT_EXCHANGE_RATE_URL
     assert not isinstance(rate.rate, float)
 
@@ -123,16 +125,20 @@ def test_bcv_malformed_incomplete_or_zero_responses_are_rejected(payload):
 @pytest.mark.parametrize(
     "payload",
     [
-        {"current": {"average": "780.50", "date": "2026-07-20 21:00:03.932Z"}},
+        {},
+        {"data": {}},
+        {"data": {"binance": {}, "captured_at": "2026-07-20T21:00:03.932Z"}},
         {
-            "current": {"average": "0", "date": "2026-07-20 21:00:03.932Z"},
-            "previous": {"average": "772.00"},
-            "changePercentage": {"average": "1.10"},
+            "data": {
+                "binance": {"buy_rate": "0"},
+                "captured_at": "2026-07-20T21:00:03.932Z",
+            },
         },
         {
-            "current": {"average": "NaN", "date": "2026-07-20 21:00:03.932Z"},
-            "previous": {"average": "772.00"},
-            "changePercentage": {"average": "1.10"},
+            "data": {
+                "binance": {"buy_rate": "NaN"},
+                "captured_at": "2026-07-20T21:00:03.932Z",
+            },
         },
     ],
 )
@@ -144,8 +150,8 @@ def test_usdt_malformed_incomplete_or_zero_responses_are_rejected(payload):
 
 
 @pytest.mark.asyncio
-async def test_usdt_fetch_sends_trimmed_api_key_header(monkeypatch):
-    from app.stores.dolarvzla import USDT_AUTH_HEADER, USDT_EXCHANGE_RATE_URL, DolarVzlaClient
+async def test_usdt_fetch_uses_public_endpoint_without_authentication(monkeypatch):
+    from app.stores.dolarvzla import USDT_EXCHANGE_RATE_URL, DolarVzlaClient
 
     captured = {}
 
@@ -153,17 +159,43 @@ async def test_usdt_fetch_sends_trimmed_api_key_header(monkeypatch):
         captured["url"] = url
         captured["headers"] = headers
         return {
-            "current": {"buy": "779.10", "sell": "781.90", "average": "780.50", "date": "2026-07-20 21:00:03.932Z"},
-            "previous": {"buy": "770.00", "sell": "774.00", "average": "772.00", "date": "2026-07-19 21:00:03.932Z"},
-            "changePercentage": {"buy": "1.18", "sell": "1.02", "average": "1.10"},
+            "data": {
+                "binance": {"buy_rate": "779.10"},
+                "captured_at": "2026-07-20T21:00:03.932Z",
+            },
         }
 
     monkeypatch.setattr(DolarVzlaClient, "_get_json", fake_get_json)
 
-    await DolarVzlaClient(api_key="  test-key  ").fetch_usdt_rate()
+    await DolarVzlaClient().fetch_usdt_rate()
 
     assert captured["url"] == USDT_EXCHANGE_RATE_URL
-    assert captured["headers"] == {USDT_AUTH_HEADER: "test-key"}
+    assert captured["headers"] is None
+
+
+@pytest.mark.asyncio
+async def test_usdt_http_failure_is_reported_after_retries(monkeypatch):
+    from app.stores import dolarvzla
+
+    requests = []
+
+    class FailingAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, *, headers):
+            requests.append((url, headers))
+            return httpx.Response(503, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(dolarvzla.httpx, "AsyncClient", lambda **kwargs: FailingAsyncClient())
+
+    with pytest.raises(dolarvzla.DolarVzlaClientError):
+        await dolarvzla.DolarVzlaClient(retries=0).fetch_usdt_rate()
+
+    assert requests == [(dolarvzla.USDT_EXCHANGE_RATE_URL, {})]
 
 
 @pytest.mark.asyncio
@@ -294,7 +326,6 @@ async def test_api_keys_are_not_logged_or_propagated_to_store_settings(monkeypat
             "fetched_at": datetime(2026, 7, 20, 12, tzinfo=UTC),
         }
     ])
-    assert "DOLARVZLA_API_KEY" not in settings
     assert secret not in str(settings)
 
 
@@ -332,7 +363,7 @@ def test_store_rate_settings_omit_invalid_rows_instead_of_emptying_values():
             "rate": Decimal("780.50"),
             "effective_at": datetime(2026, 7, 20, tzinfo=UTC),
             "fetched_at": None,
-            "source": "https://api.dolarvzla.com/public/usdt/exchange-rate",
+            "source": "https://www.usdt.com.ve/api/v1/rates/current",
         },
     ])
 

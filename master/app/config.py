@@ -33,8 +33,7 @@ class MasterSettings(BaseSettings):
     # Cap parallel /stats connections to each store DB (provider pool limits)
     store_stats_max_concurrent: int = 5
 
-    # DolarVZLA exchange-rate refresh (master-only credential)
-    dolarvzla_api_key: str = ""
+    # Exchange-rate refresh settings
     dolarvzla_bcv_refresh_minutes: int = 45
     dolarvzla_usdt_refresh_minutes: int = 60
     dolarvzla_usdt_stale_minutes: int = 120

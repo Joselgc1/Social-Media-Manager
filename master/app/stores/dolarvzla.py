@@ -14,8 +14,7 @@ import httpx
 from app.config import get_config
 
 BCV_CURRENT_URL = "https://rates.dolarvzla.com/bcv/current.json"
-USDT_EXCHANGE_RATE_URL = "https://api.dolarvzla.com/public/usdt/exchange-rate"
-USDT_AUTH_HEADER = "x-dolarvzla-key"
+USDT_EXCHANGE_RATE_URL = "https://www.usdt.com.ve/api/v1/rates/current"
 
 
 @dataclass(frozen=True)
@@ -33,14 +32,6 @@ class NormalizedExchangeRate:
 
 class DolarVzlaClientError(RuntimeError):
     """Raised when DolarVZLA data cannot be fetched or parsed."""
-
-
-class DolarVzlaAuthError(DolarVzlaClientError):
-    """Raised when DolarVZLA rejects the configured API key."""
-
-
-class DolarVzlaConfigurationError(DolarVzlaClientError):
-    """Raised when DolarVZLA credentials are missing."""
 
 
 def _decimal(value: Any, *, field: str, positive: bool = True) -> Decimal:
@@ -110,18 +101,25 @@ def parse_bcv_response(payload: dict[str, Any], *, fetched_at: datetime | None =
 
 
 def parse_usdt_response(payload: dict[str, Any], *, fetched_at: datetime | None = None) -> NormalizedExchangeRate:
-    current = payload.get("current") or {}
-    previous = payload.get("previous") or {}
-    change = payload.get("changePercentage") or {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise DolarVzlaClientError("USDT.com.ve response is missing data")
+    binance = data.get("binance")
+    if not isinstance(binance, dict):
+        raise DolarVzlaClientError("USDT.com.ve response is missing Binance data")
+    fetched = _fetched_at(fetched_at)
+    rate = _decimal(binance.get("buy_rate"), field="data.binance.buy_rate")
+    captured_at = data.get("captured_at")
     return NormalizedExchangeRate(
         rate_key="usdt_binance",
         currency_code="USDT",
         market="binance",
-        rate=_decimal(current.get("average"), field="current.average"),
-        effective_at=_effective_at(current.get("date")),
-        fetched_at=_fetched_at(fetched_at),
-        previous_rate=_decimal(previous.get("average"), field="previous.average"),
-        change_percentage=_decimal(change.get("average"), field="changePercentage.average", positive=False),
+        rate=rate,
+        effective_at=_effective_at(captured_at) if captured_at else fetched,
+        fetched_at=fetched,
+        # The public endpoint publishes a point-in-time rate without history.
+        previous_rate=rate,
+        change_percentage=Decimal("0"),
         source=USDT_EXCHANGE_RATE_URL,
     )
 
@@ -130,12 +128,10 @@ class DolarVzlaClient:
     def __init__(
         self,
         *,
-        api_key: str,
         timeout_seconds: float = 10.0,
         retries: int = 2,
         retry_backoff_seconds: float = 1.0,
     ):
-        self.api_key = str(api_key or "").strip()
         self.timeout_seconds = timeout_seconds
         self.retries = max(0, retries)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
@@ -144,7 +140,6 @@ class DolarVzlaClient:
     def from_config(cls) -> DolarVzlaClient:
         config = get_config()
         return cls(
-            api_key=config.dolarvzla_api_key,
             timeout_seconds=config.dolarvzla_http_timeout_seconds,
             retries=config.dolarvzla_http_retries,
             retry_backoff_seconds=config.dolarvzla_retry_backoff_seconds,
@@ -155,9 +150,7 @@ class DolarVzlaClient:
         return parse_bcv_response(payload)
 
     async def fetch_usdt_rate(self) -> NormalizedExchangeRate:
-        if not self.api_key:
-            raise DolarVzlaConfigurationError("DOLARVZLA_API_KEY is not configured in the master service")
-        payload = await self._get_json(USDT_EXCHANGE_RATE_URL, headers={USDT_AUTH_HEADER: self.api_key})
+        payload = await self._get_json(USDT_EXCHANGE_RATE_URL)
         return parse_usdt_response(payload)
 
     async def _get_json(self, url: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:
@@ -172,8 +165,6 @@ class DolarVzlaClient:
                     return json.loads(response.text, parse_float=Decimal, parse_int=Decimal)
                 except httpx.HTTPStatusError as exc:
                     last_error = exc
-                    if exc.response.status_code in {401, 403}:
-                        raise DolarVzlaAuthError("DolarVZLA API key is missing, invalid, or expired") from exc
                     if attempt < self.retries:
                         await asyncio.sleep(self.retry_backoff_seconds * (2**attempt))
                 except (httpx.HTTPError, json.JSONDecodeError) as exc:

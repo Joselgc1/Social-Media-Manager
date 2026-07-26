@@ -12,9 +12,7 @@ from typing import Any
 from app import db
 from app.config import get_config
 from app.stores.dolarvzla import (
-    DolarVzlaAuthError,
     DolarVzlaClient,
-    DolarVzlaConfigurationError,
     NormalizedExchangeRate,
 )
 
@@ -280,33 +278,11 @@ async def refresh_exchange_rates(
                 changed = await upsert_exchange_rate(usdt_rate)
                 result["sources"]["usdt"] = {"ok": True, "rates": [{"rate_key": usdt_rate.rate_key, "changed": changed}]}
                 result["successful_rate_keys"].append(usdt_rate.rate_key)
-            except DolarVzlaConfigurationError:
-                logger.warning(
-                    "DolarVZLA rate refresh failed",
-                    extra={
-                        "source": "DolarVZLA USDT Binance",
-                        "rate_key": "usdt_binance",
-                        "success": False,
-                        "reason": "api_key_missing",
-                    },
-                )
-                result["sources"]["usdt"] = {"ok": False, "error": "api_key_missing"}
-            except DolarVzlaAuthError:
-                logger.warning(
-                    "DolarVZLA rate refresh failed",
-                    extra={
-                        "source": "DolarVZLA USDT Binance",
-                        "rate_key": "usdt_binance",
-                        "success": False,
-                        "reason": "api_key_unauthorized",
-                    },
-                )
-                result["sources"]["usdt"] = {"ok": False, "error": "api_key_unauthorized"}
             except ExchangeRateValidationError:
                 logger.warning(
-                    "DolarVZLA rate refresh failed",
+                    "USDT.com.ve rate refresh failed",
                     extra={
-                        "source": "DolarVZLA USDT Binance",
+                        "source": "USDT.com.ve Binance",
                         "rate_key": "usdt_binance",
                         "success": False,
                         "reason": "validation_failed",
@@ -315,8 +291,8 @@ async def refresh_exchange_rates(
                 result["sources"]["usdt"] = {"ok": False, "error": "validation_failed"}
             except Exception:
                 logger.warning(
-                    "DolarVZLA rate refresh failed",
-                    extra={"source": "DolarVZLA USDT Binance", "rate_key": "usdt_binance", "success": False},
+                    "USDT.com.ve rate refresh failed",
+                    extra={"source": "USDT.com.ve Binance", "rate_key": "usdt_binance", "success": False},
                 )
                 result["sources"]["usdt"] = {"ok": False, "error": "fetch_failed"}
 
