@@ -53,7 +53,7 @@ async def finalize_checkout(
     policy = await _get_shipping_policy()
     session = await sessions.get_or_create_session(customer_id)
 
-    if session.current_order_id and session.workflow_stage == "waiting_for_payment":
+    if session.current_order_id and session.workflow_stage == "waiting_for_payment" and not start_new_order:
         existing = await orders.get_order(session.current_order_id)
         if existing:
             return _finalized_response(existing, payment_methods, already_finalized=True)
@@ -69,6 +69,11 @@ async def finalize_checkout(
             "order_id": open_order.get("id") or open_order.get("order_id"),
             "missing_fields": [],
         }
+
+    if start_new_order:
+        pending_order_count = await orders.get_active_unpaid_order_count(customer_id)
+        if pending_order_count >= orders.MAX_ACTIVE_UNPAID_ORDERS:
+            return _pending_order_limit_response(pending_order_count)
 
     draft = session.checkout_draft
     quote = _quote_for_draft(draft, policy)
@@ -111,19 +116,22 @@ async def finalize_checkout(
             "unit_price": float(product.get("price_usd") or 0),
         })
 
-    order = await orders.create_order(
-        customer_id=customer_id,
-        items=canonical_items,
-        payment_method=draft.payment_method or "",
-        shipping_city=quote.get("shipping_city") or draft.shipping_city,
-        shipping_address=draft.shipping_address if quote.get("fulfillment_type") == "home_delivery" else None,
-        shipping_method=quote.get("shipping_method"),
-        fulfillment_type=quote.get("fulfillment_type"),
-        shipping_zone=quote.get("shipping_zone"),
-        pickup_agency=draft.pickup_agency if quote.get("fulfillment_type") == "courier_agency_pickup" else None,
-        shipping_fee=quote.get("shipping_fee", 0),
-        shipping_currency=quote.get("shipping_currency", "USD"),
-    )
+    try:
+        order = await orders.create_order(
+            customer_id=customer_id,
+            items=canonical_items,
+            payment_method=draft.payment_method or "",
+            shipping_city=quote.get("shipping_city") or draft.shipping_city,
+            shipping_address=draft.shipping_address if quote.get("fulfillment_type") == "home_delivery" else None,
+            shipping_method=quote.get("shipping_method"),
+            fulfillment_type=quote.get("fulfillment_type"),
+            shipping_zone=quote.get("shipping_zone"),
+            pickup_agency=draft.pickup_agency if quote.get("fulfillment_type") == "courier_agency_pickup" else None,
+            shipping_fee=quote.get("shipping_fee", 0),
+            shipping_currency=quote.get("shipping_currency", "USD"),
+        )
+    except orders.PendingOrderLimitError as exc:
+        return _pending_order_limit_response(exc.pending_order_count)
 
     if order.get("created_new", True):
         await _notify_checkout_order(customer, order, canonical_items)
@@ -432,6 +440,18 @@ def _finalized_response(order: dict, payment_methods: list[dict], *, already_fin
         "payment_method": method_name,
         "payment_instructions": _payment_instructions(payment_methods, method_name),
         "workflow_stage": "waiting_for_payment",
+    }
+
+
+def _pending_order_limit_response(pending_order_count: int) -> dict:
+    return {
+        "status": "pending_order_limit_reached",
+        "message": (
+            f"Tienes {pending_order_count} pedidos pendientes de pago. "
+            "Paga o envía el comprobante de alguno antes de crear otro pedido."
+        ),
+        "pending_order_count": pending_order_count,
+        "missing_fields": [],
     }
 
 

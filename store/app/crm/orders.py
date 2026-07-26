@@ -34,6 +34,7 @@ ORDER_DISCOUNT_THRESHOLD = float(RUNTIME_SETTING_DEFAULTS["order_discount_thresh
 ORDER_DISCOUNT_RATE = float(RUNTIME_SETTING_DEFAULTS["order_discount_percent"]) / 100.0
 INVENTORY_LOCK_KEY = "store_inventory_google_sheets"
 INVENTORY_RESERVATION_TTL_HOURS = 48
+MAX_ACTIVE_UNPAID_ORDERS = 3
 RESERVATION_IN_PROGRESS = "reservation_pending"
 RESERVATION_FAILED = "reservation_failed"
 RELEASE_IN_PROGRESS = "release_pending"
@@ -42,6 +43,17 @@ RELEASED = "released"
 
 class InventoryReservationUncertainError(RuntimeError):
     """The Sheets mutation outcome could not be reconciled with its ledger."""
+
+
+class PendingOrderLimitError(ValueError):
+    """Raised when a customer has reached the unpaid-order limit."""
+
+    def __init__(self, pending_order_count: int):
+        self.pending_order_count = pending_order_count
+        super().__init__(
+            f"Tienes {pending_order_count} pedidos pendientes de pago. "
+            "Paga o envía el comprobante de alguno antes de crear otro pedido."
+        )
 
 
 def _normalize_order_items(items: list[dict]) -> list[dict]:
@@ -477,6 +489,9 @@ async def create_order(
                 order_status = existing["payment_status"]
                 inventory_status = existing["inventory_status"]
             else:
+                pending_order_count = await _get_active_unpaid_order_count(connection, customer_id)
+                if pending_order_count >= MAX_ACTIVE_UNPAID_ORDERS:
+                    raise PendingOrderLimitError(pending_order_count)
                 order_id = str(await connection.execute(
                     """
                     INSERT INTO orders (
@@ -772,6 +787,25 @@ async def get_latest_open_order(customer_id: str) -> dict | None:
     if not row:
         return None
     return await get_order(str(row["id"]))
+
+
+async def get_active_unpaid_order_count(customer_id: str) -> int:
+    """Return orders that still reserve inventory and require payment."""
+    return await _get_active_unpaid_order_count(db, customer_id)
+
+
+async def _get_active_unpaid_order_count(queryable, customer_id: str) -> int:
+    row = await queryable.fetch_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM orders
+        WHERE customer_id = :cid
+          AND payment_status IN ('pending', 'proof_received')
+          AND inventory_status IN ('reservation_pending', 'reserved', 'legacy_unknown')
+        """,
+        {"cid": customer_id},
+    )
+    return int(row["count"] or 0) if row else 0
 
 
 async def get_latest_pending_order(customer_id: str) -> dict | None:

@@ -398,7 +398,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "properties": {
                     "start_new_order": {
                         "type": "boolean",
-                        "description": "True only after the customer explicitly confirms starting a separate purchase despite an unpaid order",
+                        "description": (
+                            "True only after the customer explicitly confirms starting a separate purchase despite unpaid orders. "
+                            "The backend allows up to three unpaid orders and rejects a fourth."
+                        ),
                     },
                 },
             },

@@ -349,6 +349,7 @@ async def test_starting_separate_new_purchase(monkeypatch):
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft())))
     monkeypatch.setattr(service.sessions, "set_current_order", AsyncMock(return_value=_session(current_order_id="order-new")))
     monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value={"id": "order-open"}))
+    monkeypatch.setattr(service.orders, "get_active_unpaid_order_count", AsyncMock(return_value=1))
     monkeypatch.setattr(service.orders, "create_order", AsyncMock(return_value={
         "order_id": "order-new",
         "items": [],
@@ -363,6 +364,22 @@ async def test_starting_separate_new_purchase(monkeypatch):
     result = await service.finalize_checkout(_customer(), payment_methods=_payment_methods(), start_new_order=True)
 
     assert result["order_id"] == "order-new"
+
+
+@pytest.mark.asyncio
+async def test_fourth_unpaid_order_is_blocked_with_payment_reminder(monkeypatch):
+    monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session(_complete_draft())))
+    monkeypatch.setattr(service.orders, "get_latest_pending_order", AsyncMock(return_value={"id": "order-open"}))
+    monkeypatch.setattr(service.orders, "get_active_unpaid_order_count", AsyncMock(return_value=3))
+    create_order = AsyncMock()
+    monkeypatch.setattr(service.orders, "create_order", create_order)
+
+    result = await service.finalize_checkout(_customer(), payment_methods=_payment_methods(), start_new_order=True)
+
+    assert result["status"] == "pending_order_limit_reached"
+    assert result["pending_order_count"] == 3
+    assert "Paga" in result["message"]
+    create_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,13 @@ def _order_settings():
     }
 
 
+@pytest.fixture(autouse=True)
+def _default_active_unpaid_order_count(monkeypatch):
+    from app.crm import orders
+
+    monkeypatch.setattr(orders, "_get_active_unpaid_order_count", AsyncMock(return_value=0))
+
+
 def test_sheet_inventory_uses_one_batch_after_validating_every_item():
     from app.catalog import sheets
 
@@ -625,6 +632,26 @@ async def test_order_rejects_unconfigured_payment_method_before_inventory_mutati
         await orders.create_order(
             "customer-1", _items(), "Inventado", "Caracas", "Av. Principal", "mrw"
         )
+
+    deduct.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_order_rejects_fourth_active_unpaid_order_before_inventory_mutation(monkeypatch):
+    from app.crm import orders
+
+    monkeypatch.setattr(orders, "_get_active_unpaid_order_count", AsyncMock(return_value=3))
+    deduct = MagicMock()
+    with (
+        patch.object(orders, "get_cached_catalog", return_value=_catalog()),
+        patch.object(orders, "ensure_fresh_catalog", AsyncMock(return_value=_catalog())),
+        patch.object(orders.db, "get_settings", AsyncMock(return_value=_order_settings())),
+        patch.object(orders.db, "fetch_one", AsyncMock(return_value={"id": "customer-1"})),
+        patch.object(orders.db, "get_db", return_value=_database(fetch_one=AsyncMock(return_value=None))),
+        patch.object(orders, "deduct_stock", deduct),
+        pytest.raises(orders.PendingOrderLimitError, match="3 pedidos pendientes"),
+    ):
+        await orders.create_order("customer-1", _items(), "Zelle", "Caracas", "Av. Principal", "mrw")
 
     deduct.assert_not_called()
 
