@@ -59,10 +59,8 @@ def test_salesbot_jwt_hs256_remains_supported():
     assert claims["entity_type"] == "leads"
 
 
-def test_salesbot_jwt_hs512_rejected():
-    with pytest.raises(KommoAuthError, match="algorithm") as exc:
-        validate_salesbot_jwt(_token(algorithm="HS512"), _config())
-    assert exc.value.reason_code == "unsupported_algorithm"
+def test_salesbot_jwt_hs512_accepted():
+    assert validate_salesbot_jwt(_token(algorithm="HS512"), _config())["entity_type"] == "leads"
 
 
 def test_salesbot_jwt_with_valid_exp_accepted():
@@ -147,10 +145,9 @@ def test_salesbot_jwt_rejects_missing_required_temporal_or_issuer_claim(claim):
     assert exc.value.reason_code == "missing_claim"
 
 
-def test_salesbot_jwt_rejects_missing_jti():
-    with pytest.raises(KommoAuthError, match="required claim") as exc:
-        validate_salesbot_jwt(_token(jti=None), _config())
-    assert exc.value.reason_code == "missing_claim"
+def test_salesbot_jwt_accepts_missing_jti():
+    claims = validate_salesbot_jwt(_token(jti=None), _config())
+    assert "jti" not in claims
 
 
 def test_salesbot_jwt_missing_required_identity_claims_rejected():

@@ -259,7 +259,7 @@ async def recover_stale_broadcast_deliveries(broadcast_id: str | None = None) ->
         UPDATE broadcast_deliveries
         SET status = 'pending', claimed_at = NULL, updated_at = NOW(),
             last_error = 'recovered_before_meta_send'
-        WHERE (:broadcast_id IS NULL OR broadcast_id = :broadcast_id)
+        WHERE (CAST(:broadcast_id AS uuid) IS NULL OR broadcast_id = CAST(:broadcast_id AS uuid))
           AND status = 'sending'
           AND outbound_started_at IS NULL
           AND claimed_at < NOW() - INTERVAL '5 minutes'
@@ -271,7 +271,7 @@ async def recover_stale_broadcast_deliveries(broadcast_id: str | None = None) ->
         UPDATE broadcast_deliveries
         SET status = 'delivery_unknown', failed_at = NOW(), updated_at = NOW(),
             last_error = 'delivery_unknown_after_stale_meta_attempt'
-        WHERE (:broadcast_id IS NULL OR broadcast_id = :broadcast_id)
+        WHERE (CAST(:broadcast_id AS uuid) IS NULL OR broadcast_id = CAST(:broadcast_id AS uuid))
           AND status = 'sending'
           AND outbound_started_at IS NOT NULL
           AND claimed_at < NOW() - INTERVAL '5 minutes'

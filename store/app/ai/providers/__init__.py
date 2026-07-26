@@ -24,6 +24,11 @@ AVAILABLE_MODELS = {
             "label": "GPT-5.4 Mini",
             "cost_per_m_tokens": {"input": 0.75, "output": 4.50},
         },
+        {
+            "id": "gpt-5.6-luna",
+            "label": "GPT-5.6 Luna",
+            "cost_per_m_tokens": {"input": 1, "output": 6},
+        },
     ],
     "anthropic": [
         {
@@ -33,9 +38,9 @@ AVAILABLE_MODELS = {
             "cost_per_m_tokens": {"input": 1.00, "output": 5.00},
         },
         {
-            "id": "claude-sonnet-4-6",
-            "label": "Claude Sonnet 4.6",
-            "cost_per_m_tokens": {"input": 3.00, "output": 15.00},
+            "id": "claude-sonnet-5",
+            "label": "Claude Sonnet 5",
+            "cost_per_m_tokens": {"input": 2.00, "output": 10.00},
         },
     ],
 }

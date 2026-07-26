@@ -407,6 +407,7 @@ async def test_duplicate_callback_prevention(monkeypatch):
     assert "callback_claims" in claim_query
     assert "candidate.lead_id = :entity_id" in claim_query
     assert "candidate.salesbot_launched_at < to_timestamp" in claim_query
+    assert ":salesbot_token_iat_text" in claim_query
     assert "consumed.return_url = :return_url" in claim_query
     assert "CAST(:interaction_type AS text)" in claim_query
     assert claim_values["salesbot_token_jti"] == "token-id"
@@ -414,13 +415,13 @@ async def test_duplicate_callback_prevention(monkeypatch):
     assert claim_values["interaction_type"] == "private_message"
     assert "lead_id" not in claim_values
     assert "contact_id" not in claim_values
-    assert "WHERE return_url = :return_url" in mock_db.fetch_one.await_args_list[1].args[0]
+    assert "return_url = :return_url" in mock_db.fetch_one.await_args_list[1].args[0]
     assert "ORDER BY salesbot_launched_at" not in mock_db.fetch_one.await_args_list[1].args[0]
     fallback_values = mock_db.fetch_one.await_args_list[1].args[1]
     assert fallback_values == {
         "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
         "salesbot_token_jti": "token-id",
-        "salesbot_token_iat": "123456",
+        "salesbot_token_iat_text": "123456",
     }
 
 
@@ -617,7 +618,7 @@ async def test_comment_callback_token_replay_is_duplicate_even_with_altered_text
     duplicate_query, duplicate_values = create_db.fetch_one_calls[1]
     assert "salesbot_token_jti = CAST(:salesbot_token_jti AS text)" in duplicate_query
     assert "_normalized_message_sql" not in duplicate_query
-    assert duplicate_values["salesbot_token_iat"] == "123456"
+    assert duplicate_values["salesbot_token_iat_text"] == "123456"
     assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
 
 
@@ -681,7 +682,7 @@ async def test_repeated_comment_callback_is_idempotent(monkeypatch):
     assert result == {"status": "duplicate", "job_id": "existing-comment"}
     duplicate_values = create_db.fetch_one_calls[1][1]
     assert duplicate_values["salesbot_token_jti"] == "token-id"
-    assert duplicate_values["salesbot_token_iat"] == "123456"
+    assert duplicate_values["salesbot_token_iat_text"] == "123456"
     assert not any("INSERT INTO kommo_message_jobs" in query for query, _values in create_db.fetch_one_calls)
 
 
@@ -795,7 +796,8 @@ async def test_valid_lead_callback_uses_exact_update_bind_parameters(monkeypatch
         "widget_contact_id": "200",
         "callback_claims": values["callback_claims"],
         "salesbot_token_jti": "token-id",
-        "salesbot_token_iat": "123456",
+        "salesbot_token_iat": 123456.0,
+        "salesbot_token_iat_text": "123456",
         "salesbot_account_id": "123",
         "salesbot_user_id": "456",
         "salesbot_client_uuid": "client-uuid",
@@ -837,6 +839,7 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
         "callback_claims",
         "salesbot_token_jti",
         "salesbot_token_iat",
+        "salesbot_token_iat_text",
         "salesbot_account_id",
         "salesbot_user_id",
         "salesbot_client_uuid",
@@ -876,7 +879,7 @@ async def test_callback_without_waiting_job_uses_exact_fallback_bind_parameters(
     assert strict_db.calls[1][1] == {
         "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
         "salesbot_token_jti": None,
-        "salesbot_token_iat": "123456",
+        "salesbot_token_iat_text": "123456",
     }
 
 
@@ -903,7 +906,7 @@ async def test_duplicate_callback_uses_exact_fallback_bind_parameters(monkeypatc
     assert strict_db.calls[1][1] == {
         "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
         "salesbot_token_jti": None,
-        "salesbot_token_iat": "123456",
+        "salesbot_token_iat_text": "123456",
     }
 
 

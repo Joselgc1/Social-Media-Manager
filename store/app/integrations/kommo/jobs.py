@@ -221,6 +221,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "callback_claims": values["callback_claims"],
         "salesbot_token_jti": values["salesbot_token_jti"],
         "salesbot_token_iat": values["salesbot_token_iat"],
+        "salesbot_token_iat_text": values["salesbot_token_iat_text"],
         "salesbot_account_id": values["salesbot_account_id"],
         "salesbot_user_id": values["salesbot_user_id"],
         "salesbot_client_uuid": values["salesbot_client_uuid"],
@@ -252,15 +253,18 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             SELECT candidate.id
             FROM kommo_message_jobs candidate
             WHERE candidate.status = 'waiting_for_salesbot'
-               AND candidate.salesbot_launched_at < to_timestamp(CAST(:salesbot_token_iat AS double precision) + 1)
+               AND candidate.salesbot_launched_at < to_timestamp(:salesbot_token_iat + 1)
               AND NOT EXISTS (
                   SELECT 1
                   FROM kommo_message_jobs consumed
-                  WHERE consumed.return_url = :return_url
-                     OR (
-                         CAST(:salesbot_token_jti AS text) IS NOT NULL
-                         AND consumed.salesbot_token_jti = CAST(:salesbot_token_jti AS text)
-                         AND consumed.callback_claims ->> 'iat' = CAST(:salesbot_token_iat AS text)
+                   WHERE (
+                          consumed.return_url = :return_url
+                          AND consumed.callback_claims ->> 'iat' = :salesbot_token_iat_text
+                         )
+                      OR (
+                          CAST(:salesbot_token_jti AS text) IS NOT NULL
+                          AND consumed.salesbot_token_jti = CAST(:salesbot_token_jti AS text)
+                          AND consumed.callback_claims ->> 'iat' = :salesbot_token_iat_text
                      )
               )
               AND (
@@ -906,15 +910,18 @@ async def _find_job_for_callback_identity(values: dict):
     query_values = {
         "return_url": values["return_url"],
         "salesbot_token_jti": values["salesbot_token_jti"],
-        "salesbot_token_iat": values["salesbot_token_iat"],
+        "salesbot_token_iat_text": values["salesbot_token_iat_text"],
     }
     query = """
         SELECT * FROM kommo_message_jobs
-        WHERE return_url = :return_url
+        WHERE (
+               return_url = :return_url
+               AND callback_claims ->> 'iat' = :salesbot_token_iat_text
+              )
            OR (
-               CAST(:salesbot_token_jti AS text) IS NOT NULL
-               AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
-               AND callback_claims ->> 'iat' = CAST(:salesbot_token_iat AS text)
+                CAST(:salesbot_token_jti AS text) IS NOT NULL
+                AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
+                AND callback_claims ->> 'iat' = :salesbot_token_iat_text
            )
         ORDER BY updated_at DESC
         LIMIT 1
@@ -976,7 +983,7 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
         duplicate = await _find_duplicate_comment_callback_job(
             external_message_id=external_message_id,
             salesbot_token_jti=values["salesbot_token_jti"],
-            salesbot_token_iat=values["salesbot_token_iat"],
+            salesbot_token_iat_text=values["salesbot_token_iat_text"],
             entity_type=values["entity_type"],
             entity_id=values["entity_id"],
             return_url=values["return_url"],
@@ -1068,7 +1075,7 @@ async def _find_duplicate_comment_callback_job(
     *,
     external_message_id: str,
     salesbot_token_jti: str | None,
-    salesbot_token_iat: str | None,
+    salesbot_token_iat_text: str,
     entity_type: str,
     entity_id: str,
     return_url: str,
@@ -1085,8 +1092,7 @@ async def _find_duplicate_comment_callback_job(
                   CAST(:salesbot_token_jti AS text) IS NOT NULL
                   AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
                   AND (
-                      CAST(:salesbot_token_iat AS text) IS NULL
-                      OR callback_claims ->> 'iat' = CAST(:salesbot_token_iat AS text)
+                       callback_claims ->> 'iat' = :salesbot_token_iat_text
                   )
               )
               OR (
@@ -1095,6 +1101,7 @@ async def _find_duplicate_comment_callback_job(
                   AND {_normalized_message_sql('combined_message')} = :normalized_message
                   AND (
                       return_url = :return_url
+                      AND callback_claims ->> 'iat' = :salesbot_token_iat_text
                   )
               )
           )
@@ -1104,7 +1111,7 @@ async def _find_duplicate_comment_callback_job(
         {
             "external_message_id": external_message_id,
             "salesbot_token_jti": salesbot_token_jti,
-            "salesbot_token_iat": salesbot_token_iat,
+            "salesbot_token_iat_text": salesbot_token_iat_text,
             "entity_type": entity_type,
             "entity_id": entity_id,
             "return_url": return_url,
@@ -1149,7 +1156,7 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
     if entity_type == "contacts" and data.contact_id and data.contact_id != entity_id:
         raise ValueError("widget_contact_id_mismatch")
     try:
-        token_iat = int(claims.get("iat"))
+        token_iat = float(claims.get("iat"))
     except (TypeError, ValueError) as e:
         raise ValueError("missing_signed_issued_at") from e
     if token_iat <= 0:
@@ -1164,7 +1171,8 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         "widget_contact_id": _clean_widget_id(data.contact_id),
         "callback_claims": json.dumps(_safe_claims(claims)),
         "salesbot_token_jti": _claim_as_str(claims, "jti"),
-        "salesbot_token_iat": str(token_iat),
+        "salesbot_token_iat": token_iat,
+        "salesbot_token_iat_text": str(claims.get("iat")),
         "salesbot_account_id": _claim_as_str(claims, "account_id"),
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
         "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
@@ -1230,7 +1238,7 @@ def _comment_callback_ids(values: dict, message: str) -> tuple[str, str]:
             values.get("entity_id"),
             values.get("return_url"),
             values.get("salesbot_token_jti"),
-            values.get("salesbot_token_iat"),
+            values.get("salesbot_token_iat_text") or values.get("salesbot_token_iat"),
             _message_hash(normalized_message),
         )
     )

@@ -183,13 +183,13 @@ def _log_kommo_startup_config_summary(config) -> None:
     logger.info(
         "Kommo startup config summary: channel_backend=%s kommo_subdomain=%s "
         "integration_id_present=%s integration_secret_present=%s integration_secret_length=%s "
-        "salesbot_configured=%s",
+        "salesbot_id=%s",
         config.channel_backend,
         config.kommo_subdomain or "",
         bool(config.kommo_integration_id),
         bool(config.kommo_integration_secret),
         len(config.kommo_integration_secret or ""),
-        config.kommo_salesbot_id is not None,
+        config.kommo_salesbot_id,
     )
 
 

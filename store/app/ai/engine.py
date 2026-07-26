@@ -447,7 +447,9 @@ async def generate_response(
             message_source_id=message_source_id,
         )
 
-    if _detect_exchange_rate_question(message_text, stored_history):
+    if _detect_exchange_rate_question(message_text, stored_history) and _is_exchange_rate_only_message(
+        message_text
+    ):
         logger.info(
             "AI route decision",
             extra={
@@ -1151,6 +1153,24 @@ def _detect_exchange_rate_question(message_text: str, stored_history: list[dict]
         if role == "user" and _looks_like_exchange_rate_question(content):
             return True
     return False
+
+
+def _is_exchange_rate_only_message(message_text: str) -> bool:
+    lines = [line.strip() for line in message_text.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return False
+    normalized = guards.normalize_text_for_moderation(lines[0])
+    discount_markers = (
+        "descuento",
+        "descuentos",
+        "rebaja",
+        "rebajas",
+        "oferta",
+        "ofertas",
+        "promocion",
+        "promociones",
+    )
+    return not any(marker in normalized for marker in discount_markers)
 
 
 def _looks_like_exchange_rate_question(normalized: str) -> bool:

@@ -228,8 +228,10 @@ async def test_stale_broadcast_claims_requeue_only_before_the_meta_send(monkeypa
     attempted_query = execute.await_args_list[1].args[0]
     assert "outbound_started_at IS NULL" in before_send_query
     assert "status = 'pending'" in before_send_query
+    assert "CAST(:broadcast_id AS uuid) IS NULL" in before_send_query
     assert "outbound_started_at IS NOT NULL" in attempted_query
     assert "status = 'delivery_unknown'" in attempted_query
+    assert "CAST(:broadcast_id AS uuid) IS NULL" in attempted_query
 
 
 @pytest.mark.asyncio

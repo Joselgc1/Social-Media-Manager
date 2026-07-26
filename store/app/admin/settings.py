@@ -345,6 +345,7 @@ async def kommo_status():
         "kommo_access_token_configured": bool(config.kommo_access_token),
         "kommo_integration_id_configured": bool(config.kommo_integration_id),
         "kommo_integration_secret_configured": bool(config.kommo_integration_secret),
+        "kommo_salesbot_id": config.kommo_salesbot_id,
         "kommo_salesbot_id_configured": config.kommo_salesbot_id is not None,
         "kommo_webhook_secret_configured": bool(config.kommo_webhook_secret),
         "kommo_ai_mode_field_configured": config.kommo_ai_mode_field_id is not None,

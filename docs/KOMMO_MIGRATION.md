@@ -150,7 +150,7 @@ python3 build_widget.py --widget-code YOUR_WIDGET_CODE
 
 Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, widget version, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
 
-The widget version must be incremented on every upload. Current version: `1.2.7`.
+The widget version must be incremented on every upload. Current version: `1.2.9`.
 
 ## Widget Installation
 

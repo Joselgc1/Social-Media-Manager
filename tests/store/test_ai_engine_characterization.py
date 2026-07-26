@@ -350,6 +350,22 @@ async def test_exchange_rate_question_is_answered_without_llm(engine_harness):
 
 
 @pytest.mark.asyncio
+async def test_rate_question_with_discount_question_uses_llm(engine_harness):
+    engine_harness.provider.chat.return_value = LLMResponse(
+        text="La tasa es 40,25 Bs por USD. Los descuentos aplican según el subtotal del pedido."
+    )
+
+    response = await engine.generate_response(
+        "whatsapp",
+        "584121234567",
+        "Solo para futuras compras\n¿A qué tasa reciben?\n¿Aceptan descuentos?",
+    )
+
+    assert response["text"] == "La tasa es 40,25 Bs por USD. Los descuentos aplican según el subtotal del pedido."
+    engine_harness.provider.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_bs_total_question_is_not_mistaken_for_exchange_rate(engine_harness):
     engine_harness.provider.chat.return_value = LLMResponse(text="Claro, te ayudo a calcularlo según el producto.")
 
