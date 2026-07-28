@@ -23,6 +23,7 @@ from app.config import get_config
 logger = logging.getLogger(__name__)
 
 _catalog_cache: list[dict] = []
+_catalog_reference_cache: list[dict] = []
 _catalog_ts: float = 0
 _refresh_interval: int = 900  # 15 minutes in seconds
 _refresh_failures: int = 0
@@ -69,7 +70,8 @@ def refresh_catalog(*, force: bool = False) -> bool:
     Pull the latest product data from Google Sheets.
     Called periodically by the scheduler and once at startup.
     """
-    global _catalog_cache, _catalog_ts, _refresh_failures, _next_refresh_allowed
+    global _catalog_cache, _catalog_reference_cache, _catalog_ts
+    global _refresh_failures, _next_refresh_allowed
     global _refresh_generation, _last_refresh_succeeded
 
     if not force and time.monotonic() < _next_refresh_allowed:
@@ -96,12 +98,10 @@ def refresh_catalog(*, force: bool = False) -> bool:
             except Exception:
                 formula_records = records
 
-            products = []
+            reference_products = []
             for idx, row in enumerate(records):
-                # Skip inactive or out-of-stock products
+                # Inactive products are excluded from both catalog views.
                 if str(row.get("Active", "")).strip().lower() != "yes":
-                    continue
-                if int(row.get("Stock", 0)) <= 0:
                     continue
 
                 formula_row = formula_records[idx] if idx < len(formula_records) else {}
@@ -114,7 +114,7 @@ def refresh_catalog(*, force: bool = False) -> bool:
                 size_value = str(row.get("Size", "")).strip().upper()
                 sizes_value = str(row.get("Sizes", "")).strip()
 
-                products.append({
+                reference_products.append({
                     "sku": str(row.get("SKU", "")).strip(),
                     "parent_sku": str(row.get("Parent SKU", "")).strip(),
                     "product_name": str(row.get("Product name", "")).strip(),
@@ -127,7 +127,9 @@ def refresh_catalog(*, force: bool = False) -> bool:
                     "image_url": image_url,
                 })
 
+            products = [product for product in reference_products if product["stock"] > 0]
             _catalog_cache = products
+            _catalog_reference_cache = reference_products
             _catalog_ts = time.time()
             _refresh_failures = 0
             _next_refresh_allowed = 0
@@ -163,6 +165,11 @@ def get_cached_catalog() -> list[dict]:
     Return the in-memory product catalog without performing network I/O.
     """
     return _catalog_cache
+
+
+def get_cached_reference_catalog() -> list[dict]:
+    """Return all cached active products, including variants with zero stock."""
+    return _catalog_reference_cache
 
 
 def catalog_cache_age_seconds() -> float | None:

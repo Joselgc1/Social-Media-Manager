@@ -41,6 +41,7 @@
       <div class="tab" onclick="switchTab('customers', this)">Clientes</div>
       <div class="tab" onclick="switchTab('orders', this)">Pedidos</div>
       <div class="tab" onclick="switchTab('broadcasts', this)">Broadcasts</div>
+      <div class="tab" onclick="switchTab('instagram', this)">Instagram</div>
       <div class="tab" onclick="switchTab('settings', this)">Configuracion</div>
     </div>
 
@@ -205,6 +206,44 @@
         <div class="card">
           <h3 class="font-semibold text-gray-900 dark:text-gray-100 mb-4">Broadcasts recientes</h3>
           <div id="broadcasts-list" class="text-sm dark:text-gray-300">Cargando...</div>
+        </div>
+      </div>
+
+      <!-- Instagram mappings tab -->
+      <div id="tab-instagram" class="tab-panel fade-in" style="display:none">
+        <div class="card mb-4">
+          <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-4">
+            <div>
+              <h3 id="instagram-form-title" class="font-semibold text-gray-900 dark:text-gray-100">Mapear publicación</h3>
+              <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Relaciona un post o reel de Instagram con un producto del catálogo.</p>
+            </div>
+            <span class="badge badge-blue">Configuración administrativa</span>
+          </div>
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">URL del post o reel</label>
+              <input id="instagram-post-url" type="url" class="w-full" placeholder="https://www.instagram.com/p/ABC123/">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Producto</label>
+              <select id="instagram-product-sku" class="w-full">
+                <option value="">Cargando catálogo...</option>
+              </select>
+            </div>
+          </div>
+          <div class="flex gap-2 mt-4">
+            <button id="instagram-save-btn" class="btn btn-primary" onclick="saveInstagramMapping()">Guardar mapeo</button>
+            <button id="instagram-cancel-btn" class="btn btn-secondary" onclick="cancelInstagramEdit()" style="display:none">Cancelar edición</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="flex items-start justify-between gap-4 mb-4">
+            <div>
+              <h3 class="font-semibold text-gray-900 dark:text-gray-100">Mapeos existentes</h3>
+              <p id="instagram-mappings-count" class="text-sm text-gray-500 dark:text-gray-400 mt-1">Cargando...</p>
+            </div>
+          </div>
+          <div id="instagram-mappings-list" class="text-sm dark:text-gray-300">Cargando...</div>
         </div>
       </div>
 

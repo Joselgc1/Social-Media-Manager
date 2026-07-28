@@ -1,5 +1,6 @@
 const API = '/admin/settings';
 const BROADCAST_API = '/admin/broadcasts';
+const INSTAGRAM_CONTENT_API = '/admin/instagram-content';
 let MODELS = {};
 
 // -- Authenticated fetch wrapper --
@@ -64,6 +65,9 @@ async function logout() {
 let _customersData = [];
 let _ordersData = [];
 let _broadcastsData = [];
+let _instagramMappingsData = [];
+let _instagramProductsData = [];
+let _instagramEditingId = null;
 let _sort = { customers: {col: null, asc: true}, orders: {col: null, asc: true}, broadcasts: {col: null, asc: true} };
 const MOBILE_BREAKPOINT = 768;
 let _lastMobileViewport = window.innerWidth < MOBILE_BREAKPOINT;
@@ -229,7 +233,116 @@ function switchTabByName(name) {
   else if (name === 'customers') loadCustomers();
   else if (name === 'orders') loadOrders();
   else if (name === 'broadcasts') loadBroadcasts();
+  else if (name === 'instagram') loadInstagramMappings();
   else if (name === 'settings') loadSettings();
+}
+
+// -- Instagram content mappings --
+async function loadInstagramMappings() {
+  const [products, mappings] = await Promise.all([
+    apiFetch(INSTAGRAM_CONTENT_API + '/products').then(r => r.json()),
+    apiFetch(INSTAGRAM_CONTENT_API).then(r => r.json()),
+  ]);
+  _instagramProductsData = products;
+  _instagramMappingsData = mappings;
+  renderInstagramProductOptions();
+  renderInstagramMappings();
+}
+
+function renderInstagramProductOptions() {
+  const select = document.getElementById('instagram-product-sku');
+  if (!select) return;
+  const selected = select.value;
+  select.innerHTML = '<option value="">Selecciona un producto</option>' + _instagramProductsData.map(product => {
+    const stockLabel = product.total_stock > 0 ? `${product.total_stock} disponibles` : 'Sin stock';
+    return `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)} · $${Number(product.price).toFixed(2)} · ${stockLabel}</option>`;
+  }).join('');
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+}
+
+function renderInstagramMappings() {
+  const container = document.getElementById('instagram-mappings-list');
+  const count = document.getElementById('instagram-mappings-count');
+  if (!container || !count) return;
+  count.textContent = `${_instagramMappingsData.length} mapeo${_instagramMappingsData.length === 1 ? '' : 's'}`;
+  if (!_instagramMappingsData.length) {
+    container.innerHTML = '<div class="text-gray-500 dark:text-gray-400 py-5 text-center">Aún no hay publicaciones mapeadas.</div>';
+    return;
+  }
+  container.innerHTML = `<div class="grid gap-3">${_instagramMappingsData.map(mapping => {
+    const products = mapping.products || [];
+    const productNames = products.map(product => product.name || 'Producto no disponible').join(', ');
+    const productSkus = products.map(product => product.sku).join(', ');
+    const prices = products.map(product => product.price === null ? 'No disponible' : `$${Number(product.price).toFixed(2)}`).join(', ');
+    const stocks = products.map(product => product.stock === null ? 'No disponible' : String(product.stock)).join(', ');
+    const statusClass = mapping.status === 'active' ? 'badge-green' : 'badge-gray';
+    const archiveButton = mapping.status === 'active'
+      ? `<button class="btn btn-secondary text-xs" onclick="archiveInstagramMapping('${escapeHtml(mapping.id)}')">Archivar</button>`
+      : '';
+    return `<article class="rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+      <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <div class="min-w-0">
+          <a class="font-semibold text-indigo-600 dark:text-indigo-400 break-all" href="${escapeHtml(mapping.normalized_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mapping.shortcode || mapping.post_url)}</a>
+          <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(mapping.content_type)}</span><span class="badge ${statusClass}">${escapeHtml(mapping.status)}</span></div>
+        </div>
+        <div class="flex gap-2"><button class="btn btn-secondary text-xs" onclick="editInstagramMapping('${escapeHtml(mapping.id)}')">Editar</button>${archiveButton}</div>
+      </div>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4 text-sm">
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Producto</span>${escapeHtml(productNames)}</div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">SKU</span>${escapeHtml(productSkus)}</div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Precio actual</span>${escapeHtml(prices)}</div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Stock actual</span>${escapeHtml(stocks)}</div>
+      </div>
+    </article>`;
+  }).join('')}</div>`;
+}
+
+async function saveInstagramMapping() {
+  const postUrl = document.getElementById('instagram-post-url').value.trim();
+  const productSku = document.getElementById('instagram-product-sku').value;
+  if (!postUrl || !productSku) {
+    toast('Ingresa la URL y selecciona un producto', '#dc2626');
+    return;
+  }
+  const editing = Boolean(_instagramEditingId);
+  const url = editing ? `${INSTAGRAM_CONTENT_API}/${encodeURIComponent(_instagramEditingId)}` : INSTAGRAM_CONTENT_API;
+  await apiFetch(url, {
+    method: editing ? 'PUT' : 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({post_url: postUrl, product_skus: [productSku]}),
+  });
+  toast(editing ? 'Mapeo actualizado' : 'Mapeo creado');
+  cancelInstagramEdit();
+  await loadInstagramMappings();
+}
+
+function editInstagramMapping(contentId) {
+  const mapping = _instagramMappingsData.find(item => item.id === contentId);
+  if (!mapping) return;
+  _instagramEditingId = contentId;
+  document.getElementById('instagram-post-url').value = mapping.post_url;
+  document.getElementById('instagram-product-sku').value = mapping.product_skus[0] || '';
+  document.getElementById('instagram-form-title').textContent = 'Editar mapeo';
+  document.getElementById('instagram-save-btn').textContent = 'Guardar cambios';
+  document.getElementById('instagram-cancel-btn').style.display = 'inline-flex';
+  document.getElementById('instagram-post-url').focus();
+}
+
+function cancelInstagramEdit() {
+  _instagramEditingId = null;
+  document.getElementById('instagram-post-url').value = '';
+  document.getElementById('instagram-product-sku').value = '';
+  document.getElementById('instagram-form-title').textContent = 'Mapear publicación';
+  document.getElementById('instagram-save-btn').textContent = 'Guardar mapeo';
+  document.getElementById('instagram-cancel-btn').style.display = 'none';
+}
+
+async function archiveInstagramMapping(contentId) {
+  if (!window.confirm('¿Archivar este mapeo?')) return;
+  await apiFetch(`${INSTAGRAM_CONTENT_API}/${encodeURIComponent(contentId)}`, {method: 'DELETE'});
+  if (_instagramEditingId === contentId) cancelInstagramEdit();
+  toast('Mapeo archivado');
+  await loadInstagramMappings();
 }
 
 // -- Toast --

@@ -22,6 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app import db
 from app.admin.analytics_api import router as analytics_router
 from app.admin.dashboard import router as dashboard_router
+from app.admin.instagram_content import router as instagram_content_admin_router
 from app.admin.settings import router as settings_router
 from app.admin.telegram_bot import router as telegram_router
 from app.ai.providers import init_providers, list_providers
@@ -365,6 +366,7 @@ app.include_router(dashboard_router)
 app.include_router(telegram_router)
 app.include_router(broadcast_router)
 app.include_router(analytics_router)
+app.include_router(instagram_content_admin_router)
 app.include_router(test_router)
 
 

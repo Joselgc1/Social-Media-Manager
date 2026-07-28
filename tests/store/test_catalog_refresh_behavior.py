@@ -12,6 +12,7 @@ def catalog_state():
 
     names = (
         "_catalog_cache",
+        "_catalog_reference_cache",
         "_catalog_ts",
         "_refresh_failures",
         "_next_refresh_allowed",
@@ -20,6 +21,7 @@ def catalog_state():
     )
     original = {name: getattr(sheets, name) for name in names}
     sheets._catalog_cache = []
+    sheets._catalog_reference_cache = []
     sheets._catalog_ts = 0
     sheets._refresh_failures = 0
     sheets._next_refresh_allowed = 0
@@ -38,6 +40,50 @@ def test_cached_catalog_read_never_triggers_google_sheets_io(monkeypatch, catalo
 
     assert catalog_state.get_cached_catalog() == []
     refresh.assert_not_called()
+
+
+def test_reference_catalog_keeps_active_zero_stock_without_changing_sellable_catalog(
+    monkeypatch,
+    catalog_state,
+):
+    records = [
+        {
+            "SKU": "ZERO",
+            "Product name": "Pijama agotada",
+            "Category": "Pijamas",
+            "Price USD": 20,
+            "Stock": 0,
+            "Active": "yes",
+        },
+        {
+            "SKU": "AVAILABLE",
+            "Product name": "Pijama disponible",
+            "Category": "Pijamas",
+            "Price USD": 25,
+            "Stock": 2,
+            "Active": "yes",
+        },
+        {
+            "SKU": "INACTIVE",
+            "Product name": "Pijama inactiva",
+            "Category": "Pijamas",
+            "Price USD": 25,
+            "Stock": 2,
+            "Active": "no",
+        },
+    ]
+    worksheet = MagicMock()
+    worksheet.get_all_records.return_value = records
+    client = SimpleNamespace(open_by_key=lambda key: SimpleNamespace(sheet1=worksheet))
+    monkeypatch.setattr(catalog_state, "_get_gspread_client", lambda: client)
+    monkeypatch.setattr(catalog_state, "get_config", lambda: SimpleNamespace(product_sheet_id="sheet-1"))
+
+    assert catalog_state.refresh_catalog(force=True) is True
+    assert [product["sku"] for product in catalog_state.get_cached_catalog()] == ["AVAILABLE"]
+    assert [product["sku"] for product in catalog_state.get_cached_reference_catalog()] == [
+        "ZERO",
+        "AVAILABLE",
+    ]
 
 
 @pytest.mark.asyncio

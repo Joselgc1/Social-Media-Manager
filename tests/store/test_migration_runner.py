@@ -25,10 +25,12 @@ async def test_store_migration_runner_executes_schema_and_closes_connection(monk
 
     migration_sql = runner.MIGRATION_PATH.read_text(encoding="utf-8")
     delivery_migration_sql = runner.DELIVERY_MIGRATION_PATH.read_text(encoding="utf-8")
+    instagram_content_migration_sql = runner.INSTAGRAM_CONTENT_MIGRATION_PATH.read_text(encoding="utf-8")
     assert connection.execute.await_args_list[1].args == (migration_sql,)
     assert connection.execute.await_args_list[2].args == (delivery_migration_sql,)
+    assert connection.execute.await_args_list[3].args == (instagram_content_migration_sql,)
     assert connection.execute.await_args_list[0].args[0] == "SELECT pg_advisory_lock($1)"
-    assert connection.execute.await_args_list[3].args[0] == "SELECT pg_advisory_unlock($1)"
+    assert connection.execute.await_args_list[4].args[0] == "SELECT pg_advisory_unlock($1)"
     connection.close.assert_awaited_once()
 
 
