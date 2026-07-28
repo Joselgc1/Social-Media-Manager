@@ -1,5 +1,6 @@
 """Authenticated administration of Instagram content-to-product mappings."""
 
+import logging
 from typing import Literal
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from app.catalog.sheets import (
 )
 from app.instagram_content.service import InstagramContentUrlError, normalize_instagram_url
 
+logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/admin/instagram-content",
     tags=["instagram-content"],
@@ -23,13 +25,13 @@ router = APIRouter(
 
 
 class InstagramContentCreate(BaseModel):
-    post_url: str
-    product_skus: list[str] = Field(min_length=1)
+    post_url: str = Field(max_length=500)
+    product_skus: list[str] = Field(min_length=1, max_length=20)
 
 
 class InstagramContentUpdate(BaseModel):
-    post_url: str | None = None
-    product_skus: list[str] | None = Field(default=None, min_length=1)
+    post_url: str | None = Field(default=None, max_length=500)
+    product_skus: list[str] | None = Field(default=None, min_length=1, max_length=20)
     status: Literal["active", "archived"] | None = None
 
 
@@ -120,7 +122,11 @@ async def list_instagram_content():
         ORDER BY content_id, display_order, created_at
         """
     )
-    grouped_products = {product["sku"]: product for product in await _reference_products()}
+    try:
+        grouped_products = {product["sku"]: product for product in await _reference_products()}
+    except Exception:
+        logger.warning("Catalog enrichment unavailable for Instagram content mappings")
+        grouped_products = {}
     skus_by_content: dict[str, list[str]] = {}
     for mapping in mapping_rows:
         skus_by_content.setdefault(str(mapping["content_id"]), []).append(mapping["product_sku"])

@@ -4,8 +4,8 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS instagram_content (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content_type TEXT NOT NULL CHECK (content_type IN ('post', 'carousel', 'reel', 'story')),
-    permalink TEXT NOT NULL,
-    normalized_permalink TEXT NOT NULL,
+    permalink TEXT,
+    normalized_permalink TEXT,
     shortcode TEXT,
     media_id TEXT,
     caption_snapshot TEXT,
@@ -13,6 +13,19 @@ CREATE TABLE IF NOT EXISTS instagram_content (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE instagram_content
+    ALTER COLUMN permalink DROP NOT NULL,
+    ALTER COLUMN normalized_permalink DROP NOT NULL;
+
+ALTER TABLE instagram_content
+    DROP CONSTRAINT IF EXISTS instagram_content_stable_identifier_check;
+ALTER TABLE instagram_content
+    ADD CONSTRAINT instagram_content_stable_identifier_check CHECK (
+        normalized_permalink IS NOT NULL
+        OR shortcode IS NOT NULL
+        OR media_id IS NOT NULL
+    );
 
 CREATE TABLE IF NOT EXISTS instagram_content_products (
     content_id UUID NOT NULL REFERENCES instagram_content(id) ON DELETE CASCADE,
@@ -31,6 +44,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_instagram_content_shortcode
 CREATE UNIQUE INDEX IF NOT EXISTS uq_instagram_content_media_id
     ON instagram_content(media_id)
     WHERE media_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_instagram_content_status_updated
+    ON instagram_content(status, updated_at DESC);
 
 DROP TRIGGER IF EXISTS trg_instagram_content_updated_at ON instagram_content;
 CREATE TRIGGER trg_instagram_content_updated_at

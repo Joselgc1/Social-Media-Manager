@@ -7,6 +7,7 @@ import pytest
 from app.admin import instagram_content
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 
 CONTENT_ID = "11111111-1111-1111-1111-111111111111"
 
@@ -85,6 +86,20 @@ async def test_product_endpoint_uses_grouped_reference_catalog_with_zero_stock(m
 
 
 @pytest.mark.asyncio
+async def test_product_endpoint_exposes_derived_product_sku_without_parent(monkeypatch):
+    reference_rows = [
+        {**_products()[0], "sku": "SET-002-S", "parent_sku": "", "size": "S"},
+        {**_products()[0], "sku": "SET-002-M", "parent_sku": "", "size": "M"},
+    ]
+    monkeypatch.setattr(instagram_content, "ensure_fresh_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(instagram_content, "get_cached_reference_catalog", lambda: reference_rows)
+
+    result = await instagram_content.list_mapping_products()
+
+    assert result[0]["sku"] == "SET-002"
+
+
+@pytest.mark.asyncio
 async def test_create_mapping_deduplicates_and_supports_multiple_skus(monkeypatch):
     monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
     monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
@@ -110,6 +125,23 @@ async def test_create_mapping_deduplicates_and_supports_multiple_skus(monkeypatc
         if "INSERT INTO instagram_content_products" in call.args[0]
     ]
     assert inserted_skus == ["PARENT-1", "PARENT-2"]
+
+
+def test_mapping_input_limits_are_enforced():
+    with pytest.raises(ValidationError):
+        instagram_content.InstagramContentCreate(
+            post_url="x" * 501,
+            product_skus=["PARENT-1"],
+        )
+
+    with pytest.raises(ValidationError):
+        instagram_content.InstagramContentCreate(
+            post_url="https://instagram.com/p/ABC123",
+            product_skus=[f"SKU-{index}" for index in range(21)],
+        )
+
+    with pytest.raises(ValidationError):
+        instagram_content.InstagramContentUpdate(post_url="x" * 501)
 
 
 @pytest.mark.asyncio
@@ -173,6 +205,25 @@ async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_archived_mapping_can_be_restored_without_catalog_access(monkeypatch):
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    monkeypatch.setattr(instagram_content.db, "fetch_one", AsyncMock(return_value={"id": CONTENT_ID}))
+    reference_products = AsyncMock()
+    monkeypatch.setattr(instagram_content, "_reference_products", reference_products)
+    execute = AsyncMock()
+    monkeypatch.setattr(instagram_content.db, "execute", execute)
+
+    result = await instagram_content.update_instagram_content(
+        UUID(CONTENT_ID),
+        instagram_content.InstagramContentUpdate(status="active"),
+    )
+
+    assert result == {"id": CONTENT_ID, "status": "active", "product_skus": None}
+    assert execute.await_args.args[1]["status"] == "active"
+    reference_products.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_archive_mapping_is_soft_delete(monkeypatch):
     fetch_one = AsyncMock(return_value={"id": CONTENT_ID})
     monkeypatch.setattr(instagram_content.db, "fetch_one", fetch_one)
@@ -181,3 +232,38 @@ async def test_archive_mapping_is_soft_delete(monkeypatch):
 
     assert result == {"id": CONTENT_ID, "status": "archived"}
     assert "SET status = 'archived'" in fetch_one.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_mapping_list_survives_catalog_refresh_failure(monkeypatch):
+    fetch_all = AsyncMock(side_effect=[
+        [{
+            "id": CONTENT_ID,
+            "content_type": "post",
+            "permalink": "https://instagram.com/p/ABC123",
+            "normalized_permalink": "https://www.instagram.com/p/ABC123/",
+            "shortcode": "ABC123",
+            "media_id": None,
+            "status": "active",
+            "created_at": "created",
+            "updated_at": "updated",
+        }],
+        [{"content_id": CONTENT_ID, "product_sku": "PARENT-1"}],
+    ])
+    monkeypatch.setattr(instagram_content.db, "fetch_all", fetch_all)
+    monkeypatch.setattr(
+        instagram_content,
+        "_reference_products",
+        AsyncMock(side_effect=RuntimeError("Sheets unavailable")),
+    )
+
+    result = await instagram_content.list_instagram_content()
+
+    assert result[0]["product_skus"] == ["PARENT-1"]
+    assert result[0]["product_names"] == [None]
+    assert result[0]["products"] == [{
+        "sku": "PARENT-1",
+        "name": None,
+        "price": None,
+        "stock": None,
+    }]

@@ -20,6 +20,7 @@ def test_instagram_content_migration_is_idempotent_and_records_version_four():
     assert "CREATE TABLE IF NOT EXISTS instagram_content" in migration
     assert "CREATE TABLE IF NOT EXISTS instagram_content_products" in migration
     assert migration.count("CREATE UNIQUE INDEX IF NOT EXISTS") == 3
+    assert "CREATE INDEX IF NOT EXISTS idx_instagram_content_status_updated" in migration
     assert "DROP TRIGGER IF EXISTS trg_instagram_content_updated_at" in migration
     assert "ALTER TABLE instagram_content ENABLE ROW LEVEL SECURITY" in migration
     assert "ALTER TABLE instagram_content_products ENABLE ROW LEVEL SECURITY" in migration
@@ -27,6 +28,19 @@ def test_instagram_content_migration_is_idempotent_and_records_version_four():
     assert "REVOKE ALL PRIVILEGES ON instagram_content_products FROM PUBLIC" in migration
     assert "ON CONFLICT (version) DO NOTHING" in migration
     assert "(4, 'instagram_content_mapping')" in migration
+
+
+def test_instagram_content_can_be_identified_only_by_media_id():
+    migration = Path("store/migrations/004_instagram_content_mapping.sql").read_text()
+
+    assert "permalink TEXT," in migration
+    assert "normalized_permalink TEXT," in migration
+    assert "ALTER COLUMN permalink DROP NOT NULL" in migration
+    assert "ALTER COLUMN normalized_permalink DROP NOT NULL" in migration
+    assert "normalized_permalink IS NOT NULL" in migration
+    assert "OR shortcode IS NOT NULL" in migration
+    assert "OR media_id IS NOT NULL" in migration
+    assert "DROP CONSTRAINT IF EXISTS instagram_content_stable_identifier_check" in migration
 
 
 @pytest.mark.asyncio

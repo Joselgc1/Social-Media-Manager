@@ -40,6 +40,35 @@ def test_group_catalog_products_merges_variant_rows():
     assert grouped[0]["size_skus"]["M"] == "SET-001-M"
 
 
+def test_group_catalog_products_derives_product_sku_when_parent_is_missing():
+    grouped = group_catalog_products([
+        {
+            "sku": "SET-002-S",
+            "parent_sku": "",
+            "product_name": "Set negro",
+            "category": "Sets",
+            "size": "S",
+            "price_usd": 30,
+            "stock": 2,
+        },
+        {
+            "sku": "SET-002-M",
+            "parent_sku": "",
+            "product_name": "Set negro",
+            "category": "Sets",
+            "size": "M",
+            "price_usd": 30,
+            "stock": 3,
+        },
+    ])
+
+    assert len(grouped) == 1
+    assert grouped[0]["sku"] == "SET-002"
+    assert grouped[0]["parent_sku"] == "SET-002"
+    assert grouped[0]["size_skus"] == {"S": "SET-002-S", "M": "SET-002-M"}
+    assert [variant["sku"] for variant in grouped[0]["variants"]] == ["SET-002-S", "SET-002-M"]
+
+
 def test_count_grouped_catalog_products_counts_parent_skus_not_variants():
     count = count_grouped_catalog_products([
         {

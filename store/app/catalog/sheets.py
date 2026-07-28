@@ -265,7 +265,7 @@ def group_catalog_products(products: list[dict]) -> list[dict]:
         sizes = get_product_sizes(product)
         product_stock = _safe_int(product.get("stock", 0))
         product_sku = str(product.get("sku", "")).strip()
-        parent_sku = str(product.get("parent_sku", "")).strip() or product_sku
+        parent_sku = str(product.get("parent_sku", "")).strip() or _derived_product_sku(product_sku)
 
         entry = grouped.setdefault(key, {
             "sku": parent_sku or product_sku,
@@ -343,12 +343,16 @@ def _catalog_group_key(product: dict) -> str:
     if parent_sku:
         return parent_sku.lower()
     if sku:
-        base_sku = re.sub(r"[-_](xxs|xs|s|m|l|xl|xxl|xxxl)$", "", sku, flags=re.IGNORECASE)
-        return base_sku.lower()
+        return _derived_product_sku(sku).lower()
     return "|".join([
         str(product.get("product_name", "")).strip().lower(),
         str(product.get("category", "")).strip().lower(),
     ])
+
+
+def _derived_product_sku(sku: str) -> str:
+    """Derive a product-level SKU while exact variant SKUs remain unchanged elsewhere."""
+    return re.sub(r"[-_](xxs|xs|s|m|l|xl|xxl|xxxl)$", "", sku, flags=re.IGNORECASE)
 
 
 def _safe_int(value) -> int:

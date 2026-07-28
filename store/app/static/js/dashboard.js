@@ -67,6 +67,7 @@ let _ordersData = [];
 let _broadcastsData = [];
 let _instagramMappingsData = [];
 let _instagramProductsData = [];
+let _instagramProductsAvailable = true;
 let _instagramEditingId = null;
 let _sort = { customers: {col: null, asc: true}, orders: {col: null, asc: true}, broadcasts: {col: null, asc: true} };
 const MOBILE_BREAKPOINT = 768;
@@ -239,12 +240,14 @@ function switchTabByName(name) {
 
 // -- Instagram content mappings --
 async function loadInstagramMappings() {
-  const [products, mappings] = await Promise.all([
+  const [productsResult, mappingsResult] = await Promise.allSettled([
     apiFetch(INSTAGRAM_CONTENT_API + '/products').then(r => r.json()),
     apiFetch(INSTAGRAM_CONTENT_API).then(r => r.json()),
   ]);
-  _instagramProductsData = products;
-  _instagramMappingsData = mappings;
+  if (mappingsResult.status === 'rejected') throw mappingsResult.reason;
+  _instagramProductsAvailable = productsResult.status === 'fulfilled';
+  _instagramProductsData = _instagramProductsAvailable ? productsResult.value : [];
+  _instagramMappingsData = mappingsResult.value;
   renderInstagramProductOptions();
   renderInstagramMappings();
 }
@@ -253,7 +256,10 @@ function renderInstagramProductOptions() {
   const select = document.getElementById('instagram-product-sku');
   if (!select) return;
   const selected = select.value;
-  select.innerHTML = '<option value="">Selecciona un producto</option>' + _instagramProductsData.map(product => {
+  const placeholder = _instagramProductsAvailable
+    ? 'Selecciona un producto'
+    : 'Catálogo temporalmente no disponible';
+  select.innerHTML = `<option value="">${placeholder}</option>` + _instagramProductsData.map(product => {
     const stockLabel = product.total_stock > 0 ? `${product.total_stock} disponibles` : 'Sin stock';
     return `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)} · $${Number(product.price).toFixed(2)} · ${stockLabel}</option>`;
   }).join('');
@@ -276,16 +282,20 @@ function renderInstagramMappings() {
     const prices = products.map(product => product.price === null ? 'No disponible' : `$${Number(product.price).toFixed(2)}`).join(', ');
     const stocks = products.map(product => product.stock === null ? 'No disponible' : String(product.stock)).join(', ');
     const statusClass = mapping.status === 'active' ? 'badge-green' : 'badge-gray';
-    const archiveButton = mapping.status === 'active'
+    const statusButton = mapping.status === 'active'
       ? `<button class="btn btn-secondary text-xs" onclick="archiveInstagramMapping('${escapeHtml(mapping.id)}')">Archivar</button>`
-      : '';
+      : `<button class="btn btn-secondary text-xs" onclick="restoreInstagramMapping('${escapeHtml(mapping.id)}')">Restaurar</button>`;
+    const contentLabel = mapping.shortcode || mapping.normalized_url || mapping.post_url || mapping.media_id || 'Contenido de Instagram';
+    const contentLink = mapping.normalized_url
+      ? `<a class="font-semibold text-indigo-600 dark:text-indigo-400 break-all" href="${escapeHtml(mapping.normalized_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(contentLabel)}</a>`
+      : `<span class="font-semibold text-gray-900 dark:text-gray-100 break-all">${escapeHtml(contentLabel)}</span>`;
     return `<article class="rounded-xl border border-gray-200 dark:border-gray-700 p-4">
       <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
         <div class="min-w-0">
-          <a class="font-semibold text-indigo-600 dark:text-indigo-400 break-all" href="${escapeHtml(mapping.normalized_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mapping.shortcode || mapping.post_url)}</a>
+          ${contentLink}
           <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(mapping.content_type)}</span><span class="badge ${statusClass}">${escapeHtml(mapping.status)}</span></div>
         </div>
-        <div class="flex gap-2"><button class="btn btn-secondary text-xs" onclick="editInstagramMapping('${escapeHtml(mapping.id)}')">Editar</button>${archiveButton}</div>
+        <div class="flex gap-2"><button class="btn btn-secondary text-xs" onclick="editInstagramMapping('${escapeHtml(mapping.id)}')">Editar</button>${statusButton}</div>
       </div>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4 text-sm">
         <div><span class="block text-xs text-gray-500 dark:text-gray-400">Producto</span>${escapeHtml(productNames)}</div>
@@ -342,6 +352,16 @@ async function archiveInstagramMapping(contentId) {
   await apiFetch(`${INSTAGRAM_CONTENT_API}/${encodeURIComponent(contentId)}`, {method: 'DELETE'});
   if (_instagramEditingId === contentId) cancelInstagramEdit();
   toast('Mapeo archivado');
+  await loadInstagramMappings();
+}
+
+async function restoreInstagramMapping(contentId) {
+  await apiFetch(`${INSTAGRAM_CONTENT_API}/${encodeURIComponent(contentId)}`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status: 'active'}),
+  });
+  toast('Mapeo restaurado');
   await loadInstagramMappings();
 }
 

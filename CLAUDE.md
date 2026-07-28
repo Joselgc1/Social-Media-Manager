@@ -31,7 +31,7 @@ Python 3.12. Tests use pytest + pytest-asyncio (see `tests/`). Linting uses ruff
 - `http://localhost:8000/test/catalog` — View loaded products from Google Sheets
 - `http://localhost:8000/health` — System health status
 - `http://localhost:8000/admin/login` — Store admin login page. Successful login sets the `admin_session` HTTP-only cookie and redirects to `/admin/dashboard`.
-- `http://localhost:8000/admin/dashboard` — Web admin panel with dark mode (5 tabs: Resumen, Clientes, Pedidos, Broadcasts, Configuracion). Requires a valid session cookie or Bearer auth on the underlying `/admin/` APIs.
+- `http://localhost:8000/admin/dashboard` — Web admin panel with dark mode (6 tabs: Resumen, Clientes, Pedidos, Broadcasts, Instagram, Configuracion). The Instagram tab maps posts and reels to products from the reference catalog. Requires a valid session cookie or Bearer auth on the underlying `/admin/` APIs.
 
 ### Local testing endpoints (master — port 9000)
 
@@ -167,7 +167,7 @@ In Kommo mode, Kommo sends general DM webhooks to `store/app/webhooks/kommo.py`;
 
 **Background scheduler** (`store/app/broadcast/scheduler.py`): 6 business jobs — catalog refresh, broadcast execution, daily analytics aggregation, token usage reminders, catalog PDF auto-refresh, unpaid inventory reservation cleanup — plus an internal sync job that keeps APScheduler timings aligned with DB settings from `master/`. In Kommo mode it also runs durable Kommo job processing and stale-job recovery.
 
-**Database:** PostgreSQL. Railway runs `store/scripts/migrate.py` as a pre-deploy command; it applies the idempotent `store/migrations/001_schema.sql` baseline. Use `store/migrations/002_consolidated_upgrade.sql` only for a pre-consolidation recovery case. `schema_migrations` records the version and startup rejects incompatible schemas. Tables include customers, conversations, orders, broadcasts, settings, usage_log, ai_run_logs, daily_analytics, product_analytics, conversation_sessions, customer_channel_mappings, meta_inbound_jobs, meta_inbound_receipts, kommo_message_jobs, and kommo_message_receipts.
+**Database:** PostgreSQL. Railway runs `store/scripts/migrate.py` as a pre-deploy command; it applies the idempotent Store migrations. Use `store/migrations/002_consolidated_upgrade.sql` only for a pre-consolidation recovery case. `schema_migrations` records the version and startup rejects incompatible schemas. Tables include customers, conversations, orders, broadcasts, settings, usage_log, ai_run_logs, daily_analytics, product_analytics, conversation_sessions, customer_channel_mappings, meta_inbound_jobs, meta_inbound_receipts, kommo_message_jobs, kommo_message_receipts, `instagram_content`, and `instagram_content_products`.
 
 **Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Multi-store fields: `admin_password` (protects store dashboard), `system_prompt_override` (replaces prompt template file), `llm_managed_externally` (when True, locks LLM controls in store dashboard/Telegram/API — managed from master instead), and `ai_orchestration_mode` (optional env default; DB setting wins). Kommo env vars are exactly: `CHANNEL_BACKEND`, `KOMMO_SUBDOMAIN`, `KOMMO_ACCESS_TOKEN`, `KOMMO_INTEGRATION_ID`, `KOMMO_INTEGRATION_SECRET`, `KOMMO_SALESBOT_ID`, `KOMMO_WEBHOOK_SECRET`, `KOMMO_AI_MODE_FIELD_ID`, `KOMMO_AI_ACTIVE_ENUM_ID`, `KOMMO_AI_HUMAN_ENUM_ID`, `KOMMO_AI_PAUSED_ENUM_ID`, `KOMMO_DEFAULT_RESPONSIBLE_USER_ID`.
 
