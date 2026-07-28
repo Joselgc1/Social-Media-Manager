@@ -2,7 +2,7 @@
 
 This widget must be installed at the Kommo account level before it appears as an installed widget inside Salesbot.
 
-The widget version is currently `1.2.9`. Increment `widget.version` in `manifest.json` every time a new archive is uploaded so Kommo refreshes the widget files.
+The widget version is currently `1.2.10`. Increment `widget.version` in `manifest.json` every time a new archive is uploaded so Kommo refreshes the widget files.
 
 Build:
 
@@ -28,14 +28,14 @@ Installation sequence:
 11. Hard refresh the browser if Salesbot still shows stale widget fields.
 12. Open Salesbot.
 13. Add a Widget step.
-14. Select `Ask Eva AI for DMs` for the private-message Salesbot or `Ask Eva AI for Instagram comments` for the native comment-triggered Salesbot.
+14. Select `Ask Eva AI for Instagram DMs`, `Ask Eva AI for WhatsApp`, or `Ask Eva AI for Instagram comments` for the corresponding Salesbot.
 15. Leave the Salesbot block's `Salesbot callback URL override` empty unless this block must call a different store backend.
 
 The widget uses `installation=true`, has both `settings` and `salesbot_designer` locations, and requires the top-level `backend_url` setting. The Salesbot block `webhook_url` is an optional per-block override. If it is empty, the generated Salesbot source uses the installed account-level `backend_url`; if it is valid, it overrides the global URL.
 
 The Salesbot source uses `widget_request` followed by `goto` question step `1`. The backend resumes the flow by calling Kommo's continuation URL. The widget exposes two documented Salesbot exits: `success` for completed AI responses and `fail` for errors.
 
-The same installed widget is used by both Kommo Salesbot flows. The private-message Salesbot should end with a Kommo Message step using `{{json.message}}`; its Salesbot ID is configured as `KOMMO_SALESBOT_ID` and launched by the backend after an inbound DM webhook. The public-comment Salesbot should use Kommo's native `When a comment is received` trigger, select the Instagram-comment widget block, and end with a Kommo Comment step using `{{json.message}}`; the backend does not launch this Salesbot and does not need its ID.
+The same installed widget is used by all three Kommo Salesbot flows. The Instagram DM and WhatsApp Salesbots each end with a channel-restricted Kommo Message step using `{{json.message}}`; their IDs are configured as `KOMMO_INSTAGRAM_DM_SALESBOT_ID` and `KOMMO_WHATSAPP_SALESBOT_ID`. The public-comment Salesbot uses Kommo's native `When a comment is received` trigger, selects the Instagram-comment widget block, and ends with a Kommo Comment step using `{{json.message}}`; the backend does not launch this Salesbot and does not need its ID.
 
 The Instagram-comment widget block sends optional post/product placeholders such as post caption, product SKU, product name, and media URL. The backend ignores unresolved placeholders and only answers price/availability when those resolved fields identify exactly one catalog product.
 

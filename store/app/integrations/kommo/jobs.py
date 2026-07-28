@@ -226,6 +226,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "salesbot_user_id": values["salesbot_user_id"],
         "salesbot_client_uuid": values["salesbot_client_uuid"],
         "interaction_type": values["interaction_type"],
+        "expected_channel": values["expected_channel"],
         "author_username": values["author_username"],
         "author_profile_url": values["author_profile_url"],
         "sender_username": values["sender_username"],
@@ -276,6 +277,10 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
                   OR candidate.contact_id = CAST(:widget_contact_id AS text)
               )
               AND candidate.interaction_type = CAST(:interaction_type AS text)
+              AND (
+                  CAST(:expected_channel AS text) IS NULL
+                  OR candidate.channel = CAST(:expected_channel AS text)
+              )
             ORDER BY candidate.salesbot_launched_at DESC NULLS LAST, candidate.created_at DESC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -294,6 +299,10 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             logger.info("Kommo Salesbot comment callback ignored as duplicate for job: %s", _job_log_context(dict(duplicate)))
             return {"status": "duplicate", "job_id": str(duplicate["id"])}
         return await _create_ready_comment_job_from_callback(data, values)
+
+    if values["expected_channel"] and await _has_waiting_job_for_other_channel(values):
+        logger.warning("Kommo Salesbot callback ignored: reason=expected_channel_mismatch")
+        return {"status": "ignored", "reason": "expected_channel_mismatch"}
 
     duplicate = await _find_job_for_callback_identity(values)
     if duplicate and duplicate["status"] in _TERMINAL_STATUSES | _ACTIVE_SALESBOT_STATUSES:
@@ -554,6 +563,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
     try:
         if await _discard_private_job_if_superseded_by_recent_comment(job):
             return
+        salesbot_id = _salesbot_id_for_channel(job.get("channel"))
         logger.info("Kommo Salesbot launch preparing job: %s", _job_log_context(job))
         settings = await db.get_settings()
         client = KommoClient.from_config()
@@ -609,7 +619,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             return
         logger.info("Kommo job waiting for Salesbot callback before launch: job_id=%s", job["id"])
         try:
-            await client.run_salesbot(entity_id, entity_type)
+            await client.run_salesbot(entity_id, entity_type, salesbot_id)
         except KommoAPIError as e:
             error = sanitize_job_error(e)
             if _is_definitive_launch_error(e):
@@ -929,6 +939,34 @@ async def _find_job_for_callback_identity(values: dict):
     return await db.fetch_one(query, query_values)
 
 
+async def _has_waiting_job_for_other_channel(values: dict) -> bool:
+    job = await db.fetch_one(
+        """
+        SELECT id
+        FROM kommo_message_jobs candidate
+        WHERE candidate.status = 'waiting_for_salesbot'
+          AND candidate.interaction_type = 'private_message'
+          AND candidate.channel <> CAST(:expected_channel AS text)
+          AND (
+              (:entity_type = 'leads' AND candidate.lead_id = :entity_id)
+              OR (:entity_type = 'contacts' AND candidate.contact_id = :entity_id)
+          )
+          AND (
+              CAST(:widget_contact_id AS text) IS NULL
+              OR candidate.contact_id = CAST(:widget_contact_id AS text)
+          )
+        LIMIT 1
+        """,
+        {
+            "expected_channel": values["expected_channel"],
+            "entity_type": values["entity_type"],
+            "entity_id": values["entity_id"],
+            "widget_contact_id": values["widget_contact_id"],
+        },
+    )
+    return job is not None
+
+
 async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, values: dict) -> dict:
     message = _callback_comment_text(data)
     public_comment_context = _public_comment_context_from_callback(data)
@@ -1164,6 +1202,8 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
     interaction_type = data.interaction_type or "private_message"
     if _has_public_comment_context(data) and interaction_type != "instagram_comment":
         raise ValueError("comment_callback_interaction_type_mismatch")
+    if interaction_type == "instagram_comment" and data.expected_channel not in {None, "instagram"}:
+        raise ValueError("comment_callback_expected_channel_mismatch")
     return {
         "return_url": return_url,
         "entity_id": entity_id,
@@ -1177,6 +1217,7 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
         "salesbot_user_id": _claim_as_str(claims, "user_id"),
         "salesbot_client_uuid": _claim_as_str(claims, "client_uid") or _claim_as_str(claims, "client_uuid"),
         "interaction_type": interaction_type,
+        "expected_channel": data.expected_channel,
         "author_username": data.author_username,
         "author_profile_url": data.author_profile_url,
         "sender_username": data.sender_username,
@@ -1728,6 +1769,20 @@ def _job_log_context(job: dict) -> dict:
 def _job_interaction_type(job: dict) -> str:
     interaction_type = str(job.get("interaction_type") or "private_message").strip().lower()
     return interaction_type if interaction_type in {"private_message", "instagram_comment"} else "private_message"
+
+
+def _salesbot_id_for_channel(channel: str | None) -> int:
+    config = get_config()
+    normalized_channel = str(channel or "").strip().lower()
+    if normalized_channel == "instagram":
+        salesbot_id = config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
+    elif normalized_channel == "whatsapp":
+        salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
+    else:
+        raise KommoAPIError("Unsupported Kommo private-message channel")
+    if not isinstance(salesbot_id, int) or isinstance(salesbot_id, bool) or salesbot_id <= 0:
+        raise KommoAPIError(f"Kommo Salesbot ID is not configured for {normalized_channel}")
+    return salesbot_id
 
 
 def _job_public_comment_context(job: dict) -> dict:

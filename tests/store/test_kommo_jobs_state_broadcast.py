@@ -413,6 +413,7 @@ async def test_duplicate_callback_prevention(monkeypatch):
     assert claim_values["salesbot_token_jti"] == "token-id"
     assert claim_values["entity_id"] == "100"
     assert claim_values["interaction_type"] == "private_message"
+    assert claim_values["expected_channel"] is None
     assert "lead_id" not in claim_values
     assert "contact_id" not in claim_values
     assert "return_url = :return_url" in mock_db.fetch_one.await_args_list[1].args[0]
@@ -446,6 +447,7 @@ async def test_salesbot_callback_uses_signed_lead_identity(monkeypatch):
     assert values["entity_type"] == "leads"
     assert values["entity_id"] == "100"
     assert values["interaction_type"] == "private_message"
+    assert values["expected_channel"] is None
     assert "lead_id" not in values
     assert "contact_id" not in values
 
@@ -470,6 +472,7 @@ async def test_salesbot_callback_uses_signed_contact_identity(monkeypatch):
     assert values["entity_type"] == "contacts"
     assert values["entity_id"] == "200"
     assert values["interaction_type"] == "private_message"
+    assert values["expected_channel"] is None
     assert "lead_id" not in values
     assert "contact_id" not in values
 
@@ -802,6 +805,7 @@ async def test_valid_lead_callback_uses_exact_update_bind_parameters(monkeypatch
         "salesbot_user_id": "456",
         "salesbot_client_uuid": "client-uuid",
         "interaction_type": "private_message",
+        "expected_channel": None,
         "author_username": None,
         "author_profile_url": None,
         "sender_username": None,
@@ -844,6 +848,7 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
         "salesbot_user_id",
         "salesbot_client_uuid",
         "interaction_type",
+        "expected_channel",
         "author_username",
         "author_profile_url",
         "sender_username",
@@ -853,6 +858,47 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
     assert values["entity_id"] == "200"
     assert values["widget_contact_id"] == "200"
     assert values["interaction_type"] == "private_message"
+    assert values["expected_channel"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expected_channel", "waiting_channel"),
+    [("instagram", "whatsapp"), ("whatsapp", "instagram")],
+)
+async def test_salesbot_callback_cannot_consume_other_channel_job(
+    monkeypatch,
+    caplog,
+    expected_channel,
+    waiting_channel,
+):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(
+        side_effect=[None, {"id": "waiting-job", "channel": waiting_channel}]
+    )
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    with caplog.at_level("WARNING", logger="app.integrations.kommo.jobs"):
+        result = await jobs.persist_salesbot_callback(
+            SalesbotWidgetData(lead_id="100", expected_channel=expected_channel),
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            {
+                "iat": 123456,
+                "account_id": 123,
+                "client_uid": "client-uuid",
+                "entity_type": "leads",
+                "entity_id": "100",
+            },
+        )
+
+    assert result == {"status": "ignored", "reason": "expected_channel_mismatch"}
+    claim_query, claim_values = mock_db.fetch_one.await_args_list[0].args
+    assert "candidate.channel = CAST(:expected_channel AS text)" in claim_query
+    assert claim_values["expected_channel"] == expected_channel
+    assert "reason=expected_channel_mismatch" in caplog.text
+    assert "https://" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -961,7 +1007,13 @@ async def test_salesbot_launch_race_preserves_ready_callback(monkeypatch):
     monkeypatch.setattr(
         jobs,
         "get_config",
-        lambda: SimpleNamespace(channel_backend="kommo", kommo_ai_active_enum_id=1, kommo_salesbot_id=555),
+        lambda: SimpleNamespace(
+            channel_backend="kommo",
+            kommo_ai_active_enum_id=1,
+            kommo_instagram_dm_salesbot_id=555,
+            kommo_whatsapp_salesbot_id=556,
+            kommo_salesbot_id=557,
+        ),
     )
     monkeypatch.setattr(jobs, "ensure_ai_mode_initialized", AsyncMock(return_value=(1, False)))
     monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
@@ -979,7 +1031,8 @@ async def test_salesbot_launch_race_preserves_ready_callback(monkeypatch):
     client = MagicMock()
     client.get_lead = AsyncMock(return_value={"id": 100})
 
-    async def run_salesbot(_entity_id, _entity_type):
+    async def run_salesbot(_entity_id, _entity_type, salesbot_id):
+        assert salesbot_id == 556
         race_db.status_when_run_started = race_db.status
         race_db.status = "ready"
         race_db.ready_count += 1
@@ -1066,6 +1119,15 @@ async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkey
     safety_db = _LaunchSafetyDB(comment_match=None)
     safety_db.get_settings = AsyncMock(return_value={"ai_enabled": True})
     monkeypatch.setattr(jobs, "db", safety_db)
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_instagram_dm_salesbot_id=701,
+            kommo_whatsapp_salesbot_id=702,
+            kommo_salesbot_id=700,
+        ),
+    )
     monkeypatch.setattr(jobs, "ensure_ai_mode_initialized", AsyncMock(return_value=(1, False)))
     monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock(return_value=None))
     monkeypatch.setattr(jobs, "_reactivate_expired_escalation_if_needed", AsyncMock(return_value=1))
@@ -1098,8 +1160,59 @@ async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkey
         }
     )
 
-    client.run_salesbot.assert_awaited_once_with("100", "leads")
+    client.run_salesbot.assert_awaited_once_with("100", "leads", 701)
     assert not any(call[1].get("last_error") == "superseded_by_instagram_comment" for call in safety_db.execute_calls)
+
+
+@pytest.mark.parametrize(
+    ("channel", "instagram_id", "whatsapp_id", "fallback_id", "expected"),
+    [
+        ("instagram", 701, 702, 700, 701),
+        ("whatsapp", 701, 702, 700, 702),
+        ("instagram", None, 702, 700, 700),
+        ("whatsapp", 701, None, 700, 700),
+    ],
+)
+def test_private_message_salesbot_id_routing(
+    monkeypatch,
+    channel,
+    instagram_id,
+    whatsapp_id,
+    fallback_id,
+    expected,
+):
+    from app.integrations.kommo import jobs
+
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_instagram_dm_salesbot_id=instagram_id,
+            kommo_whatsapp_salesbot_id=whatsapp_id,
+            kommo_salesbot_id=fallback_id,
+        ),
+    )
+
+    assert jobs._salesbot_id_for_channel(channel) == expected
+
+
+@pytest.mark.parametrize("channel", ["instagram", "whatsapp"])
+def test_private_message_salesbot_id_routing_requires_channel_configuration(monkeypatch, channel):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.client import KommoAPIError
+
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_instagram_dm_salesbot_id=None,
+            kommo_whatsapp_salesbot_id=None,
+            kommo_salesbot_id=None,
+        ),
+    )
+
+    with pytest.raises(KommoAPIError, match=f"not configured for {channel}"):
+        jobs._salesbot_id_for_channel(channel)
 
 
 @pytest.mark.asyncio

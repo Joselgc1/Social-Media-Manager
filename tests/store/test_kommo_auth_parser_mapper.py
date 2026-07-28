@@ -398,9 +398,14 @@ def test_missing_optional_and_unknown_events_are_safe():
 
 
 def test_salesbot_widget_data_ignores_unresolved_placeholders():
-    data = SalesbotWidgetData(lead_id="{{lead.id}}", contact_id="42")
+    data = SalesbotWidgetData(
+        lead_id="{{lead.id}}",
+        contact_id="42",
+        expected_channel="{{expected.channel}}",
+    )
     assert data.lead_id is None
     assert data.contact_id == "42"
+    assert data.expected_channel is None
 
 
 def test_origin_mapping():
@@ -483,7 +488,8 @@ def test_url_buttons_are_included_in_salesbot_message():
 
 
 @pytest.mark.asyncio
-async def test_salesbot_launch_request_and_accepted_response(monkeypatch):
+@pytest.mark.parametrize("salesbot_id", [555, 777])
+async def test_salesbot_launch_request_and_accepted_response(monkeypatch, salesbot_id):
     from app.integrations.kommo.client import KommoClient
 
     recorded = {}
@@ -508,13 +514,13 @@ async def test_salesbot_launch_request_and_accepted_response(monkeypatch):
             return _Response()
 
     monkeypatch.setattr("app.integrations.kommo.client.httpx.AsyncClient", _Client)
-    monkeypatch.setattr(
-        "app.integrations.kommo.client.get_config",
-        lambda: SimpleNamespace(kommo_salesbot_id=555),
+    await KommoClient(subdomain="acme", access_token="token").run_salesbot(
+        100,
+        "leads",
+        salesbot_id,
     )
-    await KommoClient(subdomain="acme", access_token="token").run_salesbot(100, "leads")
     assert recorded["method"] == "POST"
-    assert recorded["url"] == "https://acme.kommo.com/api/v4/bots/555/run"
+    assert recorded["url"] == f"https://acme.kommo.com/api/v4/bots/{salesbot_id}/run"
     assert recorded["json"] == {"entity_id": 100, "entity_type": "leads"}
 
 

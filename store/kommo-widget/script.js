@@ -87,12 +87,17 @@ define(['jquery'], function ($) {
       return null;
     }
 
-    function interactionTypeForHandler(handlerCode) {
+    function handlerMetadata(handlerCode) {
       if (handlerCode === 'kommo_ai_instagram_comment') {
-        return 'instagram_comment';
+        return { interactionType: 'instagram_comment', expectedChannel: null };
       }
-
-      return 'private_message';
+      if (handlerCode === 'kommo_ai_instagram_dm') {
+        return { interactionType: 'private_message', expectedChannel: 'instagram' };
+      }
+      if (handlerCode === 'kommo_ai_whatsapp') {
+        return { interactionType: 'private_message', expectedChannel: 'whatsapp' };
+      }
+      throw new Error('Unsupported Salesbot widget block.');
     }
 
     this.callbacks = {
@@ -160,7 +165,8 @@ define(['jquery'], function ($) {
           unwrapSettingValue(blockParams.webhook_url)
         );
         const webhookUrl = blockUrl || getInstalledBackendUrl();
-        const interactionType = interactionTypeForHandler(handlerCode);
+        const metadata = handlerMetadata(handlerCode);
+        const interactionType = metadata.interactionType;
 
         if (!webhookUrl) {
           console.warn('Kommo Salesbot widget configuration is invalid', {
@@ -179,6 +185,10 @@ define(['jquery'], function ($) {
           origin: '{{origin}}',
           interaction_type: interactionType
         };
+
+        if (metadata.expectedChannel) {
+          requestData.expected_channel = metadata.expectedChannel;
+        }
 
         if (interactionType === 'instagram_comment') {
           Object.assign(requestData, {

@@ -308,7 +308,9 @@ Click **"+ Add Credential"** and add each one:
 | `KOMMO_ACCESS_TOKEN` | Kommo mode only |
 | `KOMMO_INTEGRATION_ID` | Kommo mode only |
 | `KOMMO_INTEGRATION_SECRET` | Kommo mode only |
-| `KOMMO_SALESBOT_ID` | Kommo private-message Salesbot |
+| `KOMMO_INSTAGRAM_DM_SALESBOT_ID` | Preferred Instagram DM Salesbot |
+| `KOMMO_WHATSAPP_SALESBOT_ID` | Preferred WhatsApp Salesbot |
+| `KOMMO_SALESBOT_ID` | Temporary fallback for either private-message channel |
 | `KOMMO_WEBHOOK_SECRET` | Kommo mode only |
 | `KOMMO_AI_MODE_FIELD_ID` | Kommo mode only |
 | `KOMMO_AI_ACTIVE_ENUM_ID` | Kommo mode only |

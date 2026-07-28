@@ -67,7 +67,13 @@ def _json_body(**overrides):
     body = {
         "token": _token(),
         "return_url": RETURN_URL,
-        "data": {"message": "Hola secreta", "lead_id": "100", "contact_id": "200", "origin": "whatsapp"},
+        "data": {
+            "message": "Hola secreta",
+            "lead_id": "100",
+            "contact_id": "200",
+            "origin": "whatsapp",
+            "expected_channel": "whatsapp",
+        },
     }
     body.update(overrides)
     return body
@@ -81,6 +87,7 @@ async def test_salesbot_callback_accepts_json_body(client):
     callback_data = kommo.persist_salesbot_callback.await_args.args[0]
     assert callback_data.lead_id == "100"
     assert callback_data.message == "Hola secreta"
+    assert callback_data.expected_channel == "whatsapp"
 
 
 @pytest.mark.asyncio

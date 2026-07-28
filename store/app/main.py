@@ -134,7 +134,6 @@ def _validate_startup_config(config):
                 "KOMMO_ACCESS_TOKEN": config.kommo_access_token,
                 "KOMMO_INTEGRATION_ID": config.kommo_integration_id,
                 "KOMMO_INTEGRATION_SECRET": config.kommo_integration_secret,
-                "KOMMO_SALESBOT_ID": config.kommo_salesbot_id,
                 "KOMMO_WEBHOOK_SECRET": config.kommo_webhook_secret,
                 "KOMMO_AI_MODE_FIELD_ID": config.kommo_ai_mode_field_id,
                 "KOMMO_AI_ACTIVE_ENUM_ID": config.kommo_ai_active_enum_id,
@@ -146,7 +145,21 @@ def _validate_startup_config(config):
                 errors.append(
                     "Kommo mode has missing or placeholder settings: " + ", ".join(missing_kommo)
                 )
-            else:
+            instagram_salesbot_id = (
+                config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
+            )
+            whatsapp_salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
+            if not _is_configured(instagram_salesbot_id):
+                errors.append(
+                    "Kommo Instagram DMs require KOMMO_INSTAGRAM_DM_SALESBOT_ID "
+                    "or fallback KOMMO_SALESBOT_ID."
+                )
+            if not _is_configured(whatsapp_salesbot_id):
+                errors.append(
+                    "Kommo WhatsApp requires KOMMO_WHATSAPP_SALESBOT_ID "
+                    "or fallback KOMMO_SALESBOT_ID."
+                )
+            if not missing_kommo:
                 try:
                     kommo_account_hostname(config.kommo_subdomain)
                 except KommoAuthError as e:
@@ -183,13 +196,16 @@ def _log_kommo_startup_config_summary(config) -> None:
     logger.info(
         "Kommo startup config summary: channel_backend=%s kommo_subdomain=%s "
         "integration_id_present=%s integration_secret_present=%s integration_secret_length=%s "
-        "salesbot_id=%s",
+        "instagram_dm_salesbot_configured=%s whatsapp_salesbot_configured=%s "
+        "legacy_salesbot_fallback_configured=%s",
         config.channel_backend,
         config.kommo_subdomain or "",
         bool(config.kommo_integration_id),
         bool(config.kommo_integration_secret),
         len(config.kommo_integration_secret or ""),
-        config.kommo_salesbot_id,
+        bool(config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id),
+        bool(config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id),
+        bool(config.kommo_salesbot_id),
     )
 
 

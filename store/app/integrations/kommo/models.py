@@ -114,6 +114,7 @@ class SalesbotWidgetData(BaseModel):
     sender_username: str | None = None
     sender_profile_url: str | None = None
     interaction_type: KommoInteractionType | None = None
+    expected_channel: KommoChannel | None = None
     post_id: str | None = None
     comment_id: str | None = None
     parent_comment_id: str | None = None
@@ -178,7 +179,16 @@ class SalesbotWidgetData(BaseModel):
             return None
         if text in {"private_message", "instagram_comment"}:
             return text
-        return None
+
+    @field_validator("expected_channel", mode="before")
+    @classmethod
+    def _normalize_expected_channel(cls, value):
+        if value in ("", None):
+            return None
+        text = str(value).strip().lower()
+        if text.startswith("{{") and text.endswith("}}"):
+            return None
+        return text
 
 
 class SalesbotWidgetRequest(BaseModel):

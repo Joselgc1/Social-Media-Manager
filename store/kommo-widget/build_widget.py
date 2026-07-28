@@ -39,11 +39,18 @@ INCLUDE = [
 ]
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_IMAGE_BYTES = 300 * 1024
-EXPECTED_WIDGET_VERSION = "1.2.9"
+EXPECTED_WIDGET_VERSION = "1.2.10"
 REQUIRED_I18N_KEYS = {
     "widget": {"name", "short_description", "description", "tour_description"},
     "settings": {"backend_url"},
-    "salesbot": {"private_message_handler_name", "instagram_comment_handler_name", "webhook_url", "success_exit", "fail_exit"},
+    "salesbot": {
+        "instagram_dm_handler_name",
+        "whatsapp_handler_name",
+        "instagram_comment_handler_name",
+        "webhook_url",
+        "success_exit",
+        "fail_exit",
+    },
 }
 REQUIRED_LOCATIONS = {"settings", "salesbot_designer"}
 UNRESOLVED_PLACEHOLDERS = (WIDGET_CODE_PLACEHOLDER, "YOUR_WIDGET_CODE", "YOUR-STORE-DOMAIN")
@@ -129,7 +136,7 @@ def _validate_manifest(manifest: dict, widget_code: str) -> None:
     expected_logo = f"/widgets/{widget_code}/images/logo_small.png"
     if salesbot.get("logo") != expected_logo:
         raise WidgetBuildError(f"salesbot_designer.logo must be {expected_logo}")
-    for handler_code in ("kommo_ai_private_message", "kommo_ai_instagram_comment"):
+    for handler_code in ("kommo_ai_instagram_dm", "kommo_ai_whatsapp", "kommo_ai_instagram_comment"):
         handler = salesbot.get(handler_code) or {}
         webhook = (handler.get("settings") or {}).get("webhook_url") or {}
         if webhook.get("name") != "salesbot.webhook_url" or webhook.get("default_value") != "" or webhook.get("type") != "url" or webhook.get("manual") is not True:
@@ -157,7 +164,7 @@ def _validate_manifest_localization_keys(manifest: dict) -> None:
         manifest.get("tour", {}).get("tour_description"),
         manifest.get("settings", {}).get("backend_url", {}).get("name"),
     }
-    for handler_code in ("kommo_ai_private_message", "kommo_ai_instagram_comment"):
+    for handler_code in ("kommo_ai_instagram_dm", "kommo_ai_whatsapp", "kommo_ai_instagram_comment"):
         handler = manifest.get("salesbot_designer", {}).get(handler_code, {}) or {}
         expected_paths.add(handler.get("name"))
         expected_paths.add(((handler.get("settings") or {}).get("webhook_url") or {}).get("name"))
