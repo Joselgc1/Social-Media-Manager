@@ -39,6 +39,10 @@ _REFRESH_BACKOFF_MAX_SECONDS = 900
 _IMAGE_FORMULA_RE = re.compile(r'=\s*IMAGE\s*\(\s*"([^"]+)"', re.IGNORECASE)
 _HYPERLINK_FORMULA_RE = re.compile(r'=\s*HYPERLINK\s*\(\s*"([^"]+)"', re.IGNORECASE)
 _SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]
+_SIZE_SUFFIX_RE = re.compile(
+    r"^(?P<base>.+)[-_](?P<size>xxs|xs|s|m|l|xl|xxl|xxxl)$",
+    re.IGNORECASE,
+)
 _INVENTORY_LEDGER_TITLE = "_inventory_mutations"
 _INVENTORY_LEDGER_HEADERS = [
     "Operation ID",
@@ -258,14 +262,17 @@ def group_catalog_products(products: list[dict]) -> list[dict]:
     - variants: size-specific entries
     - size_skus: mapping of size -> exact sellable SKU
     """
+    products = products or []
+    derived_product_skus = get_confirmed_derived_product_skus(products)
     grouped: dict[str, dict] = {}
 
-    for product in products or []:
-        key = _catalog_group_key(product)
+    for product in products:
         sizes = get_product_sizes(product)
         product_stock = _safe_int(product.get("stock", 0))
         product_sku = str(product.get("sku", "")).strip()
-        parent_sku = str(product.get("parent_sku", "")).strip() or _derived_product_sku(product_sku)
+        explicit_parent_sku = str(product.get("parent_sku", "")).strip()
+        parent_sku = explicit_parent_sku or derived_product_skus.get(product_sku) or product_sku
+        key = _catalog_group_key(product, derived_product_skus)
 
         entry = grouped.setdefault(key, {
             "sku": parent_sku or product_sku,
@@ -337,22 +344,40 @@ def _normalize_google_drive_url(url: str) -> str:
     return f"https://drive.google.com/uc?export=view&id={file_id}"
 
 
-def _catalog_group_key(product: dict) -> str:
+def _catalog_group_key(product: dict, derived_product_skus: dict[str, str]) -> str:
     parent_sku = str(product.get("parent_sku", "")).strip()
     sku = str(product.get("sku", "")).strip()
     if parent_sku:
         return parent_sku.lower()
     if sku:
-        return _derived_product_sku(sku).lower()
+        return derived_product_skus.get(sku, sku).lower()
     return "|".join([
         str(product.get("product_name", "")).strip().lower(),
         str(product.get("category", "")).strip().lower(),
     ])
 
 
-def _derived_product_sku(sku: str) -> str:
-    """Derive a product-level SKU while exact variant SKUs remain unchanged elsewhere."""
-    return re.sub(r"[-_](xxs|xs|s|m|l|xl|xxl|xxxl)$", "", sku, flags=re.IGNORECASE)
+def get_confirmed_derived_product_skus(products: list[dict]) -> dict[str, str]:
+    """Map exact SKUs to a derived base only for confirmed parentless size groups."""
+    candidates: dict[str, list[tuple[str, str, str]]] = {}
+    for product in products or []:
+        if str(product.get("parent_sku", "")).strip():
+            continue
+        sku = str(product.get("sku", "")).strip()
+        sizes = get_product_sizes(product)
+        match = _SIZE_SUFFIX_RE.fullmatch(sku)
+        if not match or len(sizes) != 1 or match.group("size").upper() != sizes[0]:
+            continue
+        base_sku = match.group("base")
+        candidates.setdefault(base_sku.lower(), []).append((sku, base_sku, sizes[0]))
+
+    confirmed: dict[str, str] = {}
+    for rows in candidates.values():
+        if len({sku for sku, _, _ in rows}) < 2 or len({size for _, _, size in rows}) < 2:
+            continue
+        canonical_base = rows[0][1]
+        confirmed.update({sku: canonical_base for sku, _, _ in rows})
+    return confirmed
 
 
 def _safe_int(value) -> int:

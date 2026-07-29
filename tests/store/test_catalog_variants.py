@@ -69,6 +69,47 @@ def test_group_catalog_products_derives_product_sku_when_parent_is_missing():
     assert [variant["sku"] for variant in grouped[0]["variants"]] == ["SET-002-S", "SET-002-M"]
 
 
+def test_group_catalog_products_keeps_standalone_size_suffixed_sku():
+    grouped = group_catalog_products([{
+        "sku": "BODY-M",
+        "parent_sku": "",
+        "product_name": "Body clásico",
+        "category": "Bodies",
+        "size": "M",
+        "price_usd": 25,
+        "stock": 3,
+    }])
+
+    assert grouped[0]["sku"] == "BODY-M"
+    assert grouped[0]["parent_sku"] == "BODY-M"
+    assert grouped[0]["variants"][0]["sku"] == "BODY-M"
+
+
+def test_group_catalog_products_does_not_strip_suffix_that_differs_from_row_size():
+    grouped = group_catalog_products([
+        {
+            "sku": "SET-003-S",
+            "parent_sku": "",
+            "product_name": "Set cruzado",
+            "category": "Sets",
+            "size": "M",
+            "price_usd": 30,
+            "stock": 2,
+        },
+        {
+            "sku": "SET-003-M",
+            "parent_sku": "",
+            "product_name": "Set cruzado",
+            "category": "Sets",
+            "size": "S",
+            "price_usd": 30,
+            "stock": 2,
+        },
+    ])
+
+    assert {product["sku"] for product in grouped} == {"SET-003-S", "SET-003-M"}
+
+
 def test_count_grouped_catalog_products_counts_parent_skus_not_variants():
     count = count_grouped_catalog_products([
         {
@@ -184,6 +225,44 @@ def test_normalize_order_items_resolves_parent_sku_to_variant(monkeypatch):
     assert items[0]["sku"] == "SET-001-M"
     assert items[0]["size"] == "M"
     assert items[0]["unit_price"] == 35.0
+
+
+def test_normalize_order_items_resolves_confirmed_derived_sku_without_product_name(monkeypatch):
+    monkeypatch.setattr("app.crm.orders.get_cached_catalog", lambda: [
+        {
+            "sku": "SET-002-S",
+            "parent_sku": "",
+            "product_name": "",
+            "size": "S",
+            "sizes": "S",
+            "price_usd": 30,
+            "stock": 4,
+        },
+        {
+            "sku": "SET-002-M",
+            "parent_sku": "",
+            "product_name": "",
+            "size": "M",
+            "sizes": "M",
+            "price_usd": 32,
+            "stock": 7,
+        },
+    ])
+
+    items = _normalize_order_items([{
+        "product_name": "",
+        "sku": "SET-002",
+        "size": "M",
+        "quantity": 2,
+    }])
+
+    assert items == [{
+        "product_name": "",
+        "sku": "SET-002-M",
+        "size": "M",
+        "quantity": 2,
+        "unit_price": 32.0,
+    }]
 
 
 def test_catalog_pdf_rows_strip_stock_and_variant_fields():

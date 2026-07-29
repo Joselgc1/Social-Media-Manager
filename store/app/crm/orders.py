@@ -17,6 +17,7 @@ from app.catalog.sheets import (
     deduct_stock,
     ensure_fresh_catalog,
     get_cached_catalog,
+    get_confirmed_derived_product_skus,
     get_product_sizes,
     inventory_operation_applied,
     restore_stock,
@@ -207,6 +208,19 @@ def _resolve_catalog_variant(sku: str, product_name: str, size: str) -> dict | N
         )
         if parent_match:
             return parent_match
+
+        derived_product_skus = get_confirmed_derived_product_skus(catalog)
+        derived_match = next(
+            (
+                product for product in catalog
+                if not str(product.get("parent_sku", "")).strip()
+                and derived_product_skus.get(str(product.get("sku", "")).strip()) == normalized_sku
+                and _catalog_variant_matches_size(product, normalized_size)
+            ),
+            None,
+        )
+        if derived_match:
+            return derived_match
 
     if normalized_name:
         name_matches = [
