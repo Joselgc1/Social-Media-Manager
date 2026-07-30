@@ -378,7 +378,7 @@ async def test_meta_context_scheduled_function_defensively_skips_when_disabled(m
 
 
 @pytest.mark.asyncio
-async def test_meta_context_scheduler_processes_wait_deadlines_before_enrichment(monkeypatch):
+async def test_meta_context_scheduler_enriches_before_final_wait_deadline_check(monkeypatch):
     from app.broadcast import scheduler
     from app.integrations.meta_context import correlation, service
 
@@ -405,7 +405,7 @@ async def test_meta_context_scheduler_processes_wait_deadlines_before_enrichment
 
     await scheduler._process_meta_context_jobs()
 
-    assert calls == [("waiting", 10), ("pending", 10)]
+    assert calls == [("pending", 10), ("waiting", 10)]
 
 
 @pytest.mark.asyncio

@@ -549,6 +549,71 @@ async def test_public_instagram_comment_price_uses_post_context_without_llm(engi
 
 
 @pytest.mark.asyncio
+async def test_resolved_instagram_mapping_uses_injected_product_sku(engine_harness):
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Precio?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_sku": "PJ-001",
+            },
+        },
+    )
+
+    assert response["text"] == "Pijama satén azul cuesta $28."
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_instagram_mapping_ignores_caption_product_guess(engine_harness):
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Disponible?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "timed_out",
+                "post_caption": "Nueva Pijama satén azul disponible",
+            },
+        },
+    )
+
+    assert response["text"] == (
+        "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
+    )
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolved_mapping_never_falls_back_to_callback_parent_sku(engine_harness):
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Precio?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_sku": "UNKNOWN-MAPPED-SKU",
+                "parent_sku": "PJ-001",
+            },
+        },
+    )
+
+    assert response["text"] == (
+        "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
+    )
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_public_instagram_comment_stock_uses_post_caption_context_without_stock_count(engine_harness):
     response = await engine.generate_response(
         "instagram",

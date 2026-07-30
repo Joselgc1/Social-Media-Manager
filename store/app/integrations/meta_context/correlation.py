@@ -175,7 +175,7 @@ async def process_waiting_context_jobs(limit: int = 10) -> dict:
     """Make one last correlation attempt, then release due jobs to safe fallback."""
     rows = await db.fetch_all(
         """
-        SELECT id
+        SELECT id, context_status, meta_context_event_id
         FROM kommo_message_jobs
         WHERE status = 'waiting_for_context'
         ORDER BY context_deadline_at ASC, created_at ASC
@@ -187,8 +187,20 @@ async def process_waiting_context_jobs(limit: int = 10) -> dict:
     timed_out = 0
     for row in rows:
         job_id = str(row["id"])
-        result = await correlate_kommo_job(job_id)
-        matched += int(result.get("status") == "matched")
+        event_id = str(row["meta_context_event_id"]) if row["meta_context_event_id"] else None
+        try:
+            newly_matched = False
+            if row["context_status"] != "matched":
+                result = await correlate_kommo_job(job_id)
+                newly_matched = result.get("status") == "matched"
+                matched += int(newly_matched)
+                event_id = result.get("event_id") or event_id
+            if event_id:
+                from app.integrations.meta_context.service import resolve_and_release_matched_job
+
+                await resolve_and_release_matched_job(event_id, force=newly_matched)
+        except Exception:
+            logger.exception("Meta context mapping gate failed: job_id=%s", job_id)
         timed_out += int(await _release_context_job_if_due(job_id))
 
     expired = await db.execute(
@@ -240,6 +252,8 @@ async def _release_context_job_if_due(job_id: str) -> bool:
         UPDATE kommo_message_jobs
         SET status = 'ready',
             context_status = 'timed_out',
+            public_comment_context = COALESCE(public_comment_context, '{}'::jsonb)
+                || jsonb_build_object('mapping_status', 'timed_out'),
             last_error = 'Meta Instagram context deadline elapsed',
             updated_at = NOW()
         WHERE id = :id
@@ -257,8 +271,23 @@ async def _release_context_job_if_due(job_id: str) -> bool:
 
 async def schedule_context_job_processing(job_id: str) -> None:
     """Accelerate correlation while PostgreSQL and the scheduler remain authoritative."""
-    result = await correlate_kommo_job(job_id)
-    if result.get("status") != "matched":
+    try:
+        result = await correlate_kommo_job(job_id)
+    except Exception:
+        logger.exception("Meta context correlation accelerator failed: job_id=%s", job_id)
+        result = {"status": "pending"}
+    release_result = {"status": "waiting"}
+    if result.get("status") == "matched":
+        from app.integrations.meta_context.service import resolve_and_release_matched_job
+
+        try:
+            release_result = await resolve_and_release_matched_job(
+                result["event_id"],
+                force=True,
+            )
+        except Exception:
+            logger.exception("Meta context mapping gate failed: job_id=%s", job_id)
+    if release_result.get("status") != "ready":
         await asyncio.sleep(get_config().meta_context_wait_seconds + 0.2)
         await process_waiting_context_jobs(limit=10)
     from app.integrations.kommo.jobs import process_ready_jobs
@@ -483,7 +512,6 @@ async def _persist_match(candidate: Candidate) -> bool:
             context_status = 'matched',
             context_correlation_score = :score,
             public_comment_context = COALESCE(public_comment_context, '{}'::jsonb) || CAST(:context AS jsonb),
-            status = 'ready',
             last_error = NULL,
             updated_at = NOW()
         WHERE id = :job_id

@@ -46,7 +46,6 @@ class _CorrelationDB:
             if job["status"] != "waiting_for_context" or job.get("meta_context_event_id"):
                 return None
             job.update(
-                status="ready",
                 context_status="matched",
                 meta_context_event_id=values["event_id"],
                 context_correlation_score=values["score"],
@@ -173,7 +172,7 @@ async def test_meta_first_correlation_merges_context_and_releases_job(monkeypatc
     assert result["status"] == "matched"
     assert fake.events["event-1"]["matched_kommo_job_id"] == "job-1"
     matched_job = fake.jobs["job-1"]
-    assert matched_job["status"] == "ready"
+    assert matched_job["status"] == "waiting_for_context"
     assert matched_job["context_status"] == "matched"
     assert matched_job["public_comment_context"] == {
         "comment_id": "meta-comment",
@@ -240,7 +239,7 @@ async def test_conflicting_known_usernames_reject_candidate(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_media_id_without_permalink_can_release_waiting_job(monkeypatch):
+async def test_media_id_without_permalink_can_correlate_while_job_waits(monkeypatch):
     event = _event()
     event["media_permalink"] = None
     job = _job()
@@ -249,7 +248,7 @@ async def test_media_id_without_permalink_can_release_waiting_job(monkeypatch):
     result = await correlation.correlate_kommo_job("job-1")
 
     assert result["status"] == "matched"
-    assert fake.jobs["job-1"]["status"] == "ready"
+    assert fake.jobs["job-1"]["status"] == "waiting_for_context"
 
 
 @pytest.mark.asyncio
@@ -375,7 +374,15 @@ async def test_context_deadline_releases_job_to_safe_ready_fallback(monkeypatch,
     from app.integrations.meta_context import correlation
 
     mock_db = AsyncMock()
-    mock_db.fetch_all = AsyncMock(return_value=[{"id": "job-1"}])
+    mock_db.fetch_all = AsyncMock(
+        return_value=[
+            {
+                "id": "job-1",
+                "context_status": "pending",
+                "meta_context_event_id": None,
+            }
+        ]
+    )
     mock_db.fetch_one = AsyncMock(return_value={"id": "job-1"})
     mock_db.execute = AsyncMock(return_value="UPDATE 0")
     monkeypatch.setattr(correlation, "db", mock_db)
@@ -392,5 +399,35 @@ async def test_context_deadline_releases_job_to_safe_ready_fallback(monkeypatch,
     timeout_query = mock_db.fetch_one.await_args.args[0]
     assert "status = 'ready'" in timeout_query
     assert "context_status = 'timed_out'" in timeout_query
+    assert "mapping_status', 'timed_out'" in timeout_query
     assert "WHERE id = :id" in timeout_query
     assert "meta_kommo_correlation_timed_out" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mapping_gate_failure_cannot_block_safe_timeout(monkeypatch):
+    from app.integrations.meta_context import correlation, service
+
+    mock_db = AsyncMock()
+    mock_db.fetch_all = AsyncMock(
+        return_value=[
+            {
+                "id": "job-1",
+                "context_status": "matched",
+                "meta_context_event_id": "event-1",
+            }
+        ]
+    )
+    mock_db.fetch_one = AsyncMock(return_value={"id": "job-1"})
+    mock_db.execute = AsyncMock(return_value="UPDATE 0")
+    monkeypatch.setattr(correlation, "db", mock_db)
+    monkeypatch.setattr(
+        service,
+        "resolve_and_release_matched_job",
+        AsyncMock(side_effect=RuntimeError("mapping database unavailable")),
+    )
+
+    result = await correlation.process_waiting_context_jobs(limit=10)
+
+    assert result["timed_out"] == 1
+    assert "mapping_status', 'timed_out'" in mock_db.fetch_one.await_args.args[0]

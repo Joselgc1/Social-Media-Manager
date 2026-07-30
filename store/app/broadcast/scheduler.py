@@ -355,8 +355,8 @@ async def _process_meta_context_jobs():
         from app.integrations.meta_context.correlation import process_waiting_context_jobs
         from app.integrations.meta_context.service import process_pending_context_events
 
-        await process_waiting_context_jobs(limit=10)
         await process_pending_context_events(limit=10)
+        await process_waiting_context_jobs(limit=10)
     except Exception:
         logger.exception("Meta Instagram context processor failed")
 

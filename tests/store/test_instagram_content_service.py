@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from app.instagram_content.service import InstagramContentUrlError, normalize_instagram_url
 
@@ -40,3 +42,133 @@ def test_normalizes_reel_url_and_removes_query_string():
 def test_rejects_invalid_domains_authority_and_paths(url):
     with pytest.raises(InstagramContentUrlError):
         normalize_instagram_url(url)
+
+
+@pytest.mark.asyncio
+async def test_resolves_active_product_mapping_by_media_id(monkeypatch):
+    from app.instagram_content import service
+
+    fetch_all = AsyncMock(
+        return_value=[
+            {
+                "content_id": "content-1",
+                "media_id": "media-1",
+                "normalized_permalink": None,
+                "product_sku": "SKU-1",
+                "display_order": 0,
+            }
+        ]
+    )
+    monkeypatch.setattr(service.db, "fetch_all", fetch_all)
+
+    result = await service.resolve_content_product_mapping(
+        media_id="media-1",
+        permalink=None,
+    )
+
+    assert result == {
+        "status": "resolved",
+        "content_id": "content-1",
+        "product_sku": "SKU-1",
+    }
+    query, values = fetch_all.await_args.args
+    assert "content.status = 'active'" in query
+    assert values["media_id"] == "media-1"
+    assert values["normalized_permalink"] is None
+
+
+@pytest.mark.asyncio
+async def test_resolves_active_product_mapping_by_normalized_permalink(monkeypatch):
+    from app.instagram_content import service
+
+    fetch_all = AsyncMock(
+        return_value=[
+            {
+                "content_id": "content-2",
+                "media_id": None,
+                "normalized_permalink": "https://www.instagram.com/p/ABC123/",
+                "product_sku": "SKU-2",
+                "display_order": 0,
+            }
+        ]
+    )
+    monkeypatch.setattr(service.db, "fetch_all", fetch_all)
+
+    result = await service.resolve_content_product_mapping(
+        media_id=None,
+        permalink="https://instagram.com/p/ABC123/?igsh=test",
+    )
+
+    assert result["status"] == "resolved"
+    assert result["product_sku"] == "SKU-2"
+    assert fetch_all.await_args.args[1]["normalized_permalink"] == (
+        "https://www.instagram.com/p/ABC123/"
+    )
+
+
+@pytest.mark.asyncio
+async def test_multiple_mapped_products_are_ambiguous(monkeypatch):
+    from app.instagram_content import service
+
+    monkeypatch.setattr(
+        service.db,
+        "fetch_all",
+        AsyncMock(
+            return_value=[
+                {
+                    "content_id": "content-1",
+                    "media_id": "media-1",
+                    "normalized_permalink": None,
+                    "product_sku": "SKU-1",
+                },
+                {
+                    "content_id": "content-1",
+                    "media_id": "media-1",
+                    "normalized_permalink": None,
+                    "product_sku": "SKU-2",
+                },
+            ]
+        ),
+    )
+
+    result = await service.resolve_content_product_mapping(
+        media_id="media-1",
+        permalink=None,
+    )
+
+    assert result == {
+        "status": "ambiguous",
+        "reason": "multiple_products",
+        "content_id": "content-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_single_mapping_with_conflicting_identifier_is_ambiguous(monkeypatch):
+    from app.instagram_content import service
+
+    monkeypatch.setattr(
+        service.db,
+        "fetch_all",
+        AsyncMock(
+            return_value=[
+                {
+                    "content_id": "content-1",
+                    "media_id": "different-media",
+                    "normalized_permalink": "https://www.instagram.com/p/ABC123/",
+                    "product_sku": "SKU-1",
+                }
+            ]
+        ),
+    )
+
+    result = await service.resolve_content_product_mapping(
+        media_id="media-1",
+        permalink="https://www.instagram.com/p/ABC123/",
+    )
+
+    assert result == {
+        "status": "ambiguous",
+        "reason": "mapping_identifier_conflict",
+        "content_id": "content-1",
+    }

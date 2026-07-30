@@ -78,6 +78,7 @@ _PUBLIC_COMMENT_CONTEXT_KEYS = {
     "media_id",
     "post_url",
     "comment_url",
+    "mapping_status",
 }
 _PUBLIC_COMMENT_STOPWORDS = {
     "con",
@@ -970,14 +971,26 @@ def _resolve_public_comment_product(integration_context: dict | None) -> dict | 
     if not context:
         return None
 
+    mapping_status = context.get("mapping_status")
+    if mapping_status in {"ambiguous", "not_found", "pending", "timed_out"}:
+        return None
+
     grouped_products = group_catalog_products(get_cached_catalog())
     if not grouped_products:
         return None
 
-    for key in ("product_sku", "parent_sku", "sku"):
+    sku_keys = ("product_sku",) if mapping_status == "resolved" else (
+        "product_sku",
+        "parent_sku",
+        "sku",
+    )
+    for key in sku_keys:
         product = _single_public_comment_match(_match_public_comment_product_by_sku(context.get(key), grouped_products))
         if product:
             return product
+
+    if mapping_status == "resolved":
+        return None
 
     for key in ("image_url", "post_image_url", "post_media_url", "media_url", "permalink"):
         product = _single_public_comment_match(_match_public_comment_product_by_image(context.get(key), grouped_products))
