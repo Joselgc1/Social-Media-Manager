@@ -467,6 +467,7 @@ async def meta_instagram_context_status():
         "graph_api_version": config.meta_graph_api_version,
         "context_wait_seconds": config.meta_context_wait_seconds,
         "match_window_seconds": config.meta_context_match_window_seconds,
+        "event_retention_hours": config.meta_context_event_retention_hours,
         **diagnostics,
     }
 

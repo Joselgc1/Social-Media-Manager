@@ -56,7 +56,7 @@ class _CorrelationDB:
         return None
 
     async def fetch_all(self, query, values=None):
-        if "FROM kommo_message_jobs" in query and "SELECT *" in query:
+        if "FROM kommo_message_jobs" in query and "SELECT job.*" in query:
             return [
                 job
                 for job in self.jobs.values()
@@ -87,7 +87,15 @@ class _CorrelationDB:
         return "UPDATE 1"
 
 
-def _event(event_id="event-1", *, text="Precio?", username="cliente", seconds=0, comment_id="meta-comment"):
+def _event(
+    event_id="event-1",
+    *,
+    text="Precio?",
+    username="cliente",
+    seconds=0,
+    comment_id="meta-comment",
+    sender_id="meta-user-id",
+):
     now = datetime.now(UTC)
     return {
         "id": event_id,
@@ -98,6 +106,7 @@ def _event(event_id="event-1", *, text="Precio?", username="cliente", seconds=0,
         "expires_at": now + timedelta(minutes=1),
         "message_text": text,
         "sender_username": username,
+        "sender_id": sender_id,
         "comment_id": comment_id,
         "parent_comment_id": "parent-1",
         "media_id": "media-1",
@@ -106,8 +115,18 @@ def _event(event_id="event-1", *, text="Precio?", username="cliente", seconds=0,
     }
 
 
-def _job(job_id="job-1", *, text="precio?", username="cliente", seconds=1, comment_id=None):
+def _job(
+    job_id="job-1",
+    *,
+    text="precio?",
+    username="cliente",
+    seconds=1,
+    correlation_seconds=None,
+    comment_id=None,
+    author_id="kommo-author-id",
+):
     now = datetime.now(UTC)
+    created_at = now + timedelta(seconds=seconds)
     context = {"comment_id": comment_id} if comment_id else {}
     return {
         "id": job_id,
@@ -116,8 +135,12 @@ def _job(job_id="job-1", *, text="precio?", username="cliente", seconds=1, comme
         "meta_context_event_id": None,
         "interaction_type": "instagram_comment",
         "channel": "instagram",
-        "created_at": now + timedelta(seconds=seconds),
+        "created_at": created_at,
+        "correlation_timestamp": now
+        + timedelta(seconds=seconds if correlation_seconds is None else correlation_seconds),
+        "correlation_timestamp_source": "salesbot_jwt_iat",
         "combined_message": text,
+        "author_id": author_id,
         "author_username": username,
         "author_profile_url": None,
         "sender_username": None,
@@ -217,7 +240,7 @@ async def test_conflicting_known_usernames_reject_candidate(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unenriched_media_event_cannot_release_waiting_job(monkeypatch):
+async def test_media_id_without_permalink_can_release_waiting_job(monkeypatch):
     event = _event()
     event["media_permalink"] = None
     job = _job()
@@ -225,8 +248,8 @@ async def test_unenriched_media_event_cannot_release_waiting_job(monkeypatch):
 
     result = await correlation.correlate_kommo_job("job-1")
 
-    assert result == {"status": "pending"}
-    assert fake.jobs["job-1"]["status"] == "waiting_for_context"
+    assert result["status"] == "matched"
+    assert fake.jobs["job-1"]["status"] == "ready"
 
 
 @pytest.mark.asyncio
@@ -239,6 +262,98 @@ async def test_exact_comment_id_can_match_when_text_differs(monkeypatch):
 
     assert result["status"] == "matched"
     assert result["score"] == 160
+
+
+@pytest.mark.asyncio
+async def test_one_matching_username_among_multiple_identity_fields_is_accepted(monkeypatch):
+    event = _event(username="matching-user")
+    job = _job(username="different-author")
+    job["sender_username"] = "matching-user"
+    job["author_profile_url"] = "https://instagram.com/another-user/"
+    correlation, _ = _install(monkeypatch, [event], [job])
+
+    result = await correlation.correlate_kommo_job("job-1")
+
+    assert result["status"] == "matched"
+    assert result["score"] == 90
+
+
+@pytest.mark.asyncio
+async def test_different_meta_sender_and_kommo_author_ids_do_not_reject_match(monkeypatch):
+    event = _event(sender_id="instagram-scoped-id")
+    job = _job(author_id="kommo-contact-author-id")
+    correlation, _ = _install(monkeypatch, [event], [job])
+
+    result = await correlation.correlate_kommo_job("job-1")
+
+    assert result["status"] == "matched"
+
+
+@pytest.mark.asyncio
+async def test_correlation_uses_best_timestamp_for_delayed_callback(monkeypatch):
+    event = _event(seconds=0)
+    job = _job(seconds=300, correlation_seconds=10)
+    correlation, _ = _install(monkeypatch, [event], [job])
+
+    result = await correlation.correlate_kommo_job("job-1")
+
+    assert result["status"] == "matched"
+
+
+@pytest.mark.asyncio
+async def test_correlation_timestamp_still_enforces_configured_match_window(monkeypatch):
+    event = _event(seconds=0)
+    job = _job(seconds=1, correlation_seconds=46)
+    correlation, fake = _install(monkeypatch, [event], [job])
+
+    result = await correlation.correlate_kommo_job("job-1")
+
+    assert result == {"status": "pending"}
+    assert fake.jobs["job-1"]["status"] == "waiting_for_context"
+
+
+def test_job_timestamp_helper_uses_documented_precedence():
+    from app.integrations.meta_context import correlation
+
+    fallback = datetime(2026, 7, 30, tzinfo=UTC)
+    receipt = fallback + timedelta(seconds=1)
+    jwt = fallback + timedelta(seconds=2)
+    incoming = fallback + timedelta(seconds=3)
+    job = {
+        "created_at": fallback,
+        "callback_receipt_timestamp": receipt,
+        "callback_claims": {"iat": jwt.timestamp()},
+        "incoming_message_timestamp": incoming,
+    }
+
+    assert correlation._job_correlation_timestamp(job) == incoming
+    del job["incoming_message_timestamp"]
+    assert correlation._job_correlation_timestamp(job) == jwt
+    job["callback_claims"] = {"iat": "not-a-number"}
+    assert correlation._job_correlation_timestamp(job) == receipt
+    job["callback_claims"] = {"iat": 10**10000}
+    assert correlation._job_correlation_timestamp(job) == receipt
+    del job["callback_receipt_timestamp"]
+    assert correlation._job_correlation_timestamp(job) == fallback
+
+
+@pytest.mark.asyncio
+async def test_candidate_job_sql_uses_receipt_jwt_and_created_at_precedence(monkeypatch):
+    from app.integrations.meta_context import correlation
+
+    mock_db = AsyncMock()
+    mock_db.fetch_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(correlation, "db", mock_db)
+
+    await correlation._candidate_jobs(_event(), 45)
+
+    query = mock_db.fetch_all.await_args.args[0]
+    assert "receipt.received_at" in query
+    assert "callback_claims -> 'iat'" in query
+    assert "receipt.created_at" in query
+    assert "job.created_at" in query
+    assert "AS correlation_timestamp" in query
+    assert "<= :window_seconds" in query
 
 
 @pytest.mark.asyncio
@@ -260,12 +375,8 @@ async def test_context_deadline_releases_job_to_safe_ready_fallback(monkeypatch,
     from app.integrations.meta_context import correlation
 
     mock_db = AsyncMock()
-    mock_db.fetch_all = AsyncMock(
-        side_effect=[
-            [{"id": "job-1"}],
-            [{"id": "job-1"}],
-        ]
-    )
+    mock_db.fetch_all = AsyncMock(return_value=[{"id": "job-1"}])
+    mock_db.fetch_one = AsyncMock(return_value={"id": "job-1"})
     mock_db.execute = AsyncMock(return_value="UPDATE 0")
     monkeypatch.setattr(correlation, "db", mock_db)
     monkeypatch.setattr(
@@ -278,7 +389,8 @@ async def test_context_deadline_releases_job_to_safe_ready_fallback(monkeypatch,
         result = await correlation.process_waiting_context_jobs(limit=10)
 
     assert result["timed_out"] == 1
-    timeout_query = mock_db.fetch_all.await_args_list[1].args[0]
+    timeout_query = mock_db.fetch_one.await_args.args[0]
     assert "status = 'ready'" in timeout_query
     assert "context_status = 'timed_out'" in timeout_query
+    assert "WHERE id = :id" in timeout_query
     assert "meta_kommo_correlation_timed_out" in caplog.text

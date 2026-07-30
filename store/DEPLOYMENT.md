@@ -242,6 +242,11 @@ KOMMO_AI_ACTIVE_ENUM_ID=222
 KOMMO_AI_HUMAN_ENUM_ID=333
 KOMMO_AI_PAUSED_ENUM_ID=444
 KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
+# Optional signed Meta context webhook; Kommo still sends every response
+META_INSTAGRAM_CONTEXT_ENABLED=false
+META_CONTEXT_WAIT_SECONDS=10
+META_CONTEXT_MATCH_WINDOW_SECONDS=45
+META_CONTEXT_EVENT_RETENTION_HOURS=24
 ```
 
 `KOMMO_SUBDOMAIN` is the account subdomain only, for example `acme`, not `https://acme.kommo.com`.
@@ -411,6 +416,13 @@ Additional variables for `CHANNEL_BACKEND=kommo`:
 | `KOMMO_AI_HUMAN_ENUM_ID`            | Enum ID for Human                          |
 | `KOMMO_AI_PAUSED_ENUM_ID`           | Enum ID for Paused                         |
 | `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` | Optional assignment target on escalation   |
+
+Optional Meta Instagram context alongside Kommo requires `META_INSTAGRAM_CONTEXT_ENABLED=true`,
+`META_APP_SECRET`, `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_VERIFY_TOKEN`, `INSTAGRAM_ACCOUNT_ID`, and
+`META_GRAPH_API_VERSION`. `META_CONTEXT_WAIT_SECONDS` controls only the brief Kommo fallback wait,
+`META_CONTEXT_MATCH_WINDOW_SECONDS` limits timestamp matching, and
+`META_CONTEXT_EVENT_RETENTION_HOURS` controls event retry/diagnostic retention (default 24 hours).
+Configure Meta to call `GET/POST /webhooks/meta/instagram-context`; do not reuse the direct Meta route.
 
 
 Deploy this store as a **single instance / single worker**. The scheduler runs in-process, so multiple app instances would duplicate scheduled jobs and broadcast checks.
@@ -700,6 +712,7 @@ Agent and tool locations:
 [ ] Send /start to Telegram bot -> command menu appears
 [ ] CHANNEL_BACKEND=meta -> /webhooks/whatsapp and /webhooks/instagram are registered
 [ ] CHANNEL_BACKEND=kommo -> /webhooks/kommo/events/{secret} and /webhooks/kommo/salesbot are registered
+[ ] Meta context enabled with Kommo -> /webhooks/meta/instagram-context is also registered
 [ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
 [ ] GET /test/ui with DEBUG=true -> test page loads
 ```

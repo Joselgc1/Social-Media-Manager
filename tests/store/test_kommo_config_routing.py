@@ -1,7 +1,7 @@
 import importlib
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from app.config import Settings, get_config
@@ -29,6 +29,7 @@ def _base_config(**overrides):
         "meta_instagram_context_enabled": False,
         "meta_context_wait_seconds": 10,
         "meta_context_match_window_seconds": 45,
+        "meta_context_event_retention_hours": 24,
         "telegram_bot_token": "",
         "telegram_admin_chat_id": "",
         "telegram_webhook_secret": "",
@@ -197,6 +198,18 @@ def test_invalid_channel_backend_rejected(monkeypatch):
         Settings()
 
 
+@pytest.mark.parametrize("retention_hours", [0, 169])
+def test_meta_context_event_retention_hours_enforces_safe_range(retention_hours):
+    with pytest.raises(ValidationError, match="meta_context_event_retention_hours"):
+        Settings(
+            database_url="postgresql://test:test@localhost:5432/test",
+            google_sheets_credentials_b64="e30=",
+            product_sheet_id="sheet",
+            meta_context_event_retention_hours=retention_hours,
+            _env_file=None,
+        )
+
+
 def test_optional_kommo_responsible_user_accepts_empty_string(monkeypatch):
     monkeypatch.setenv("KOMMO_DEFAULT_RESPONSIBLE_USER_ID", "")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
@@ -300,9 +313,7 @@ def test_kommo_and_meta_context_routes_run_together_when_enabled(monkeypatch):
     get_config.cache_clear()
 
 
-def test_meta_context_maintenance_remains_durable_when_outbound_processing_is_disabled(
-    monkeypatch,
-):
+def _scheduler_job_ids(monkeypatch, *, enabled: bool, outbound: bool):
     from app.broadcast import scheduler
 
     mock_scheduler = MagicMock()
@@ -314,13 +325,112 @@ def test_meta_context_maintenance_remains_durable_when_outbound_processing_is_di
         "get_config",
         lambda: SimpleNamespace(
             channel_backend="kommo",
-            meta_instagram_context_enabled=False,
+            meta_instagram_context_enabled=enabled,
+            outbound_processing_enabled=outbound,
         ),
     )
     monkeypatch.setattr(scheduler.asyncio, "create_task", lambda coroutine: coroutine.close())
 
-    scheduler.start_scheduler(outbound_processing_enabled=False)
+    scheduler.start_scheduler(outbound_processing_enabled=outbound)
+    return {call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list}
 
-    job_ids = {call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list}
+
+def test_meta_context_scheduler_registered_only_when_fully_enabled(monkeypatch):
+    job_ids = _scheduler_job_ids(monkeypatch, enabled=True, outbound=True)
+
     assert "meta_instagram_context_processor" in job_ids
-    assert "kommo_job_processor" not in job_ids
+
+
+@pytest.mark.parametrize(
+    ("enabled", "outbound"),
+    [(False, True), (True, False), (False, False)],
+)
+def test_meta_context_scheduler_not_registered_when_disabled(monkeypatch, enabled, outbound):
+    job_ids = _scheduler_job_ids(monkeypatch, enabled=enabled, outbound=outbound)
+
+    assert "meta_instagram_context_processor" not in job_ids
+
+
+@pytest.mark.asyncio
+async def test_meta_context_scheduled_function_defensively_skips_when_disabled(monkeypatch):
+    from app.broadcast import scheduler
+    from app.integrations.meta_context import correlation, service
+
+    pending = AsyncMock()
+    waiting = AsyncMock()
+    monkeypatch.setattr(service, "process_pending_context_events", pending)
+    monkeypatch.setattr(correlation, "process_waiting_context_jobs", waiting)
+    monkeypatch.setattr(
+        scheduler,
+        "get_config",
+        lambda: SimpleNamespace(
+            channel_backend="kommo",
+            meta_instagram_context_enabled=False,
+            outbound_processing_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(scheduler, "_outbound_processing_enabled", True)
+
+    await scheduler._process_meta_context_jobs()
+
+    pending.assert_not_awaited()
+    waiting.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_meta_context_scheduler_processes_wait_deadlines_before_enrichment(monkeypatch):
+    from app.broadcast import scheduler
+    from app.integrations.meta_context import correlation, service
+
+    calls = []
+
+    async def waiting(*, limit):
+        calls.append(("waiting", limit))
+
+    async def pending(*, limit):
+        calls.append(("pending", limit))
+
+    monkeypatch.setattr(correlation, "process_waiting_context_jobs", waiting)
+    monkeypatch.setattr(service, "process_pending_context_events", pending)
+    monkeypatch.setattr(
+        scheduler,
+        "get_config",
+        lambda: SimpleNamespace(
+            channel_backend="kommo",
+            meta_instagram_context_enabled=True,
+            outbound_processing_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(scheduler, "_outbound_processing_enabled", True)
+
+    await scheduler._process_meta_context_jobs()
+
+    assert calls == [("waiting", 10), ("pending", 10)]
+
+
+@pytest.mark.asyncio
+async def test_normal_kommo_processor_releases_old_context_jobs_after_feature_disable(
+    monkeypatch,
+):
+    from app.broadcast import scheduler
+    from app.integrations.kommo import jobs as kommo_jobs
+    from app.integrations.meta_context import correlation
+
+    recover = AsyncMock()
+    pending = AsyncMock()
+    ready = AsyncMock()
+    release = AsyncMock()
+    monkeypatch.setattr(kommo_jobs, "recover_stale_jobs", recover)
+    monkeypatch.setattr(kommo_jobs, "process_pending_jobs", pending)
+    monkeypatch.setattr(kommo_jobs, "process_ready_jobs", ready)
+    monkeypatch.setattr(correlation, "release_timed_out_context_jobs", release)
+    monkeypatch.setattr(
+        scheduler,
+        "get_config",
+        lambda: SimpleNamespace(meta_instagram_context_enabled=False),
+    )
+
+    await scheduler._process_kommo_jobs()
+
+    release.assert_awaited_once_with(limit=10)
+    ready.assert_awaited_once_with(limit=5)

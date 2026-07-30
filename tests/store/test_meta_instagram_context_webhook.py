@@ -194,8 +194,7 @@ async def test_duplicate_meta_delivery_returns_existing_event(monkeypatch):
         service,
         "get_config",
         lambda: SimpleNamespace(
-            meta_context_wait_seconds=10,
-            meta_context_match_window_seconds=45,
+            meta_context_event_retention_hours=24,
         ),
     )
 
@@ -208,4 +207,7 @@ async def test_duplicate_meta_delivery_returns_existing_event(monkeypatch):
     )
 
     assert result == {"status": "duplicate", "event_id": "existing-event"}
-    assert "ON CONFLICT DO NOTHING" in mock_db.fetch_one.await_args_list[0].args[0]
+    insert_query, insert_values = mock_db.fetch_one.await_args_list[0].args
+    assert "ON CONFLICT DO NOTHING" in insert_query
+    assert ":retention_hours * INTERVAL '1 hour'" in insert_query
+    assert insert_values["retention_hours"] == 24

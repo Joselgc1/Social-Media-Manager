@@ -16,6 +16,57 @@ from app.integrations.meta_context.normalization import (
 
 logger = logging.getLogger(__name__)
 
+_RECEIPT_MATCH_SQL = """
+receipt.job_id = job.id
+AND receipt.external_message_id = job.external_message_id
+"""
+_VALID_JWT_IAT_SQL = """
+CASE
+    WHEN jsonb_typeof(job.callback_claims -> 'iat') = 'number'
+    THEN CAST(job.callback_claims ->> 'iat' AS numeric) BETWEEN 0 AND 32503680000
+    ELSE FALSE
+END
+"""
+_JOB_CORRELATION_TIMESTAMP_SQL = f"""
+COALESCE(
+    (
+        SELECT receipt.received_at
+        FROM kommo_message_receipts receipt
+        WHERE {_RECEIPT_MATCH_SQL}
+          AND receipt.received_at IS NOT NULL
+        ORDER BY receipt.created_at DESC
+        LIMIT 1
+    ),
+    CASE
+        WHEN {_VALID_JWT_IAT_SQL}
+        THEN to_timestamp(CAST(job.callback_claims ->> 'iat' AS double precision))
+    END,
+    (
+        SELECT receipt.created_at
+        FROM kommo_message_receipts receipt
+        WHERE {_RECEIPT_MATCH_SQL}
+        ORDER BY receipt.created_at DESC
+        LIMIT 1
+    ),
+    job.created_at
+)
+"""
+_JOB_CORRELATION_TIMESTAMP_SOURCE_SQL = f"""
+CASE
+    WHEN EXISTS (
+        SELECT 1 FROM kommo_message_receipts receipt
+        WHERE {_RECEIPT_MATCH_SQL}
+          AND receipt.received_at IS NOT NULL
+    ) THEN 'incoming_message_timestamp'
+    WHEN {_VALID_JWT_IAT_SQL} THEN 'salesbot_jwt_iat'
+    WHEN EXISTS (
+        SELECT 1 FROM kommo_message_receipts receipt
+        WHERE {_RECEIPT_MATCH_SQL}
+    ) THEN 'callback_receipt_timestamp'
+    ELSE 'job_created_at'
+END
+"""
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -82,6 +133,8 @@ async def _correlate(
             anchor_kind=anchor_kind,
             window_seconds=config.meta_context_match_window_seconds,
         )
+        if not opposite:
+            return {"status": "pending"}
         opposite_best_score = max(item.score for item in opposite)
         opposite_winners = [item for item in opposite if item.score == opposite_best_score]
         if len(opposite_winners) != 1:
@@ -131,24 +184,12 @@ async def process_waiting_context_jobs(limit: int = 10) -> dict:
         {"limit": limit},
     )
     matched = 0
+    timed_out = 0
     for row in rows:
-        result = await correlate_kommo_job(str(row["id"]))
+        job_id = str(row["id"])
+        result = await correlate_kommo_job(job_id)
         matched += int(result.get("status") == "matched")
-
-    timed_out_rows = await db.fetch_all(
-        """
-        UPDATE kommo_message_jobs
-        SET status = 'ready',
-            context_status = 'timed_out',
-            last_error = 'Meta Instagram context deadline elapsed',
-            updated_at = NOW()
-        WHERE status = 'waiting_for_context'
-          AND context_deadline_at <= NOW()
-        RETURNING id
-        """
-    )
-    for row in timed_out_rows:
-        logger.info("meta_kommo_correlation_timed_out job_id=%s", row["id"])
+        timed_out += int(await _release_context_job_if_due(job_id))
 
     expired = await db.execute(
         """
@@ -169,9 +210,49 @@ async def process_waiting_context_jobs(limit: int = 10) -> dict:
     return {
         "checked": len(rows),
         "matched": matched,
-        "timed_out": len(timed_out_rows),
+        "timed_out": timed_out,
         "expired": _affected_rows(expired),
     }
+
+
+async def release_timed_out_context_jobs(limit: int = 10) -> int:
+    """Release old waiting jobs without running Meta work after the feature is disabled."""
+    rows = await db.fetch_all(
+        """
+        SELECT id
+        FROM kommo_message_jobs
+        WHERE status = 'waiting_for_context'
+          AND context_deadline_at <= NOW()
+        ORDER BY context_deadline_at ASC, created_at ASC
+        LIMIT :limit
+        """,
+        {"limit": limit},
+    )
+    released = 0
+    for row in rows:
+        released += int(await _release_context_job_if_due(str(row["id"])))
+    return released
+
+
+async def _release_context_job_if_due(job_id: str) -> bool:
+    row = await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs
+        SET status = 'ready',
+            context_status = 'timed_out',
+            last_error = 'Meta Instagram context deadline elapsed',
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'waiting_for_context'
+          AND context_deadline_at <= NOW()
+        RETURNING id
+        """,
+        {"id": job_id},
+    )
+    if not row:
+        return False
+    logger.info("meta_kommo_correlation_timed_out job_id=%s", row["id"])
+    return True
 
 
 async def schedule_context_job_processing(job_id: str) -> None:
@@ -195,7 +276,6 @@ async def _load_event(event_id: str):
           AND correlation_status IN ('pending', 'ambiguous')
           AND matched_kommo_job_id IS NULL
           AND expires_at > NOW()
-          AND (media_id IS NULL OR media_permalink IS NOT NULL)
         FOR UPDATE
         """,
         {"id": event_id},
@@ -204,16 +284,18 @@ async def _load_event(event_id: str):
 
 async def _load_job(job_id: str):
     return await db.fetch_one(
-        """
-        SELECT *
-        FROM kommo_message_jobs
-        WHERE id = :id
-          AND status = 'waiting_for_context'
-          AND interaction_type = 'instagram_comment'
-          AND channel = 'instagram'
-          AND context_status IN ('pending', 'ambiguous')
-          AND meta_context_event_id IS NULL
-        FOR UPDATE
+        f"""
+        SELECT job.*,
+               {_JOB_CORRELATION_TIMESTAMP_SQL} AS correlation_timestamp,
+               {_JOB_CORRELATION_TIMESTAMP_SOURCE_SQL} AS correlation_timestamp_source
+        FROM kommo_message_jobs job
+        WHERE job.id = :id
+          AND job.status = 'waiting_for_context'
+          AND job.interaction_type = 'instagram_comment'
+          AND job.channel = 'instagram'
+          AND job.context_status IN ('pending', 'ambiguous')
+          AND job.meta_context_event_id IS NULL
+        FOR UPDATE OF job
         """,
         {"id": job_id},
     )
@@ -221,17 +303,21 @@ async def _load_job(job_id: str):
 
 async def _candidate_jobs(event: dict, window_seconds: int):
     return await db.fetch_all(
-        """
-        SELECT *
-        FROM kommo_message_jobs
-        WHERE status = 'waiting_for_context'
-          AND interaction_type = 'instagram_comment'
-          AND channel = 'instagram'
-          AND context_status IN ('pending', 'ambiguous')
-          AND meta_context_event_id IS NULL
-          AND ABS(EXTRACT(EPOCH FROM (created_at - :event_timestamp))) <= :window_seconds
-        ORDER BY created_at ASC, id ASC
-        FOR UPDATE
+        f"""
+        SELECT job.*,
+               {_JOB_CORRELATION_TIMESTAMP_SQL} AS correlation_timestamp,
+               {_JOB_CORRELATION_TIMESTAMP_SOURCE_SQL} AS correlation_timestamp_source
+        FROM kommo_message_jobs job
+        WHERE job.status = 'waiting_for_context'
+          AND job.interaction_type = 'instagram_comment'
+          AND job.channel = 'instagram'
+          AND job.context_status IN ('pending', 'ambiguous')
+          AND job.meta_context_event_id IS NULL
+          AND ABS(EXTRACT(EPOCH FROM (
+              {_JOB_CORRELATION_TIMESTAMP_SQL} - :event_timestamp
+          ))) <= :window_seconds
+        ORDER BY job.created_at ASC, job.id ASC
+        FOR UPDATE OF job
         """,
         {"event_timestamp": event["event_timestamp"], "window_seconds": window_seconds},
     )
@@ -246,12 +332,14 @@ async def _candidate_events(job: dict, window_seconds: int):
           AND correlation_status IN ('pending', 'ambiguous')
           AND matched_kommo_job_id IS NULL
           AND expires_at > NOW()
-          AND (media_id IS NULL OR media_permalink IS NOT NULL)
           AND ABS(EXTRACT(EPOCH FROM (event_timestamp - :job_timestamp))) <= :window_seconds
         ORDER BY event_timestamp ASC, id ASC
         FOR UPDATE
         """,
-        {"job_timestamp": job["created_at"], "window_seconds": window_seconds},
+        {
+            "job_timestamp": _job_correlation_timestamp(dict(job)),
+            "window_seconds": window_seconds,
+        },
     )
 
 
@@ -284,9 +372,12 @@ def _same_pair(left: Candidate, right: Candidate) -> bool:
 
 
 def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate | None:
-    if event.get("media_id") and not event.get("media_permalink"):
-        return None
-    difference = abs((_as_datetime(event["event_timestamp"]) - _as_datetime(job["created_at"])).total_seconds())
+    difference = abs(
+        (
+            _as_datetime(event["event_timestamp"])
+            - _job_correlation_timestamp(job)
+        ).total_seconds()
+    )
     if difference > window_seconds:
         return None
     context = _job_context(job)
@@ -303,11 +394,7 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
 
     event_username = normalize_username(event.get("sender_username"))
     job_usernames = _job_usernames(job)
-    if event_username and job_usernames and job_usernames != {event_username}:
-        return None
-    event_sender_id = str(event.get("sender_id") or "").strip()
-    job_sender_id = str(job.get("author_id") or "").strip()
-    if event_sender_id and job_sender_id and event_sender_id != job_sender_id:
+    if event_username and job_usernames and event_username not in job_usernames:
         return None
 
     score = 0
@@ -318,9 +405,6 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
     if event_username and event_username in job_usernames:
         score += 40
         signals.append("username")
-    if event_sender_id and event_sender_id == job_sender_id:
-        score += 50
-        signals.append("sender_id")
     if exact_text:
         score += 30
         signals.append("text")
@@ -389,6 +473,8 @@ async def _persist_match(candidate: Candidate) -> bool:
         "score": candidate.score,
         "signals": list(candidate.signals),
         "timestamp_difference_seconds": candidate.timestamp_difference_seconds,
+        "job_timestamp_source": _job_correlation_timestamp_source(candidate.job),
+        "job_correlation_timestamp": _job_correlation_timestamp(candidate.job).isoformat(),
     }
     job = await db.fetch_one(
         """
@@ -455,6 +541,60 @@ def _as_datetime(value) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _job_correlation_timestamp(job: dict) -> datetime:
+    incoming_timestamp = job.get("incoming_message_timestamp")
+    if incoming_timestamp:
+        return _as_datetime(incoming_timestamp)
+    if job.get("correlation_timestamp"):
+        return _as_datetime(job["correlation_timestamp"])
+    claims = job.get("callback_claims")
+    if isinstance(claims, str):
+        try:
+            claims = json.loads(claims)
+        except json.JSONDecodeError:
+            claims = {}
+    issued_at = _jwt_iat_datetime(claims)
+    if issued_at:
+        return issued_at
+    if job.get("callback_receipt_timestamp"):
+        return _as_datetime(job["callback_receipt_timestamp"])
+    return _as_datetime(job["created_at"])
+
+
+def _job_correlation_timestamp_source(job: dict) -> str:
+    if job.get("correlation_timestamp_source"):
+        return str(job["correlation_timestamp_source"])
+    if job.get("incoming_message_timestamp"):
+        return "incoming_message_timestamp"
+    claims = job.get("callback_claims")
+    if isinstance(claims, str):
+        try:
+            claims = json.loads(claims)
+        except json.JSONDecodeError:
+            claims = {}
+    if _jwt_iat_datetime(claims):
+        return "salesbot_jwt_iat"
+    if job.get("callback_receipt_timestamp"):
+        return "callback_receipt_timestamp"
+    return "job_created_at"
+
+
+def _jwt_iat_datetime(claims) -> datetime | None:
+    issued_at = claims.get("iat") if isinstance(claims, dict) else None
+    if not isinstance(issued_at, (int, float)) or isinstance(issued_at, bool):
+        return None
+    try:
+        numeric_issued_at = float(issued_at)
+    except (OSError, OverflowError, ValueError):
+        return None
+    if not 0 <= numeric_issued_at <= 32_503_680_000:
+        return None
+    try:
+        return datetime.fromtimestamp(numeric_issued_at, tz=UTC)
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def _affected_rows(value) -> int:

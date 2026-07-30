@@ -19,8 +19,7 @@ async def store_context_event(event: MetaInstagramContextEvent) -> dict:
     values = {
         **event.model_dump(),
         "normalized_text_hash": normalized_text_hash(event.message_text),
-        "expiry_seconds": config.meta_context_wait_seconds
-        + config.meta_context_match_window_seconds,
+        "retention_hours": config.meta_context_event_retention_hours,
     }
     row = await db.fetch_one(
         """
@@ -32,7 +31,7 @@ async def store_context_event(event: MetaInstagramContextEvent) -> dict:
             :external_event_id, :event_type, :instagram_account_id, :sender_id, :sender_username,
             :message_text, :normalized_text_hash, :event_timestamp, :comment_id, :parent_comment_id,
             :message_id, :media_id, :media_product_type, :story_id, :story_url,
-            NOW() + (:expiry_seconds * INTERVAL '1 second')
+            NOW() + (:retention_hours * INTERVAL '1 hour')
         )
         ON CONFLICT DO NOTHING
         RETURNING *
@@ -72,7 +71,7 @@ async def store_context_event(event: MetaInstagramContextEvent) -> dict:
 
 
 async def process_context_event(event_id: str) -> dict:
-    """Enrich a stored event when possible, then run deterministic correlation."""
+    """Correlate immediately, then independently enrich and backfill context."""
     event = await db.fetch_one(
         "SELECT * FROM meta_instagram_context_events WHERE id = :id",
         {"id": event_id},
@@ -81,7 +80,14 @@ async def process_context_event(event_id: str) -> dict:
         return {"status": "missing"}
 
     event_dict = dict(event)
-    enrichment_failed = False
+    from app.integrations.meta_context.correlation import correlate_meta_event
+
+    try:
+        correlation_result = await correlate_meta_event(event_id)
+    except Exception:
+        logger.exception("Meta Instagram correlation failed: event_id=%s", event_id)
+        correlation_result = {"status": "pending", "reason": "correlation_failed"}
+
     if event_dict.get("media_id") and not event_dict.get("media_permalink"):
         try:
             media = await MetaContextClient.from_config().get_media(event_dict["media_id"])
@@ -102,17 +108,18 @@ async def process_context_event(event_id: str) -> dict:
                 event_id,
             )
         except MetaContextAPIError as exc:
-            enrichment_failed = True
             error = str(exc)
             await _merge_event_details(event_id, {"meta_api_error": error})
             logger.warning("meta_media_enrichment_failed event_id=%s error=%s", event_id, error)
         except Exception:
-            enrichment_failed = True
             await _merge_event_details(event_id, {"meta_api_error": "Media enrichment failed"})
             logger.exception("meta_media_enrichment_failed event_id=%s", event_id)
 
-    if enrichment_failed:
-        return {"status": "pending", "reason": "media_enrichment_failed"}
+    if event_dict.get("media_id"):
+        try:
+            await _update_matched_job_context(event_id, event_dict)
+        except Exception:
+            logger.exception("Meta matched Kommo context update failed: event_id=%s", event_id)
 
     details = _event_details(event_dict.get("correlation_details"))
     if (
@@ -134,22 +141,20 @@ async def process_context_event(event_id: str) -> dict:
         except Exception:
             await _merge_event_details(event_id, {"mapping_error": "Mapping backfill failed"})
             logger.exception("Meta Instagram mapping backfill failed: event_id=%s", event_id)
-            return {"status": "pending", "reason": "mapping_backfill_failed"}
-        mapping_status = mapping_result.get("status")
-        if mapping_status == "conflict":
-            await _merge_event_details(
-                event_id,
-                {
-                    "mapping_status": "conflict",
-                    "mapping_conflict": mapping_result.get("reason"),
-                },
-            )
-        elif mapping_status in {"matched", "backfilled"}:
-            await _merge_event_details(event_id, {"mapping_status": mapping_status})
+        else:
+            mapping_status = mapping_result.get("status")
+            if mapping_status == "conflict":
+                await _merge_event_details(
+                    event_id,
+                    {
+                        "mapping_status": "conflict",
+                        "mapping_conflict": mapping_result.get("reason"),
+                    },
+                )
+            elif mapping_status in {"matched", "backfilled"}:
+                await _merge_event_details(event_id, {"mapping_status": mapping_status})
 
-    from app.integrations.meta_context.correlation import correlate_meta_event
-
-    return await correlate_meta_event(event_id)
+    return correlation_result
 
 
 async def process_pending_context_events(limit: int = 10) -> int:
@@ -160,8 +165,20 @@ async def process_pending_context_events(limit: int = 10) -> int:
         """
         SELECT id
         FROM meta_instagram_context_events
-        WHERE correlation_status IN ('pending', 'ambiguous')
-          AND expires_at > NOW()
+        WHERE expires_at > NOW()
+          AND (
+              correlation_status IN ('pending', 'ambiguous')
+              OR (
+                  correlation_status = 'matched'
+                  AND media_id IS NOT NULL
+                  AND (
+                      media_permalink IS NULL
+                      OR COALESCE(correlation_details ->> 'mapping_status', '')
+                          NOT IN ('matched', 'backfilled', 'conflict')
+                      OR COALESCE(correlation_details ->> 'job_context_enriched', 'false') <> 'true'
+                  )
+              )
+          )
         ORDER BY created_at ASC
         LIMIT :limit
         """,
@@ -197,6 +214,37 @@ async def _save_media_enrichment(event_id: str, media: MetaMediaDetails) -> None
             "media_thumbnail_url": media.thumbnail_url,
         },
     )
+
+
+async def _update_matched_job_context(event_id: str, event: dict) -> bool:
+    context = {
+        "media_id": event.get("media_id"),
+        "post_id": event.get("media_id"),
+        "post_url": event.get("media_permalink"),
+        "post_caption": event.get("media_caption"),
+    }
+    context = {key: value for key, value in context.items() if value is not None}
+    if not context:
+        return False
+    job = await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs job
+        SET public_comment_context = COALESCE(job.public_comment_context, '{}'::jsonb)
+                || CAST(:context AS jsonb),
+            updated_at = NOW()
+        FROM meta_instagram_context_events event
+        WHERE event.id = :event_id
+          AND event.correlation_status = 'matched'
+          AND event.matched_kommo_job_id = job.id
+          AND job.meta_context_event_id = event.id
+        RETURNING job.id
+        """,
+        {"event_id": event_id, "context": json.dumps(context, ensure_ascii=False)},
+    )
+    if not job:
+        return False
+    await _merge_event_details(event_id, {"job_context_enriched": True})
+    return True
 
 
 async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
@@ -310,7 +358,7 @@ async def diagnostics_summary() -> dict:
     by_status = {row["correlation_status"]: row["cnt"] for row in counts}
     last_event = await db.fetch_one(
         """
-        SELECT id, event_type, correlation_status, event_timestamp, created_at,
+        SELECT id, event_type, correlation_status, event_timestamp, expires_at, created_at,
                comment_id IS NOT NULL AS has_comment_id,
                media_id IS NOT NULL AS has_media_id
         FROM meta_instagram_context_events
