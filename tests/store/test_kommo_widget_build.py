@@ -136,7 +136,7 @@ def _flow_exit_codes(flow: list[dict]) -> set[str]:
 def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     manifest = _source_manifest()
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.10"
+    assert manifest["widget"]["version"] == "1.2.11"
     assert manifest["locations"] == ["settings", "salesbot_designer"]
     assert manifest["settings"]["backend_url"] == {
         "name": "settings.backend_url",
@@ -212,7 +212,7 @@ def test_widget_build_substitutes_widget_code_and_includes_expected_archive_cont
     assert "manifest.json" in names
     assert "__WIDGET_CODE__" not in json.dumps(manifest)
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.10"
+    assert manifest["widget"]["version"] == "1.2.11"
     assert "settings" in manifest
     assert {"settings", "salesbot_designer"}.issubset(set(manifest["locations"]))
     assert manifest["salesbot_designer"]["logo"] == "/widgets/social_media_manager_kommo_v2/images/logo_small.png"
@@ -310,4 +310,8 @@ def test_salesbot_script_uses_documented_widget_request_flow_and_matching_exits(
     assert "expected_channel" not in comment_data
     assert comment_data["post_caption"] == "{{post.caption}}"
     assert comment_data["product_sku"] == "{{product.sku}}"
+    assert comment_data["author_username"] == "{{author.username}}"
+    assert comment_data["author_profile_url"] == "{{author.profile_url}}"
+    assert comment_data["sender_username"] == "{{sender.username}}"
+    assert comment_data["sender_profile_url"] == "{{sender.profile_url}}"
     assert "{{lead.responsible.id}}" not in (WIDGET_ROOT / "script.js").read_text(encoding="utf-8")

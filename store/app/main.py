@@ -166,6 +166,25 @@ def _validate_startup_config(config):
                 except KommoAuthError as e:
                     errors.append(f"KOMMO_SUBDOMAIN is invalid: {e}")
 
+        if config.meta_instagram_context_enabled:
+            if config.channel_backend != "kommo":
+                errors.append("META_INSTAGRAM_CONTEXT_ENABLED requires CHANNEL_BACKEND=kommo.")
+            required_meta_context = {
+                "META_APP_SECRET": config.meta_app_secret,
+                "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
+                "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
+                "INSTAGRAM_ACCOUNT_ID": config.instagram_account_id,
+                "META_GRAPH_API_VERSION": config.meta_graph_api_version,
+            }
+            missing_meta_context = [
+                name for name, value in required_meta_context.items() if not _is_configured(value)
+            ]
+            if missing_meta_context:
+                errors.append(
+                    "Meta Instagram context is enabled but missing or placeholder: "
+                    + ", ".join(missing_meta_context)
+                )
+
         optional_integrations = {
             "Telegram": {
                 "TELEGRAM_BOT_TOKEN": config.telegram_bot_token,
@@ -215,6 +234,10 @@ def _include_channel_routers(fastapi_app: FastAPI, config):
         from app.webhooks.kommo import router as kommo_router
 
         fastapi_app.include_router(kommo_router)
+        if config.meta_instagram_context_enabled:
+            from app.webhooks.meta_instagram_context import router as meta_context_router
+
+            fastapi_app.include_router(meta_context_router)
         return
 
     from app.webhooks.instagram import router as instagram_router
@@ -428,6 +451,9 @@ async def health():
             "kommo": config.channel_backend == "kommo",
             "whatsapp_via_kommo": config.channel_backend == "kommo",
             "instagram_via_kommo": config.channel_backend == "kommo",
+            "meta_instagram_context": bool(
+                getattr(config, "meta_instagram_context_enabled", False)
+            ),
         },
         "providers": providers,
         "active_provider": active_provider,

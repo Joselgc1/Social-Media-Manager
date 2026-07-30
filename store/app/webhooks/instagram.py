@@ -19,7 +19,6 @@ Key constraints:
 """
 
 import hashlib
-import hmac
 import json
 import logging
 
@@ -35,9 +34,11 @@ from app.channels.instagram_sender import (
 from app.config import get_config
 from app.crm import conversations
 from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
+from app.webhooks.meta_security import verify_meta_signature
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_verify_signature = verify_meta_signature
 _APOLOGY_TEXT = "Disculpa, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo? 🙏"
 
 
@@ -96,7 +97,7 @@ async def handle_instagram(request: Request):
     body_bytes = await request.body()
 
     # Verify the request signature
-    if not _verify_signature(
+    if not verify_meta_signature(
         body_bytes,
         request.headers.get("X-Hub-Signature-256", ""),
         config.meta_app_secret,
@@ -451,20 +452,6 @@ def _split_message(text: str, max_bytes: int = 950) -> list[str]:
         remaining = remaining[split_at:].lstrip()
 
     return chunks
-
-
-def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bool:
-    """Verify the X-Hub-Signature-256 header from Meta."""
-    if not signature_header or not app_secret:
-        return False
-
-    expected = "sha256=" + hmac.new(
-        app_secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
-
-    return hmac.compare_digest(expected, signature_header)
 
 
 def _event_fingerprint(event: dict) -> str:

@@ -1,6 +1,7 @@
 import importlib
 import sys
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from app.config import Settings, get_config
@@ -23,6 +24,11 @@ def _base_config(**overrides):
         "whatsapp_verify_token": "verify",
         "instagram_access_token": "",
         "instagram_verify_token": "",
+        "instagram_account_id": "",
+        "meta_graph_api_version": "v21.0",
+        "meta_instagram_context_enabled": False,
+        "meta_context_wait_seconds": 10,
+        "meta_context_match_window_seconds": 45,
         "telegram_bot_token": "",
         "telegram_admin_chat_id": "",
         "telegram_webhook_secret": "",
@@ -117,6 +123,22 @@ def test_kommo_mode_startup_validation_does_not_require_meta_credentials():
             whatsapp_verify_token="",
         )
     )
+
+
+def test_kommo_mode_requires_complete_meta_context_credentials_when_enabled():
+    from app.main import _validate_startup_config
+
+    with pytest.raises(RuntimeError, match="INSTAGRAM_ACCOUNT_ID"):
+        _validate_startup_config(
+            _base_config(
+                channel_backend="kommo",
+                meta_instagram_context_enabled=True,
+                meta_app_secret="meta-secret",
+                instagram_access_token="ig-token",
+                instagram_verify_token="ig-verify",
+                instagram_account_id="",
+            )
+        )
 
 
 def test_kommo_mode_startup_validation_requires_kommo_credentials():
@@ -260,3 +282,45 @@ def test_kommo_routes_registered_only_in_kommo_mode(monkeypatch):
     assert "/webhooks/instagram" not in paths
     assert "/admin/settings/" in paths
     assert "/test/chat" in paths
+
+
+def test_kommo_and_meta_context_routes_run_together_when_enabled(monkeypatch):
+    monkeypatch.setenv("META_INSTAGRAM_CONTEXT_ENABLED", "true")
+    monkeypatch.setenv("META_APP_SECRET", "meta-secret")
+    monkeypatch.setenv("INSTAGRAM_ACCESS_TOKEN", "ig-token")
+    monkeypatch.setenv("INSTAGRAM_VERIFY_TOKEN", "ig-verify")
+    monkeypatch.setenv("INSTAGRAM_ACCOUNT_ID", "ig-account")
+    main = _load_main_for_backend(monkeypatch, "kommo")
+    paths = _route_paths(main.app)
+
+    assert "/webhooks/kommo/events/{webhook_secret}" in paths
+    assert "/webhooks/kommo/salesbot" in paths
+    assert "/webhooks/meta/instagram-context" in paths
+    assert "/webhooks/instagram" not in paths
+    get_config.cache_clear()
+
+
+def test_meta_context_maintenance_remains_durable_when_outbound_processing_is_disabled(
+    monkeypatch,
+):
+    from app.broadcast import scheduler
+
+    mock_scheduler = MagicMock()
+    mock_scheduler.running = False
+    mock_scheduler.get_job.return_value = None
+    monkeypatch.setattr(scheduler, "get_scheduler", lambda: mock_scheduler)
+    monkeypatch.setattr(
+        scheduler,
+        "get_config",
+        lambda: SimpleNamespace(
+            channel_backend="kommo",
+            meta_instagram_context_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(scheduler.asyncio, "create_task", lambda coroutine: coroutine.close())
+
+    scheduler.start_scheduler(outbound_processing_enabled=False)
+
+    job_ids = {call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list}
+    assert "meta_instagram_context_processor" in job_ids
+    assert "kommo_job_processor" not in job_ids

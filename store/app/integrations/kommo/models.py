@@ -22,6 +22,7 @@ KommoJobStatus = Literal[
     "pending",
     "prepared",
     "waiting_for_salesbot",
+    "waiting_for_context",
     "ready",
     "processing",
     "continuing",
@@ -218,6 +219,12 @@ class PersistentKommoJob(BaseModel):
     media_url: str | None = None
     return_url: str | None = None
     public_comment_context: dict | None = None
+    meta_context_event_id: str | None = None
+    context_status: Literal[
+        "not_required", "pending", "matched", "ambiguous", "timed_out"
+    ] = "not_required"
+    context_deadline_at: datetime | None = None
+    context_correlation_score: int | None = None
     status: KommoJobStatus
     attempt_count: int = 0
     last_error: str | None = None

@@ -168,6 +168,15 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
             name="Process durable Kommo Salesbot jobs",
             replace_existing=True,
         )
+    context_config = get_config()
+    if context_config.channel_backend == "kommo":
+        scheduler.add_job(
+            _process_meta_context_jobs,
+            trigger=IntervalTrigger(seconds=15),
+            id="meta_instagram_context_processor",
+            name="Process Meta Instagram context events",
+            replace_existing=True,
+        )
 
     scheduler.start()
     asyncio.create_task(_sync_scheduler_config())
@@ -318,6 +327,17 @@ async def _process_kommo_jobs():
         await process_ready_jobs(limit=5)
     except Exception as e:
         logger.error(f"Kommo job processor failed: {e}")
+
+
+async def _process_meta_context_jobs():
+    try:
+        from app.integrations.meta_context.correlation import process_waiting_context_jobs
+        from app.integrations.meta_context.service import process_pending_context_events
+
+        await process_pending_context_events(limit=10)
+        await process_waiting_context_jobs(limit=10)
+    except Exception:
+        logger.exception("Meta Instagram context processor failed")
 
 
 async def _process_meta_inbound_jobs():

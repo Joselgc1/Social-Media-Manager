@@ -14,6 +14,9 @@ DELIVERY_MIGRATION_PATH = Path(__file__).resolve().parents[1] / "migrations" / "
 INSTAGRAM_CONTENT_MIGRATION_PATH = (
     Path(__file__).resolve().parents[1] / "migrations" / "004_instagram_content_mapping.sql"
 )
+META_INSTAGRAM_CONTEXT_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1] / "migrations" / "005_meta_instagram_context.sql"
+)
 ADVISORY_LOCK_KEY = 891_014_001
 
 
@@ -26,6 +29,9 @@ async def run_migration(database_url: str | None = None) -> None:
     migration_sql = MIGRATION_PATH.read_text(encoding="utf-8")
     delivery_migration_sql = DELIVERY_MIGRATION_PATH.read_text(encoding="utf-8")
     instagram_content_migration_sql = INSTAGRAM_CONTENT_MIGRATION_PATH.read_text(encoding="utf-8")
+    meta_instagram_context_migration_sql = META_INSTAGRAM_CONTEXT_MIGRATION_PATH.read_text(
+        encoding="utf-8"
+    )
     connection = await asyncpg.connect(database_url)
     try:
         await connection.execute("SELECT pg_advisory_lock($1)", ADVISORY_LOCK_KEY)
@@ -33,6 +39,7 @@ async def run_migration(database_url: str | None = None) -> None:
             await connection.execute(migration_sql)
             await connection.execute(delivery_migration_sql)
             await connection.execute(instagram_content_migration_sql)
+            await connection.execute(meta_instagram_context_migration_sql)
         finally:
             await connection.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
     finally:

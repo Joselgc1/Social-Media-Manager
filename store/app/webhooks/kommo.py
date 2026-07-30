@@ -29,6 +29,7 @@ from app.integrations.kommo.jobs import (
 from app.integrations.kommo.models import SalesbotWidgetRequest
 from app.integrations.kommo.state import sync_local_state_from_ai_mode
 from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, parse_nested_form
+from app.integrations.meta_context.correlation import schedule_context_job_processing
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks/kommo", tags=["kommo"])
@@ -126,6 +127,11 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
 
     if getattr(config, "outbound_processing_enabled", True) and result.get("status") == "ready":
         background_tasks.add_task(process_ready_jobs, 3)
+    elif (
+        getattr(config, "outbound_processing_enabled", True)
+        and result.get("status") == "waiting_for_context"
+    ):
+        background_tasks.add_task(schedule_context_job_processing, result["job_id"])
 
     return {"status": "accepted"}
 

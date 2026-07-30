@@ -192,6 +192,10 @@ define(['jquery'], function ($) {
 
         if (interactionType === 'instagram_comment') {
           Object.assign(requestData, {
+            author_username: '{{author.username}}',
+            author_profile_url: '{{author.profile_url}}',
+            sender_username: '{{sender.username}}',
+            sender_profile_url: '{{sender.profile_url}}',
             post_id: '{{post.id}}',
             comment_id: '{{comment.id}}',
             parent_comment_id: '{{comment.parent_id}}',

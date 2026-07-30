@@ -372,7 +372,7 @@ async def test_atomic_job_claiming_prevents_concurrent_salesbot_runs(monkeypatch
     assert "FOR UPDATE SKIP LOCKED" in query
     assert "NOT EXISTS" in query
     assert "waiting_for_salesbot" in query
-    assert "active.status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')" in query
+    assert "active.status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing')" in query
     assert "active.lead_id = candidate.lead_id" in query
     assert "active.contact_id = candidate.contact_id" in query
     assert "pg_try_advisory_xact_lock" in query
@@ -563,7 +563,7 @@ async def test_native_comment_callback_creates_ready_job_from_signed_identity(mo
     assert "context_keys=['post_caption', 'product_sku']" in caplog.text
     assert "signed_entity_type=leads" in caplog.text
     assert "signed_entity_id=100" in caplog.text
-    assert "created ready comment job" in caplog.text
+    assert "created comment job" in caplog.text
     assert "Precio?" not in caplog.text
 
 
@@ -1382,10 +1382,17 @@ async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_format
             "combined_message": "Precio?",
             "channel": "instagram",
             "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "media_id": "media-1",
+                "post_url": "https://www.instagram.com/p/ABC123/",
+                "context_provider": "meta",
+                "correlation_status": "matched",
+            },
             "correlation_id": "corr",
         })
 
     assert jobs.generate_response.await_args.kwargs["integration_context"]["interaction_type"] == "instagram_comment"
+    assert jobs.generate_response.await_args.kwargs["integration_context"]["public_comment_context"]["context_provider"] == "meta"
     message = client.continue_salesbot.await_args.kwargs["data"]["message"]
     assert "**" not in message
     assert "\n" not in message

@@ -2,7 +2,7 @@
 
 This widget must be installed at the Kommo account level before it appears as an installed widget inside Salesbot.
 
-The widget version is currently `1.2.10`. Increment `widget.version` in `manifest.json` every time a new archive is uploaded so Kommo refreshes the widget files.
+The widget version is currently `1.2.11`. Increment `widget.version` in `manifest.json` every time a new archive is uploaded so Kommo refreshes the widget files.
 
 Build:
 

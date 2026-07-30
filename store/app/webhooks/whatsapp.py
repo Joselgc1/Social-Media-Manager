@@ -5,7 +5,6 @@ normalizes them, and routes them through the AI engine.
 """
 
 import hashlib
-import hmac
 import json
 import logging
 from contextlib import suppress
@@ -18,6 +17,7 @@ from app.channels.whatsapp_sender import mark_as_read, send_document, send_image
 from app.config import get_config
 from app.crm import conversations
 from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
+from app.webhooks.meta_security import verify_meta_signature
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -277,21 +277,7 @@ async def _store_delivered_assistant_message(result: dict, content: str, source_
 
 # ── Signature verification ───────────────────────────────────
 
-def _verify_signature(body: bytes, signature_header: str, app_secret: str) -> bool:
-    """
-    Verify the X-Hub-Signature-256 header to ensure the request
-    actually came from Meta and wasn't spoofed.
-    """
-    if not signature_header or not app_secret:
-        return False
-
-    expected = "sha256=" + hmac.new(
-        app_secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
-
-    return hmac.compare_digest(expected, signature_header)
+_verify_signature = verify_meta_signature
 
 
 def _message_fingerprint(message: dict) -> str:

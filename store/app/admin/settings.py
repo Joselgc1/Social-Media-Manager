@@ -439,6 +439,38 @@ async def kommo_test():
     return {"channel_backend": config.channel_backend, "ok": all(item["ok"] for item in checks), "checks": checks}
 
 
+@router.get("/meta-instagram-context/status")
+async def meta_instagram_context_status():
+    """Safe context-provider diagnostics without payloads or credentials."""
+    config = get_config()
+    try:
+        from app.integrations.meta_context.service import diagnostics_summary
+
+        diagnostics = await diagnostics_summary()
+    except Exception:
+        logger.exception("Meta Instagram context diagnostics unavailable")
+        diagnostics = {
+            "last_meta_event": None,
+            "pending_event_count": 0,
+            "matched_event_count": 0,
+            "ambiguous_event_count": 0,
+            "timed_out_kommo_job_count": 0,
+            "last_meta_api_error": "Diagnostics unavailable",
+        }
+    return {
+        "enabled": config.meta_instagram_context_enabled,
+        "channel_backend": config.channel_backend,
+        "meta_app_secret_configured": bool(config.meta_app_secret),
+        "instagram_access_token_configured": bool(config.instagram_access_token),
+        "instagram_verify_token_configured": bool(config.instagram_verify_token),
+        "instagram_account_id_configured": bool(config.instagram_account_id),
+        "graph_api_version": config.meta_graph_api_version,
+        "context_wait_seconds": config.meta_context_wait_seconds,
+        "match_window_seconds": config.meta_context_match_window_seconds,
+        **diagnostics,
+    }
+
+
 @router.put("/payment-methods")
 async def update_payment_methods(body: PaymentMethodsUpdate):
     try:

@@ -70,3 +70,14 @@ def test_scheduler_registers_daily_sensitive_data_retention(monkeypatch):
     jobs = {call.kwargs["id"]: call.kwargs for call in mock_scheduler.add_job.call_args_list}
     assert jobs["sensitive_data_retention"]["name"] == "Apply sensitive data retention policy"
     mock_scheduler.start.assert_called_once()
+
+
+def test_meta_context_sensitive_data_has_unconditional_retention_policy():
+    from app import data_retention
+
+    policy = next(
+        item for item in data_retention._POLICIES if item[0] == "meta_instagram_context_sensitive"
+    )
+    assert policy[1] == 0
+    assert "meta_instagram_context_events" in policy[2]
+    assert "message_text = NULL" in policy[2]

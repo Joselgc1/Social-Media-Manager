@@ -7,7 +7,7 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str = ""
     instagram_access_token: str = ""
     instagram_verify_token: str = ""
+    instagram_account_id: str = ""
+    meta_graph_api_version: str = "v21.0"
+    meta_instagram_context_enabled: bool = False
+    meta_context_wait_seconds: int = Field(default=10, ge=1, le=60)
+    meta_context_match_window_seconds: int = Field(default=45, ge=5, le=300)
 
     # --- Kommo private integration / Salesbot transport ---
     kommo_subdomain: str = ""

@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 from datetime import UTC, datetime
 
 from app import db
@@ -28,6 +27,7 @@ from app.integrations.kommo.text_sanitizer import (
     build_kommo_message_diagnostics,
     prepare_kommo_customer_message,
 )
+from app.integrations.meta_context.normalization import normalize_message_text
 from app.webhooks.inbound_buffer import MESSAGE_DEBOUNCE_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,14 @@ MAX_JOB_ATTEMPTS = 3
 STALE_PROCESSING_MINUTES = 5
 STALE_WAITING_MINUTES = 3
 _TERMINAL_STATUSES = {"sent", "discarded", "failed", "delivery_unknown"}
-_ACTIVE_SALESBOT_STATUSES = {"prepared", "waiting_for_salesbot", "ready", "processing", "continuing"}
+_ACTIVE_SALESBOT_STATUSES = {
+    "prepared",
+    "waiting_for_salesbot",
+    "waiting_for_context",
+    "ready",
+    "processing",
+    "continuing",
+}
 _TRANSIENT_CONTINUATION_STATUSES = {429, 500, 502, 503, 504}
 COMMENT_MIRROR_RECONCILIATION_SECONDS = 30
 COMMENT_CALLBACK_DEDUP_SECONDS = 300
@@ -432,7 +439,7 @@ async def diagnostics_summary() -> dict:
         {"minutes": STALE_PROCESSING_MINUTES},
     )
     return {
-        "pending_job_count": counts.get("pending", 0) + counts.get("prepared", 0) + counts.get("waiting_for_salesbot", 0) + counts.get("ready", 0) + counts.get("processing", 0) + counts.get("continuing", 0),
+        "pending_job_count": counts.get("pending", 0) + counts.get("prepared", 0) + counts.get("waiting_for_salesbot", 0) + counts.get("waiting_for_context", 0) + counts.get("ready", 0) + counts.get("processing", 0) + counts.get("continuing", 0),
         "failed_job_count": counts.get("failed", 0) + counts.get("delivery_unknown", 0),
         "stale_job_count": stale["cnt"] if stale else 0,
         "last_successful_incoming_webhook_at": timestamps["last_incoming"] if timestamps else None,
@@ -464,7 +471,7 @@ async def _claim_due_pending_job():
               )
                AND NOT EXISTS (
                    SELECT 1 FROM kommo_message_jobs active
-                   WHERE active.status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')
+                   WHERE active.status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing')
                     AND active.id <> candidate.id
                     AND (
                         (candidate.lead_id IS NOT NULL AND active.lead_id = candidate.lead_id)
@@ -507,7 +514,7 @@ async def _log_pending_claim_diagnostics() -> None:
                salesbot_launched_at, processing_started_at, created_at, updated_at, last_error
         FROM kommo_message_jobs
         WHERE correlation_id = :correlation_id
-          AND status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing')
+          AND status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing')
           AND id <> :id
         ORDER BY updated_at DESC
         LIMIT 3
@@ -981,6 +988,10 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
     external_message_id, correlation_id = _comment_callback_ids(values, message)
     normalized_message = _normalize_reconciliation_message(message)
     message_hash = _message_hash(normalized_message)
+    config = get_config()
+    context_enabled = bool(getattr(config, "meta_instagram_context_enabled", False))
+    initial_status = "waiting_for_context" if context_enabled else "ready"
+    context_status = "pending" if context_enabled else "not_required"
     job_values = {
         "correlation_id": correlation_id,
         "external_message_id": external_message_id,
@@ -1001,6 +1012,9 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
         "author_profile_url": values["author_profile_url"],
         "sender_username": values["sender_username"],
         "sender_profile_url": values["sender_profile_url"],
+        "initial_status": initial_status,
+        "context_status": context_status,
+        "context_wait_seconds": getattr(config, "meta_context_wait_seconds", 10),
     }
 
     async with db.get_db().transaction():
@@ -1037,12 +1051,18 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
                 correlation_id, external_message_id, lead_id, contact_id, origin, channel,
                 author_username, author_profile_url, sender_username, sender_profile_url,
                 interaction_type, combined_message, return_url, status, buffer_expires_at,
+                context_status, context_deadline_at,
                 callback_claims, public_comment_context, salesbot_token_jti, salesbot_account_id,
                 salesbot_user_id, salesbot_client_uuid
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :origin, :channel,
                 :author_username, :author_profile_url, :sender_username, :sender_profile_url,
-                :interaction_type, :combined_message, :return_url, 'ready', NOW(),
+                :interaction_type, :combined_message, :return_url, :initial_status, NOW(),
+                :context_status,
+                CASE WHEN :context_status = 'pending'
+                    THEN NOW() + (:context_wait_seconds * INTERVAL '1 second')
+                    ELSE NULL
+                END,
                 CAST(:callback_claims AS jsonb), CAST(:public_comment_context AS jsonb), :salesbot_token_jti, :salesbot_account_id,
                 :salesbot_user_id, :salesbot_client_uuid
             )
@@ -1054,8 +1074,11 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
             raise RuntimeError("comment_callback_job_insert_failed")
         await _record_callback_receipt(job_values, str(job["id"]))
 
-    logger.info("Kommo native comment callback created ready comment job: %s", _job_log_context(dict(job)))
-    return {"status": "ready", "job_id": str(job["id"])}
+    logger.info(
+        "Kommo native comment callback created comment job: %s",
+        _job_log_context(dict(job)),
+    )
+    return {"status": initial_status, "job_id": str(job["id"])}
 
 
 async def _discard_recent_private_jobs_superseded_by_comment_callback(
@@ -1334,7 +1357,7 @@ def _is_instagram_private_message_job(job: dict) -> bool:
 
 
 def _normalize_reconciliation_message(value) -> str:
-    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+    return normalize_message_text(value)
 
 
 def _message_hash(normalized_message: str) -> str:
@@ -1757,6 +1780,10 @@ def _job_log_context(job: dict) -> dict:
         "has_media": bool(job.get("media_url")),
         "has_return_url": bool(job.get("return_url")),
         "has_public_comment_context": bool(_job_public_comment_context(job)),
+        "context_status": job.get("context_status"),
+        "has_meta_context_event": bool(job.get("meta_context_event_id")),
+        "context_correlation_score": job.get("context_correlation_score"),
+        "context_deadline_at": _timestamp_for_log(job.get("context_deadline_at")),
         "attempt_count": job.get("attempt_count"),
         "seconds_until_due": float(job["seconds_until_due"]) if job.get("seconds_until_due") is not None else None,
         "salesbot_launched_at": _timestamp_for_log(job.get("salesbot_launched_at")),

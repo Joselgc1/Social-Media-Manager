@@ -18,6 +18,7 @@ KOMMO_UNKNOWN_PAYLOAD_DAYS = 90
 KOMMO_TERMINAL_JOB_DAYS = 30
 KOMMO_RECEIPT_DAYS = 30
 BROADCAST_DELIVERY_DAYS = 90
+META_CONTEXT_SENSITIVE_DAYS = 0
 DEFAULT_BATCH_SIZE = 500
 DEFAULT_MAX_BATCHES = 10
 
@@ -117,6 +118,29 @@ _POLICIES = (
             UPDATE customers
             SET last_shipping_address = NULL, last_shipping_city = NULL,
                 last_shipping_method = NULL
+            WHERE id IN (SELECT id FROM candidates)
+            RETURNING 1
+        ) SELECT COUNT(*) AS count FROM changed
+        """,
+    ),
+    (
+        "meta_instagram_context_sensitive",
+        META_CONTEXT_SENSITIVE_DAYS,
+        """
+        WITH candidates AS (
+            SELECT id FROM meta_instagram_context_events
+            WHERE expires_at < NOW() - (:days * INTERVAL '1 day')
+              AND (message_text IS NOT NULL OR sender_id IS NOT NULL OR sender_username IS NOT NULL)
+            ORDER BY expires_at LIMIT :batch_size
+            FOR UPDATE SKIP LOCKED
+        ), changed AS (
+            UPDATE meta_instagram_context_events
+            SET correlation_status = CASE
+                    WHEN correlation_status = 'matched' THEN 'matched'
+                    ELSE 'expired'
+                END,
+                message_text = NULL, sender_id = NULL, sender_username = NULL,
+                updated_at = NOW()
             WHERE id IN (SELECT id FROM candidates)
             RETURNING 1
         ) SELECT COUNT(*) AS count FROM changed

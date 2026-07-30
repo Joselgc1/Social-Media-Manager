@@ -578,6 +578,7 @@ ALTER TABLE kommo_message_jobs
             'pending',
             'prepared',
             'waiting_for_salesbot',
+            'waiting_for_context',
             'ready',
             'processing',
             'continuing',
@@ -609,7 +610,7 @@ CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_lead_status
 DROP INDEX IF EXISTS uq_kommo_message_jobs_active_salesbot;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_active_salesbot
     ON kommo_message_jobs(correlation_id)
-    WHERE status IN ('prepared', 'waiting_for_salesbot', 'ready', 'processing', 'continuing');
+    WHERE status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing');
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_pending_correlation
     ON kommo_message_jobs(correlation_id)
     WHERE status = 'pending';
