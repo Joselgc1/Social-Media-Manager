@@ -860,7 +860,12 @@ async def test_multi_product_zero_stock_product_returns_unavailable(engine_harne
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "message",
-    ["¿Está disponible BODY-002-S?", "¿Cuánto cuesta BODY-002-S?"],
+    [
+        "¿Está disponible BODY-002-S?",
+        "¿Cuánto cuesta BODY-002-S?",
+        "¿Está disponible el body negro BODY-002-S?",
+        "¿Cuánto cuesta el body negro BODY-002-S?",
+    ],
 )
 async def test_multi_product_exact_variant_sku_does_not_return_grouped_answer(
     engine_harness,
@@ -885,7 +890,10 @@ async def test_multi_product_exact_variant_sku_does_not_return_grouped_answer(
         },
     )
 
-    assert response["text"].startswith("¿Cuál producto de la publicación")
+    assert response["text"] == (
+        "¿Cuál producto de la publicación te interesa? "
+        "Dinos el nombre o escríbenos al DM y te ayudamos 😊"
+    )
     assert "está disponible" not in response["text"]
     assert "$25" not in response["text"]
     engine_harness.provider.chat.assert_not_awaited()

@@ -1027,6 +1027,11 @@ def _resolve_public_comment_product(
         for product in mapped_products
         if _public_comment_product_identity(product)
     }
+    if _public_comment_mentions_mapped_variant_sku(
+        message_text,
+        list(unique_mapped_products.values()),
+    ):
+        return None, True
     if len(unique_mapped_products) == 1:
         return next(iter(unique_mapped_products.values())), False
 
@@ -1085,6 +1090,29 @@ def _match_public_comment_product_by_sku(value: str | None, grouped_products: li
         if target in {sku for sku in skus if sku}:
             matches.append(product)
     return matches
+
+
+def _public_comment_mentions_mapped_variant_sku(
+    value: str | None,
+    grouped_products: list[dict],
+) -> bool:
+    text = _normalize_catalog_text(value or "")
+    if not text:
+        return False
+    for product in grouped_products:
+        grouped_skus = {
+            _normalize_catalog_text(product.get("sku", "")),
+            _normalize_catalog_text(product.get("parent_sku", "")),
+        }
+        for variant in product.get("variants", []) or []:
+            variant_sku = _normalize_catalog_text(variant.get("sku", ""))
+            if (
+                variant_sku
+                and variant_sku not in grouped_skus
+                and re.search(rf"(?<![\w-]){re.escape(variant_sku)}(?![\w-])", text)
+            ):
+                return True
+    return False
 
 
 def _match_public_comment_product_by_image(value: str | None, grouped_products: list[dict]) -> list[dict]:
