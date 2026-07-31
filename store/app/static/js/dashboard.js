@@ -1,6 +1,12 @@
 const API = '/admin/settings';
 const BROADCAST_API = '/admin/broadcasts';
 const INSTAGRAM_CONTENT_API = '/admin/instagram-content';
+const INSTAGRAM_CONTENT_TYPE_LABELS = {
+  post: 'Post',
+  carousel: 'Carrusel',
+  reel: 'Reel',
+  story: 'Historia',
+};
 let MODELS = {};
 
 // -- Authenticated fetch wrapper --
@@ -289,7 +295,7 @@ function renderInstagramMappings() {
   if (!container || !count) return;
   count.textContent = `${_instagramMappingsData.length} mapeo${_instagramMappingsData.length === 1 ? '' : 's'}`;
   if (!_instagramMappingsData.length) {
-    container.innerHTML = '<div class="text-gray-500 dark:text-gray-400 py-5 text-center">Aún no hay publicaciones mapeadas.</div>';
+    container.innerHTML = '<div class="text-gray-500 dark:text-gray-400 py-5 text-center">Aún no hay contenidos de Instagram mapeados.</div>';
     return;
   }
   container.innerHTML = `<div class="grid gap-3">${_instagramMappingsData.map(mapping => {
@@ -303,6 +309,7 @@ function renderInstagramMappings() {
       ? `<button class="btn btn-secondary text-xs" onclick="archiveInstagramMapping('${escapeHtml(mapping.id)}')">Archivar</button>`
       : `<button class="btn btn-secondary text-xs" onclick="restoreInstagramMapping('${escapeHtml(mapping.id)}')">Restaurar</button>`;
     const contentLabel = mapping.shortcode || mapping.normalized_url || mapping.post_url || mapping.media_id || 'Contenido de Instagram';
+    const contentTypeLabel = INSTAGRAM_CONTENT_TYPE_LABELS[mapping.content_type] || mapping.content_type;
     const contentLink = mapping.normalized_url
       ? `<a class="font-semibold text-indigo-600 dark:text-indigo-400 break-all" href="${escapeHtml(mapping.normalized_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(contentLabel)}</a>`
       : `<span class="font-semibold text-gray-900 dark:text-gray-100 break-all">${escapeHtml(contentLabel)}</span>`;
@@ -310,7 +317,7 @@ function renderInstagramMappings() {
       <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
         <div class="min-w-0">
           ${contentLink}
-          <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(mapping.content_type)}</span><span class="badge ${statusClass}">${escapeHtml(mapping.status)}</span></div>
+          <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(contentTypeLabel)}</span><span class="badge ${statusClass}">${escapeHtml(mapping.status)}</span></div>
         </div>
         <div class="flex gap-2"><button class="btn btn-secondary text-xs" onclick="editInstagramMapping('${escapeHtml(mapping.id)}')">Editar</button>${statusButton}</div>
       </div>
@@ -373,7 +380,7 @@ function cancelInstagramEdit() {
   document.getElementById('instagram-post-url').value = '';
   [...document.getElementById('instagram-product-skus').options].forEach(option => { option.selected = false; });
   renderSelectedInstagramProducts();
-  document.getElementById('instagram-form-title').textContent = 'Mapear publicación';
+  document.getElementById('instagram-form-title').textContent = 'Mapear contenido de Instagram';
   document.getElementById('instagram-save-btn').textContent = 'Guardar mapeo';
   document.getElementById('instagram-cancel-btn').style.display = 'none';
 }

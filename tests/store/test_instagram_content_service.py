@@ -23,13 +23,31 @@ def test_normalizes_equivalent_post_urls(url):
 @pytest.mark.parametrize(
     "url",
     [
+        "https://instagram.com/reel/Reel_123",
+        "https://www.instagram.com/reel/Reel_123/",
+        "https://www.instagram.com/reel/Reel_123/?igsh=anything#fragment",
+    ],
+)
+def test_normalizes_equivalent_reel_urls_without_query_or_fragment(url):
+    result = normalize_instagram_url(url)
+
+    assert result.normalized_url == "https://www.instagram.com/reel/Reel_123/"
+    assert result.shortcode == "Reel_123"
+    assert result.content_type == "reel"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
         "http://www.instagram.com/p/ABC123/",
         "https://instagram.example/p/ABC123/",
         "https://user:password@instagram.com/p/ABC123/",
         "https://www.instagram.com/example_profile/",
         "https://www.instagram.com/stories/example/123/",
-        "https://www.instagram.com/reel/Reel_123/",
         "https://www.instagram.com/p/ABC123/extra",
+        "https://www.instagram.com/reel/Reel_123/extra",
+        "https://www.instagram.com/reels/Reel_123/",
+        "https://www.instagram.com/reel/invalid.shortcode/",
     ],
 )
 def test_rejects_invalid_domains_authority_and_paths(url):
@@ -98,6 +116,35 @@ async def test_resolves_active_product_mapping_by_normalized_permalink(monkeypat
     assert result["product_sku"] == "SKU-2"
     assert fetch_all.await_args.args[1]["normalized_permalink"] == (
         "https://www.instagram.com/p/ABC123/"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolves_reel_product_mapping_by_normalized_permalink(monkeypatch):
+    from app.instagram_content import service
+
+    fetch_all = AsyncMock(
+        return_value=[
+            {
+                "content_id": "content-reel",
+                "media_id": None,
+                "normalized_permalink": "https://www.instagram.com/reel/Reel_123/",
+                "product_sku": "SKU-REEL",
+                "display_order": 0,
+            }
+        ]
+    )
+    monkeypatch.setattr(service.db, "fetch_all", fetch_all)
+
+    result = await service.resolve_content_product_mapping(
+        media_id=None,
+        permalink="https://instagram.com/reel/Reel_123/?igsh=test#comments",
+    )
+
+    assert result["status"] == "resolved"
+    assert result["product_sku"] == "SKU-REEL"
+    assert fetch_all.await_args.args[1]["normalized_permalink"] == (
+        "https://www.instagram.com/reel/Reel_123/"
     )
 
 

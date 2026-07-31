@@ -84,6 +84,9 @@ _PUBLIC_COMMENT_CONTEXT_KEYS = {
     "media_id",
     "post_url",
     "comment_url",
+    "media_type",
+    "media_product_type",
+    "content_type",
     "mapping_status",
 }
 _PUBLIC_COMMENT_CLARIFICATION = (

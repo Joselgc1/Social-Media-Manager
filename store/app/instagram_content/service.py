@@ -1,10 +1,13 @@
 """Validation and normalization for supported Instagram content URLs."""
 
+import re
 from contextlib import suppress
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from app import db
+
+_SUPPORTED_CONTENT_PATH = re.compile(r"^/(p|reel)/([A-Za-z0-9_-]+)/?$", re.IGNORECASE)
 
 
 class InstagramContentUrlError(ValueError):
@@ -19,7 +22,7 @@ class NormalizedInstagramUrl:
 
 
 def normalize_instagram_url(value: str) -> NormalizedInstagramUrl:
-    """Normalize a public Instagram feed-post URL without fetching it."""
+    """Normalize a public Instagram post or Reel URL without fetching it."""
     raw_url = str(value or "").strip()
     try:
         parsed = urlsplit(raw_url)
@@ -36,16 +39,14 @@ def normalize_instagram_url(value: str) -> NormalizedInstagramUrl:
     if hostname not in {"instagram.com", "www.instagram.com"}:
         raise InstagramContentUrlError("URL must use instagram.com.")
 
-    path_parts = [part for part in parsed.path.split("/") if part]
-    if len(path_parts) != 2 or path_parts[0].lower() != "p":
-        raise InstagramContentUrlError("Only Instagram feed post URLs are supported.")
+    path_match = _SUPPORTED_CONTENT_PATH.fullmatch(parsed.path)
+    if not path_match:
+        raise InstagramContentUrlError("Only Instagram post and Reel URLs are supported.")
 
-    path_type, shortcode = path_parts
-    if not shortcode or not shortcode.replace("-", "").replace("_", "").isalnum():
-        raise InstagramContentUrlError("Instagram shortcode is invalid.")
-
-    content_type = "post"
-    normalized_url = f"https://www.instagram.com/{path_type.lower()}/{shortcode}/"
+    path_type, shortcode = path_match.groups()
+    path_type = path_type.lower()
+    content_type = "reel" if path_type == "reel" else "post"
+    normalized_url = f"https://www.instagram.com/{path_type}/{shortcode}/"
     return NormalizedInstagramUrl(
         normalized_url=normalized_url,
         shortcode=shortcode,

@@ -47,6 +47,31 @@ class _DBHandle:
         return _Tx()
 
 
+@pytest.mark.parametrize(
+    ("media_product_type", "media_type", "permalink", "expected"),
+    [
+        ("REELS", "VIDEO", "https://www.instagram.com/p/ABC123/", "reel"),
+        (None, "VIDEO", "https://www.instagram.com/p/ABC123/", "post"),
+        (None, "CAROUSEL_ALBUM", "https://www.instagram.com/p/ABC123/", "carousel"),
+        (None, "VIDEO", "https://www.instagram.com/reel/Reel_123/", "reel"),
+        (None, "VIDEO", None, "post"),
+    ],
+)
+def test_detects_instagram_content_type(
+    media_product_type,
+    media_type,
+    permalink,
+    expected,
+):
+    from app.integrations.meta_context.service import detect_instagram_content_type
+
+    assert detect_instagram_content_type(
+        media_product_type=media_product_type,
+        media_type=media_type,
+        permalink=permalink,
+    ) == expected
+
+
 @pytest.mark.asyncio
 async def test_meta_media_client_fetches_read_only_fields_without_token_in_url(monkeypatch):
     from app.integrations.meta_context import client
@@ -134,9 +159,45 @@ async def test_existing_permalink_mapping_backfills_carousel_parent_media(monkey
     query = mock_db.fetch_one.await_args.args[0]
     assert values["media_id"] == "media-1"
     assert values["caption_snapshot"] == "Caption snapshot"
-    assert values["media_type"] == "CAROUSEL_ALBUM"
+    assert values["content_type"] == "carousel"
     assert "content_type" in query
-    assert "'carousel'" in query
+
+
+@pytest.mark.asyncio
+async def test_existing_reel_mapping_backfills_media_id_caption_and_content_type(monkeypatch):
+    from app.integrations.meta_context import service
+    from app.integrations.meta_context.models import MetaMediaDetails
+
+    mock_db = MagicMock()
+    mock_db.fetch_all = AsyncMock(
+        return_value=[
+            {
+                "id": "content-reel",
+                "media_id": None,
+                "normalized_permalink": "https://www.instagram.com/reel/Reel_123/",
+                "shortcode": "Reel_123",
+            }
+        ]
+    )
+    mock_db.fetch_one = AsyncMock(return_value={"id": "content-reel"})
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    monkeypatch.setattr(service, "db", mock_db)
+
+    result = await service.backfill_instagram_mapping(
+        MetaMediaDetails(
+            id="reel-media-1",
+            permalink="https://instagram.com/reel/Reel_123/?igsh=test",
+            caption="Reel caption",
+            media_type="VIDEO",
+            media_product_type="REELS",
+        )
+    )
+
+    assert result == {"status": "backfilled", "content_id": "content-reel"}
+    values = mock_db.fetch_one.await_args.args[1]
+    assert values["media_id"] == "reel-media-1"
+    assert values["caption_snapshot"] == "Reel caption"
+    assert values["content_type"] == "reel"
 
 
 @pytest.mark.asyncio
@@ -317,8 +378,10 @@ async def test_late_media_enrichment_updates_already_matched_kommo_context(monke
         "event-1",
         {
             "media_id": "media-1",
-            "media_permalink": "https://www.instagram.com/p/ABC123/",
+            "media_permalink": "https://www.instagram.com/reel/Reel_123/",
             "media_caption": "Caption",
+            "media_type": "VIDEO",
+            "media_product_type": "REELS",
         },
     )
 
@@ -328,8 +391,11 @@ async def test_late_media_enrichment_updates_already_matched_kommo_context(monke
     assert json.loads(values["context"]) == {
         "media_id": "media-1",
         "post_id": "media-1",
-        "post_url": "https://www.instagram.com/p/ABC123/",
+        "post_url": "https://www.instagram.com/reel/Reel_123/",
         "post_caption": "Caption",
+        "media_type": "VIDEO",
+        "media_product_type": "REELS",
+        "content_type": "reel",
     }
     assert '"job_context_enriched": true' in mock_db.execute.await_args.args[1]["details"]
 

@@ -19,6 +19,25 @@ logger = logging.getLogger(__name__)
 MAPPING_NOT_FOUND_RETRY_MINUTES = 30
 
 
+def detect_instagram_content_type(
+    *,
+    media_product_type: str | None,
+    media_type: str | None,
+    permalink: str | None,
+) -> str:
+    """Determine the content type from authoritative Meta fields, then the URL."""
+    if str(media_product_type or "").strip().upper() == "REELS":
+        return "reel"
+    if str(media_type or "").strip().upper() == "CAROUSEL_ALBUM":
+        return "carousel"
+    if permalink:
+        try:
+            return normalize_instagram_url(permalink).content_type
+        except InstagramContentUrlError:
+            pass
+    return "post"
+
+
 async def store_context_event(event: MetaInstagramContextEvent) -> dict:
     """Store one signed Meta event idempotently and return its durable ID."""
     config = get_config()
@@ -118,7 +137,9 @@ async def process_context_event(event_id: str) -> dict:
                     "media_permalink": media.permalink,
                     "media_caption": media.caption,
                     "media_type": media.media_type,
-                    "media_product_type": media.media_product_type,
+                    "media_product_type": (
+                        media.media_product_type or event_dict.get("media_product_type")
+                    ),
                     "media_timestamp": media.timestamp,
                     "media_thumbnail_url": media.thumbnail_url,
                 }
@@ -282,6 +303,13 @@ async def _update_matched_job_context(event_id: str, event: dict) -> bool:
         "post_id": event.get("media_id"),
         "post_url": event.get("media_permalink"),
         "post_caption": event.get("media_caption"),
+        "media_type": event.get("media_type"),
+        "media_product_type": event.get("media_product_type"),
+        "content_type": detect_instagram_content_type(
+            media_product_type=event.get("media_product_type"),
+            media_type=event.get("media_type"),
+            permalink=event.get("media_permalink"),
+        ),
     }
     context = {key: value for key, value in context.items() if value is not None}
     if not context:
@@ -422,6 +450,11 @@ async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
         if normalized:
             normalized_permalink = normalized.normalized_url
             shortcode = normalized.shortcode
+    content_type = detect_instagram_content_type(
+        media_product_type=media.media_product_type,
+        media_type=media.media_type,
+        permalink=media.permalink,
+    )
 
     async with db.get_db().transaction():
         rows = await db.fetch_all(
@@ -466,10 +499,7 @@ async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
                     UPDATE instagram_content
                     SET media_id = COALESCE(media_id, :media_id),
                         caption_snapshot = COALESCE(caption_snapshot, :caption_snapshot),
-                        content_type = CASE
-                            WHEN :media_type = 'CAROUSEL_ALBUM' THEN 'carousel'
-                            ELSE content_type
-                        END,
+                        content_type = :content_type,
                         updated_at = NOW()
                     WHERE id = :id
                       AND (media_id IS NULL OR media_id = :media_id)
@@ -479,7 +509,7 @@ async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
                         "id": row["id"],
                         "media_id": media.id,
                         "caption_snapshot": media.caption,
-                        "media_type": media.media_type,
+                        "content_type": content_type,
                     },
                 )
         except Exception as exc:

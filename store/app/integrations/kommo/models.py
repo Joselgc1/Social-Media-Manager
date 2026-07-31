@@ -123,6 +123,9 @@ class SalesbotWidgetData(BaseModel):
     post_url: str | None = None
     comment_url: str | None = None
     post_caption: str | None = None
+    media_type: str | None = None
+    media_product_type: str | None = None
+    content_type: str | None = None
     post_text: str | None = None
     media_caption: str | None = None
     product_name: str | None = None
@@ -150,6 +153,9 @@ class SalesbotWidgetData(BaseModel):
         "post_url",
         "comment_url",
         "post_caption",
+        "media_type",
+        "media_product_type",
+        "content_type",
         "post_text",
         "media_caption",
         "product_name",

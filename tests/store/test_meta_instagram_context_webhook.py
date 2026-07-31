@@ -93,6 +93,7 @@ def test_meta_context_webhook_accepts_valid_signature_and_schedules_context_only
     assert event.comment_id == "comment-1"
     assert event.parent_comment_id == "parent-1"
     assert event.media_id == "media-1"
+    assert event.media_product_type == "REELS"
     assert event.sender_username == "Client.One"
     process.assert_awaited_once_with("event-1")
     assert not hasattr(webhook, "generate_response")

@@ -127,6 +127,30 @@ async def test_create_mapping_deduplicates_skus_and_preserves_display_order(monk
     assert inserted_products == [("PARENT-2", 0), ("PARENT-1", 1)]
 
 
+@pytest.mark.asyncio
+async def test_create_reel_mapping_with_multiple_skus(monkeypatch):
+    monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    fetch_one = AsyncMock(return_value={"id": CONTENT_ID})
+    monkeypatch.setattr(instagram_content.db, "fetch_one", fetch_one)
+    execute = AsyncMock()
+    monkeypatch.setattr(instagram_content.db, "execute", execute)
+
+    result = await instagram_content.create_instagram_content(
+        instagram_content.InstagramContentCreate(
+            post_url="https://instagram.com/reel/Reel_123/?igsh=test",
+            product_skus=["PARENT-1", "PARENT-2"],
+        )
+    )
+
+    insert_values = fetch_one.await_args.args[1]
+    assert insert_values["content_type"] == "reel"
+    assert insert_values["normalized_permalink"] == (
+        "https://www.instagram.com/reel/Reel_123/"
+    )
+    assert result["product_skus"] == ["PARENT-1", "PARENT-2"]
+
+
 def test_mapping_input_limits_are_enforced():
     with pytest.raises(ValidationError):
         instagram_content.InstagramContentCreate(
@@ -200,6 +224,26 @@ async def test_duplicate_url_returns_conflict(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_reel_url_returns_conflict(monkeypatch):
+    class UniqueViolation(Exception):
+        sqlstate = "23505"
+
+    monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    monkeypatch.setattr(instagram_content.db, "fetch_one", AsyncMock(side_effect=UniqueViolation()))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await instagram_content.create_instagram_content(
+            instagram_content.InstagramContentCreate(
+                post_url="https://instagram.com/reel/Reel_123/",
+                product_skus=["PARENT-1"],
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
     monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
     monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
@@ -237,6 +281,42 @@ async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
         if "INSERT INTO instagram_content_products" in call.args[0]
     ]
     assert inserted_products == [("PARENT-2", 0), ("PARENT-1", 1)]
+
+
+@pytest.mark.asyncio
+async def test_update_post_mapping_to_reel_clears_stale_meta_data(monkeypatch):
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    monkeypatch.setattr(
+        instagram_content.db,
+        "fetch_one",
+        AsyncMock(
+            return_value={
+                "id": CONTENT_ID,
+                "normalized_permalink": "https://www.instagram.com/p/OLD123/",
+                "content_type": "post",
+                "media_id": "stale-media-id",
+                "caption_snapshot": "Stale caption",
+            }
+        ),
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(instagram_content.db, "execute", execute)
+
+    await instagram_content.update_instagram_content(
+        UUID(CONTENT_ID),
+        instagram_content.InstagramContentUpdate(
+            post_url="https://instagram.com/reel/Reel_123/?igsh=test",
+        ),
+    )
+
+    update_query, update_values = execute.await_args.args
+    assert "content_type = :content_type" in update_query
+    assert "media_id = NULL" in update_query
+    assert "caption_snapshot = NULL" in update_query
+    assert update_values["content_type"] == "reel"
+    assert update_values["normalized_permalink"] == (
+        "https://www.instagram.com/reel/Reel_123/"
+    )
 
 
 @pytest.mark.asyncio
@@ -311,6 +391,33 @@ async def test_archive_mapping_is_soft_delete(monkeypatch):
 
     assert result == {"id": CONTENT_ID, "status": "archived"}
     assert "SET status = 'archived'" in fetch_one.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_reel_mapping_can_be_archived_and_restored(monkeypatch):
+    fetch_one = AsyncMock(
+        side_effect=[
+            {"id": CONTENT_ID},
+            {
+                "id": CONTENT_ID,
+                "normalized_permalink": "https://www.instagram.com/reel/Reel_123/",
+            },
+        ]
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(instagram_content.db, "fetch_one", fetch_one)
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    monkeypatch.setattr(instagram_content.db, "execute", execute)
+
+    archived = await instagram_content.archive_instagram_content(UUID(CONTENT_ID))
+    restored = await instagram_content.update_instagram_content(
+        UUID(CONTENT_ID),
+        instagram_content.InstagramContentUpdate(status="active"),
+    )
+
+    assert archived == {"id": CONTENT_ID, "status": "archived"}
+    assert restored == {"id": CONTENT_ID, "status": "active", "product_skus": None}
+    assert execute.await_args.args[1]["status"] == "active"
 
 
 @pytest.mark.asyncio
