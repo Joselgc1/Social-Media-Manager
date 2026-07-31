@@ -26,12 +26,12 @@ router = APIRouter(
 
 class InstagramContentCreate(BaseModel):
     post_url: str = Field(max_length=500)
-    product_skus: list[str] = Field(min_length=1, max_length=20)
+    product_skus: list[str] = Field(min_length=1, max_length=1)
 
 
 class InstagramContentUpdate(BaseModel):
     post_url: str | None = Field(default=None, max_length=500)
-    product_skus: list[str] | None = Field(default=None, min_length=1, max_length=20)
+    product_skus: list[str] | None = Field(default=None, min_length=1, max_length=1)
     status: Literal["active", "archived"] | None = None
 
 
@@ -46,11 +46,24 @@ def _serialize_reference_product(product: dict) -> dict:
         "sku": product["sku"],
         "name": product.get("product_name", ""),
         "category": product.get("category", ""),
-        "price": float(product.get("price_usd", 0) or 0),
+        "price": _current_product_price(product),
         "total_stock": int(product.get("stock", 0) or 0),
         "sizes": [size for size in str(sizes).split(",") if size],
         "has_image": bool(product.get("image_url")),
     }
+
+
+def _current_product_price(product: dict) -> float | None:
+    prices = {
+        float(variant["price_usd"])
+        for variant in product.get("variants", []) or []
+        if variant.get("price_usd") not in (None, "") and float(variant["price_usd"]) > 0
+    }
+    if not prices:
+        price = float(product.get("price_usd", 0) or 0)
+        if price > 0:
+            prices.add(price)
+    return next(iter(prices)) if len(prices) == 1 else None
 
 
 def _validate_product_skus(product_skus: list[str], products: list[dict]) -> list[str]:
@@ -141,7 +154,7 @@ async def list_instagram_content():
             products.append({
                 "sku": sku,
                 "name": current.get("product_name", "") if current else None,
-                "price": float(current.get("price_usd", 0) or 0) if current else None,
+                "price": _current_product_price(current) if current else None,
                 "stock": int(current.get("stock", 0) or 0) if current else None,
             })
         result.append({
@@ -196,7 +209,7 @@ async def create_instagram_content(body: InstagramContentCreate):
 @router.put("/{content_id}")
 async def update_instagram_content(content_id: UUID, body: InstagramContentUpdate):
     existing = await db.fetch_one(
-        "SELECT id, permalink FROM instagram_content WHERE id = :id",
+        "SELECT id, permalink, normalized_permalink FROM instagram_content WHERE id = :id",
         {"id": str(content_id)},
     )
     if not existing:
@@ -222,6 +235,8 @@ async def update_instagram_content(content_id: UUID, body: InstagramContentUpdat
             "normalized_permalink": normalized.normalized_url,
             "shortcode": normalized.shortcode,
         })
+        if normalized.normalized_url != existing["normalized_permalink"]:
+            updates.extend(["media_id = NULL", "caption_snapshot = NULL"])
     if body.status is not None:
         updates.append("status = :status")
         values["status"] = body.status

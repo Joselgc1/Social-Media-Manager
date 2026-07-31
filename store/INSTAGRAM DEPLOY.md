@@ -228,32 +228,21 @@ Start or complete verification using the legal business information and supporti
 
 Submitted documents should be clear, in colour, show the complete document and must not be expired or altered.
 
-### Verification does not block all staging work
+### Verification and access requirements depend on the deployment
 
-You may continue staging while verification is pending because this application currently serves an Instagram professional account that your own business owns or manages.
+You may continue callback verification and read-only Graph API staging while verification is pending. The requirements for Live mode depend on the assets the app serves and the access requirements shown in the Meta dashboard.
 
-Meta distinguishes:
-
-```text
-Standard Access
-For professional accounts your business owns or manages.
-
-Advanced Access
-For professional accounts belonging to other businesses.
-```
-
-Business verification may still become necessary for:
+Business verification, App Review or Advanced Access may be required for:
 
 ```text
-Advanced Access
-App Review
-Production permission approval
+Serving Instagram accounts owned by other businesses
+Permissions for which Meta requires Advanced Access
+Production permission approval shown in the Meta dashboard
 System-user or durable business credentials
-Serving accounts owned by other businesses
 Requirements displayed before switching the app to Live
 ```
 
-Because your Graph API requests are already returning the Page and Instagram account, verification is not a blocker for the next staging steps.
+For an Instagram account owned or managed by the same business, Standard Access may be sufficient for some permissions. Successful account and media queries prove the token and asset relationship, but the Meta dashboard remains authoritative for the app's Live-mode, verification, App Review and access-level requirements.
 
 ---
 
@@ -417,6 +406,7 @@ Request:
 ```text
 pages_show_list
 pages_read_engagement
+pages_manage_metadata
 instagram_basic
 instagram_manage_comments
 business_management
@@ -428,6 +418,7 @@ Meta’s documented Facebook Login permissions for this Instagram comment use ca
 pages_show_list
 instagram_basic
 pages_read_engagement
+pages_manage_metadata
 instagram_manage_comments
 ```
 
@@ -445,7 +436,6 @@ You do not need:
 instagram_content_publish
 instagram_manage_messages
 pages_messaging
-pages_manage_metadata
 ```
 
 for this context-only comment integration.
@@ -955,21 +945,42 @@ Media product type/location
 
 The application parser supports the Instagram `comments` event and extracts the account, sender, comment, text and media identifiers.
 
+## 10.4 Enable webhook notifications for the Instagram account
+
+After subscribing the app to the Instagram `comments` field in the dashboard, enable webhook notifications for the managed Instagram professional account. Use the Instagram account ID and Page access token returned through `/me/accounts`:
+
+```bash
+curl -i -X POST \
+  "https://graph.facebook.com/vXX.X/INSTAGRAM_ACCOUNT_ID/subscribed_apps" \
+  --data-urlencode "subscribed_fields=comments" \
+  --data-urlencode "access_token=PAGE_ACCESS_TOKEN"
+```
+
+This uses `graph.facebook.com` because this deployment uses Instagram API with Facebook Login. It does not subscribe to the Facebook Page `feed` field.
+
+Expected response:
+
+```json
+{
+  "success": true
+}
+```
+
+Verify the Instagram account subscription:
+
+```bash
+curl -G \
+  "https://graph.facebook.com/vXX.X/INSTAGRAM_ACCOUNT_ID/subscribed_apps" \
+  --data-urlencode "access_token=PAGE_ACCESS_TOKEN"
+```
+
+The response must list the Meta app and its subscribed Instagram fields. Use the permissions and access level required by the Meta dashboard for the selected Graph API version.
+
 ---
 
 # 11. Steps that are not required
 
-## 11.1 Do not subscribe the Facebook Page to `feed`
-
-Do not run:
-
-```text
-FACEBOOK_PAGE_ID/subscribed_apps?subscribed_fields=feed
-```
-
-The `feed` field refers to Facebook Page activity, not Instagram comment notifications.
-
-## 11.2 Do not subscribe the Page to Messenger fields
+## 11.1 Do not subscribe the Page to Messenger fields
 
 Do not run:
 
@@ -995,7 +1006,7 @@ CHANNEL_BACKEND=kommo
 
 Kommo continues receiving and sending Instagram DMs.
 
-## 11.3 Do not use `graph.instagram.com/subscribed_apps`
+## 11.2 Do not use `graph.instagram.com/subscribed_apps`
 
 Do not run:
 
@@ -1010,9 +1021,11 @@ Your implementation uses:
 ```text
 graph.facebook.com
 Facebook Page access token
+INSTAGRAM_ACCOUNT_ID/subscribed_apps
 instagram_basic
 instagram_manage_comments
 pages_read_engagement
+pages_manage_metadata
 ```
 
 ---
@@ -1057,7 +1070,7 @@ Open the Instagram content mapping section.
 
 For the first test:
 
-1. Choose a normal Zona Pink feed post or reel.
+1. Choose a normal non-Reel Zona Pink feed post. Step 4 intentionally accepts only `/p/` feed-post URLs; Reel mapping is outside the current application scope.
 2. Use a post advertising exactly one product.
 3. Copy its public Instagram URL.
 4. Paste the URL into the mapping form.
@@ -1109,7 +1122,9 @@ When using local ngrok, the same rule applies.
 
 Do not use the Zona Pink business account as the commenter.
 
-From another Instagram account, comment on the mapped post:
+From another Instagram account, comment on the mapped post. While the Meta app is in Development mode, that account must belong to a Meta user who has accepted an administrator, developer, or tester role for the app. Otherwise, switch the app to Live after satisfying Meta's production requirements before testing with an ordinary account.
+
+Comment:
 
 ```text
 Precio prueba 7421
@@ -1351,7 +1366,8 @@ Expected:
 No product is guessed
 Job waits briefly
 Safe DM/WhatsApp fallback is used
-mapping_status becomes not_found
+Meta event diagnostics record mapping_status = not_found while waiting
+The released Kommo job receives mapping_status = timed_out after its deadline
 No tight 15-second retry loop
 ```
 
@@ -1401,7 +1417,8 @@ Webhook is received
 Correlation may still occur
 Media enrichment fails safely
 No product is guessed
-Kommo eventually uses the safe fallback
+If the mapping already has the matching media ID, it may still resolve safely
+If enrichment is required to find the mapping, Kommo eventually uses the safe fallback
 ```
 
 Restore the token afterward.
@@ -1449,7 +1466,9 @@ Your own Instagram professional account
 Facebook users with app roles
 ```
 
-Meta’s documentation defines Standard Access for professional accounts your business owns or manages and has added to the app.
+This restriction also applies to the Instagram account used to create a test comment. An arbitrary customer account does not generate production webhook delivery while the app remains in Development mode.
+
+The dashboard Test button can validate callback delivery but does not prove that real comments will be delivered in the app's current mode. Check the access level and Live-mode requirements shown for the app and permissions in the Meta dashboard.
 
 ## 19.2 Live mode
 
@@ -1457,8 +1476,8 @@ Before using this with normal production traffic:
 
 ```text
 [ ] Complete App Settings → Basic
-[ ] Complete Business Portfolio verification when Meta requires it
-[ ] Confirm required permission access levels
+[ ] Complete Business Portfolio verification if Meta requires it
+[ ] Obtain Advanced Access for permissions or third-party assets that require it
 [ ] Complete App Review if shown as required
 [ ] Replace temporary staging credentials
 [ ] Switch the app to Live
@@ -1619,7 +1638,9 @@ Webhooks object is Instagram
 comments says Subscribed
 Comment is on the configured account's media
 INSTAGRAM_ACCOUNT_ID is correct
-App has the required access level
+Instagram account's subscribed_apps response lists the app and comments field
+Required permissions are granted at the access level shown by Meta
+Business verification and App Review are complete if Meta requires them
 App mode permits the test
 Callback is still publicly reachable
 ```
@@ -1642,7 +1663,7 @@ Username values do not conflict
 Confirm:
 
 ```text
-Exact public post/reel URL was entered
+Exact public non-Reel post URL was entered
 Mapping status is active
 Selected SKU exists in the catalog
 Meta permalink normalizes to the same URL
@@ -1674,7 +1695,7 @@ Exactly one product is mapped for the first test
 [ ] Facebook Login for Business product added
 [ ] Webhooks product added
 [ ] Correct Business Portfolio selected
-[ ] Business verification submitted or completed
+[ ] Business verification submitted or completed if Meta requires it
 [ ] Instagram is professional
 [ ] Instagram is linked to the Facebook Page
 [ ] User token includes business_management
@@ -1688,7 +1709,10 @@ Exactly one product is mapped for the first test
 [ ] Verification curl returns 200
 [ ] Webhooks object is Instagram
 [ ] comments field is subscribed
-[ ] No Facebook feed/Messenger subscription was added
+[ ] Instagram account subscription lists the app and comments field
+[ ] Required permissions have the access level shown by Meta
+[ ] Business verification and App Review are complete if required
+[ ] No Facebook Messenger subscription was added
 [ ] One Instagram post is mapped to one product
 [ ] Meta and Kommo point to the same backend
 [ ] Real-comment test succeeds

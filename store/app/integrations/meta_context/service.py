@@ -166,6 +166,12 @@ async def process_context_event(event_id: str) -> dict:
             logger.exception("Meta Instagram mapping backfill failed: event_id=%s", event_id)
         else:
             mapping_status = mapping_result.get("status")
+            logger.info(
+                "instagram_mapping_backfill_result event_id=%s status=%s reason=%s",
+                event_id,
+                mapping_status,
+                mapping_result.get("reason") or "none",
+            )
             if mapping_status == "conflict":
                 await _merge_event_details(
                     event_id,
@@ -307,6 +313,7 @@ async def resolve_and_release_matched_job(event_id: str, *, force: bool = False)
         row = await db.fetch_one(
             """
             SELECT event.id AS event_id, event.media_id, event.media_permalink,
+                   event.media_caption,
                    event.correlation_details, job.id AS job_id,
                    job.public_comment_context
             FROM meta_instagram_context_events event
@@ -338,16 +345,36 @@ async def resolve_and_release_matched_job(event_id: str, *, force: bool = False)
         )
         mapping_status = resolution.get("status")
         if mapping_status == "not_found":
+            logger.info(
+                "instagram_product_mapping_missing event_id=%s job_id=%s has_media_id=%s has_permalink=%s",
+                event_id,
+                row["job_id"],
+                bool(row["media_id"] or job_context.get("media_id")),
+                bool(row["media_permalink"] or job_context.get("post_url")),
+            )
             await _record_mapping_not_found(event_id)
             return {"status": "waiting", "mapping_status": "not_found"}
 
         if mapping_status == "resolved":
             context = {
+                "media_id": row["media_id"] or job_context.get("media_id"),
+                "post_id": row["media_id"] or job_context.get("post_id"),
+                "post_url": row["media_permalink"] or job_context.get("post_url"),
+                "post_caption": row["media_caption"] or job_context.get("post_caption"),
                 "product_sku": resolution["product_sku"],
                 "mapping_status": "resolved",
             }
+            context = {key: value for key, value in context.items() if value is not None}
         else:
             context = {"mapping_status": "ambiguous"}
+        logger.info(
+            "instagram_product_mapping_%s event_id=%s job_id=%s reason=%s product_sku=%s",
+            mapping_status,
+            event_id,
+            row["job_id"],
+            resolution.get("reason") or "none",
+            resolution.get("product_sku") or "none",
+        )
         released = await db.fetch_one(
             """
             UPDATE kommo_message_jobs

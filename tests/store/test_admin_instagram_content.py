@@ -100,7 +100,7 @@ async def test_product_endpoint_exposes_derived_product_sku_without_parent(monke
 
 
 @pytest.mark.asyncio
-async def test_create_mapping_deduplicates_and_supports_multiple_skus(monkeypatch):
+async def test_create_mapping_supports_exactly_one_sku(monkeypatch):
     monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
     monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
     monkeypatch.setattr(
@@ -114,17 +114,17 @@ async def test_create_mapping_deduplicates_and_supports_multiple_skus(monkeypatc
     result = await instagram_content.create_instagram_content(
         instagram_content.InstagramContentCreate(
             post_url="https://instagram.com/p/ABC123?igsh=x",
-            product_skus=["PARENT-1", "PARENT-1", "PARENT-2"],
+            product_skus=["PARENT-1"],
         )
     )
 
-    assert result["product_skus"] == ["PARENT-1", "PARENT-2"]
+    assert result["product_skus"] == ["PARENT-1"]
     inserted_skus = [
         call.args[1]["product_sku"]
         for call in execute.await_args_list
         if "INSERT INTO instagram_content_products" in call.args[0]
     ]
-    assert inserted_skus == ["PARENT-1", "PARENT-2"]
+    assert inserted_skus == ["PARENT-1"]
 
 
 def test_mapping_input_limits_are_enforced():
@@ -137,7 +137,7 @@ def test_mapping_input_limits_are_enforced():
     with pytest.raises(ValidationError):
         instagram_content.InstagramContentCreate(
             post_url="https://instagram.com/p/ABC123",
-            product_skus=[f"SKU-{index}" for index in range(21)],
+            product_skus=["PARENT-1", "PARENT-2"],
         )
 
     with pytest.raises(ValidationError):
@@ -186,14 +186,23 @@ async def test_duplicate_url_returns_conflict(monkeypatch):
 async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
     monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
     monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
-    monkeypatch.setattr(instagram_content.db, "fetch_one", AsyncMock(return_value={"id": CONTENT_ID}))
+    monkeypatch.setattr(
+        instagram_content.db,
+        "fetch_one",
+        AsyncMock(
+            return_value={
+                "id": CONTENT_ID,
+                "normalized_permalink": "https://www.instagram.com/p/OLD123/",
+            }
+        ),
+    )
     execute = AsyncMock()
     monkeypatch.setattr(instagram_content.db, "execute", execute)
 
     result = await instagram_content.update_instagram_content(
         UUID(CONTENT_ID),
         instagram_content.InstagramContentUpdate(
-            post_url="https://instagram.com/reel/REEL123/",
+            post_url="https://instagram.com/p/NEW123/",
             product_skus=["PARENT-2"],
             status="active",
         ),
@@ -201,13 +210,20 @@ async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
 
     assert result["product_skus"] == ["PARENT-2"]
     assert any("UPDATE instagram_content SET" in call.args[0] for call in execute.await_args_list)
+    update_query = next(call.args[0] for call in execute.await_args_list if "UPDATE instagram_content SET" in call.args[0])
+    assert "media_id = NULL" in update_query
+    assert "caption_snapshot = NULL" in update_query
     assert any("DELETE FROM instagram_content_products" in call.args[0] for call in execute.await_args_list)
 
 
 @pytest.mark.asyncio
 async def test_archived_mapping_can_be_restored_without_catalog_access(monkeypatch):
     monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
-    monkeypatch.setattr(instagram_content.db, "fetch_one", AsyncMock(return_value={"id": CONTENT_ID}))
+    monkeypatch.setattr(
+        instagram_content.db,
+        "fetch_one",
+        AsyncMock(return_value={"id": CONTENT_ID, "normalized_permalink": "https://www.instagram.com/p/ABC123/"}),
+    )
     reference_products = AsyncMock()
     monkeypatch.setattr(instagram_content, "_reference_products", reference_products)
     execute = AsyncMock()

@@ -526,7 +526,7 @@ async def test_hostile_message_escalates_before_normal_llm_flow(engine_harness):
 
 
 @pytest.mark.asyncio
-async def test_public_instagram_comment_price_uses_post_context_without_llm(engine_harness):
+async def test_public_instagram_comment_unresolved_widget_sku_uses_fallback(engine_harness):
     response = await engine.generate_response(
         "instagram",
         "ig-commenter",
@@ -538,14 +538,14 @@ async def test_public_instagram_comment_price_uses_post_context_without_llm(engi
         },
     )
 
-    assert response["text"] == "Pijama satén azul cuesta $28."
+    assert response["text"] == "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
     assert response["interactive"] is None
     assert response["catalog_pdf"] is None
     assert response["product_image"] is None
     engine_harness.provider.chat.assert_not_awaited()
     engine.conversations.get_history.assert_not_awaited()
     engine.orders.get_latest_open_order.assert_not_awaited()
-    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_price"
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_private_invite"
 
 
 @pytest.mark.asyncio
@@ -614,7 +614,7 @@ async def test_resolved_mapping_never_falls_back_to_callback_parent_sku(engine_h
 
 
 @pytest.mark.asyncio
-async def test_public_instagram_comment_stock_uses_post_caption_context_without_stock_count(engine_harness):
+async def test_public_instagram_comment_stock_uses_resolved_mapping_without_stock_count(engine_harness):
     response = await engine.generate_response(
         "instagram",
         "ig-commenter",
@@ -622,7 +622,11 @@ async def test_public_instagram_comment_stock_uses_post_caption_context_without_
         integration_context={
             "provider": "kommo",
             "interaction_type": "instagram_comment",
-            "public_comment_context": {"post_caption": "Nueva Pijama satén azul disponible"},
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_sku": "PJ-001",
+                "post_caption": "Nueva Pijama satén azul disponible",
+            },
         },
     )
 
@@ -630,6 +634,56 @@ async def test_public_instagram_comment_stock_uses_post_caption_context_without_
     assert "4" not in response["text"]
     engine_harness.provider.chat.assert_not_awaited()
     assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_stock"
+
+
+@pytest.mark.asyncio
+async def test_public_instagram_comment_resolved_product_out_of_stock(engine_harness):
+    engine_harness.catalog[0]["stock"] = 0
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Queda disponible?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_sku": "PJ-001",
+            },
+        },
+    )
+
+    assert response["text"] == "Por ahora Pijama satén azul no está disponible."
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_public_instagram_comment_multiple_current_prices_uses_fallback(engine_harness):
+    engine_harness.catalog.append({
+        **engine_harness.catalog[0],
+        "sku": "PJ-001-M",
+        "size": "M",
+        "sizes": "M",
+        "price_usd": 30,
+    })
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Cuánto cuesta?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_sku": "PJ-001",
+            },
+        },
+    )
+
+    assert response["text"] == "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
+    engine_harness.provider.chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio

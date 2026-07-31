@@ -261,7 +261,8 @@ function renderInstagramProductOptions() {
     : 'Catálogo temporalmente no disponible';
   select.innerHTML = `<option value="">${placeholder}</option>` + _instagramProductsData.map(product => {
     const stockLabel = product.total_stock > 0 ? `${product.total_stock} disponibles` : 'Sin stock';
-    return `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)} · $${Number(product.price).toFixed(2)} · ${stockLabel}</option>`;
+    const priceLabel = product.price === null ? 'Precio variable' : `$${Number(product.price).toFixed(2)}`;
+    return `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)} · ${priceLabel} · ${stockLabel}</option>`;
   }).join('');
   if ([...select.options].some(option => option.value === selected)) select.value = selected;
 }
@@ -302,6 +303,11 @@ function renderInstagramMappings() {
         <div><span class="block text-xs text-gray-500 dark:text-gray-400">SKU</span>${escapeHtml(productSkus)}</div>
         <div><span class="block text-xs text-gray-500 dark:text-gray-400">Precio actual</span>${escapeHtml(prices)}</div>
         <div><span class="block text-xs text-gray-500 dark:text-gray-400">Stock actual</span>${escapeHtml(stocks)}</div>
+      </div>
+      <div class="grid sm:grid-cols-3 gap-3 mt-4 pt-4 border-t border-gray-100 dark:border-gray-800 text-sm">
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">URL normalizada</span><span class="break-all">${escapeHtml(mapping.normalized_url || 'Pendiente')}</span></div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Shortcode</span>${escapeHtml(mapping.shortcode || 'Pendiente')}</div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Meta media ID</span><span class="break-all">${escapeHtml(mapping.media_id || 'Pendiente de Meta')}</span></div>
       </div>
     </article>`;
   }).join('')}</div>`;

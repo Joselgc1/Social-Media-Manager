@@ -19,7 +19,7 @@ class NormalizedInstagramUrl:
 
 
 def normalize_instagram_url(value: str) -> NormalizedInstagramUrl:
-    """Normalize a public Instagram post or reel URL without fetching it."""
+    """Normalize a public Instagram feed-post URL without fetching it."""
     raw_url = str(value or "").strip()
     try:
         parsed = urlsplit(raw_url)
@@ -37,14 +37,14 @@ def normalize_instagram_url(value: str) -> NormalizedInstagramUrl:
         raise InstagramContentUrlError("URL must use instagram.com.")
 
     path_parts = [part for part in parsed.path.split("/") if part]
-    if len(path_parts) != 2 or path_parts[0].lower() not in {"p", "reel"}:
-        raise InstagramContentUrlError("Only Instagram post and reel URLs are supported.")
+    if len(path_parts) != 2 or path_parts[0].lower() != "p":
+        raise InstagramContentUrlError("Only Instagram feed post URLs are supported.")
 
     path_type, shortcode = path_parts
     if not shortcode or not shortcode.replace("-", "").replace("_", "").isalnum():
         raise InstagramContentUrlError("Instagram shortcode is invalid.")
 
-    content_type = "post" if path_type.lower() == "p" else "reel"
+    content_type = "post"
     normalized_url = f"https://www.instagram.com/{path_type.lower()}/{shortcode}/"
     return NormalizedInstagramUrl(
         normalized_url=normalized_url,

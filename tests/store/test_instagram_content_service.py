@@ -20,14 +20,6 @@ def test_normalizes_equivalent_post_urls(url):
     assert result.content_type == "post"
 
 
-def test_normalizes_reel_url_and_removes_query_string():
-    result = normalize_instagram_url("https://instagram.com/reel/Reel_123/?utm_source=test")
-
-    assert result.normalized_url == "https://www.instagram.com/reel/Reel_123/"
-    assert result.shortcode == "Reel_123"
-    assert result.content_type == "reel"
-
-
 @pytest.mark.parametrize(
     "url",
     [
@@ -36,6 +28,7 @@ def test_normalizes_reel_url_and_removes_query_string():
         "https://user:password@instagram.com/p/ABC123/",
         "https://www.instagram.com/example_profile/",
         "https://www.instagram.com/stories/example/123/",
+        "https://www.instagram.com/reel/Reel_123/",
         "https://www.instagram.com/p/ABC123/extra",
     ],
 )

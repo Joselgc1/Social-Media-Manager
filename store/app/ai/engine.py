@@ -901,6 +901,14 @@ async def _handle_public_instagram_comment(
         route_intent = "public_comment_private_invite"
         reply_text = _public_comment_private_invite_text(settings)
 
+    context = _public_comment_context(integration_context)
+    logger.info(
+        "public_instagram_comment_route_selected route_intent=%s mapping_status=%s product_resolved=%s",
+        route_intent,
+        context.get("mapping_status") or "missing",
+        route_intent in {"public_comment_price", "public_comment_stock"},
+    )
+
     response_time_ms = int((time.monotonic() - t_start) * 1000)
     await analytics.log_ai_run(
         customer_id=customer["id"],
@@ -971,36 +979,16 @@ def _resolve_public_comment_product(integration_context: dict | None) -> dict | 
     if not context:
         return None
 
-    mapping_status = context.get("mapping_status")
-    if mapping_status in {"ambiguous", "not_found", "pending", "timed_out"}:
+    if context.get("mapping_status") != "resolved":
         return None
 
     grouped_products = group_catalog_products(get_cached_catalog())
     if not grouped_products:
         return None
 
-    sku_keys = ("product_sku",) if mapping_status == "resolved" else (
-        "product_sku",
-        "parent_sku",
-        "sku",
+    return _single_public_comment_match(
+        _match_public_comment_product_by_sku(context.get("product_sku"), grouped_products)
     )
-    for key in sku_keys:
-        product = _single_public_comment_match(_match_public_comment_product_by_sku(context.get(key), grouped_products))
-        if product:
-            return product
-
-    if mapping_status == "resolved":
-        return None
-
-    for key in ("image_url", "post_image_url", "post_media_url", "media_url", "permalink"):
-        product = _single_public_comment_match(_match_public_comment_product_by_image(context.get(key), grouped_products))
-        if product:
-            return product
-
-    text_matches = []
-    for key in ("product_name", "post_product_name", "post_caption", "post_text", "caption", "media_caption"):
-        text_matches.extend(_match_public_comment_product_by_text(context.get(key), grouped_products))
-    return _single_public_comment_match(text_matches)
 
 
 def _public_comment_context(integration_context: dict | None) -> dict:

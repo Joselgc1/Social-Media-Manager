@@ -483,6 +483,7 @@ async def test_media_id_mapping_is_applied_atomically_before_job_becomes_ready(m
                 "event_id": "event-1",
                 "media_id": "media-1",
                 "media_permalink": None,
+                "media_caption": None,
                 "correlation_details": {},
                 "job_id": "job-1",
                 "public_comment_context": {},
@@ -512,6 +513,8 @@ async def test_media_id_mapping_is_applied_atomically_before_job_becomes_ready(m
     release_query, release_values = mock_db.fetch_one.await_args_list[1].args
     assert "status = 'ready'" in release_query
     assert json.loads(release_values["context"]) == {
+        "media_id": "media-1",
+        "post_id": "media-1",
         "product_sku": "SKU-1",
         "mapping_status": "resolved",
     }
@@ -529,6 +532,7 @@ async def test_permalink_only_mapping_is_applied_before_job_becomes_ready(monkey
                 "event_id": "event-1",
                 "media_id": "media-1",
                 "media_permalink": "https://www.instagram.com/p/ABC123/",
+                "media_caption": "Caption",
                 "correlation_details": {},
                 "job_id": "job-1",
                 "public_comment_context": {},
@@ -548,6 +552,15 @@ async def test_permalink_only_mapping_is_applied_before_job_becomes_ready(monkey
         media_id="media-1",
         permalink="https://www.instagram.com/p/ABC123/",
     )
+    release_values = mock_db.fetch_one.await_args_list[1].args[1]
+    assert json.loads(release_values["context"]) == {
+        "media_id": "media-1",
+        "post_id": "media-1",
+        "post_url": "https://www.instagram.com/p/ABC123/",
+        "post_caption": "Caption",
+        "mapping_status": "resolved",
+        "product_sku": "SKU-2",
+    }
 
 
 @pytest.mark.asyncio
@@ -561,6 +574,7 @@ async def test_unmapped_product_gate_ignores_callback_sku_and_schedules_long_ret
             "event_id": "event-1",
             "media_id": "media-1",
             "media_permalink": "https://www.instagram.com/p/ABC123/",
+            "media_caption": None,
             "correlation_details": {},
             "job_id": "job-1",
             "public_comment_context": {"product_sku": "UNTRUSTED-SKU"},

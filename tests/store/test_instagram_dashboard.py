@@ -18,3 +18,13 @@ def test_mapping_list_renders_when_product_selector_request_fails():
     assert "if (mappingsResult.status === 'rejected')" in dashboard
     assert "productsResult.status === 'fulfilled'" in dashboard
     assert "Catálogo temporalmente no disponible" in dashboard
+
+
+def test_mapping_list_renders_authoritative_post_identifiers():
+    dashboard = Path("store/app/static/js/dashboard.js").read_text()
+
+    assert "URL normalizada" in dashboard
+    assert "Shortcode" in dashboard
+    assert "Meta media ID" in dashboard
+    assert "mapping.normalized_url" in dashboard
+    assert "mapping.media_id" in dashboard

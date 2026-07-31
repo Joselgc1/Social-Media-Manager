@@ -114,6 +114,10 @@ async def _correlate(
             anchor_kind = "job"
 
         if not candidates:
+            logger.info(
+                "meta_kommo_correlation_pending anchor_type=%s reason=no_unique_candidate",
+                anchor_kind,
+            )
             return {"status": "pending"}
         best_score = max(item.score for item in candidates)
         winners = [item for item in candidates if item.score == best_score]
@@ -134,6 +138,10 @@ async def _correlate(
             window_seconds=config.meta_context_match_window_seconds,
         )
         if not opposite:
+            logger.info(
+                "meta_kommo_correlation_pending anchor_type=%s reason=no_reciprocal_candidate",
+                anchor_kind,
+            )
             return {"status": "pending"}
         opposite_best_score = max(item.score for item in opposite)
         opposite_winners = [item for item in opposite if item.score == opposite_best_score]
@@ -151,6 +159,10 @@ async def _correlate(
                 "score": opposite_best_score,
             }
         if not _same_pair(winner, opposite_winners[0]):
+            logger.info(
+                "meta_kommo_correlation_pending anchor_type=%s reason=reciprocal_pair_mismatch",
+                anchor_kind,
+            )
             return {"status": "pending"}
         matched = await _persist_match(winner)
         if not matched:
