@@ -253,18 +253,34 @@ async function loadInstagramMappings() {
 }
 
 function renderInstagramProductOptions() {
-  const select = document.getElementById('instagram-product-sku');
+  const select = document.getElementById('instagram-product-skus');
   if (!select) return;
-  const selected = select.value;
-  const placeholder = _instagramProductsAvailable
-    ? 'Selecciona un producto'
-    : 'Catálogo temporalmente no disponible';
-  select.innerHTML = `<option value="">${placeholder}</option>` + _instagramProductsData.map(product => {
+  const selected = new Set([...select.selectedOptions].map(option => option.value));
+  select.innerHTML = (_instagramProductsAvailable ? '' : '<option value="" disabled>Catálogo temporalmente no disponible</option>') + _instagramProductsData.map(product => {
     const stockLabel = product.total_stock > 0 ? `${product.total_stock} disponibles` : 'Sin stock';
     const priceLabel = product.price === null ? 'Precio variable' : `$${Number(product.price).toFixed(2)}`;
     return `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)} · ${priceLabel} · ${stockLabel}</option>`;
   }).join('');
-  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+  [...select.options].forEach(option => { option.selected = selected.has(option.value); });
+  renderSelectedInstagramProducts();
+}
+
+function renderSelectedInstagramProducts() {
+  const select = document.getElementById('instagram-product-skus');
+  const container = document.getElementById('instagram-selected-products');
+  if (!select || !container) return;
+  const selected = [...select.selectedOptions];
+  container.innerHTML = selected.map((option, index) => (
+    `<span class="badge badge-blue inline-flex items-center gap-1">${escapeHtml(option.textContent)}<button type="button" class="font-bold" aria-label="Quitar producto" onclick="removeInstagramProduct(${index})">×</button></span>`
+  )).join('');
+}
+
+function removeInstagramProduct(selectedIndex) {
+  const select = document.getElementById('instagram-product-skus');
+  if (!select) return;
+  const option = [...select.selectedOptions][selectedIndex];
+  if (option) option.selected = false;
+  renderSelectedInstagramProducts();
 }
 
 function renderInstagramMappings() {
@@ -315,9 +331,13 @@ function renderInstagramMappings() {
 
 async function saveInstagramMapping() {
   const postUrl = document.getElementById('instagram-post-url').value.trim();
-  const productSku = document.getElementById('instagram-product-sku').value;
-  if (!postUrl || !productSku) {
-    toast('Ingresa la URL y selecciona un producto', '#dc2626');
+  const productSkus = [...document.getElementById('instagram-product-skus').selectedOptions].map(option => option.value);
+  if (!postUrl || !productSkus.length) {
+    toast('Ingresa la URL y selecciona al menos un producto', '#dc2626');
+    return;
+  }
+  if (productSkus.length > 20) {
+    toast('Selecciona un máximo de 20 productos', '#dc2626');
     return;
   }
   const editing = Boolean(_instagramEditingId);
@@ -325,7 +345,7 @@ async function saveInstagramMapping() {
   await apiFetch(url, {
     method: editing ? 'PUT' : 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({post_url: postUrl, product_skus: [productSku]}),
+    body: JSON.stringify({post_url: postUrl, product_skus: productSkus}),
   });
   toast(editing ? 'Mapeo actualizado' : 'Mapeo creado');
   cancelInstagramEdit();
@@ -337,7 +357,11 @@ function editInstagramMapping(contentId) {
   if (!mapping) return;
   _instagramEditingId = contentId;
   document.getElementById('instagram-post-url').value = mapping.post_url;
-  document.getElementById('instagram-product-sku').value = mapping.product_skus[0] || '';
+  const selectedSkus = new Set(mapping.product_skus || []);
+  [...document.getElementById('instagram-product-skus').options].forEach(option => {
+    option.selected = selectedSkus.has(option.value);
+  });
+  renderSelectedInstagramProducts();
   document.getElementById('instagram-form-title').textContent = 'Editar mapeo';
   document.getElementById('instagram-save-btn').textContent = 'Guardar cambios';
   document.getElementById('instagram-cancel-btn').style.display = 'inline-flex';
@@ -347,7 +371,8 @@ function editInstagramMapping(contentId) {
 function cancelInstagramEdit() {
   _instagramEditingId = null;
   document.getElementById('instagram-post-url').value = '';
-  document.getElementById('instagram-product-sku').value = '';
+  [...document.getElementById('instagram-product-skus').options].forEach(option => { option.selected = false; });
+  renderSelectedInstagramProducts();
   document.getElementById('instagram-form-title').textContent = 'Mapear publicación';
   document.getElementById('instagram-save-btn').textContent = 'Guardar mapeo';
   document.getElementById('instagram-cancel-btn').style.display = 'none';

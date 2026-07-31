@@ -215,7 +215,7 @@
           <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-4">
             <div>
               <h3 id="instagram-form-title" class="font-semibold text-gray-900 dark:text-gray-100">Mapear publicación</h3>
-              <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Relaciona un post normal de Instagram con un producto del catálogo.</p>
+              <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Relaciona una publicación de Instagram con uno o varios productos del catálogo.</p>
             </div>
             <span class="badge badge-blue">Configuración administrativa</span>
           </div>
@@ -225,10 +225,12 @@
               <input id="instagram-post-url" type="url" maxlength="500" class="w-full" placeholder="https://www.instagram.com/p/ABC123/">
             </div>
             <div>
-              <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Producto</label>
-              <select id="instagram-product-sku" class="w-full">
+              <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">Productos (máximo 20)</label>
+              <select id="instagram-product-skus" class="w-full" multiple size="7" onchange="renderSelectedInstagramProducts()">
                 <option value="">Cargando catálogo...</option>
               </select>
+              <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Selecciona varios productos con Ctrl o Cmd.</p>
+              <div id="instagram-selected-products" class="flex flex-wrap gap-2 mt-2"></div>
             </div>
           </div>
           <div class="flex gap-2 mt-4">

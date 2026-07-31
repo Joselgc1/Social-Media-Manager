@@ -58,7 +58,7 @@ async def resolve_content_product_mapping(
     media_id: str | None,
     permalink: str | None,
 ) -> dict:
-    """Resolve one active Instagram content mapping without guessing a product."""
+    """Resolve one active Instagram content mapping without guessing products."""
     normalized_permalink = None
     if permalink:
         with suppress(InstagramContentUrlError):
@@ -123,14 +123,17 @@ async def resolve_content_product_mapping(
     product_skus = list(
         dict.fromkeys(str(row["product_sku"]).strip() for row in rows if row["product_sku"])
     )
-    if len(product_skus) != 1:
+    if not product_skus:
         return {
-            "status": "ambiguous" if product_skus else "not_found",
-            "reason": "multiple_products" if product_skus else "mapping_has_no_products",
+            "status": "not_found",
+            "reason": "mapping_has_no_products",
             "content_id": next(iter(content_ids)),
         }
-    return {
+    result = {
         "status": "resolved",
         "content_id": next(iter(content_ids)),
-        "product_sku": product_skus[0],
+        "product_skus": product_skus,
     }
+    if len(product_skus) == 1:
+        result["product_sku"] = product_skus[0]
+    return result

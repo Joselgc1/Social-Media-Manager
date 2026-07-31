@@ -356,30 +356,34 @@ async def resolve_and_release_matched_job(event_id: str, *, force: bool = False)
             return {"status": "waiting", "mapping_status": "not_found"}
 
         if mapping_status == "resolved":
+            product_skus = resolution.get("product_skus") or [resolution["product_sku"]]
             context = {
                 "media_id": row["media_id"] or job_context.get("media_id"),
                 "post_id": row["media_id"] or job_context.get("post_id"),
                 "post_url": row["media_permalink"] or job_context.get("post_url"),
                 "post_caption": row["media_caption"] or job_context.get("post_caption"),
-                "product_sku": resolution["product_sku"],
+                "product_skus": product_skus,
                 "mapping_status": "resolved",
             }
+            if len(product_skus) == 1:
+                context["product_sku"] = product_skus[0]
             context = {key: value for key, value in context.items() if value is not None}
         else:
+            product_skus = []
             context = {"mapping_status": "ambiguous"}
         logger.info(
-            "instagram_product_mapping_%s event_id=%s job_id=%s reason=%s product_sku=%s",
+            "instagram_product_mapping_result mapping_status=%s mapped_product_count=%s",
             mapping_status,
-            event_id,
-            row["job_id"],
-            resolution.get("reason") or "none",
-            resolution.get("product_sku") or "none",
+            len(product_skus),
         )
         released = await db.fetch_one(
             """
             UPDATE kommo_message_jobs
-            SET public_comment_context = COALESCE(public_comment_context, '{}'::jsonb)
-                    || CAST(:context AS jsonb),
+            SET public_comment_context = (
+                    COALESCE(public_comment_context, '{}'::jsonb)
+                    - 'product_sku'
+                    - 'product_skus'
+                ) || CAST(:context AS jsonb),
                 status = 'ready',
                 updated_at = NOW()
             WHERE id = :job_id
@@ -462,6 +466,10 @@ async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
                     UPDATE instagram_content
                     SET media_id = COALESCE(media_id, :media_id),
                         caption_snapshot = COALESCE(caption_snapshot, :caption_snapshot),
+                        content_type = CASE
+                            WHEN :media_type = 'CAROUSEL_ALBUM' THEN 'carousel'
+                            ELSE content_type
+                        END,
                         updated_at = NOW()
                     WHERE id = :id
                       AND (media_id IS NULL OR media_id = :media_id)
@@ -471,6 +479,7 @@ async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
                         "id": row["id"],
                         "media_id": media.id,
                         "caption_snapshot": media.caption,
+                        "media_type": media.media_type,
                     },
                 )
         except Exception as exc:

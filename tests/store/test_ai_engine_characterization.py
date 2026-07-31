@@ -106,6 +106,23 @@ def _sample_catalog() -> list[dict]:
     ]
 
 
+def _second_catalog_product(**overrides) -> dict:
+    product = {
+        "sku": "BODY-002-M",
+        "parent_sku": "BODY-002",
+        "product_name": "Body negro",
+        "category": "Bodies",
+        "description": "Body negro clásico",
+        "size": "M",
+        "sizes": "M",
+        "price_usd": 25,
+        "stock": 3,
+        "image_url": "https://example.com/body-negro.jpg",
+    }
+    product.update(overrides)
+    return product
+
+
 def _tool_call(name: str, arguments: dict, tool_id: str = "tool-1") -> dict:
     return {"id": tool_id, "name": name, "arguments": arguments}
 
@@ -170,6 +187,7 @@ def engine_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_runner, "get_provider", lambda name: provider)
     monkeypatch.setattr(engine, "get_config", lambda: SimpleNamespace(store_name="Tienda Rosa"))
     monkeypatch.setattr(engine, "get_cached_catalog", lambda: catalog)
+    monkeypatch.setattr(engine, "get_cached_reference_catalog", lambda: catalog)
     monkeypatch.setattr(engine, "ensure_fresh_catalog", AsyncMock(return_value=catalog))
     monkeypatch.setattr(tool_catalog, "get_cached_catalog", lambda: catalog)
     monkeypatch.setattr(tool_catalog, "ensure_fresh_catalog", AsyncMock(return_value=catalog))
@@ -601,7 +619,7 @@ async def test_resolved_mapping_never_falls_back_to_callback_parent_sku(engine_h
             "interaction_type": "instagram_comment",
             "public_comment_context": {
                 "mapping_status": "resolved",
-                "product_sku": "UNKNOWN-MAPPED-SKU",
+                "product_skus": ["UNKNOWN-MAPPED-SKU"],
                 "parent_sku": "PJ-001",
             },
         },
@@ -624,6 +642,7 @@ async def test_public_instagram_comment_stock_uses_resolved_mapping_without_stoc
             "interaction_type": "instagram_comment",
             "public_comment_context": {
                 "mapping_status": "resolved",
+                "product_skus": ["PJ-001"],
                 "product_sku": "PJ-001",
                 "post_caption": "Nueva Pijama satén azul disponible",
             },
@@ -649,6 +668,7 @@ async def test_public_instagram_comment_resolved_product_out_of_stock(engine_har
             "interaction_type": "instagram_comment",
             "public_comment_context": {
                 "mapping_status": "resolved",
+                "product_skus": ["PJ-001"],
                 "product_sku": "PJ-001",
             },
         },
@@ -677,12 +697,163 @@ async def test_public_instagram_comment_multiple_current_prices_uses_fallback(en
             "interaction_type": "instagram_comment",
             "public_comment_context": {
                 "mapping_status": "resolved",
+                "product_skus": ["PJ-001"],
                 "product_sku": "PJ-001",
             },
         },
     )
 
     assert response["text"] == "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["Precio?", "Está disponible?"])
+async def test_multi_product_generic_questions_request_clarification(engine_harness, message):
+    engine_harness.catalog.append(_second_catalog_product())
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        message,
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-001", "BODY-002"],
+            },
+        },
+    )
+
+    assert response["text"] == (
+        "¿Cuál producto de la publicación te interesa? "
+        "Dinos el nombre o escríbenos al DM y te ayudamos 😊"
+    )
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == (
+        "public_comment_clarification"
+    )
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_explicit_name_returns_mapped_product_price(engine_harness):
+    engine_harness.catalog.append(_second_catalog_product())
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "¿Cuánto cuesta el body negro?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-001", "BODY-002"],
+            },
+        },
+    )
+
+    assert response["text"] == "Body negro cuesta $25."
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_explicit_name_returns_mapped_product_availability(engine_harness):
+    engine_harness.catalog.append(_second_catalog_product())
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "¿Está disponible el pijama satén azul?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-001", "BODY-002"],
+            },
+        },
+    )
+
+    assert response["text"] == "Sí, Pijama satén azul está disponible."
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_does_not_resolve_unmapped_global_catalog_product(engine_harness):
+    engine_harness.catalog.extend([
+        _second_catalog_product(),
+        _second_catalog_product(
+            sku="SET-003-S",
+            parent_sku="SET-003",
+            product_name="Conjunto verde",
+            price_usd=35,
+        ),
+    ])
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "¿Cuánto cuesta el conjunto verde?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-001", "BODY-002"],
+            },
+        },
+    )
+
+    assert response["text"].startswith("¿Cuál producto de la publicación")
+    assert "$35" not in response["text"]
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_invalid_mapped_sku_fails_closed(engine_harness):
+    engine_harness.catalog.append(_second_catalog_product())
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "¿Cuánto cuesta el body negro?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["BODY-002", "INACTIVE-999"],
+            },
+        },
+    )
+
+    assert response["text"] == (
+        "Hola! Para más info escríbenos al DM o por WhatsApp al +58 412-1234567! :)"
+    )
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_zero_stock_product_returns_unavailable(engine_harness):
+    engine_harness.catalog.append(_second_catalog_product(stock=0))
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "¿Está disponible el body negro?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-001", "BODY-002"],
+            },
+        },
+    )
+
+    assert response["text"] == "Por ahora Body negro no está disponible."
     engine_harness.provider.chat.assert_not_awaited()
 
 

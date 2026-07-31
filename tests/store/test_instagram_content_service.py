@@ -62,6 +62,7 @@ async def test_resolves_active_product_mapping_by_media_id(monkeypatch):
     assert result == {
         "status": "resolved",
         "content_id": "content-1",
+        "product_skus": ["SKU-1"],
         "product_sku": "SKU-1",
     }
     query, values = fetch_all.await_args.args
@@ -93,6 +94,7 @@ async def test_resolves_active_product_mapping_by_normalized_permalink(monkeypat
     )
 
     assert result["status"] == "resolved"
+    assert result["product_skus"] == ["SKU-2"]
     assert result["product_sku"] == "SKU-2"
     assert fetch_all.await_args.args[1]["normalized_permalink"] == (
         "https://www.instagram.com/p/ABC123/"
@@ -100,7 +102,7 @@ async def test_resolves_active_product_mapping_by_normalized_permalink(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_multiple_mapped_products_are_ambiguous(monkeypatch):
+async def test_multiple_mapped_products_are_resolved_in_display_order(monkeypatch):
     from app.instagram_content import service
 
     monkeypatch.setattr(
@@ -112,13 +114,15 @@ async def test_multiple_mapped_products_are_ambiguous(monkeypatch):
                     "content_id": "content-1",
                     "media_id": "media-1",
                     "normalized_permalink": None,
-                    "product_sku": "SKU-1",
+                    "product_sku": "SKU-2",
+                    "display_order": 0,
                 },
                 {
                     "content_id": "content-1",
                     "media_id": "media-1",
                     "normalized_permalink": None,
-                    "product_sku": "SKU-2",
+                    "product_sku": "SKU-1",
+                    "display_order": 1,
                 },
             ]
         ),
@@ -130,9 +134,9 @@ async def test_multiple_mapped_products_are_ambiguous(monkeypatch):
     )
 
     assert result == {
-        "status": "ambiguous",
-        "reason": "multiple_products",
+        "status": "resolved",
         "content_id": "content-1",
+        "product_skus": ["SKU-2", "SKU-1"],
     }
 
 

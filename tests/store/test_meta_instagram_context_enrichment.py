@@ -100,7 +100,7 @@ async def test_meta_media_client_returns_safe_api_errors(monkeypatch, response, 
 
 
 @pytest.mark.asyncio
-async def test_existing_permalink_mapping_backfills_media_id_and_caption(monkeypatch):
+async def test_existing_permalink_mapping_backfills_carousel_parent_media(monkeypatch):
     from app.integrations.meta_context import service
     from app.integrations.meta_context.models import MetaMediaDetails
 
@@ -125,13 +125,18 @@ async def test_existing_permalink_mapping_backfills_media_id_and_caption(monkeyp
             id="media-1",
             permalink="https://instagram.com/p/ABC123/?utm_source=test",
             caption="Caption snapshot",
+            media_type="CAROUSEL_ALBUM",
         )
     )
 
     assert result == {"status": "backfilled", "content_id": "content-1"}
     values = mock_db.fetch_one.await_args.args[1]
+    query = mock_db.fetch_one.await_args.args[0]
     assert values["media_id"] == "media-1"
     assert values["caption_snapshot"] == "Caption snapshot"
+    assert values["media_type"] == "CAROUSEL_ALBUM"
+    assert "content_type" in query
+    assert "'carousel'" in query
 
 
 @pytest.mark.asyncio
@@ -497,7 +502,7 @@ async def test_media_id_mapping_is_applied_atomically_before_job_becomes_ready(m
         return_value={
             "status": "resolved",
             "content_id": "content-1",
-            "product_sku": "SKU-1",
+            "product_skus": ["SKU-1", "SKU-2"],
         }
     )
     monkeypatch.setattr(service, "resolve_content_product_mapping", resolve)
@@ -515,7 +520,7 @@ async def test_media_id_mapping_is_applied_atomically_before_job_becomes_ready(m
     assert json.loads(release_values["context"]) == {
         "media_id": "media-1",
         "post_id": "media-1",
-        "product_sku": "SKU-1",
+        "product_skus": ["SKU-1", "SKU-2"],
         "mapping_status": "resolved",
     }
 
@@ -542,7 +547,13 @@ async def test_permalink_only_mapping_is_applied_before_job_becomes_ready(monkey
     )
     mock_db.execute = AsyncMock()
     monkeypatch.setattr(service, "db", mock_db)
-    resolve = AsyncMock(return_value={"status": "resolved", "product_sku": "SKU-2"})
+    resolve = AsyncMock(
+        return_value={
+            "status": "resolved",
+            "product_skus": ["SKU-2"],
+            "product_sku": "SKU-2",
+        }
+    )
     monkeypatch.setattr(service, "resolve_content_product_mapping", resolve)
 
     result = await service.resolve_and_release_matched_job("event-1", force=True)
@@ -559,6 +570,7 @@ async def test_permalink_only_mapping_is_applied_before_job_becomes_ready(monkey
         "post_url": "https://www.instagram.com/p/ABC123/",
         "post_caption": "Caption",
         "mapping_status": "resolved",
+        "product_skus": ["SKU-2"],
         "product_sku": "SKU-2",
     }
 
@@ -577,7 +589,10 @@ async def test_unmapped_product_gate_ignores_callback_sku_and_schedules_long_ret
             "media_caption": None,
             "correlation_details": {},
             "job_id": "job-1",
-            "public_comment_context": {"product_sku": "UNTRUSTED-SKU"},
+            "public_comment_context": {
+                "product_sku": "UNTRUSTED-SKU",
+                "product_skus": ["UNTRUSTED-SKU"],
+            },
         }
     )
     mock_db.execute = AsyncMock()

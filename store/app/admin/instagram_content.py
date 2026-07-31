@@ -26,12 +26,12 @@ router = APIRouter(
 
 class InstagramContentCreate(BaseModel):
     post_url: str = Field(max_length=500)
-    product_skus: list[str] = Field(min_length=1, max_length=1)
+    product_skus: list[str] = Field(min_length=1, max_length=20)
 
 
 class InstagramContentUpdate(BaseModel):
     post_url: str | None = Field(default=None, max_length=500)
-    product_skus: list[str] | None = Field(default=None, min_length=1, max_length=1)
+    product_skus: list[str] | None = Field(default=None, min_length=1, max_length=20)
     status: Literal["active", "archived"] | None = None
 
 
@@ -71,6 +71,8 @@ def _validate_product_skus(product_skus: list[str], products: list[dict]) -> lis
     deduplicated = list(dict.fromkeys(str(sku).strip() for sku in product_skus if str(sku).strip()))
     if not deduplicated:
         raise HTTPException(status_code=422, detail="At least one product SKU is required.")
+    if len(deduplicated) > 20:
+        raise HTTPException(status_code=422, detail="No more than 20 product SKUs are allowed.")
     unknown = [sku for sku in deduplicated if sku not in known_skus]
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown product SKU(s): {', '.join(unknown)}")

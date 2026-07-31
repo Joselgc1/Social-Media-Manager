@@ -100,7 +100,7 @@ async def test_product_endpoint_exposes_derived_product_sku_without_parent(monke
 
 
 @pytest.mark.asyncio
-async def test_create_mapping_supports_exactly_one_sku(monkeypatch):
+async def test_create_mapping_deduplicates_skus_and_preserves_display_order(monkeypatch):
     monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
     monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
     monkeypatch.setattr(
@@ -114,17 +114,17 @@ async def test_create_mapping_supports_exactly_one_sku(monkeypatch):
     result = await instagram_content.create_instagram_content(
         instagram_content.InstagramContentCreate(
             post_url="https://instagram.com/p/ABC123?igsh=x",
-            product_skus=["PARENT-1"],
+            product_skus=["PARENT-2", "PARENT-1", "PARENT-2"],
         )
     )
 
-    assert result["product_skus"] == ["PARENT-1"]
-    inserted_skus = [
-        call.args[1]["product_sku"]
+    assert result["product_skus"] == ["PARENT-2", "PARENT-1"]
+    inserted_products = [
+        (call.args[1]["product_sku"], call.args[1]["display_order"])
         for call in execute.await_args_list
         if "INSERT INTO instagram_content_products" in call.args[0]
     ]
-    assert inserted_skus == ["PARENT-1"]
+    assert inserted_products == [("PARENT-2", 0), ("PARENT-1", 1)]
 
 
 def test_mapping_input_limits_are_enforced():
@@ -137,11 +137,18 @@ def test_mapping_input_limits_are_enforced():
     with pytest.raises(ValidationError):
         instagram_content.InstagramContentCreate(
             post_url="https://instagram.com/p/ABC123",
-            product_skus=["PARENT-1", "PARENT-2"],
+            product_skus=[],
         )
 
     with pytest.raises(ValidationError):
         instagram_content.InstagramContentUpdate(post_url="x" * 501)
+
+    products = [{"sku": f"SKU-{index}"} for index in range(21)]
+    with pytest.raises(ValidationError):
+        instagram_content.InstagramContentCreate(
+            post_url="https://instagram.com/p/ABC123",
+            product_skus=[product["sku"] for product in products],
+        )
 
 
 @pytest.mark.asyncio
@@ -154,7 +161,7 @@ async def test_create_rejects_unknown_sku_before_database_write(monkeypatch):
         await instagram_content.create_instagram_content(
             instagram_content.InstagramContentCreate(
                 post_url="https://instagram.com/p/ABC123",
-                product_skus=["UNKNOWN"],
+                product_skus=["PARENT-1", "UNKNOWN", "PARENT-2"],
             )
         )
 
@@ -203,17 +210,23 @@ async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
         UUID(CONTENT_ID),
         instagram_content.InstagramContentUpdate(
             post_url="https://instagram.com/p/NEW123/",
-            product_skus=["PARENT-2"],
+            product_skus=["PARENT-2", "PARENT-1"],
             status="active",
         ),
     )
 
-    assert result["product_skus"] == ["PARENT-2"]
+    assert result["product_skus"] == ["PARENT-2", "PARENT-1"]
     assert any("UPDATE instagram_content SET" in call.args[0] for call in execute.await_args_list)
     update_query = next(call.args[0] for call in execute.await_args_list if "UPDATE instagram_content SET" in call.args[0])
     assert "media_id = NULL" in update_query
     assert "caption_snapshot = NULL" in update_query
     assert any("DELETE FROM instagram_content_products" in call.args[0] for call in execute.await_args_list)
+    inserted_products = [
+        (call.args[1]["product_sku"], call.args[1]["display_order"])
+        for call in execute.await_args_list
+        if "INSERT INTO instagram_content_products" in call.args[0]
+    ]
+    assert inserted_products == [("PARENT-2", 0), ("PARENT-1", 1)]
 
 
 @pytest.mark.asyncio
@@ -264,7 +277,10 @@ async def test_mapping_list_survives_catalog_refresh_failure(monkeypatch):
             "created_at": "created",
             "updated_at": "updated",
         }],
-        [{"content_id": CONTENT_ID, "product_sku": "PARENT-1"}],
+        [
+            {"content_id": CONTENT_ID, "product_sku": "PARENT-2"},
+            {"content_id": CONTENT_ID, "product_sku": "PARENT-1"},
+        ],
     ])
     monkeypatch.setattr(instagram_content.db, "fetch_all", fetch_all)
     monkeypatch.setattr(
@@ -275,11 +291,9 @@ async def test_mapping_list_survives_catalog_refresh_failure(monkeypatch):
 
     result = await instagram_content.list_instagram_content()
 
-    assert result[0]["product_skus"] == ["PARENT-1"]
-    assert result[0]["product_names"] == [None]
-    assert result[0]["products"] == [{
-        "sku": "PARENT-1",
-        "name": None,
-        "price": None,
-        "stock": None,
-    }]
+    assert result[0]["product_skus"] == ["PARENT-2", "PARENT-1"]
+    assert result[0]["product_names"] == [None, None]
+    assert result[0]["products"] == [
+        {"sku": "PARENT-2", "name": None, "price": None, "stock": None},
+        {"sku": "PARENT-1", "name": None, "price": None, "stock": None},
+    ]

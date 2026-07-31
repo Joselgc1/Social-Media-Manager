@@ -34,7 +34,12 @@ from app.ai.tools.executor import execute_tool
 from app.ai.tools.registry import get_tool_schemas
 from app.ai.vision import analyze_payment_screenshot
 from app.catalog.pdf_generator import ensure_catalog_pdf
-from app.catalog.sheets import ensure_fresh_catalog, get_cached_catalog, group_catalog_products
+from app.catalog.sheets import (
+    ensure_fresh_catalog,
+    get_cached_catalog,
+    get_cached_reference_catalog,
+    group_catalog_products,
+)
 from app.config import get_config
 from app.crm import conversations, customers, escalations, orders, sessions
 from app.exchange_rates import build_customer_exchange_rate_reply
@@ -59,6 +64,7 @@ _PUBLIC_COMMENT_PRICE_RE = re.compile(r"\b(precio|precios|costo|costos|cuesta|va
 _PUBLIC_COMMENT_STOCK_RE = re.compile(r"\b(disponible|disponibles|disponibilidad|stock|hay|tienen|queda|quedan|agotado|agotada)\b")
 _PUBLIC_COMMENT_CONTEXT_KEYS = {
     "product_sku",
+    "product_skus",
     "parent_sku",
     "sku",
     "product_name",
@@ -80,6 +86,10 @@ _PUBLIC_COMMENT_CONTEXT_KEYS = {
     "comment_url",
     "mapping_status",
 }
+_PUBLIC_COMMENT_CLARIFICATION = (
+    "¿Cuál producto de la publicación te interesa? "
+    "Dinos el nombre o escríbenos al DM y te ayudamos 😊"
+)
 _PUBLIC_COMMENT_STOPWORDS = {
     "con",
     "del",
@@ -883,19 +893,26 @@ async def _handle_public_instagram_comment(
     reply_text = None
     route_intent = f"public_comment_{request_kind}"
     if request_kind in {"price", "stock"}:
+        product = None
+        should_clarify = False
         try:
             await ensure_fresh_catalog()
         except Exception:
             logger.warning("Public comment catalog lookup skipped because the catalog is stale")
-            product = None
         else:
-            product = _resolve_public_comment_product(integration_context)
+            product, should_clarify = _resolve_public_comment_product(
+                integration_context,
+                message_text,
+            )
         if product:
             reply_text = (
                 _public_comment_price_reply(product)
                 if request_kind == "price"
                 else _public_comment_stock_reply(product)
             )
+        elif should_clarify:
+            route_intent = "public_comment_clarification"
+            reply_text = _PUBLIC_COMMENT_CLARIFICATION
 
     if not reply_text:
         route_intent = "public_comment_private_invite"
@@ -974,21 +991,52 @@ def _normalize_public_store_phone(value) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def _resolve_public_comment_product(integration_context: dict | None) -> dict | None:
+def _resolve_public_comment_product(
+    integration_context: dict | None,
+    message_text: str,
+) -> tuple[dict | None, bool]:
     context = _public_comment_context(integration_context)
     if not context:
-        return None
+        return None, False
 
     if context.get("mapping_status") != "resolved":
-        return None
+        return None, False
 
-    grouped_products = group_catalog_products(get_cached_catalog())
+    mapped_skus = context.get("product_skus")
+    if not isinstance(mapped_skus, list):
+        mapped_skus = [context.get("product_sku")] if context.get("product_sku") else []
+    mapped_skus = list(dict.fromkeys(mapped_skus))
+    if not mapped_skus:
+        return None, False
+
+    grouped_products = group_catalog_products(get_cached_reference_catalog())
     if not grouped_products:
-        return None
+        return None, False
 
-    return _single_public_comment_match(
-        _match_public_comment_product_by_sku(context.get("product_sku"), grouped_products)
+    mapped_products = []
+    for mapped_sku in mapped_skus:
+        product = _single_public_comment_match(
+            _match_public_comment_product_by_sku(mapped_sku, grouped_products)
+        )
+        if not product:
+            return None, False
+        mapped_products.append(product)
+
+    unique_mapped_products = {
+        _public_comment_product_identity(product): product
+        for product in mapped_products
+        if _public_comment_product_identity(product)
+    }
+    if len(unique_mapped_products) == 1:
+        return next(iter(unique_mapped_products.values())), False
+
+    matched_product = _single_public_comment_match(
+        _match_public_comment_product_by_text(
+            message_text,
+            list(unique_mapped_products.values()),
+        )
     )
+    return (matched_product, False) if matched_product else (None, True)
 
 
 def _public_comment_context(integration_context: dict | None) -> dict:
@@ -998,12 +1046,23 @@ def _public_comment_context(integration_context: dict | None) -> dict:
     if isinstance(nested, dict):
         raw_context.update(nested)
     raw_context.update({key: source.get(key) for key in _PUBLIC_COMMENT_CONTEXT_KEYS if key in source})
-    return {
-        key: cleaned
-        for key, value in raw_context.items()
-        if key in _PUBLIC_COMMENT_CONTEXT_KEYS
-        if (cleaned := _clean_public_comment_context_value(value))
-    }
+    cleaned_context = {}
+    for key, value in raw_context.items():
+        if key not in _PUBLIC_COMMENT_CONTEXT_KEYS:
+            continue
+        if key == "product_skus":
+            if not isinstance(value, list):
+                continue
+            product_skus = [
+                cleaned
+                for sku in value[:20]
+                if (cleaned := _clean_public_comment_context_value(sku))
+            ]
+            if product_skus:
+                cleaned_context[key] = list(dict.fromkeys(product_skus))
+        elif cleaned := _clean_public_comment_context_value(value):
+            cleaned_context[key] = cleaned
+    return cleaned_context
 
 
 def _clean_public_comment_context_value(value) -> str:
@@ -1057,12 +1116,16 @@ def _match_public_comment_product_by_text(value: str | None, grouped_products: l
             term for term in product_name.split()
             if len(term) > 2 and term not in _PUBLIC_COMMENT_STOPWORDS
         ]
+        product_skus = {
+            _normalize_catalog_text(product.get("sku", "")),
+            _normalize_catalog_text(product.get("parent_sku", "")),
+        }
+        for variant in product.get("variants", []) or []:
+            product_skus.add(_normalize_catalog_text(variant.get("sku", "")))
+            product_skus.add(_normalize_catalog_text(variant.get("parent_sku", "")))
         sku_matches = any(
             sku and re.search(rf"(?<!\w){re.escape(sku)}(?!\w)", text)
-            for sku in {
-                _normalize_catalog_text(product.get("sku", "")),
-                _normalize_catalog_text(product.get("parent_sku", "")),
-            }
+            for sku in product_skus
         )
         name_matches = product_name == text or product_name in text or (len(terms) >= 2 and all(term in text for term in terms))
         if sku_matches or name_matches:
