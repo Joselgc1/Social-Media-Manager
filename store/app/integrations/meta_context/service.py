@@ -24,18 +24,48 @@ def detect_instagram_content_type(
     media_product_type: str | None,
     media_type: str | None,
     permalink: str | None,
-) -> str:
-    """Determine the content type from authoritative Meta fields, then the URL."""
-    if str(media_product_type or "").strip().upper() == "REELS":
+) -> str | None:
+    """
+    Determine the Instagram content type only when the available Meta
+    metadata provides enough evidence.
+
+    Returning None means that the existing stored classification should
+    be preserved.
+    """
+    normalized_product_type = str(media_product_type or "").strip().upper()
+    normalized_media_type = str(media_type or "").strip().upper()
+
+    # Meta identifies Reels through media_product_type. A Reel usually has
+    # media_type=VIDEO, but not every VIDEO is a Reel.
+    if normalized_product_type == "REELS":
         return "reel"
-    if str(media_type or "").strip().upper() == "CAROUSEL_ALBUM":
+
+    # Carousels share the /p/ URL format with normal feed posts, so this
+    # Meta field is required to distinguish them reliably.
+    if normalized_media_type == "CAROUSEL_ALBUM":
         return "carousel"
+
+    # A /reel/ permalink is sufficient to identify a Reel even if the
+    # Graph API response omitted media_product_type.
     if permalink:
         try:
-            return normalize_instagram_url(permalink).content_type
+            url_content_type = normalize_instagram_url(permalink).content_type
         except InstagramContentUrlError:
-            pass
-    return "post"
+            url_content_type = None
+
+        if url_content_type == "reel":
+            return "reel"
+
+    # IMAGE and VIDEO are enough to identify a normal feed post only after
+    # excluding Reels and carousels above.
+    if (
+        normalized_product_type == "FEED"
+        or normalized_media_type in {"IMAGE", "VIDEO"}
+    ):
+        return "post"
+
+    # A /p/ URL by itself is not enough to distinguish a post from a carousel.
+    return None
 
 
 async def store_context_event(event: MetaInstagramContextEvent) -> dict:
@@ -499,7 +529,7 @@ async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
                     UPDATE instagram_content
                     SET media_id = COALESCE(media_id, :media_id),
                         caption_snapshot = COALESCE(caption_snapshot, :caption_snapshot),
-                        content_type = :content_type,
+                        content_type = COALESCE(:content_type, content_type),
                         updated_at = NOW()
                     WHERE id = :id
                       AND (media_id IS NULL OR media_id = :media_id)

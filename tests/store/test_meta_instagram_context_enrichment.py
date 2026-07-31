@@ -50,11 +50,38 @@ class _DBHandle:
 @pytest.mark.parametrize(
     ("media_product_type", "media_type", "permalink", "expected"),
     [
+        # Meta's explicit Reel classification takes priority.
         ("REELS", "VIDEO", "https://www.instagram.com/p/ABC123/", "reel"),
+
+        # A normal feed video remains a post.
         (None, "VIDEO", "https://www.instagram.com/p/ABC123/", "post"),
-        (None, "CAROUSEL_ALBUM", "https://www.instagram.com/p/ABC123/", "carousel"),
+
+        # Carousel classification comes from media_type.
+        (
+            None,
+            "CAROUSEL_ALBUM",
+            "https://www.instagram.com/p/ABC123/",
+            "carousel",
+        ),
+
+        # A Reel permalink is sufficient when media_product_type is absent.
         (None, "VIDEO", "https://www.instagram.com/reel/Reel_123/", "reel"),
+        (None, None, "https://www.instagram.com/reel/Reel_123/", "reel"),
+
+        # Explicit feed metadata identifies a post.
+        ("FEED", None, "https://www.instagram.com/p/ABC123/", "post"),
+
+        # Generic image and video media identify normal posts after
+        # Reel and carousel checks.
+        (None, "IMAGE", None, "post"),
         (None, "VIDEO", None, "post"),
+
+        # A /p/ URL without Meta media metadata is ambiguous because it
+        # may represent either a regular post or a carousel.
+        (None, None, "https://www.instagram.com/p/ABC123/", None),
+
+        # No usable metadata means no classification.
+        (None, None, None, None),
     ],
 )
 def test_detects_instagram_content_type(
@@ -161,6 +188,55 @@ async def test_existing_permalink_mapping_backfills_carousel_parent_media(monkey
     assert values["caption_snapshot"] == "Caption snapshot"
     assert values["content_type"] == "carousel"
     assert "content_type" in query
+
+
+@pytest.mark.asyncio
+async def test_incomplete_meta_data_preserves_existing_carousel_type(monkeypatch):
+    from app.integrations.meta_context import service
+    from app.integrations.meta_context.models import MetaMediaDetails
+
+    mock_db = MagicMock()
+    mock_db.fetch_all = AsyncMock(
+        return_value=[
+            {
+                "id": "content-carousel",
+                "media_id": None,
+                "normalized_permalink": "https://www.instagram.com/p/ABC123/",
+                "shortcode": "ABC123",
+            }
+        ]
+    )
+    mock_db.fetch_one = AsyncMock(return_value={"id": "content-carousel"})
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    monkeypatch.setattr(service, "db", mock_db)
+
+    result = await service.backfill_instagram_mapping(
+        MetaMediaDetails(
+            id="media-carousel",
+            permalink="https://www.instagram.com/p/ABC123/",
+            caption="Carousel caption",
+            media_type=None,
+            media_product_type=None,
+        )
+    )
+
+    assert result == {
+        "status": "backfilled",
+        "content_id": "content-carousel",
+    }
+
+    update_query, update_values = mock_db.fetch_one.await_args.args
+
+    # The detector cannot distinguish a normal post from a carousel based
+    # only on a /p/ URL.
+    assert update_values["content_type"] is None
+
+    # PostgreSQL must retain the existing stored value when the new
+    # classification is unknown.
+    assert (
+        "content_type = COALESCE(:content_type, content_type)"
+        in update_query
+    )
 
 
 @pytest.mark.asyncio
@@ -436,6 +512,48 @@ async def test_correlation_runs_before_media_api_enrichment(monkeypatch):
     await service.process_context_event("event-1")
 
     assert calls == ["correlate", "enrich"]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_meta_data_does_not_overwrite_job_content_type(monkeypatch):
+    from app.integrations.meta_context import service
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(return_value={"id": "job-1"})
+    monkeypatch.setattr(service, "db", mock_db)
+
+    merge_details = AsyncMock()
+    monkeypatch.setattr(service, "_merge_event_details", merge_details)
+
+    result = await service._update_matched_job_context(
+        "event-1",
+        {
+            "media_id": "media-1",
+            "media_permalink": "https://www.instagram.com/p/ABC123/",
+            "media_caption": "Existing carousel",
+            "media_type": None,
+            "media_product_type": None,
+        },
+    )
+
+    assert result is True
+
+    _, values = mock_db.fetch_one.await_args.args
+    context = json.loads(values["context"])
+
+    assert context["media_id"] == "media-1"
+    assert context["post_id"] == "media-1"
+    assert context["post_url"] == "https://www.instagram.com/p/ABC123/"
+
+    # Because the type cannot be determined, it must not be included in
+    # the JSON merge. Any existing content_type in the job context will
+    # therefore remain unchanged.
+    assert "content_type" not in context
+
+    merge_details.assert_awaited_once_with(
+        "event-1",
+        {"job_context_enriched": True},
+    )
 
 
 @pytest.mark.asyncio
