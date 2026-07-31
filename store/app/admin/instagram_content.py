@@ -26,12 +26,12 @@ router = APIRouter(
 
 class InstagramContentCreate(BaseModel):
     post_url: str = Field(max_length=500)
-    product_skus: list[str] = Field(min_length=1, max_length=20)
+    product_skus: list[str] = Field(min_length=1, max_length=100)
 
 
 class InstagramContentUpdate(BaseModel):
     post_url: str | None = Field(default=None, max_length=500)
-    product_skus: list[str] | None = Field(default=None, min_length=1, max_length=20)
+    product_skus: list[str] | None = Field(default=None, min_length=1, max_length=100)
     status: Literal["active", "archived"] | None = None
 
 
@@ -225,20 +225,21 @@ async def update_instagram_content(content_id: UUID, body: InstagramContentUpdat
     updates = []
     values: dict = {"id": str(content_id)}
     if normalized is not None:
-        updates.extend([
-            "content_type = :content_type",
-            "permalink = :permalink",
-            "normalized_permalink = :normalized_permalink",
-            "shortcode = :shortcode",
-        ])
-        values.update({
-            "content_type": normalized.content_type,
-            "permalink": body.post_url.strip(),
-            "normalized_permalink": normalized.normalized_url,
-            "shortcode": normalized.shortcode,
-        })
+        updates.append("permalink = :permalink")
+        values["permalink"] = body.post_url.strip()
         if normalized.normalized_url != existing["normalized_permalink"]:
-            updates.extend(["media_id = NULL", "caption_snapshot = NULL"])
+            updates.extend([
+                "content_type = :content_type",
+                "normalized_permalink = :normalized_permalink",
+                "shortcode = :shortcode",
+                "media_id = NULL",
+                "caption_snapshot = NULL",
+            ])
+            values.update({
+                "content_type": normalized.content_type,
+                "normalized_permalink": normalized.normalized_url,
+                "shortcode": normalized.shortcode,
+            })
     if body.status is not None:
         updates.append("status = :status")
         values["status"] = body.status

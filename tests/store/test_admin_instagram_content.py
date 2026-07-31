@@ -143,12 +143,22 @@ def test_mapping_input_limits_are_enforced():
     with pytest.raises(ValidationError):
         instagram_content.InstagramContentUpdate(post_url="x" * 501)
 
+    raw_skus = ["PARENT-1"] * 21
+    body = instagram_content.InstagramContentCreate(
+        post_url="https://instagram.com/p/ABC123",
+        product_skus=raw_skus,
+    )
+    assert instagram_content._validate_product_skus(body.product_skus, _products()) == [
+        "PARENT-1"
+    ]
+
     products = [{"sku": f"SKU-{index}"} for index in range(21)]
-    with pytest.raises(ValidationError):
-        instagram_content.InstagramContentCreate(
-            post_url="https://instagram.com/p/ABC123",
-            product_skus=[product["sku"] for product in products],
+    with pytest.raises(HTTPException) as exc_info:
+        instagram_content._validate_product_skus(
+            [product["sku"] for product in products],
+            products,
         )
+    assert exc_info.value.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -227,6 +237,46 @@ async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
         if "INSERT INTO instagram_content_products" in call.args[0]
     ]
     assert inserted_products == [("PARENT-2", 0), ("PARENT-1", 1)]
+
+
+@pytest.mark.asyncio
+async def test_update_unchanged_carousel_url_preserves_meta_enrichment(monkeypatch):
+    monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    monkeypatch.setattr(
+        instagram_content.db,
+        "fetch_one",
+        AsyncMock(
+            return_value={
+                "id": CONTENT_ID,
+                "normalized_permalink": "https://www.instagram.com/p/CAROUSEL1/",
+                "content_type": "carousel",
+                "media_id": "media-carousel-1",
+                "caption_snapshot": "Carousel caption",
+            }
+        ),
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(instagram_content.db, "execute", execute)
+
+    result = await instagram_content.update_instagram_content(
+        UUID(CONTENT_ID),
+        instagram_content.InstagramContentUpdate(
+            post_url="https://instagram.com/p/CAROUSEL1/?igsh=unchanged",
+            product_skus=["PARENT-2", "PARENT-1"],
+        ),
+    )
+
+    assert result["product_skus"] == ["PARENT-2", "PARENT-1"]
+    update_query = next(
+        call.args[0]
+        for call in execute.await_args_list
+        if "UPDATE instagram_content SET" in call.args[0]
+    )
+    assert "permalink = :permalink" in update_query
+    assert "content_type" not in update_query
+    assert "media_id = NULL" not in update_query
+    assert "caption_snapshot = NULL" not in update_query
 
 
 @pytest.mark.asyncio

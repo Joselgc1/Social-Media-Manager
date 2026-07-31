@@ -1082,9 +1082,6 @@ def _match_public_comment_product_by_sku(value: str | None, grouped_products: li
             _normalize_catalog_text(product.get("sku", "")),
             _normalize_catalog_text(product.get("parent_sku", "")),
         }
-        for variant in product.get("variants", []) or []:
-            skus.add(_normalize_catalog_text(variant.get("sku", "")))
-            skus.add(_normalize_catalog_text(variant.get("parent_sku", "")))
         if target in {sku for sku in skus if sku}:
             matches.append(product)
     return matches
@@ -1120,11 +1117,8 @@ def _match_public_comment_product_by_text(value: str | None, grouped_products: l
             _normalize_catalog_text(product.get("sku", "")),
             _normalize_catalog_text(product.get("parent_sku", "")),
         }
-        for variant in product.get("variants", []) or []:
-            product_skus.add(_normalize_catalog_text(variant.get("sku", "")))
-            product_skus.add(_normalize_catalog_text(variant.get("parent_sku", "")))
         sku_matches = any(
-            sku and re.search(rf"(?<!\w){re.escape(sku)}(?!\w)", text)
+            sku and re.search(rf"(?<![\w-]){re.escape(sku)}(?![\w-])", text)
             for sku in product_skus
         )
         name_matches = product_name == text or product_name in text or (len(terms) >= 2 and all(term in text for term in terms))

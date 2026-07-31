@@ -858,6 +858,40 @@ async def test_multi_product_zero_stock_product_returns_unavailable(engine_harne
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    ["¿Está disponible BODY-002-S?", "¿Cuánto cuesta BODY-002-S?"],
+)
+async def test_multi_product_exact_variant_sku_does_not_return_grouped_answer(
+    engine_harness,
+    message,
+):
+    engine_harness.catalog.extend([
+        _second_catalog_product(sku="BODY-002-S", size="S", sizes="S", stock=0),
+        _second_catalog_product(sku="BODY-002-M", size="M", sizes="M", stock=3),
+    ])
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        message,
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-001", "BODY-002"],
+            },
+        },
+    )
+
+    assert response["text"].startswith("¿Cuál producto de la publicación")
+    assert "está disponible" not in response["text"]
+    assert "$25" not in response["text"]
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_public_instagram_comment_other_uses_exact_phone_fallback(engine_harness):
     response = await engine.generate_response(
         "instagram",
