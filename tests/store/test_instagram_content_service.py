@@ -90,6 +90,31 @@ async def test_resolves_active_product_mapping_by_media_id(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resolves_story_mapping_by_stable_media_id_without_permalink(monkeypatch):
+    from app.instagram_content import service
+
+    monkeypatch.setattr(
+        service.db,
+        "fetch_all",
+        AsyncMock(return_value=[{
+            "content_id": "story-content-1",
+            "media_id": "story-media-1",
+            "normalized_permalink": None,
+            "product_sku": "SKU-STORY",
+            "display_order": 0,
+        }]),
+    )
+
+    result = await service.resolve_content_product_mapping(
+        media_id="story-media-1",
+        permalink=None,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["product_sku"] == "SKU-STORY"
+
+
+@pytest.mark.asyncio
 async def test_resolves_active_product_mapping_by_normalized_permalink(monkeypatch):
     from app.instagram_content import service
 

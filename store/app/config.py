@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     meta_context_wait_seconds: int = Field(default=10, ge=1, le=60)
     meta_context_match_window_seconds: int = Field(default=45, ge=5, le=300)
     meta_context_event_retention_hours: int = Field(default=24, ge=1, le=168)
+    meta_story_context_enabled: bool = False
+    meta_story_context_wait_seconds: int = Field(default=10, ge=1, le=60)
+    meta_story_context_match_window_seconds: int = Field(default=45, ge=5, le=300)
+    instagram_story_mapping_ttl_hours: int = Field(default=24, ge=1, le=168)
+    instagram_story_context_ttl_hours: int = Field(default=24, ge=1, le=168)
 
     # --- Kommo private integration / Salesbot transport ---
     kommo_subdomain: str = ""

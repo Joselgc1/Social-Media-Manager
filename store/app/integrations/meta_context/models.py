@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class MetaInstagramContextEvent(BaseModel):
     external_event_id: str
-    event_type: Literal["comment"] = "comment"
+    event_type: Literal["comment", "story_reply"] = "comment"
     instagram_account_id: str | None = None
     sender_id: str | None = None
     sender_username: str | None = None

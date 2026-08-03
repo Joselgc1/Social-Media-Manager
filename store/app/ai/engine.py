@@ -547,6 +547,12 @@ async def generate_response(
     except Exception:
         logger.exception("Catalog is stale and could not be refreshed before prompt generation")
         catalog = []
+    instagram_content_context = _resolve_private_instagram_content_context(
+        channel=channel,
+        integration_context=integration_context,
+        message_text=original_message_text,
+        products=group_catalog_products(get_cached_reference_catalog()),
+    )
     catalog_md = format_catalog_as_markdown(catalog)
     catalog_pdf_supported = _catalog_pdf_supported(channel, integration_context, config)
     system_prompt = build_agent_prompt(
@@ -563,6 +569,7 @@ async def generate_response(
             order_discount_threshold_usd=settings.get("order_discount_threshold_usd"),
             catalog_pdf_supported=catalog_pdf_supported,
             workflow_state=session.workflow_context() if session and orchestration.agent.name != "legacy" else None,
+            instagram_content_context=instagram_content_context,
         ),
     )
     system_prompt = _with_conversation_continuity_guidance(system_prompt, has_previous_context)
@@ -1500,6 +1507,79 @@ def _with_public_comment_guidance(system_prompt: str) -> str:
 
 def _is_public_instagram_comment(integration_context: dict | None) -> bool:
     return (integration_context or {}).get("interaction_type") == "instagram_comment"
+
+
+def _resolve_private_instagram_content_context(
+    *,
+    channel: str,
+    integration_context: dict | None,
+    message_text: str,
+    products: list[dict],
+) -> dict:
+    context = (integration_context or {}).get("incoming_instagram_context")
+    if (
+        channel != "instagram"
+        or (integration_context or {}).get("provider") != "kommo"
+        or (integration_context or {}).get("interaction_type") != "private_message"
+        or not isinstance(context, dict)
+        or context.get("source") != "story_reply"
+        or context.get("mapping_status") != "resolved"
+    ):
+        return {}
+
+    mapped_skus = list(dict.fromkeys(
+        str(sku).strip() for sku in context.get("product_skus") or [] if str(sku).strip()
+    ))
+    products_by_sku = {
+        str(product.get("sku") or "").strip(): product
+        for product in products
+        if str(product.get("sku") or "").strip()
+    }
+    if not mapped_skus or any(sku not in products_by_sku for sku in mapped_skus):
+        return {}
+
+    selected_sku = str(context.get("selected_product_sku") or "").strip() or None
+    current_story = bool((integration_context or {}).get("current_story_context"))
+    if not current_story:
+        normalized_message = _normalize_catalog_text(message_text)
+        explicit_matches = []
+        for sku, product in products_by_sku.items():
+            normalized_name = _normalize_catalog_text(product.get("product_name") or "")
+            normalized_sku = _normalize_catalog_text(sku)
+            if (
+                normalized_name
+                and len(normalized_name) >= 3
+                and normalized_name in normalized_message
+            ) or (normalized_sku and normalized_sku in normalized_message):
+                explicit_matches.append(sku)
+        explicit_matches = list(dict.fromkeys(explicit_matches))
+        if len(explicit_matches) == 1:
+            if explicit_matches[0] not in mapped_skus:
+                return {}
+            selected_sku = explicit_matches[0]
+
+    resolved_products = []
+    for sku in mapped_skus:
+        product = products_by_sku[sku]
+        price = _single_public_comment_price(product)
+        try:
+            in_stock = float(product.get("stock", 0) or 0) > 0
+        except (TypeError, ValueError):
+            in_stock = False
+        resolved_products.append({
+            "sku": sku,
+            "name": product.get("product_name") or "Producto",
+            "price_text": _format_usd_price(price) if price is not None else "variable; confirmar",
+            "sizes": product.get("sizes") or "",
+            "availability": "disponible" if in_stock else "agotado",
+        })
+    return {
+        "source": "story_reply",
+        "story_id": context.get("story_id"),
+        "product_skus": mapped_skus,
+        "selected_product_sku": selected_sku if selected_sku in mapped_skus else None,
+        "products": resolved_products,
+    }
 
 
 def _sanitize_public_comment_reply(text: str | None) -> str:

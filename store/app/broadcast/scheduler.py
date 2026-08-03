@@ -173,7 +173,10 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
     context_processing_enabled = (
         outbound_processing_enabled
         and context_config.channel_backend == "kommo"
-        and getattr(context_config, "meta_instagram_context_enabled", False) is True
+        and (
+            getattr(context_config, "meta_instagram_context_enabled", False) is True
+            or getattr(context_config, "meta_story_context_enabled", False) is True
+        )
         and getattr(context_config, "outbound_processing_enabled", True) is True
     )
     if context_processing_enabled:
@@ -332,7 +335,11 @@ async def _process_kommo_jobs():
         from app.integrations.kommo.jobs import process_pending_jobs, process_ready_jobs, recover_stale_jobs
 
         await recover_stale_jobs()
-        if not getattr(get_config(), "meta_instagram_context_enabled", False):
+        config = get_config()
+        if not (
+            getattr(config, "meta_instagram_context_enabled", False)
+            or getattr(config, "meta_story_context_enabled", False)
+        ):
             from app.integrations.meta_context.correlation import release_timed_out_context_jobs
 
             await release_timed_out_context_jobs(limit=10)
@@ -347,7 +354,10 @@ async def _process_meta_context_jobs():
     if not (
         _outbound_processing_enabled
         and config.channel_backend == "kommo"
-        and getattr(config, "meta_instagram_context_enabled", False) is True
+        and (
+            getattr(config, "meta_instagram_context_enabled", False) is True
+            or getattr(config, "meta_story_context_enabled", False) is True
+        )
         and getattr(config, "outbound_processing_enabled", True) is True
     ):
         return

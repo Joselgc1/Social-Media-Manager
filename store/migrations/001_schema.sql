@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
     checkout_draft        JSONB NOT NULL DEFAULT '{}'::jsonb,
     current_order_id      UUID REFERENCES orders(id) ON DELETE SET NULL,
     last_route_confidence NUMERIC(4,3),
+    instagram_content_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    instagram_context_expires_at TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -174,6 +176,9 @@ CREATE INDEX IF NOT EXISTS idx_conversation_sessions_active_agent
 
 CREATE INDEX IF NOT EXISTS idx_conversation_sessions_updated
     ON conversation_sessions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversation_sessions_instagram_context_expiry
+    ON conversation_sessions(instagram_context_expires_at)
+    WHERE instagram_context_expires_at IS NOT NULL;
 
 -- ============================================================
 -- Broadcasts
@@ -540,6 +545,7 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
     completed_at TIMESTAMPTZ,
     callback_claims JSONB,
     public_comment_context JSONB,
+    instagram_content_context JSONB NOT NULL DEFAULT '{}'::jsonb,
     salesbot_token_jti TEXT,
     salesbot_account_id TEXT,
     salesbot_user_id TEXT,
@@ -561,6 +567,7 @@ ALTER TABLE kommo_message_jobs
     ADD COLUMN IF NOT EXISTS ai_started_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS callback_claims JSONB,
     ADD COLUMN IF NOT EXISTS public_comment_context JSONB,
+    ADD COLUMN IF NOT EXISTS instagram_content_context JSONB NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS salesbot_token_jti TEXT,
     ADD COLUMN IF NOT EXISTS salesbot_account_id TEXT,
     ADD COLUMN IF NOT EXISTS salesbot_user_id TEXT,

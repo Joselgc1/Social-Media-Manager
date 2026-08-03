@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS instagram_content (
     shortcode TEXT,
     media_id TEXT,
     caption_snapshot TEXT,
+    thumbnail_url TEXT,
+    published_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -46,6 +49,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_instagram_content_media_id
     WHERE media_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_instagram_content_status_updated
     ON instagram_content(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_instagram_content_story_media
+    ON instagram_content(media_id)
+    WHERE content_type = 'story' AND media_id IS NOT NULL;
 
 DROP TRIGGER IF EXISTS trg_instagram_content_updated_at ON instagram_content;
 CREATE TRIGGER trg_instagram_content_updated_at

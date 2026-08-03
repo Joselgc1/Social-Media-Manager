@@ -125,7 +125,8 @@ async def list_instagram_content():
     rows = await db.fetch_all(
         """
         SELECT id, content_type, permalink, normalized_permalink, shortcode,
-               media_id, status, created_at, updated_at
+               media_id, thumbnail_url, published_at, expires_at,
+               status, created_at, updated_at
         FROM instagram_content
         ORDER BY created_at DESC
         """
@@ -162,14 +163,21 @@ async def list_instagram_content():
         result.append({
             "id": content_id,
             "content_type": row["content_type"],
+            "story_id": row["media_id"] if row["content_type"] == "story" else None,
             "post_url": row["permalink"],
             "normalized_url": row["normalized_permalink"],
             "shortcode": row["shortcode"],
             "media_id": row["media_id"],
+            "thumbnail_url": row["thumbnail_url"],
+            "preview_url": row["thumbnail_url"],
+            "published_at": row["published_at"],
+            "expires_at": row["expires_at"],
             "status": row["status"],
+            "mapping_status": "mapped" if product_skus else "assignment_required",
             "product_skus": product_skus,
             "product_names": [product["name"] for product in products],
             "products": products,
+            "discovered_at": row["created_at"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         })
@@ -211,13 +219,19 @@ async def create_instagram_content(body: InstagramContentCreate):
 @router.put("/{content_id}")
 async def update_instagram_content(content_id: UUID, body: InstagramContentUpdate):
     existing = await db.fetch_one(
-        "SELECT id, permalink, normalized_permalink FROM instagram_content WHERE id = :id",
+        "SELECT id, content_type, permalink, normalized_permalink FROM instagram_content WHERE id = :id",
         {"id": str(content_id)},
     )
     if not existing:
         raise HTTPException(status_code=404, detail="Instagram content mapping not found.")
 
-    normalized = _normalize_or_422(body.post_url) if body.post_url is not None else None
+    # Discovered Stories are identified by media_id and do not have a stable public URL.
+    # Product assignment must not replace that identifier or turn the row into a post/Reel.
+    normalized = (
+        _normalize_or_422(body.post_url)
+        if body.post_url is not None and existing["content_type"] != "story"
+        else None
+    )
     product_skus = None
     if body.product_skus is not None:
         product_skus = _validate_product_skus(body.product_skus, await _reference_products())

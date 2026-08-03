@@ -34,7 +34,7 @@ async def test_store_schema_version_accepts_consolidated_upgrade_version(monkeyp
         "fetch_all",
         AsyncMock(
             side_effect=[
-                [{"version": 1}, {"version": 3}, {"version": 4}, {"version": 5}],
+                [{"version": 1}, {"version": 3}, {"version": 4}, {"version": 5}, {"version": 6}],
                 META_LEASE_COLUMNS,
             ]
         ),
@@ -67,7 +67,14 @@ async def test_store_schema_version_rejects_historical_upgrade_without_meta_leas
         "fetch_all",
         AsyncMock(
             side_effect=[
-                [{"version": 1}, {"version": 2}, {"version": 3}, {"version": 4}, {"version": 5}],
+                [
+                    {"version": 1},
+                    {"version": 2},
+                    {"version": 3},
+                    {"version": 4},
+                    {"version": 5},
+                    {"version": 6},
+                ],
                 [{"column_name": "outbound_started_at"}],
             ]
         ),

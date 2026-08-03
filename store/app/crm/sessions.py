@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -155,6 +157,7 @@ class ConversationSession(BaseModel):
     created_at: Any = None
     updated_at: Any = None
 
+
     @field_validator("customer_id", mode="before")
     @classmethod
     def _normalize_customer_id(cls, value):
@@ -201,6 +204,40 @@ class ConversationSession(BaseModel):
             "current_order_id": self.current_order_id,
             "last_route_confidence": self.last_route_confidence,
         }
+
+
+class InstagramContentContext(BaseModel):
+    """Short-lived identifiers for a private Instagram Story conversation."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    source: str
+    content_id: str | None = None
+    story_id: str
+    product_skus: list[str] = Field(default_factory=list, max_length=20)
+    selected_product_sku: str | None = None
+    mapping_status: str = "resolved"
+    meta_context_event_id: str | None = None
+
+    @field_validator("source")
+    @classmethod
+    def _story_source(cls, value):
+        if str(value or "").strip() != "story_reply":
+            raise ValueError("Unsupported Instagram content context source")
+        return "story_reply"
+
+    @field_validator("story_id", "content_id", "selected_product_sku", "meta_context_event_id", mode="before")
+    @classmethod
+    def _clean_context_text(cls, value):
+        text = str(value or "").strip()
+        return text or None
+
+    @field_validator("product_skus", mode="before")
+    @classmethod
+    def _clean_context_skus(cls, value):
+        if not isinstance(value, list):
+            return []
+        return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))[:20]
 
 
 def normalize_checkout_draft(raw_value: Any) -> CheckoutDraft:
@@ -431,6 +468,8 @@ async def reset_session(customer_id: str) -> ConversationSession:
             checkout_draft = '{}'::jsonb,
             current_order_id = NULL,
             last_route_confidence = NULL,
+            instagram_content_context = '{}'::jsonb,
+            instagram_context_expires_at = NULL,
             updated_at = NOW()
         RETURNING customer_id, active_agent, active_intent, workflow_stage, checkout_draft,
                   current_order_id, last_route_confidence, created_at, updated_at
@@ -439,6 +478,120 @@ async def reset_session(customer_id: str) -> ConversationSession:
     )
     logger.info("AI workflow reset", extra={"active_agent": "legacy", "workflow_stage": "idle"})
     return _row_to_session(row)
+
+
+async def store_instagram_content_context(
+    customer_id: str,
+    context: dict,
+    *,
+    ttl_hours: int,
+) -> dict:
+    """Replace the customer's private Story context with validated identifiers."""
+    customer_id = _customer_id_text(customer_id)
+    normalized = InstagramContentContext.model_validate(context).model_dump(exclude_none=True)
+    if normalized.get("mapping_status") != "resolved" or not normalized.get("product_skus"):
+        await clear_instagram_content_context(customer_id)
+        return {}
+    selected = normalized.get("selected_product_sku")
+    if selected and selected not in normalized["product_skus"]:
+        normalized.pop("selected_product_sku", None)
+    await db.execute(
+        """
+        INSERT INTO conversation_sessions (
+            customer_id, instagram_content_context, instagram_context_expires_at
+        ) VALUES (
+            :customer_id, CAST(:context AS jsonb), NOW() + (:ttl_hours * INTERVAL '1 hour')
+        )
+        ON CONFLICT (customer_id) DO UPDATE
+        SET instagram_content_context = CAST(:context AS jsonb),
+            instagram_context_expires_at = NOW() + (:ttl_hours * INTERVAL '1 hour'),
+            updated_at = NOW()
+        """,
+        {
+            "customer_id": customer_id,
+            "context": json.dumps(normalized, ensure_ascii=False),
+            "ttl_hours": ttl_hours,
+        },
+    )
+    return normalized
+
+
+async def load_active_instagram_content_context(customer_id: str) -> dict:
+    """Load active Story context and atomically clear expired or invalid data."""
+    customer_id = _customer_id_text(customer_id)
+    row = await db.fetch_one(
+        """
+        SELECT instagram_content_context, instagram_context_expires_at
+        FROM conversation_sessions
+        WHERE customer_id = :customer_id
+        """,
+        {"customer_id": customer_id},
+    )
+    if not row:
+        return {}
+    expires_at = row["instagram_context_expires_at"]
+    if not expires_at or _context_datetime(expires_at) <= datetime.now(UTC):
+        await clear_instagram_content_context(customer_id)
+        return {}
+    raw_context = row["instagram_content_context"]
+    if isinstance(raw_context, str):
+        try:
+            raw_context = json.loads(raw_context)
+        except json.JSONDecodeError:
+            raw_context = {}
+    try:
+        context = InstagramContentContext.model_validate(raw_context).model_dump(exclude_none=True)
+    except ValidationError:
+        await clear_instagram_content_context(customer_id)
+        return {}
+    if context.get("mapping_status") != "resolved" or not context.get("product_skus"):
+        await clear_instagram_content_context(customer_id)
+        return {}
+    content_id = context.get("content_id")
+    if content_id:
+        try:
+            normalized_content_id = str(UUID(content_id))
+        except ValueError:
+            await clear_instagram_content_context(customer_id)
+            return {}
+        mappings = await db.fetch_all(
+            """
+            SELECT mapping.product_sku
+            FROM instagram_content content
+            JOIN instagram_content_products mapping ON mapping.content_id = content.id
+            WHERE content.id = :content_id
+              AND content.content_type = 'story'
+              AND content.status = 'active'
+              AND content.media_id = :story_id
+            ORDER BY mapping.display_order, mapping.product_sku
+            """,
+            {"content_id": normalized_content_id, "story_id": context["story_id"]},
+        )
+        active_skus = {str(mapping["product_sku"]).strip() for mapping in mappings}
+        if not active_skus or not set(context["product_skus"]).issubset(active_skus):
+            await clear_instagram_content_context(customer_id)
+            return {}
+    return context
+
+
+async def clear_instagram_content_context(customer_id: str) -> None:
+    await db.execute(
+        """
+        UPDATE conversation_sessions
+        SET instagram_content_context = '{}'::jsonb,
+            instagram_context_expires_at = NULL,
+            updated_at = NOW()
+        WHERE customer_id = :customer_id
+        """,
+        {"customer_id": _customer_id_text(customer_id)},
+    )
+
+
+def _context_datetime(value) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+        str(value).replace("Z", "+00:00")
+    )
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _row_to_session(row) -> ConversationSession:

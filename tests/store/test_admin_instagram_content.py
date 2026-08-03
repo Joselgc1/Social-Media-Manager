@@ -253,6 +253,7 @@ async def test_update_mapping_replaces_products_and_updates_url(monkeypatch):
         AsyncMock(
             return_value={
                 "id": CONTENT_ID,
+                "content_type": "post",
                 "normalized_permalink": "https://www.instagram.com/p/OLD123/",
             }
         ),
@@ -365,7 +366,11 @@ async def test_archived_mapping_can_be_restored_without_catalog_access(monkeypat
     monkeypatch.setattr(
         instagram_content.db,
         "fetch_one",
-        AsyncMock(return_value={"id": CONTENT_ID, "normalized_permalink": "https://www.instagram.com/p/ABC123/"}),
+        AsyncMock(return_value={
+            "id": CONTENT_ID,
+            "content_type": "post",
+            "normalized_permalink": "https://www.instagram.com/p/ABC123/",
+        }),
     )
     reference_products = AsyncMock()
     monkeypatch.setattr(instagram_content, "_reference_products", reference_products)
@@ -400,6 +405,7 @@ async def test_reel_mapping_can_be_archived_and_restored(monkeypatch):
             {"id": CONTENT_ID},
             {
                 "id": CONTENT_ID,
+                "content_type": "reel",
                 "normalized_permalink": "https://www.instagram.com/reel/Reel_123/",
             },
         ]
@@ -430,6 +436,9 @@ async def test_mapping_list_survives_catalog_refresh_failure(monkeypatch):
             "normalized_permalink": "https://www.instagram.com/p/ABC123/",
             "shortcode": "ABC123",
             "media_id": None,
+            "thumbnail_url": None,
+            "published_at": None,
+            "expires_at": None,
             "status": "active",
             "created_at": "created",
             "updated_at": "updated",
@@ -454,3 +463,62 @@ async def test_mapping_list_survives_catalog_refresh_failure(monkeypatch):
         {"sku": "PARENT-2", "name": None, "price": None, "stock": None},
         {"sku": "PARENT-1", "name": None, "price": None, "stock": None},
     ]
+
+
+@pytest.mark.asyncio
+async def test_unmapped_story_is_serialized_with_discovery_metadata(monkeypatch):
+    fetch_all = AsyncMock(side_effect=[[
+        {
+            "id": CONTENT_ID,
+            "content_type": "story",
+            "permalink": None,
+            "normalized_permalink": None,
+            "shortcode": None,
+            "media_id": "story-media-1",
+            "thumbnail_url": "https://example.com/story.jpg",
+            "published_at": "published",
+            "expires_at": "expires",
+            "status": "active",
+            "created_at": "discovered",
+            "updated_at": "updated",
+        }
+    ], []])
+    monkeypatch.setattr(instagram_content.db, "fetch_all", fetch_all)
+    monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
+
+    result = await instagram_content.list_instagram_content()
+
+    assert result[0]["story_id"] == "story-media-1"
+    assert result[0]["preview_url"] == "https://example.com/story.jpg"
+    assert result[0]["discovered_at"] == "discovered"
+    assert result[0]["published_at"] == "published"
+    assert result[0]["expires_at"] == "expires"
+    assert result[0]["mapping_status"] == "assignment_required"
+    assert result[0]["product_skus"] == []
+
+
+@pytest.mark.asyncio
+async def test_discovered_story_can_assign_products_without_permalink(monkeypatch):
+    monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    monkeypatch.setattr(
+        instagram_content.db,
+        "fetch_one",
+        AsyncMock(return_value={
+            "id": CONTENT_ID,
+            "content_type": "story",
+            "permalink": None,
+            "normalized_permalink": None,
+        }),
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(instagram_content.db, "execute", execute)
+
+    result = await instagram_content.update_instagram_content(
+        UUID(CONTENT_ID),
+        instagram_content.InstagramContentUpdate(product_skus=["PARENT-1", "PARENT-2"]),
+    )
+
+    assert result["product_skus"] == ["PARENT-1", "PARENT-2"]
+    assert not any("UPDATE instagram_content SET" in call.args[0] for call in execute.await_args_list)
+    assert any("DELETE FROM instagram_content_products" in call.args[0] for call in execute.await_args_list)

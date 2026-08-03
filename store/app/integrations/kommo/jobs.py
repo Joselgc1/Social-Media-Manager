@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from app import db
 from app.ai.engine import generate_response
 from app.config import get_config
-from app.crm import conversations, escalations
+from app.crm import conversations, escalations, sessions
 from app.crm.channel_mappings import resolve_customer_from_kommo_job, upsert_mapping
 from app.integrations.kommo.client import KommoAPIError, KommoClient, sanitize_kommo_error
 from app.integrations.kommo.customer_profile import build_kommo_customer_profile
@@ -223,6 +223,7 @@ async def process_ready_jobs(limit: int = 5) -> int:
 
 async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, claims: dict | None = None) -> dict:
     values = _callback_values(data, return_url, claims or {})
+    config = get_config()
     update_values = {
         "return_url": values["return_url"],
         "entity_id": values["entity_id"],
@@ -242,12 +243,35 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "sender_username": values["sender_username"],
         "sender_profile_url": values["sender_profile_url"],
     }
+    story_wait_enabled = bool(config.meta_story_context_enabled)
+    if story_wait_enabled:
+        update_values.update({
+            "story_context_enabled": True,
+            "story_context_wait_seconds": config.meta_story_context_wait_seconds,
+        })
+
+    status_sql = """CASE
+                WHEN :story_context_enabled
+                     AND job.channel = 'instagram'
+                     AND job.interaction_type = 'private_message'
+                THEN 'waiting_for_context'
+                ELSE 'ready'
+            END""" if story_wait_enabled else "'ready'"
+    story_context_sql = """
+            context_status = CASE
+                WHEN job.channel = 'instagram' AND job.interaction_type = 'private_message'
+                THEN 'pending' ELSE context_status END,
+            context_deadline_at = CASE
+                WHEN job.channel = 'instagram' AND job.interaction_type = 'private_message'
+                THEN NOW() + (:story_context_wait_seconds * INTERVAL '1 second')
+                ELSE context_deadline_at END,
+    """ if story_wait_enabled else ""
 
     job = await db.fetch_one(
-        """
+        f"""
         UPDATE kommo_message_jobs job
         SET return_url = :return_url,
-            status = 'ready',
+            status = {status_sql},
             processing_lease_id = NULL,
             ai_started_at = NULL,
             callback_claims = CAST(:callback_claims AS jsonb),
@@ -259,6 +283,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             author_profile_url = COALESCE(:author_profile_url, author_profile_url),
             sender_username = COALESCE(:sender_username, sender_username),
             sender_profile_url = COALESCE(:sender_profile_url, sender_profile_url),
+            {story_context_sql}
             updated_at = NOW()
         WHERE job.id = (
             SELECT candidate.id
@@ -301,7 +326,8 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
     )
     if job:
         logger.info("Kommo Salesbot callback matched waiting job: %s", _job_log_context(dict(job)))
-        return {"status": "ready", "job_id": str(job["id"])}
+        status = "waiting_for_context" if job["status"] == "waiting_for_context" else "ready"
+        return {"status": status, "job_id": str(job["id"])}
 
     if values["interaction_type"] == "instagram_comment":
         duplicate = await _find_job_for_callback_identity(values)
@@ -771,6 +797,29 @@ async def _process_ready_job(job: dict) -> None:
             await _continue_and_discard_job(client, job, before.reason)
             return
 
+        incoming_instagram_context = {}
+        current_story_context = False
+        if (
+            job.get("channel") == "instagram"
+            and _job_interaction_type(job) == "private_message"
+        ):
+            current_context = _job_instagram_content_context(job)
+            if (
+                current_context.get("source") == "story_reply"
+                and current_context.get("mapping_status") == "resolved"
+                and current_context.get("product_skus")
+            ):
+                current_story_context = True
+                incoming_instagram_context = await sessions.store_instagram_content_context(
+                    str(customer["id"]),
+                    current_context,
+                    ttl_hours=config.instagram_story_context_ttl_hours,
+                )
+            else:
+                incoming_instagram_context = await sessions.load_active_instagram_content_context(
+                    str(customer["id"])
+                )
+
         sender_id = _local_sender_id(job)
         media_url = job.get("media_url")
         result = await generate_response(
@@ -790,6 +839,8 @@ async def _process_ready_job(job: dict) -> None:
                 "interaction_type": _job_interaction_type(job),
                 "media_url_is_direct": bool(job.get("media_url")),
                 "public_comment_context": _job_public_comment_context(job),
+                "incoming_instagram_context": incoming_instagram_context,
+                "current_story_context": current_story_context,
             },
             persist_assistant_message=False,
         )
@@ -1817,6 +1868,19 @@ def _salesbot_id_for_channel(channel: str | None) -> int:
 
 def _job_public_comment_context(job: dict) -> dict:
     context = job.get("public_comment_context")
+    if isinstance(context, dict):
+        return context
+    if isinstance(context, str) and context.strip():
+        try:
+            loaded = json.loads(context)
+        except json.JSONDecodeError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _job_instagram_content_context(job: dict) -> dict:
+    context = job.get("instagram_content_context")
     if isinstance(context, dict):
         return context
     if isinstance(context, str) and context.strip():

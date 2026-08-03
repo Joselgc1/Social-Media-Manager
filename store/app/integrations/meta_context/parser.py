@@ -1,4 +1,4 @@
-"""Parse supported Meta Instagram comment webhook payload variants."""
+"""Parse context-only Meta Instagram comment and Story-reply webhooks."""
 
 import hashlib
 import json
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from app.integrations.meta_context.models import MetaInstagramContextEvent
 
 
-def parse_instagram_comment_events(payload: object) -> list[MetaInstagramContextEvent]:
+def parse_instagram_context_events(payload: object) -> list[MetaInstagramContextEvent]:
     if not isinstance(payload, dict) or payload.get("object") != "instagram":
         return []
 
@@ -17,6 +17,14 @@ def parse_instagram_comment_events(payload: object) -> list[MetaInstagramContext
             continue
         account_id = _text(entry.get("id"))
         entry_timestamp = _timestamp(entry.get("time"))
+        for messaging_event in entry.get("messaging") or []:
+            event = _parse_story_reply(
+                messaging_event,
+                account_id=account_id,
+                entry_timestamp=entry_timestamp,
+            )
+            if event:
+                events.append(event)
         candidates: list[tuple[str | None, object]] = []
         if "value" in entry:
             candidates.append((_text(entry.get("field")), entry.get("value")))
@@ -36,6 +44,58 @@ def parse_instagram_comment_events(payload: object) -> list[MetaInstagramContext
                 if event:
                     events.append(event)
     return events
+
+
+def parse_instagram_comment_events(payload: object) -> list[MetaInstagramContextEvent]:
+    """Compatibility alias for callers that previously parsed comments only."""
+    return parse_instagram_context_events(payload)
+
+
+def _parse_story_reply(
+    value: object,
+    *,
+    account_id: str | None,
+    entry_timestamp: datetime | None,
+) -> MetaInstagramContextEvent | None:
+    if not isinstance(value, dict):
+        return None
+    message = value.get("message")
+    if not isinstance(message, dict):
+        return None
+    sender = value.get("sender") if isinstance(value.get("sender"), dict) else {}
+    sender_id = _text(sender.get("id"))
+    if (
+        message.get("is_echo") is True
+        or message.get("is_deleted") is True
+        or message.get("deleted") is True
+        or value.get("is_echo") is True
+        or sender_id == account_id
+    ):
+        return None
+    reply_to = message.get("reply_to") if isinstance(message.get("reply_to"), dict) else {}
+    story = reply_to.get("story") if isinstance(reply_to.get("story"), dict) else {}
+    story_id = _text(story.get("id"))
+    message_id = _text(message.get("mid") or message.get("message_id"))
+    if not story_id or not message_id or not sender_id:
+        return None
+    return MetaInstagramContextEvent(
+        external_event_id=message_id,
+        event_type="story_reply",
+        instagram_account_id=account_id,
+        sender_id=sender_id,
+        sender_username=_text(sender.get("username")),
+        message_text=_text(message.get("text")) or "",
+        event_timestamp=(
+            _timestamp(value.get("timestamp"))
+            or _timestamp(message.get("timestamp"))
+            or entry_timestamp
+            or datetime.now(UTC)
+        ),
+        message_id=message_id,
+        media_id=story_id,
+        story_id=story_id,
+        story_url=_text(story.get("url")),
+    )
 
 
 def _parse_comment_value(

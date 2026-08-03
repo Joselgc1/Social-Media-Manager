@@ -55,3 +55,24 @@ def test_instagram_mapping_form_can_remove_one_selected_product():
     assert "removeInstagramProduct(selectedIndex)" in dashboard
     assert "[...select.selectedOptions][selectedIndex]" in dashboard
     assert "if (option) option.selected = false" in dashboard
+
+
+def test_story_content_renders_preview_timing_and_assignment_status():
+    dashboard = Path("store/app/static/js/dashboard.js").read_text()
+
+    assert "Story ID" in dashboard
+    assert "mapping.preview_url" in dashboard
+    assert "mapping.discovered_at" in dashboard
+    assert "mapping.published_at" in dashboard
+    assert "mapping.expires_at" in dashboard
+    assert "Asignación requerida" in dashboard
+
+
+def test_story_edit_assigns_products_without_submitting_permalink():
+    template = Path("store/app/templates/dashboard.html").read_text()
+    dashboard = Path("store/app/static/js/dashboard.js").read_text()
+
+    assert 'id="instagram-url-help"' in template
+    assert "const editingStory = mapping?.content_type === 'story'" in dashboard
+    assert "if (!editingStory) body.post_url = postUrl" in dashboard
+    assert "postUrlInput.disabled = editingStory" in dashboard

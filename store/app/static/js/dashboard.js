@@ -293,31 +293,48 @@ function renderInstagramMappings() {
   const container = document.getElementById('instagram-mappings-list');
   const count = document.getElementById('instagram-mappings-count');
   if (!container || !count) return;
-  count.textContent = `${_instagramMappingsData.length} mapeo${_instagramMappingsData.length === 1 ? '' : 's'}`;
+  count.textContent = `${_instagramMappingsData.length} contenido${_instagramMappingsData.length === 1 ? '' : 's'}`;
   if (!_instagramMappingsData.length) {
-    container.innerHTML = '<div class="text-gray-500 dark:text-gray-400 py-5 text-center">Aún no hay contenidos de Instagram mapeados.</div>';
+    container.innerHTML = '<div class="text-gray-500 dark:text-gray-400 py-5 text-center">Aún no hay contenidos de Instagram.</div>';
     return;
   }
   container.innerHTML = `<div class="grid gap-3">${_instagramMappingsData.map(mapping => {
     const products = mapping.products || [];
-    const productNames = products.map(product => product.name || 'Producto no disponible').join(', ');
-    const productSkus = products.map(product => product.sku).join(', ');
-    const prices = products.map(product => product.price === null ? 'No disponible' : `$${Number(product.price).toFixed(2)}`).join(', ');
-    const stocks = products.map(product => product.stock === null ? 'No disponible' : String(product.stock)).join(', ');
+    const assignmentRequired = mapping.mapping_status === 'assignment_required' || !products.length;
+    const productNames = products.map(product => product.name || 'Producto no disponible').join(', ') || 'Sin asignar';
+    const productSkus = products.map(product => product.sku).join(', ') || 'Sin asignar';
+    const prices = products.map(product => product.price === null ? 'No disponible' : `$${Number(product.price).toFixed(2)}`).join(', ') || 'Sin asignar';
+    const stocks = products.map(product => product.stock === null ? 'No disponible' : String(product.stock)).join(', ') || 'Sin asignar';
     const statusClass = mapping.status === 'active' ? 'badge-green' : 'badge-gray';
     const statusButton = mapping.status === 'active'
       ? `<button class="btn btn-secondary text-xs" onclick="archiveInstagramMapping('${escapeHtml(mapping.id)}')">Archivar</button>`
       : `<button class="btn btn-secondary text-xs" onclick="restoreInstagramMapping('${escapeHtml(mapping.id)}')">Restaurar</button>`;
     const contentLabel = mapping.shortcode || mapping.normalized_url || mapping.post_url || mapping.media_id || 'Contenido de Instagram';
     const contentTypeLabel = INSTAGRAM_CONTENT_TYPE_LABELS[mapping.content_type] || mapping.content_type;
+    const assignmentBadge = assignmentRequired
+      ? '<span class="badge badge-yellow">Asignación requerida</span>'
+      : '<span class="badge badge-green">Productos asignados</span>';
     const contentLink = mapping.normalized_url
       ? `<a class="font-semibold text-indigo-600 dark:text-indigo-400 break-all" href="${escapeHtml(mapping.normalized_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(contentLabel)}</a>`
       : `<span class="font-semibold text-gray-900 dark:text-gray-100 break-all">${escapeHtml(contentLabel)}</span>`;
+    const storyPreview = mapping.content_type === 'story' && mapping.preview_url
+      ? `<img src="${escapeHtml(mapping.preview_url)}" alt="Vista previa de la Historia" class="w-20 h-28 rounded-lg object-cover border border-gray-200 dark:border-gray-700">`
+      : '';
+    const storyDetails = mapping.content_type === 'story' ? `
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4 pt-4 border-t border-gray-100 dark:border-gray-800 text-sm">
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Story ID</span><span class="break-all">${escapeHtml(mapping.story_id || mapping.media_id || 'No disponible')}</span></div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Descubierta</span>${escapeHtml(formatInstagramContentDate(mapping.discovered_at))}</div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Publicada</span>${escapeHtml(formatInstagramContentDate(mapping.published_at))}</div>
+        <div><span class="block text-xs text-gray-500 dark:text-gray-400">Expira</span>${escapeHtml(formatInstagramContentDate(mapping.expires_at))}</div>
+      </div>` : '';
     return `<article class="rounded-xl border border-gray-200 dark:border-gray-700 p-4">
       <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-        <div class="min-w-0">
-          ${contentLink}
-          <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(contentTypeLabel)}</span><span class="badge ${statusClass}">${escapeHtml(mapping.status)}</span></div>
+        <div class="flex gap-3 min-w-0">
+          ${storyPreview}
+          <div class="min-w-0">
+            ${contentLink}
+            <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(contentTypeLabel)}</span><span class="badge ${statusClass}">${escapeHtml(mapping.status)}</span>${assignmentBadge}</div>
+          </div>
         </div>
         <div class="flex gap-2"><button class="btn btn-secondary text-xs" onclick="editInstagramMapping('${escapeHtml(mapping.id)}')">Editar</button>${statusButton}</div>
       </div>
@@ -332,27 +349,38 @@ function renderInstagramMappings() {
         <div><span class="block text-xs text-gray-500 dark:text-gray-400">Shortcode</span>${escapeHtml(mapping.shortcode || 'Pendiente')}</div>
         <div><span class="block text-xs text-gray-500 dark:text-gray-400">Meta media ID</span><span class="break-all">${escapeHtml(mapping.media_id || 'Pendiente de Meta')}</span></div>
       </div>
+      ${storyDetails}
     </article>`;
   }).join('')}</div>`;
+}
+
+function formatInstagramContentDate(value) {
+  if (!value) return 'No disponible';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('es-VE');
 }
 
 async function saveInstagramMapping() {
   const postUrl = document.getElementById('instagram-post-url').value.trim();
   const productSkus = [...document.getElementById('instagram-product-skus').selectedOptions].map(option => option.value);
-  if (!postUrl || !productSkus.length) {
-    toast('Ingresa la URL y selecciona al menos un producto', '#dc2626');
+  const editing = Boolean(_instagramEditingId);
+  const mapping = editing ? _instagramMappingsData.find(item => item.id === _instagramEditingId) : null;
+  const editingStory = mapping?.content_type === 'story';
+  if (!productSkus.length || (!editingStory && !postUrl)) {
+    toast(editingStory ? 'Selecciona al menos un producto' : 'Ingresa la URL y selecciona al menos un producto', '#dc2626');
     return;
   }
   if (productSkus.length > 20) {
     toast('Selecciona un máximo de 20 productos', '#dc2626');
     return;
   }
-  const editing = Boolean(_instagramEditingId);
   const url = editing ? `${INSTAGRAM_CONTENT_API}/${encodeURIComponent(_instagramEditingId)}` : INSTAGRAM_CONTENT_API;
+  const body = {product_skus: productSkus};
+  if (!editingStory) body.post_url = postUrl;
   await apiFetch(url, {
     method: editing ? 'PUT' : 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({post_url: postUrl, product_skus: productSkus}),
+    body: JSON.stringify(body),
   });
   toast(editing ? 'Mapeo actualizado' : 'Mapeo creado');
   cancelInstagramEdit();
@@ -363,7 +391,14 @@ function editInstagramMapping(contentId) {
   const mapping = _instagramMappingsData.find(item => item.id === contentId);
   if (!mapping) return;
   _instagramEditingId = contentId;
-  document.getElementById('instagram-post-url').value = mapping.post_url;
+  const postUrlInput = document.getElementById('instagram-post-url');
+  const urlHelp = document.getElementById('instagram-url-help');
+  const editingStory = mapping.content_type === 'story';
+  postUrlInput.value = mapping.post_url || '';
+  postUrlInput.disabled = editingStory;
+  if (urlHelp) urlHelp.textContent = editingStory
+    ? 'La Historia se identifica por su Story ID; su enlace público no se requiere ni se modifica.'
+    : 'Edita la URL pública del post o Reel.';
   const selectedSkus = new Set(mapping.product_skus || []);
   [...document.getElementById('instagram-product-skus').options].forEach(option => {
     option.selected = selectedSkus.has(option.value);
@@ -372,12 +407,16 @@ function editInstagramMapping(contentId) {
   document.getElementById('instagram-form-title').textContent = 'Editar mapeo';
   document.getElementById('instagram-save-btn').textContent = 'Guardar cambios';
   document.getElementById('instagram-cancel-btn').style.display = 'inline-flex';
-  document.getElementById('instagram-post-url').focus();
+  (editingStory ? document.getElementById('instagram-product-skus') : postUrlInput).focus();
 }
 
 function cancelInstagramEdit() {
   _instagramEditingId = null;
-  document.getElementById('instagram-post-url').value = '';
+  const postUrlInput = document.getElementById('instagram-post-url');
+  postUrlInput.value = '';
+  postUrlInput.disabled = false;
+  const urlHelp = document.getElementById('instagram-url-help');
+  if (urlHelp) urlHelp.textContent = 'Obligatoria al crear manualmente un post o Reel.';
   [...document.getElementById('instagram-product-skus').options].forEach(option => { option.selected = false; });
   renderSelectedInstagramProducts();
   document.getElementById('instagram-form-title').textContent = 'Mapear contenido de Instagram';

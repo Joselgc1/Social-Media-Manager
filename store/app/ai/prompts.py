@@ -64,6 +64,7 @@ class PromptContext:
     order_discount_threshold_usd: float | int | str | None = None
     catalog_pdf_supported: bool | None = None
     workflow_state: dict[str, Any] | str | None = None
+    instagram_content_context: dict[str, Any] | None = None
 
 
 def load_prompt_file(relative_path: str, *, use_cache: bool = True) -> str:
@@ -144,6 +145,10 @@ def build_legacy_prompt(context: PromptContext) -> str:
     if workflow_note:
         prompt += f"\n\n# Estado del flujo\n\n{workflow_note}"
 
+    instagram_note = _build_instagram_content_context(context.instagram_content_context)
+    if instagram_note:
+        prompt += f"\n\n# Contexto privado de contenido de Instagram\n\n{instagram_note}"
+
     return prompt
 
 
@@ -169,6 +174,10 @@ def build_agent_prompt(prompt_name: str, context: PromptContext) -> str:
     workflow_note = _build_workflow_context(context.workflow_state)
     if workflow_note:
         prompt += f"\n\n# Estado del flujo\n\n{workflow_note}"
+
+    instagram_note = _build_instagram_content_context(context.instagram_content_context)
+    if instagram_note:
+        prompt += f"\n\n# Contexto privado de contenido de Instagram\n\n{instagram_note}"
 
     return prompt
 
@@ -427,6 +436,44 @@ def _build_workflow_context(workflow_state: dict[str, Any] | str | None) -> str:
     if isinstance(workflow_state, str):
         return workflow_state.strip()
     return json.dumps(workflow_state, ensure_ascii=False, sort_keys=True)
+
+
+def _build_instagram_content_context(context: dict[str, Any] | None) -> str:
+    if not context or context.get("source") != "story_reply":
+        return ""
+    products = context.get("products") if isinstance(context.get("products"), list) else []
+    if not products:
+        return ""
+    selected = context.get("selected_product_sku")
+    lines = [
+        "La cliente respondió en privado a una Historia de Instagram asociada a los productos siguientes.",
+        "Los precios, tallas y disponibilidad indicados aquí vienen del catálogo en vivo.",
+    ]
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        lines.append(
+            "- "
+            + str(product.get("name") or "Producto")
+            + f" [SKU interno {product.get('sku')}]: precio {product.get('price_text')}, "
+            + f"tallas {product.get('sizes') or 'por confirmar'}, "
+            + f"disponibilidad {product.get('availability')}"
+        )
+    if selected:
+        lines.append(
+            f"Producto seleccionado para esta conversación: SKU interno {selected}. "
+            "Interpreta preguntas breves como precio, talla o disponibilidad sobre ese producto."
+        )
+    elif len(products) > 1:
+        lines.append(
+            "Hay varios productos asociados. Limita la interpretación a esta lista y pide una aclaración breve "
+            "si el mensaje no identifica uno; no elijas ni adivines."
+        )
+    lines.append(
+        "Si la cliente identifica claramente otro producto del catálogo en su mensaje actual, ese producto explícito "
+        "reemplaza este contexto temporal. Nunca reveles SKUs internos ni cantidades exactas de inventario."
+    )
+    return "\n".join(lines)
 
 
 def format_catalog_as_markdown(products: list[dict]) -> str:

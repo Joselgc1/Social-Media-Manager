@@ -459,6 +459,7 @@ async def meta_instagram_context_status():
         }
     return {
         "enabled": config.meta_instagram_context_enabled,
+        "story_enabled": config.meta_story_context_enabled,
         "channel_backend": config.channel_backend,
         "meta_app_secret_configured": bool(config.meta_app_secret),
         "instagram_access_token_configured": bool(config.instagram_access_token),
@@ -468,6 +469,10 @@ async def meta_instagram_context_status():
         "context_wait_seconds": config.meta_context_wait_seconds,
         "match_window_seconds": config.meta_context_match_window_seconds,
         "event_retention_hours": config.meta_context_event_retention_hours,
+        "story_context_wait_seconds": config.meta_story_context_wait_seconds,
+        "story_match_window_seconds": config.meta_story_context_match_window_seconds,
+        "story_mapping_ttl_hours": config.instagram_story_mapping_ttl_hours,
+        "story_context_ttl_hours": config.instagram_story_context_ttl_hours,
         **diagnostics,
     }
 

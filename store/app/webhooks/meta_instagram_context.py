@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 
 from app.config import get_config
-from app.integrations.meta_context.parser import parse_instagram_comment_events
+from app.integrations.meta_context.parser import parse_instagram_context_events
 from app.integrations.meta_context.service import (
     process_context_event,
     store_context_event,
@@ -24,7 +24,7 @@ async def verify_instagram_context(request: Request):
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
     if (
-        config.meta_instagram_context_enabled
+        (config.meta_instagram_context_enabled or getattr(config, "meta_story_context_enabled", False))
         and mode == "subscribe"
         and token == config.instagram_verify_token
         and challenge is not None
@@ -37,7 +37,10 @@ async def verify_instagram_context(request: Request):
 async def handle_instagram_context(request: Request, background_tasks: BackgroundTasks):
     config = get_config()
     body = await request.body()
-    if not config.meta_instagram_context_enabled or not verify_meta_signature(
+    if not (
+        config.meta_instagram_context_enabled
+        or getattr(config, "meta_story_context_enabled", False)
+    ) or not verify_meta_signature(
         body,
         request.headers.get("X-Hub-Signature-256", ""),
         config.meta_app_secret,
@@ -49,7 +52,11 @@ async def handle_instagram_context(request: Request, background_tasks: Backgroun
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON") from exc
 
-    for event in parse_instagram_comment_events(payload):
+    for event in parse_instagram_context_events(payload):
+        if event.event_type == "comment" and not config.meta_instagram_context_enabled:
+            continue
+        if event.event_type == "story_reply" and not getattr(config, "meta_story_context_enabled", False):
+            continue
         if event.instagram_account_id != getattr(config, "instagram_account_id", ""):
             logger.warning("Ignored Meta Instagram context event for a different account")
             continue

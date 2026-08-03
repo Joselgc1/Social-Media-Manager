@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app import db
 from app.config import get_config
@@ -136,6 +136,8 @@ async def process_context_event(event_id: str) -> dict:
 
     event_dict = dict(event)
     details = _event_details(event_dict.get("correlation_details"))
+    if event_dict.get("event_type", "comment") == "story_reply":
+        await discover_instagram_story(event_dict)
     from app.integrations.meta_context.correlation import correlate_meta_event
 
     try:
@@ -154,7 +156,8 @@ async def process_context_event(event_id: str) -> dict:
 
     media_enriched_now = False
     if (
-        event_dict.get("media_id")
+        event_dict.get("event_type", "comment") == "comment"
+        and event_dict.get("media_id")
         and not event_dict.get("media_permalink")
         and details.get("media_enrichment_status") != "succeeded"
     ):
@@ -196,7 +199,8 @@ async def process_context_event(event_id: str) -> dict:
             logger.exception("Meta matched Kommo context update failed: event_id=%s", event_id)
 
     if (
-        event_dict.get("media_id")
+        event_dict.get("event_type", "comment") == "comment"
+        and event_dict.get("media_id")
         and event_dict.get("media_permalink")
         and details.get("mapping_status") not in {"matched", "backfilled", "conflict"}
         and (_mapping_retry_is_due(details) or media_enriched_now)
@@ -246,7 +250,8 @@ async def process_context_event(event_id: str) -> dict:
 
 async def process_pending_context_events(limit: int = 10) -> int:
     """Retry enrichment/correlation durably until context events expire."""
-    if not get_config().meta_instagram_context_enabled:
+    config = get_config()
+    if not (config.meta_instagram_context_enabled or config.meta_story_context_enabled):
         return 0
     rows = await db.fetch_all(
         """
@@ -259,14 +264,21 @@ async def process_pending_context_events(limit: int = 10) -> int:
                   correlation_status = 'matched'
                   AND media_id IS NOT NULL
                   AND (
-                      (
-                          media_permalink IS NULL
+                          (
+                           event_type = 'comment'
+                           AND
+                           media_permalink IS NULL
                           AND COALESCE(
                               correlation_details ->> 'media_enrichment_status',
                               ''
                           ) <> 'succeeded'
                       )
-                      OR COALESCE(correlation_details ->> 'job_context_enriched', 'false') <> 'true'
+                          OR (
+                              event_type = 'comment'
+                              AND COALESCE(
+                                  correlation_details ->> 'job_context_enriched', 'false'
+                              ) <> 'true'
+                          )
                       OR (
                           EXISTS (
                               SELECT 1
@@ -328,6 +340,8 @@ async def _save_media_enrichment(event_id: str, media: MetaMediaDetails) -> None
 
 
 async def _update_matched_job_context(event_id: str, event: dict) -> bool:
+    if event.get("event_type") == "story_reply":
+        return False
     context = {
         "media_id": event.get("media_id"),
         "post_id": event.get("media_id"),
@@ -370,10 +384,10 @@ async def resolve_and_release_matched_job(event_id: str, *, force: bool = False)
     async with db.get_db().transaction():
         row = await db.fetch_one(
             """
-            SELECT event.id AS event_id, event.media_id, event.media_permalink,
-                   event.media_caption,
+            SELECT event.id AS event_id, event.event_type, event.media_id,
+                   event.story_id, event.story_url, event.media_permalink, event.media_caption,
                    event.correlation_details, job.id AS job_id,
-                   job.public_comment_context
+                   job.public_comment_context, job.instagram_content_context
             FROM meta_instagram_context_events event
             JOIN kommo_message_jobs job ON job.id = event.matched_kommo_job_id
             WHERE event.id = :event_id
@@ -389,14 +403,19 @@ async def resolve_and_release_matched_job(event_id: str, *, force: bool = False)
             return {"status": "not_waiting"}
 
         details = _event_details(row["correlation_details"])
-        job_context = _event_details(row["public_comment_context"])
+        row_data = dict(row)
+        is_story = row_data.get("event_type", "comment") == "story_reply"
+        job_context = _event_details(
+            row_data.get("instagram_content_context") if is_story else row_data.get("public_comment_context")
+        )
         if not force and not _mapping_retry_is_due(details):
             return {"status": "waiting", "mapping_status": "not_found"}
 
         resolution = await resolve_content_product_mapping(
-            media_id=row["media_id"] or job_context.get("media_id"),
+            media_id=(row_data.get("story_id") if is_story else row_data.get("media_id"))
+            or job_context.get("media_id"),
             permalink=(
-                row["media_permalink"]
+                row_data.get("media_permalink")
                 or job_context.get("post_url")
                 or job_context.get("permalink")
             ),
@@ -407,23 +426,35 @@ async def resolve_and_release_matched_job(event_id: str, *, force: bool = False)
                 "instagram_product_mapping_missing event_id=%s job_id=%s has_media_id=%s has_permalink=%s",
                 event_id,
                 row["job_id"],
-                bool(row["media_id"] or job_context.get("media_id")),
-                bool(row["media_permalink"] or job_context.get("post_url")),
+                bool(row_data.get("story_id") or row_data.get("media_id") or job_context.get("media_id")),
+                bool(row_data.get("media_permalink") or job_context.get("post_url")),
             )
             await _record_mapping_not_found(event_id)
             return {"status": "waiting", "mapping_status": "not_found"}
 
         if mapping_status == "resolved":
             product_skus = resolution.get("product_skus") or [resolution["product_sku"]]
-            context = {
-                "media_id": row["media_id"] or job_context.get("media_id"),
-                "post_id": row["media_id"] or job_context.get("post_id"),
-                "post_url": row["media_permalink"] or job_context.get("post_url"),
-                "post_caption": row["media_caption"] or job_context.get("post_caption"),
-                "product_skus": product_skus,
-                "mapping_status": "resolved",
-            }
-            if len(product_skus) == 1:
+            if is_story:
+                context = {
+                    "source": "story_reply",
+                    "content_id": resolution.get("content_id"),
+                    "story_id": row_data.get("story_id") or row_data.get("media_id"),
+                    "story_url": row_data.get("story_url"),
+                    "product_skus": product_skus,
+                    "selected_product_sku": product_skus[0] if len(product_skus) == 1 else None,
+                    "mapping_status": "resolved",
+                    "meta_context_event_id": str(row["event_id"]),
+                }
+            else:
+                context = {
+                    "media_id": row_data.get("media_id") or job_context.get("media_id"),
+                    "post_id": row_data.get("media_id") or job_context.get("post_id"),
+                    "post_url": row_data.get("media_permalink") or job_context.get("post_url"),
+                    "post_caption": row_data.get("media_caption") or job_context.get("post_caption"),
+                    "product_skus": product_skus,
+                    "mapping_status": "resolved",
+                }
+            if len(product_skus) == 1 and not is_story:
                 context["product_sku"] = product_skus[0]
             context = {key: value for key, value in context.items() if value is not None}
         else:
@@ -434,11 +465,12 @@ async def resolve_and_release_matched_job(event_id: str, *, force: bool = False)
             mapping_status,
             len(product_skus),
         )
+        context_column = "instagram_content_context" if is_story else "public_comment_context"
         released = await db.fetch_one(
-            """
+            f"""
             UPDATE kommo_message_jobs
-            SET public_comment_context = (
-                    COALESCE(public_comment_context, '{}'::jsonb)
+            SET {context_column} = (
+                    COALESCE({context_column}, '{{}}'::jsonb)
                     - 'product_sku'
                     - 'product_skus'
                 ) || CAST(:context AS jsonb),
@@ -554,6 +586,43 @@ async def backfill_instagram_mapping(media: MetaMediaDetails) -> dict:
     }
 
 
+async def discover_instagram_story(event: dict) -> dict:
+    """Idempotently register a Story by stable ID without trusting its CDN URL as identity."""
+    story_id = str(event.get("story_id") or "").strip()
+    if not story_id:
+        return {"status": "ignored"}
+    discovered_at = event.get("event_timestamp") or datetime.now(UTC)
+    expires_at = _as_utc_datetime(discovered_at) + timedelta(
+        hours=get_config().instagram_story_mapping_ttl_hours
+    )
+    row = await db.fetch_one(
+        """
+        INSERT INTO instagram_content (
+            content_type, media_id, thumbnail_url, published_at, expires_at
+        ) VALUES (
+            'story', :media_id, :thumbnail_url, :published_at, :expires_at
+        )
+        ON CONFLICT (media_id) WHERE media_id IS NOT NULL DO UPDATE
+        SET thumbnail_url = COALESCE(EXCLUDED.thumbnail_url, instagram_content.thumbnail_url),
+            published_at = COALESCE(instagram_content.published_at, EXCLUDED.published_at),
+            expires_at = GREATEST(instagram_content.expires_at, EXCLUDED.expires_at),
+            updated_at = NOW()
+        WHERE instagram_content.content_type = 'story'
+        RETURNING id, status
+        """,
+        {
+            "media_id": story_id,
+            "thumbnail_url": event.get("story_url"),
+            "published_at": discovered_at,
+            "expires_at": expires_at,
+        },
+    )
+    return {
+        "status": "discovered" if row else "conflict",
+        "content_id": str(row["id"]) if row else None,
+    }
+
+
 async def _merge_event_details(event_id: str, details: dict) -> None:
     await db.execute(
         """
@@ -618,6 +687,13 @@ def _event_details(value) -> dict:
             return {}
         return loaded if isinstance(loaded, dict) else {}
     return {}
+
+
+def _as_utc_datetime(value) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+        str(value).replace("Z", "+00:00")
+    )
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _mapping_retry_is_due(details: dict) -> bool:

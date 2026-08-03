@@ -166,9 +166,9 @@ def _validate_startup_config(config):
                 except KommoAuthError as e:
                     errors.append(f"KOMMO_SUBDOMAIN is invalid: {e}")
 
-        if config.meta_instagram_context_enabled:
+        if config.meta_instagram_context_enabled or getattr(config, "meta_story_context_enabled", False):
             if config.channel_backend != "kommo":
-                errors.append("META_INSTAGRAM_CONTEXT_ENABLED requires CHANNEL_BACKEND=kommo.")
+                errors.append("Meta Instagram context requires CHANNEL_BACKEND=kommo.")
             required_meta_context = {
                 "META_APP_SECRET": config.meta_app_secret,
                 "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
@@ -234,7 +234,7 @@ def _include_channel_routers(fastapi_app: FastAPI, config):
         from app.webhooks.kommo import router as kommo_router
 
         fastapi_app.include_router(kommo_router)
-        if config.meta_instagram_context_enabled:
+        if config.meta_instagram_context_enabled or getattr(config, "meta_story_context_enabled", False):
             from app.webhooks.meta_instagram_context import router as meta_context_router
 
             fastapi_app.include_router(meta_context_router)
@@ -453,7 +453,9 @@ async def health():
             "instagram_via_kommo": config.channel_backend == "kommo",
             "meta_instagram_context": bool(
                 getattr(config, "meta_instagram_context_enabled", False)
+                or getattr(config, "meta_story_context_enabled", False)
             ),
+            "meta_story_context": bool(getattr(config, "meta_story_context_enabled", False)),
         },
         "providers": providers,
         "active_provider": active_provider,

@@ -1,4 +1,4 @@
-"""Deterministic one-to-one correlation between Meta comments and Kommo jobs."""
+"""Deterministic one-to-one correlation between Meta context and Kommo jobs."""
 
 import asyncio
 import json
@@ -100,16 +100,18 @@ async def _correlate(
             event = await _load_event(meta_event_id)
             if not event or event["correlation_status"] == "matched":
                 return {"status": "already_matched" if event else "missing"}
-            jobs = await _candidate_jobs(event, config.meta_context_match_window_seconds)
-            candidates = [_score_candidate(dict(event), dict(job), config.meta_context_match_window_seconds) for job in jobs]
+            window_seconds = _match_window_seconds(dict(event), config)
+            jobs = await _candidate_jobs(event, window_seconds)
+            candidates = [_score_candidate(dict(event), dict(job), window_seconds) for job in jobs]
             candidates = [item for item in candidates if item]
             anchor_kind = "event"
         else:
             job = await _load_job(kommo_job_id)
             if not job or job["context_status"] == "matched":
                 return {"status": "already_matched" if job else "missing"}
-            events = await _candidate_events(job, config.meta_context_match_window_seconds)
-            candidates = [_score_candidate(dict(event), dict(job), config.meta_context_match_window_seconds) for event in events]
+            window_seconds = _match_window_seconds_for_job(dict(job), config)
+            events = await _candidate_events(job, window_seconds)
+            candidates = [_score_candidate(dict(event), dict(job), window_seconds) for event in events]
             candidates = [item for item in candidates if item]
             anchor_kind = "job"
 
@@ -135,7 +137,7 @@ async def _correlate(
         opposite = await _opposite_candidates(
             winner,
             anchor_kind=anchor_kind,
-            window_seconds=config.meta_context_match_window_seconds,
+            window_seconds=window_seconds,
         )
         if not opposite:
             logger.info(
@@ -264,8 +266,16 @@ async def _release_context_job_if_due(job_id: str) -> bool:
         UPDATE kommo_message_jobs
         SET status = 'ready',
             context_status = 'timed_out',
-            public_comment_context = COALESCE(public_comment_context, '{}'::jsonb)
-                || jsonb_build_object('mapping_status', 'timed_out'),
+            public_comment_context = CASE
+                WHEN interaction_type = 'instagram_comment'
+                THEN COALESCE(public_comment_context, '{}'::jsonb)
+                    || jsonb_build_object('mapping_status', 'timed_out')
+                ELSE public_comment_context
+            END,
+            instagram_content_context = CASE
+                WHEN interaction_type = 'private_message' THEN '{}'::jsonb
+                ELSE instagram_content_context
+            END,
             last_error = 'Meta Instagram context deadline elapsed',
             updated_at = NOW()
         WHERE id = :id
@@ -300,7 +310,11 @@ async def schedule_context_job_processing(job_id: str) -> None:
         except Exception:
             logger.exception("Meta context mapping gate failed: job_id=%s", job_id)
     if release_result.get("status") != "ready":
-        await asyncio.sleep(get_config().meta_context_wait_seconds + 0.2)
+        config = get_config()
+        await asyncio.sleep(max(
+            config.meta_context_wait_seconds,
+            config.meta_story_context_wait_seconds,
+        ) + 0.2)
         await process_waiting_context_jobs(limit=10)
     from app.integrations.kommo.jobs import process_ready_jobs
 
@@ -313,7 +327,7 @@ async def _load_event(event_id: str):
         SELECT *
         FROM meta_instagram_context_events
         WHERE id = :id
-          AND event_type = 'comment'
+          AND event_type IN ('comment', 'story_reply')
           AND correlation_status IN ('pending', 'ambiguous')
           AND matched_kommo_job_id IS NULL
           AND expires_at > NOW()
@@ -332,8 +346,7 @@ async def _load_job(job_id: str):
         FROM kommo_message_jobs job
         WHERE job.id = :id
           AND job.status = 'waiting_for_context'
-          AND job.interaction_type = 'instagram_comment'
-          AND job.channel = 'instagram'
+           AND job.channel = 'instagram'
           AND job.context_status IN ('pending', 'ambiguous')
           AND job.meta_context_event_id IS NULL
         FOR UPDATE OF job
@@ -343,6 +356,7 @@ async def _load_job(job_id: str):
 
 
 async def _candidate_jobs(event: dict, window_seconds: int):
+    interaction_type = _interaction_type_for_event(event)
     return await db.fetch_all(
         f"""
         SELECT job.*,
@@ -350,7 +364,7 @@ async def _candidate_jobs(event: dict, window_seconds: int):
                {_JOB_CORRELATION_TIMESTAMP_SOURCE_SQL} AS correlation_timestamp_source
         FROM kommo_message_jobs job
         WHERE job.status = 'waiting_for_context'
-          AND job.interaction_type = 'instagram_comment'
+           AND job.interaction_type = :interaction_type
           AND job.channel = 'instagram'
           AND job.context_status IN ('pending', 'ambiguous')
           AND job.meta_context_event_id IS NULL
@@ -360,16 +374,21 @@ async def _candidate_jobs(event: dict, window_seconds: int):
         ORDER BY job.created_at ASC, job.id ASC
         FOR UPDATE OF job
         """,
-        {"event_timestamp": event["event_timestamp"], "window_seconds": window_seconds},
+        {
+            "event_timestamp": event["event_timestamp"],
+            "window_seconds": window_seconds,
+            "interaction_type": interaction_type,
+        },
     )
 
 
 async def _candidate_events(job: dict, window_seconds: int):
+    event_type = _event_type_for_job(job)
     return await db.fetch_all(
         """
         SELECT *
         FROM meta_instagram_context_events
-        WHERE event_type = 'comment'
+        WHERE event_type = :event_type
           AND correlation_status IN ('pending', 'ambiguous')
           AND matched_kommo_job_id IS NULL
           AND expires_at > NOW()
@@ -380,6 +399,7 @@ async def _candidate_events(job: dict, window_seconds: int):
         {
             "job_timestamp": _job_correlation_timestamp(dict(job)),
             "window_seconds": window_seconds,
+            "event_type": event_type,
         },
     )
 
@@ -498,17 +518,29 @@ async def _mark_ambiguous(candidates: list[Candidate], anchor_kind: str) -> None
 
 
 async def _persist_match(candidate: Candidate) -> bool:
-    context = {
-        "comment_id": candidate.event.get("comment_id"),
-        "parent_comment_id": candidate.event.get("parent_comment_id"),
-        "media_id": candidate.event.get("media_id"),
-        "post_id": candidate.event.get("media_id"),
-        "post_url": candidate.event.get("media_permalink"),
-        "post_caption": candidate.event.get("media_caption"),
-        "sender_username": candidate.event.get("sender_username"),
-        "context_provider": "meta",
-        "correlation_status": "matched",
-    }
+    is_story = candidate.event.get("event_type") == "story_reply"
+    if is_story:
+        context = {
+            "source": "story_reply",
+            "story_id": candidate.event.get("story_id"),
+            "story_url": candidate.event.get("story_url"),
+            "meta_sender_id": candidate.event.get("sender_id"),
+            "sender_username": candidate.event.get("sender_username"),
+            "mapping_status": "pending",
+            "meta_context_event_id": str(candidate.event["id"]),
+        }
+    else:
+        context = {
+            "comment_id": candidate.event.get("comment_id"),
+            "parent_comment_id": candidate.event.get("parent_comment_id"),
+            "media_id": candidate.event.get("media_id"),
+            "post_id": candidate.event.get("media_id"),
+            "post_url": candidate.event.get("media_permalink"),
+            "post_caption": candidate.event.get("media_caption"),
+            "sender_username": candidate.event.get("sender_username"),
+            "context_provider": "meta",
+            "correlation_status": "matched",
+        }
     context = {key: value for key, value in context.items() if value is not None}
     details = {
         "score": candidate.score,
@@ -517,13 +549,15 @@ async def _persist_match(candidate: Candidate) -> bool:
         "job_timestamp_source": _job_correlation_timestamp_source(candidate.job),
         "job_correlation_timestamp": _job_correlation_timestamp(candidate.job).isoformat(),
     }
+    context_column = "instagram_content_context" if is_story else "public_comment_context"
     job = await db.fetch_one(
-        """
+        f"""
         UPDATE kommo_message_jobs
         SET meta_context_event_id = :event_id,
             context_status = 'matched',
             context_correlation_score = :score,
-            public_comment_context = COALESCE(public_comment_context, '{}'::jsonb) || CAST(:context AS jsonb),
+            {context_column} = COALESCE({context_column}, '{{}}'::jsonb) || CAST(:context AS jsonb),
+            sender_username = COALESCE(sender_username, :sender_username),
             last_error = NULL,
             updated_at = NOW()
         WHERE id = :job_id
@@ -536,6 +570,7 @@ async def _persist_match(candidate: Candidate) -> bool:
             "job_id": candidate.job["id"],
             "score": candidate.score,
             "context": json.dumps(context, ensure_ascii=False),
+            "sender_username": candidate.event.get("sender_username"),
         },
     )
     if not job:
@@ -560,7 +595,11 @@ async def _persist_match(candidate: Candidate) -> bool:
 
 
 def _job_context(job: dict) -> dict:
-    value = job.get("public_comment_context")
+    value = job.get(
+        "instagram_content_context"
+        if _job_interaction_type(job) == "private_message"
+        else "public_comment_context"
+    )
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
@@ -570,6 +609,30 @@ def _job_context(job: dict) -> dict:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _interaction_type_for_event(event: dict) -> str:
+    return "private_message" if event.get("event_type") == "story_reply" else "instagram_comment"
+
+
+def _event_type_for_job(job: dict) -> str:
+    return "story_reply" if _job_interaction_type(job) == "private_message" else "comment"
+
+
+def _job_interaction_type(job: dict) -> str:
+    return str(job.get("interaction_type") or "private_message").strip().lower()
+
+
+def _match_window_seconds(event: dict, config) -> int:
+    if event.get("event_type") == "story_reply":
+        return config.meta_story_context_match_window_seconds
+    return config.meta_context_match_window_seconds
+
+
+def _match_window_seconds_for_job(job: dict, config) -> int:
+    if _job_interaction_type(job) == "private_message":
+        return config.meta_story_context_match_window_seconds
+    return config.meta_context_match_window_seconds
 
 
 def _as_datetime(value) -> datetime:
