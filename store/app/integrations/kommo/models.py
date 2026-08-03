@@ -231,6 +231,8 @@ class PersistentKommoJob(BaseModel):
     ] = "not_required"
     context_deadline_at: datetime | None = None
     context_correlation_score: int | None = None
+    suppress_after_context: bool = False
+    automation_block_reason: str | None = None
     status: KommoJobStatus
     attempt_count: int = 0
     last_error: str | None = None

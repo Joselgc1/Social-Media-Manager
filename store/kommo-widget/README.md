@@ -37,6 +37,8 @@ The Salesbot source uses `widget_request` followed by `goto` question step `1`. 
 
 The same installed widget is used by all three Kommo Salesbot flows. The Instagram DM and WhatsApp Salesbots each end with a channel-restricted Kommo Message step using `{{json.message}}`; their IDs are configured as `KOMMO_INSTAGRAM_DM_SALESBOT_ID` and `KOMMO_WHATSAPP_SALESBOT_ID`. The public-comment Salesbot uses Kommo's native `When a comment is received` trigger, selects the Instagram-comment widget block, and ends with a Kommo Comment step using `{{json.message}}`; the backend does not launch this Salesbot and does not need its ID.
 
+The Instagram DM Salesbot must reach the backend widget callback before any customer-visible Message step. This ordering is required because suppressed Story replies launch the Salesbot only to correlate Meta context, then resume through the widget's `fail` exit with an empty message. Put the Instagram Message step only on the widget's `success` exit; the `fail` exit must terminate without sending anything.
+
 The Instagram-comment widget block sends optional post/product placeholders such as post caption, product SKU, product name, and media URL. The backend ignores unresolved placeholders and only answers price/availability when those resolved fields identify exactly one catalog product.
 
 If invalid manifests were previously uploaded first and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive, following Kommo's widget update behavior.

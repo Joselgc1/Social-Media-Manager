@@ -552,6 +552,8 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
     callback_claims JSONB,
     public_comment_context JSONB,
     instagram_content_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    suppress_after_context BOOLEAN NOT NULL DEFAULT FALSE,
+    automation_block_reason TEXT,
     salesbot_token_jti TEXT,
     salesbot_account_id TEXT,
     salesbot_user_id TEXT,
@@ -574,6 +576,8 @@ ALTER TABLE kommo_message_jobs
     ADD COLUMN IF NOT EXISTS callback_claims JSONB,
     ADD COLUMN IF NOT EXISTS public_comment_context JSONB,
     ADD COLUMN IF NOT EXISTS instagram_content_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS suppress_after_context BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS automation_block_reason TEXT,
     ADD COLUMN IF NOT EXISTS salesbot_token_jti TEXT,
     ADD COLUMN IF NOT EXISTS salesbot_account_id TEXT,
     ADD COLUMN IF NOT EXISTS salesbot_user_id TEXT,
@@ -647,6 +651,8 @@ COMMENT ON COLUMN kommo_message_jobs.continuation_payload IS 'Last Salesbot cont
 COMMENT ON COLUMN kommo_message_jobs.continuation_response IS 'Sanitized Salesbot continuation response when Kommo accepted the request.';
 COMMENT ON COLUMN kommo_message_jobs.assistant_message_persisted_at IS 'Set after the delivered Kommo continuation has been persisted as assistant conversation history. Used to make retries idempotent.';
 COMMENT ON COLUMN kommo_message_jobs.interaction_type IS 'private_message for WhatsApp/Instagram DMs, instagram_comment for public Instagram comment replies through Kommo native comment-triggered Salesbot callbacks.';
+COMMENT ON COLUMN kommo_message_jobs.suppress_after_context IS 'When true, Story context is applied after callback but AI execution remains suppressed.';
+COMMENT ON COLUMN kommo_message_jobs.automation_block_reason IS 'Durable pre-Salesbot automation block reason used after Story context correlation.';
 
 -- ============================================================
 -- Kommo inbound message receipts

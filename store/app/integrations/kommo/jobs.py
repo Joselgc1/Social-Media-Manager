@@ -603,6 +603,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
         )
         return
 
+    config = get_config()
     try:
         if await _discard_private_job_if_superseded_by_recent_comment(job):
             return
@@ -631,7 +632,13 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             kommo_ai_mode_enum_id=ai_mode_enum,
             job_status=job.get("status"),
         )
-        if not decision.allowed:
+        defer_suppression = (
+            not decision.allowed
+            and config.meta_story_context_enabled
+            and job.get("channel") == "instagram"
+            and _job_interaction_type(job) == "private_message"
+        )
+        if not decision.allowed and not defer_suppression:
             logger.info(
                 "Kommo job suppressed before Salesbot launch: job_id=%s reason=%s",
                 job["id"],
@@ -645,6 +652,12 @@ async def _launch_salesbot_for_job(job: dict) -> None:
                 processing_lease_id=processing_lease_id,
             )
             return
+        if defer_suppression:
+            logger.info(
+                "Kommo job suppression deferred until after Story context: job_id=%s reason=%s",
+                job["id"],
+                decision.reason,
+            )
 
         entity_id = job.get("lead_id") or job.get("contact_id")
         entity_type = "leads" if job.get("lead_id") else "contacts"
@@ -654,7 +667,12 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             return
         if await _discard_private_job_if_superseded_by_recent_comment(job):
             return
-        waiting_job = await _mark_job_waiting_for_salesbot(job["id"], processing_lease_id)
+        waiting_job = await _mark_job_waiting_for_salesbot(
+            job["id"],
+            processing_lease_id,
+            suppress_after_context=defer_suppression,
+            automation_block_reason=decision.reason if defer_suppression else None,
+        )
         if not waiting_job:
             logger.info("Kommo Salesbot launch skipped because job was no longer processing: job_id=%s", job["id"])
             return
@@ -683,12 +701,20 @@ async def _launch_salesbot_for_job(job: dict) -> None:
         await _mark_job(job["id"], "failed", sanitize_job_error(e), processing_lease_id=processing_lease_id)
 
 
-async def _mark_job_waiting_for_salesbot(job_id: str, processing_lease_id: str | None):
+async def _mark_job_waiting_for_salesbot(
+    job_id: str,
+    processing_lease_id: str | None,
+    *,
+    suppress_after_context: bool = False,
+    automation_block_reason: str | None = None,
+):
     return await db.fetch_one(
         """
         UPDATE kommo_message_jobs
         SET status = 'waiting_for_salesbot',
             salesbot_launched_at = NOW(),
+            suppress_after_context = :suppress_after_context,
+            automation_block_reason = :automation_block_reason,
             processing_started_at = NULL,
             updated_at = NOW()
         WHERE id = :id
@@ -696,7 +722,12 @@ async def _mark_job_waiting_for_salesbot(job_id: str, processing_lease_id: str |
           AND processing_lease_id = CAST(:processing_lease_id AS uuid)
         RETURNING *
         """,
-        {"id": job_id, "processing_lease_id": processing_lease_id},
+        {
+            "id": job_id,
+            "processing_lease_id": processing_lease_id,
+            "suppress_after_context": suppress_after_context,
+            "automation_block_reason": automation_block_reason,
+        },
     )
 
 
@@ -830,6 +861,17 @@ async def _process_ready_job(job: dict) -> None:
                 )
             elif has_current_story_event:
                 await sessions.clear_instagram_content_context(str(customer["id"]))
+
+        if job.get("suppress_after_context"):
+            suppression_reason = job.get("automation_block_reason") or "automation_suppressed_before_context"
+            logger.info(
+                "Kommo ready job honoring deferred suppression: job_id=%s reason=%s",
+                job["id"],
+                suppression_reason,
+            )
+            await _store_user_message_if_suppressed(customer, job)
+            await _continue_and_discard_job(client, job, suppression_reason)
+            return
 
         if ai_mode_enum is not None:
             synced_customer = await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)

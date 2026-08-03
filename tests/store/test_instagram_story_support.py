@@ -448,6 +448,164 @@ async def test_story_timeout_releases_private_job_as_normal_dm_and_clears_contex
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("case", "expected_story_action"),
+    [
+        ("resolved_story_b", "store"),
+        ("unresolved_story_b", "clear"),
+        ("regular_instagram_dm", None),
+    ],
+)
+async def test_human_mode_story_lifecycle_defers_suppression_until_after_context(
+    monkeypatch,
+    case,
+    expected_story_action,
+):
+    from app.channels import instagram_sender
+    from app.integrations.kommo import jobs
+
+    config = SimpleNamespace(
+        meta_story_context_enabled=True,
+        instagram_story_context_ttl_hours=24,
+        kommo_instagram_dm_salesbot_id=701,
+        kommo_whatsapp_salesbot_id=702,
+        kommo_salesbot_id=700,
+        kommo_ai_active_enum_id=1,
+    )
+    monkeypatch.setattr(jobs, "get_config", lambda: config)
+    monkeypatch.setattr(
+        jobs,
+        "_discard_private_job_if_superseded_by_recent_comment",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(jobs, "ensure_ai_mode_initialized", AsyncMock(return_value=(2, False)))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock(return_value=None))
+    monkeypatch.setattr(jobs, "_reactivate_expired_escalation_if_needed", AsyncMock(return_value=2))
+    resolve_customer = AsyncMock(
+        return_value={"id": "customer-1", "conversation_state": "escalated"}
+    )
+    monkeypatch.setattr(jobs, "resolve_customer_from_kommo_job", resolve_customer)
+
+    evaluate_state = MagicMock(
+        return_value=SimpleNamespace(
+            allowed=False,
+            reason="kommo_ai_mode_human",
+            needs_ai_mode_initialization=False,
+        )
+    )
+    monkeypatch.setattr(jobs, "evaluate_automation_state", evaluate_state)
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.get_settings = AsyncMock(return_value={"ai_enabled": True})
+    mock_db.execute = AsyncMock()
+    mock_db.fetch_one = AsyncMock(return_value={"id": "job-1", "status": "waiting_for_salesbot"})
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    client = MagicMock()
+    client.get_lead = AsyncMock(return_value={"id": 100})
+    client.run_salesbot = AsyncMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    base_job = {
+        "id": "job-1",
+        "status": "processing",
+        "processing_lease_id": "00000000-0000-0000-0000-000000000001",
+        "lead_id": "100",
+        "combined_message": "Precio?",
+        "channel": "instagram",
+        "interaction_type": "private_message",
+    }
+    await jobs._launch_salesbot_for_job(base_job)
+
+    client.run_salesbot.assert_awaited_once_with("100", "leads", 701)
+    waiting_query, waiting_values = mock_db.fetch_one.await_args.args
+    assert "suppress_after_context = :suppress_after_context" in waiting_query
+    assert waiting_values["suppress_after_context"] is True
+    assert waiting_values["automation_block_reason"] == "kommo_ai_mode_human"
+
+    story_b = _session_context(story_id="story-b", skus=["SKU-B"])
+    ready_job = base_job | {
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "suppress_after_context": True,
+        "automation_block_reason": "kommo_ai_mode_human",
+        "instagram_content_context": {},
+        "meta_context_event_id": None,
+    }
+    if case == "resolved_story_b":
+        ready_job |= {
+            "instagram_content_context": story_b,
+            "meta_context_event_id": "event-b",
+        }
+    elif case == "unresolved_story_b":
+        ready_job |= {
+            "instagram_content_context": {
+                "source": "story_reply",
+                "story_id": "story-b",
+                "mapping_status": "not_found",
+                "product_skus": [],
+            },
+            "meta_context_event_id": "event-b",
+        }
+
+    store_session = AsyncMock(return_value=story_b)
+    clear_session = AsyncMock()
+    load_session = AsyncMock(return_value=_session_context(story_id="story-a", skus=["SKU-A"]))
+    monkeypatch.setattr(jobs.sessions, "store_instagram_content_context", store_session)
+    monkeypatch.setattr(jobs.sessions, "clear_instagram_content_context", clear_session)
+    monkeypatch.setattr(jobs.sessions, "load_active_instagram_content_context", load_session)
+    generate_response = AsyncMock()
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs, "generate_response", generate_response)
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+    meta_senders = {
+        name: AsyncMock()
+        for name in (
+            "send_text",
+            "send_text_with_quick_replies",
+            "send_image",
+            "send_generic_template",
+            "send_private_reply",
+        )
+    }
+    for name, sender in meta_senders.items():
+        monkeypatch.setattr(instagram_sender, name, sender)
+
+    client.get_lead = AsyncMock(return_value=None)
+    mock_db.fetch_one = AsyncMock(side_effect=[{"id": "job-1"}, {"id": "job-1"}])
+    await jobs._process_ready_job(ready_job)
+
+    if expected_story_action == "store":
+        store_session.assert_awaited_once_with("customer-1", story_b, ttl_hours=24)
+        clear_session.assert_not_awaited()
+    elif expected_story_action == "clear":
+        clear_session.assert_awaited_once_with("customer-1")
+        store_session.assert_not_awaited()
+    else:
+        store_session.assert_not_awaited()
+        clear_session.assert_not_awaited()
+    load_session.assert_not_awaited()
+    assert evaluate_state.call_count == 1
+    generate_response.assert_not_awaited()
+    store_message.assert_awaited_once_with(
+        customer_id="customer-1",
+        role="user",
+        content="Precio?",
+        channel="instagram",
+        media_url=None,
+    )
+    client.continue_salesbot.assert_awaited_once_with(
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        data={"status": "fail", "message": ""},
+    )
+    discard_values = mock_db.fetch_one.await_args_list[-1].args[1]
+    assert discard_values["last_error"] == "kommo_ai_mode_human"
+    for sender in meta_senders.values():
+        sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("resolution", "expected_status", "expected_skus", "selected"),
     [
         ({"status": "resolved", "content_id": "c1", "product_skus": ["SKU-1"]}, "resolved", ["SKU-1"], "SKU-1"),
@@ -765,7 +923,12 @@ async def test_salesbot_callback_waits_only_for_instagram_private_story_candidat
     from app.integrations.kommo import jobs
     from app.integrations.kommo.models import SalesbotWidgetData
 
-    returned_job = {"id": "job-1", "status": expected_status}
+    returned_job = {
+        "id": "job-1",
+        "status": expected_status,
+        "suppress_after_context": True,
+        "automation_block_reason": "kommo_ai_mode_human",
+    }
     mock_db = MagicMock()
     mock_db.fetch_one = AsyncMock(return_value=returned_job)
     monkeypatch.setattr(jobs, "db", mock_db)
@@ -792,6 +955,8 @@ async def test_salesbot_callback_waits_only_for_instagram_private_story_candidat
     assert result["status"] == expected_status
     assert "job.channel = 'instagram'" in query
     assert "job.interaction_type = 'private_message'" in query
+    assert "suppress_after_context =" not in query
+    assert "automation_block_reason =" not in query
     assert values["story_context_enabled"] is True
     assert values["story_context_wait_seconds"] == 3
 

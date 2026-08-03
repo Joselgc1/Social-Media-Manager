@@ -1096,6 +1096,82 @@ async def test_comment_job_does_not_launch_salesbot_from_backend(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel", "story_context_enabled"),
+    [("whatsapp", True), ("instagram", False)],
+)
+async def test_non_story_human_mode_keeps_early_suppression(
+    monkeypatch,
+    channel,
+    story_context_enabled,
+):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_settings = AsyncMock(return_value={"ai_enabled": True})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            meta_story_context_enabled=story_context_enabled,
+            kommo_instagram_dm_salesbot_id=701,
+            kommo_whatsapp_salesbot_id=702,
+            kommo_salesbot_id=700,
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "_discard_private_job_if_superseded_by_recent_comment",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(jobs, "ensure_ai_mode_initialized", AsyncMock(return_value=(2, False)))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock(return_value=None))
+    monkeypatch.setattr(jobs, "_reactivate_expired_escalation_if_needed", AsyncMock(return_value=2))
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "escalated"}),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=False,
+            reason="kommo_ai_mode_human",
+            needs_ai_mode_initialization=False,
+        ),
+    )
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+
+    client = MagicMock()
+    client.get_lead = AsyncMock(return_value={"id": 100})
+    client.run_salesbot = AsyncMock()
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._launch_salesbot_for_job(
+        {
+            "id": "job",
+            "status": "processing",
+            "processing_lease_id": LEASE_ID,
+            "lead_id": "100",
+            "combined_message": "Hola",
+            "channel": channel,
+            "interaction_type": "private_message",
+        }
+    )
+
+    client.run_salesbot.assert_not_awaited()
+    store_message.assert_awaited_once()
+    query, values = mock_db.execute.await_args.args
+    assert "suppress_after_context" not in query
+    assert values["status"] == "discarded"
+    assert values["last_error"] == "kommo_ai_mode_human"
+
+
+@pytest.mark.asyncio
 async def test_comment_callback_before_private_webhook_job_suppresses_launch(monkeypatch):
     from app.integrations.kommo import jobs
 
@@ -1307,6 +1383,38 @@ async def test_stale_worker_cannot_issue_continuation_after_losing_lease(monkeyp
     assert "processing_lease_id = CAST(:processing_lease_id AS uuid)" in query
     assert "RETURNING id" in query
     assert values["processing_lease_id"] == LEASE_ID
+
+
+@pytest.mark.asyncio
+async def test_deferred_suppression_retry_cannot_continue_twice(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[{"id": "job"}, {"id": "job"}, None])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    job = {
+        "id": "job",
+        "processing_lease_id": LEASE_ID,
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "suppress_after_context": True,
+        "automation_block_reason": "kommo_ai_mode_human",
+    }
+
+    await jobs._continue_and_discard_job(client, job, job["automation_block_reason"])
+    await jobs._continue_and_discard_job(client, job, job["automation_block_reason"])
+
+    client.continue_salesbot.assert_awaited_once_with(
+        job["return_url"],
+        data={"status": "fail", "message": ""},
+    )
+    assert all(
+        "suppress_after_context =" not in call.args[0]
+        and "automation_block_reason =" not in call.args[0]
+        for call in mock_db.fetch_one.await_args_list
+    )
 
 
 @pytest.mark.asyncio
