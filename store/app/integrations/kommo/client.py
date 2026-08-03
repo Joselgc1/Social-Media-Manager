@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -100,6 +101,16 @@ def _retry_after_seconds(value: str | None) -> float | None:
         except (TypeError, ValueError, IndexError, OverflowError):
             return None
     return max(0.0, min(delay, KOMMO_MAX_RETRY_AFTER_SECONDS))
+
+
+def _is_uuid(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        uuid.UUID(value.strip())
+    except ValueError:
+        return False
+    return True
 
 
 async def _wait_for_account_rate_limit() -> None:
@@ -206,9 +217,9 @@ class KommoClient:
             raise KommoAPIError("Kommo account response is missing drive_url")
 
         drive_url = drive_url.strip().rstrip("/")
-        parsed = urlparse(drive_url)
-        hostname = (parsed.hostname or "").lower().rstrip(".")
         try:
+            parsed = urlparse(drive_url)
+            hostname = (parsed.hostname or "").lower().rstrip(".")
             port = parsed.port
         except ValueError as e:
             raise KommoAPIError("Kommo account returned an invalid drive_url") from e
@@ -256,9 +267,9 @@ class KommoClient:
             version_uuid = attachment.get("drive_version_uuid")
             if attachment_type not in {"file", "video", "picture"}:
                 raise KommoAPIError("Kommo attachment type is invalid")
-            if not isinstance(drive_uuid, str) or not drive_uuid.strip():
+            if not _is_uuid(drive_uuid):
                 raise KommoAPIError("Kommo attachment file UUID is invalid")
-            if not isinstance(version_uuid, str) or not version_uuid.strip():
+            if not _is_uuid(version_uuid):
                 raise KommoAPIError("Kommo attachment version UUID is invalid")
             payload["attachment"] = {
                 "drive_uuid": drive_uuid.strip(),

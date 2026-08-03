@@ -137,6 +137,7 @@ KOMMO_AI_HUMAN_ENUM_ID=
 KOMMO_AI_PAUSED_ENUM_ID=
 KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
 KOMMO_CHATS_MEDIA_ENABLED=false
+KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 ```
 
 `KOMMO_INSTAGRAM_DM_SALESBOT_ID` and `KOMMO_WHATSAPP_SALESBOT_ID` are optional while migrating. For each missing dedicated ID, the backend temporarily falls back to `KOMMO_SALESBOT_ID`. New installations should configure both dedicated IDs; remove the legacy fallback only after both channels have been tested. `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` is optional. Do not add `KOMMO_ACCOUNT_ID`, `KOMMO_RETURN_URL_ALLOWLIST`, `KOMMO_AUTO_TAKEOVER_ON_HUMAN_REPLY`, or `KOMMO_REQUEST_TIMEOUT_SECONDS`.
@@ -315,17 +316,19 @@ The Kommo private integration requires these additional scopes before the transp
 - `Access to files` for the Files API.
 - `Sending to external chats` for the Chats API add-on.
 
-Set `KOMMO_CHATS_MEDIA_ENABLED=true` only in a development account while validating the transport. It defaults to `false`.
+Set `KOMMO_CHATS_MEDIA_ENABLED=true` only in a development account while validating the transport. It defaults to `false`. `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` also defaults to empty; PDF files can be uploaded, but `send_pdf_to_talk()` is blocked until this setting is explicitly configured with the live-tested value.
 
 The implemented upload flow is:
 
 1. Request `GET /api/v4/account?with=drive_url` and cache the returned Drive URL in memory.
 2. Create a session with `POST {drive_url}/v1.0/sessions`, including file name, byte size, and MIME type.
-3. Respect the returned `max_file_size` and `max_part_size`, uploading raw chunks through `upload_url` and each returned `next_url`.
-4. Preserve the final response's distinct `uuid` (file UUID) and `version_uuid` (file-version UUID).
+3. Respect the returned `max_file_size` and `max_part_size`. Kommo's official chunk-upload recipe sends each part as the raw binary request body, authenticated with the bearer token and using the file's MIME type as `Content-Type`; it does not wrap chunks in multipart form data. Each non-final response supplies the next signed `next_url`.
+4. Resolve the attachment identifiers from the documented final response without assuming that `uuid` is the parent file. The parent file UUID is parsed from `_links.self.href`, whose documented form is `{drive_url}/v1.0/files/{file_uuid}`. The file-version UUID comes from the documented `version_uuid` field when present, or from `uuid` only for the documented response variant where `uuid` is the version UUID. If the self-link is absent, the version identifier is absent, or both identifiers are the same, the upload result is rejected and cannot become a Chats attachment.
 5. Send an attachment, optionally with text, through `POST /api/v4/talks/{talk_id}/send_message`; `202 Accepted` is success.
 
-Current official Kommo documentation lists Chats attachment types `picture`, `video`, and `file`. Images use `picture`; PDFs use the documented `file` value. The PDF mapping is isolated and can be disabled with an explicit unsupported guard. Before any later production wiring, validate PDF delivery and channel-specific rendering in the development Kommo account because actual WhatsApp/Instagram connector behavior may differ by plan or channel.
+Inventory image downloads allow at most three manual redirects. Every initial and redirected hostname is resolved asynchronously and rejected if any resolved address is private, loopback, link-local, multicast, reserved, or unspecified. Each request is then pinned to the validated address while preserving the original HTTP Host and TLS SNI hostname, preventing a second DNS lookup from bypassing validation. URL schemes, ports, userinfo, response size, MIME type, and binary signatures are also validated at every applicable step.
+
+Images use the documented Chats attachment type `picture`. PDF sending is intentionally disabled unless `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` is explicitly set to an allowed value; the currently accepted candidate is `file`, but it must be confirmed against the development account and connected WhatsApp/Instagram channel before configuration. No Eva tool, prompt, Salesbot continuation, Kommo job, conversation-history path, broadcast, or normal production customer workflow calls this Phase 1 code.
 
 ## Payment-Image Limitations
 

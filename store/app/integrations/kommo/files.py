@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import mimetypes
-from collections.abc import Iterable
+import socket
+import uuid
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
@@ -24,9 +26,11 @@ from app.integrations.kommo.client import (
 KOMMO_FILES_TIMEOUT_SECONDS = 30
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 15
 MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_REDIRECTS = 3
 SUPPORTED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-PDF_ATTACHMENT_TYPE = "file"
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+HostnameResolver = Callable[[str, int], Awaitable[list[str]]]
 
 
 class KommoMediaDisabledError(KommoAPIError):
@@ -39,22 +43,23 @@ class KommoPDFSendUnsupportedError(KommoAPIError):
 
 @dataclass(frozen=True)
 class KommoUploadedFile:
-    file_uuid: str
-    version_uuid: str
+    drive_uuid: str
+    drive_version_uuid: str
     file_name: str
     mime_type: str
     file_size: int
 
     def attachment(self, attachment_type: str) -> dict[str, str]:
         return {
-            "drive_uuid": self.file_uuid,
-            "drive_version_uuid": self.version_uuid,
+            "drive_uuid": self.drive_uuid,
+            "drive_version_uuid": self.drive_version_uuid,
             "type": attachment_type,
         }
 
 
 @dataclass(frozen=True)
 class KommoUploadSession:
+    drive_url: str
     upload_url: str
     max_file_size: int
     max_part_size: int
@@ -68,11 +73,15 @@ class KommoFiles:
         client: KommoClient,
         *,
         enabled: bool = False,
-        pdf_attachment_type: str | None = PDF_ATTACHMENT_TYPE,
+        pdf_attachment_type: str | None = None,
+        resolver: HostnameResolver | None = None,
     ):
+        if pdf_attachment_type not in {None, "file"}:
+            raise KommoPDFSendUnsupportedError("PDF Chats attachment type is invalid")
         self.client = client
         self.enabled = enabled
         self.pdf_attachment_type = pdf_attachment_type
+        self.resolver = resolver or _resolve_hostname
 
     @classmethod
     def from_config(cls, client: KommoClient | None = None) -> KommoFiles:
@@ -80,6 +89,7 @@ class KommoFiles:
         return cls(
             client or KommoClient.from_config(),
             enabled=config.kommo_chats_media_enabled,
+            pdf_attachment_type=config.kommo_chats_pdf_attachment_type,
         )
 
     def _require_enabled(self) -> None:
@@ -124,7 +134,7 @@ class KommoFiles:
                 f"File size {file_size} exceeds Kommo's maximum of {max_file_size} bytes"
             )
         _validate_upload_url(upload_url, drive_url)
-        return KommoUploadSession(upload_url.strip(), max_file_size, max_part_size)
+        return KommoUploadSession(drive_url, upload_url.strip(), max_file_size, max_part_size)
 
     async def upload(
         self,
@@ -148,7 +158,7 @@ class KommoFiles:
             for offset in range(0, len(data), session.max_part_size)
         )
         result = await self._upload_chunks(session, chunks, clean_mime)
-        return _uploaded_file(result, file_name, clean_mime, len(data))
+        return _uploaded_file(result, file_name, clean_mime, len(data), session.drive_url)
 
     async def upload_file(
         self,
@@ -194,7 +204,7 @@ class KommoFiles:
             return final or {}
 
         result = await upload_path()
-        return _uploaded_file(result, file_path.name, clean_mime, file_size)
+        return _uploaded_file(result, file_path.name, clean_mime, file_size, session.drive_url)
 
     async def upload_image_from_url(
         self,
@@ -203,38 +213,8 @@ class KommoFiles:
         file_name: str | None = None,
     ) -> KommoUploadedFile:
         self._require_enabled()
-        safe_url = _validate_image_url(image_url)
         try:
-            async with (
-                httpx.AsyncClient(
-                    timeout=IMAGE_DOWNLOAD_TIMEOUT_SECONDS,
-                    follow_redirects=False,
-                ) as http_client,
-                http_client.stream("GET", safe_url) as response,
-            ):
-                if response.status_code != 200:
-                    raise KommoAPIError(
-                        f"Image download returned HTTP {response.status_code}",
-                        status_code=response.status_code,
-                    )
-                content_length = response.headers.get("content-length")
-                if content_length:
-                    try:
-                        declared_size = int(content_length)
-                    except ValueError as e:
-                        raise KommoAPIError("Image download returned an invalid Content-Length") from e
-                    if declared_size > MAX_IMAGE_DOWNLOAD_BYTES:
-                        raise KommoAPIError("Image download exceeds the configured size limit")
-
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > MAX_IMAGE_DOWNLOAD_BYTES:
-                        raise KommoAPIError("Image download exceeds the configured size limit")
-                    chunks.append(chunk)
-                data = b"".join(chunks)
-                header_mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            data, header_mime, final_url = await self._download_image(image_url)
         except KommoAPIError:
             raise
         except httpx.HTTPError as e:
@@ -246,8 +226,77 @@ class KommoFiles:
         mime_type = header_mime if header_mime in IMAGE_MIME_TYPES else detected_mime
         if not mime_type:
             raise KommoAPIError("Downloaded content is not a supported image")
-        upload_name = file_name or _image_file_name(safe_url, mime_type)
+        upload_name = file_name or _image_file_name(final_url, mime_type)
         return await self.upload(data, file_name=upload_name, mime_type=mime_type)
+
+    async def _download_image(self, image_url: str) -> tuple[bytes, str, str]:
+        current_url = image_url
+        visited: set[str] = set()
+        for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
+            safe_url, addresses = await _validate_image_url(current_url, self.resolver)
+            if safe_url in visited:
+                raise KommoAPIError("Image download redirect loop detected")
+            visited.add(safe_url)
+
+            try:
+                parsed_safe_url = httpx.URL(safe_url)
+                pinned_url = parsed_safe_url.copy_with(host=addresses[0])
+            except (httpx.InvalidURL, ValueError) as e:
+                raise KommoAPIError("Image URL is malformed") from e
+            hostname = parsed_safe_url.host
+
+            async with (
+                httpx.AsyncClient(
+                    timeout=IMAGE_DOWNLOAD_TIMEOUT_SECONDS,
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as http_client,
+                http_client.stream(
+                    "GET",
+                    pinned_url,
+                    headers={"Host": hostname},
+                    extensions={"sni_hostname": hostname},
+                ) as response,
+            ):
+                if response.status_code in REDIRECT_STATUSES:
+                    if redirect_count >= MAX_IMAGE_REDIRECTS:
+                        raise KommoAPIError("Image download exceeded the redirect limit")
+                    location = response.headers.get("location")
+                    if not location or not location.strip():
+                        raise KommoAPIError("Image download redirect is missing Location")
+                    try:
+                        current_url = urljoin(safe_url, location.strip())
+                    except ValueError as e:
+                        raise KommoAPIError("Image download redirect Location is malformed") from e
+                    continue
+                if response.status_code != 200:
+                    raise KommoAPIError(
+                        f"Image download returned HTTP {response.status_code}",
+                        status_code=response.status_code,
+                    )
+
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        declared_size = int(content_length)
+                    except ValueError as e:
+                        raise KommoAPIError(
+                            "Image download returned an invalid Content-Length"
+                        ) from e
+                    if declared_size < 0 or declared_size > MAX_IMAGE_DOWNLOAD_BYTES:
+                        raise KommoAPIError("Image download exceeds the configured size limit")
+
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_IMAGE_DOWNLOAD_BYTES:
+                        raise KommoAPIError("Image download exceeds the configured size limit")
+                    chunks.append(chunk)
+                content_type = response.headers.get("content-type", "")
+                return b"".join(chunks), content_type.split(";", 1)[0].strip().lower(), safe_url
+
+        raise KommoAPIError("Image download exceeded the redirect limit")
 
     async def send_image_to_talk(
         self,
@@ -356,19 +405,24 @@ def _uploaded_file(
     file_name: str,
     mime_type: str,
     file_size: int,
+    drive_url: str,
 ) -> KommoUploadedFile:
-    file_uuid = response.get("uuid")
-    version_uuid = response.get("version_uuid")
-    if not isinstance(file_uuid, str) or not file_uuid.strip():
+    file_uuid = _file_uuid_from_self_link(response, drive_url)
+    version_uuid = (
+        response.get("uuid") if "version_uuid" not in response else response.get("version_uuid")
+    )
+    if not _valid_uuid(file_uuid):
         raise KommoAPIError("Kommo final upload response is missing the file UUID")
-    if not isinstance(version_uuid, str) or not version_uuid.strip():
+    if not _valid_uuid(version_uuid):
         raise KommoAPIError("Kommo final upload response is missing the file-version UUID")
+    if file_uuid.strip().lower() == version_uuid.strip().lower():
+        raise KommoAPIError("Kommo final upload response does not distinguish file UUIDs")
     response_size = response.get("size")
     if isinstance(response_size, int) and response_size != file_size:
         raise KommoAPIError("Kommo final upload response has an unexpected file size")
     return KommoUploadedFile(
-        file_uuid=file_uuid.strip(),
-        version_uuid=version_uuid.strip(),
+        drive_uuid=file_uuid.strip(),
+        drive_version_uuid=version_uuid.strip(),
         file_name=_validate_file_name(file_name),
         mime_type=mime_type,
         file_size=file_size,
@@ -384,9 +438,9 @@ def _next_upload_url(response: dict[str, Any], drive_url: str) -> str:
 
 
 def _validate_upload_url(url: str, drive_url: str) -> None:
-    parsed = urlparse(url)
-    drive = urlparse(drive_url)
     try:
+        parsed = urlparse(url)
+        drive = urlparse(drive_url)
         port = parsed.port
     except ValueError as e:
         raise KommoAPIError("Kommo returned an invalid upload URL") from e
@@ -436,20 +490,24 @@ def _detect_image_mime(data: bytes) -> str | None:
     return None
 
 
-def _validate_image_url(url: str) -> str:
+async def _validate_image_url(url: str, resolver: HostnameResolver) -> tuple[str, list[str]]:
     if not isinstance(url, str):
         raise KommoAPIError("Image URL is invalid")
     clean_url = url.strip()
-    parsed = urlparse(clean_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    try:
+        parsed = urlparse(clean_url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError as e:
+        raise KommoAPIError("Image URL has an invalid hostname") from e
+    if parsed.scheme not in {"http", "https"} or not hostname:
         raise KommoAPIError("Image URL must be HTTP or HTTPS")
     try:
         port = parsed.port
     except ValueError as e:
         raise KommoAPIError("Image URL contains an invalid port") from e
-    if parsed.username or parsed.password or port not in (None, 80, 443):
+    expected_port = 443 if parsed.scheme == "https" else 80
+    if parsed.username or parsed.password or port not in (None, expected_port):
         raise KommoAPIError("Image URL contains unsupported authority information")
-    hostname = parsed.hostname.lower().rstrip(".")
     if hostname == "localhost" or hostname.endswith(".localhost"):
         raise KommoAPIError("Image URL host is not allowed")
     try:
@@ -458,7 +516,80 @@ def _validate_image_url(url: str) -> str:
         pass
     else:
         raise KommoAPIError("Image URL host is not allowed")
-    return clean_url
+
+    try:
+        addresses = await resolver(hostname, port or expected_port)
+    except OSError as e:
+        raise KommoAPIError("Image URL hostname could not be resolved") from e
+    if not addresses:
+        raise KommoAPIError("Image URL hostname did not resolve to an address")
+    for address in addresses:
+        try:
+            resolved = ipaddress.ip_address(address)
+        except ValueError as e:
+            raise KommoAPIError("Image URL hostname resolved to an invalid address") from e
+        if not _is_public_address(resolved):
+            raise KommoAPIError("Image URL hostname resolved to a non-public address")
+    return clean_url, addresses
+
+
+async def _resolve_hostname(hostname: str, port: int) -> list[str]:
+    def resolve() -> list[str]:
+        records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        return list(dict.fromkeys(record[4][0] for record in records))
+
+    return await asyncio.to_thread(resolve)
+
+
+def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return address.is_global and not any(
+        (
+            address.is_private,
+            address.is_loopback,
+            address.is_link_local,
+            address.is_multicast,
+            address.is_reserved,
+            address.is_unspecified,
+        )
+    )
+
+
+def _file_uuid_from_self_link(response: dict[str, Any], drive_url: str) -> str | None:
+    links = response.get("_links")
+    self_link = links.get("self") if isinstance(links, dict) else None
+    href = self_link.get("href") if isinstance(self_link, dict) else None
+    if not isinstance(href, str):
+        return None
+    try:
+        parsed = urlparse(href.strip())
+        drive = urlparse(drive_url)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != drive.hostname
+        or parsed.username
+        or parsed.password
+        or port not in (None, 443)
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    path_parts = parsed.path.strip("/").split("/")
+    if len(path_parts) != 3 or path_parts[:2] != ["v1.0", "files"]:
+        return None
+    return path_parts[2]
+
+
+def _valid_uuid(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        uuid.UUID(value.strip())
+    except ValueError:
+        return False
+    return True
 
 
 def _image_file_name(url: str, mime_type: str) -> str:

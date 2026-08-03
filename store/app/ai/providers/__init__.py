@@ -14,21 +14,26 @@ _providers: dict[str, LLMProvider] = {}
 AVAILABLE_MODELS = {
     "openai": [
         {
-            "id": "gpt-5.6-luna",
+            "id": "gpt-5.4-nano",
             "label": "GPT-5.4 Nano (cheap, fast)",
             "default": True,
             "cost_per_m_tokens": {"input": 0.20, "output": 1.25},
         },
         {
-            "id": "gpt-5.6-terra",
+            "id": "gpt-5.4-mini",
             "label": "GPT-5.4 Mini",
             "cost_per_m_tokens": {"input": 0.75, "output": 4.50},
         },
         {
             "id": "gpt-5.6-luna",
             "label": "GPT-5.6 Luna",
-            "cost_per_m_tokens": {"input": 1, "output": 6},
+            "cost_per_m_tokens": {"input": 0.20, "output": 1.20},
         },
+        {
+            "id": "gpt-5.6-terra",
+            "label": "GPT-5.6 Terra",
+            "cost_per_m_tokens": {"input": 2.00, "output": 12.00},
+        }
     ],
     "anthropic": [
         {
