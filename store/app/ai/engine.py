@@ -1144,7 +1144,7 @@ async def _resolve_public_comment_product_with_llm(
     if provider_name not in _list_providers():
         return None, True, None
 
-    model = str(settings.get("llm_model") or "gpt-5.4-nano")
+    model = str(settings.get("llm_model") or "gpt-5.6-luna")
     allowed_products = [
         {
             "sku": product.get("parent_sku") or product.get("sku"),

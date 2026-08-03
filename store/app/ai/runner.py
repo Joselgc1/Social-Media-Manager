@@ -281,7 +281,7 @@ class AgentRunner:
         settings: dict,
     ):
         provider_name = settings.get("llm_provider", "openai")
-        model = settings.get("llm_model", "gpt-5.4-nano")
+        model = settings.get("llm_model", "gpt-5.6-luna")
         available = self._list_providers()
 
         if provider_name not in available:
@@ -292,7 +292,7 @@ class AgentRunner:
             logger.warning(f"Provider '{old_name}' not available, falling back to '{provider_name}'")
             model = next(
                 (m["id"] for m in AVAILABLE_MODELS.get(provider_name, []) if m.get("default")),
-                "gpt-5.4-nano",
+                "gpt-5.6-luna",
             )
 
         provider = self._get_provider(provider_name)

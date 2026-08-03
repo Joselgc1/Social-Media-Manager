@@ -101,7 +101,7 @@ async def analyze_payment_screenshot(
         # Step 3: Send to vision model
         settings = await db.get_settings()
         provider_name = settings.get("llm_provider", "openai")
-        model = settings.get("llm_model", "gpt-5.4-nano")
+        model = settings.get("llm_model", "gpt-5.6-luna")
         provider = get_provider(provider_name)
 
         response = await provider.analyze_image(

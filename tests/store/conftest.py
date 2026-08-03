@@ -57,7 +57,7 @@ def mock_db():
     db.execute = AsyncMock(return_value=None)
     db.get_settings = AsyncMock(return_value={
         "ai_provider": "openai",
-        "ai_model": "gpt-5.4-nano",
+        "ai_model": "gpt-5.6-luna",
         "ai_temperature": "0.7",
         "ai_max_tokens": "500",
         "ai_enabled": "true",

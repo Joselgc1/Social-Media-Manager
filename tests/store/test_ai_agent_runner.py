@@ -21,7 +21,7 @@ def _context() -> AgentRunContext:
 def _settings(**overrides) -> dict:
     settings = {
         "llm_provider": "openai",
-        "llm_model": "gpt-5.4-nano",
+        "llm_model": "gpt-5.6-luna",
         "llm_temperature": 0.2,
         "llm_max_tokens": 500,
         "auto_fallback": True,
@@ -110,7 +110,7 @@ async def test_normal_response(monkeypatch):
     assert result.text == "Hola bella"
     assert result.tool_log == []
     assert result.provider == "openai"
-    assert result.model == "gpt-5.4-nano"
+    assert result.model == "gpt-5.6-luna"
     assert result.usage == {"input_tokens": 5, "output_tokens": 6}
 
 

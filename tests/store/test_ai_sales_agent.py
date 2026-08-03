@@ -32,7 +32,7 @@ def _run_context(channel: str = "whatsapp") -> AgentRunContext:
 def _settings() -> dict:
     return {
         "llm_provider": "openai",
-        "llm_model": "gpt-5.4-nano",
+        "llm_model": "gpt-5.6-luna",
         "llm_temperature": 0.2,
         "llm_max_tokens": 500,
         "auto_fallback": False,

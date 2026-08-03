@@ -235,7 +235,7 @@ async def get_settings() -> dict:
     """
     Return all settings as a dict.
     Cache is reused only when the latest settings row has not changed.
-    Example: {"llm_provider": "openai", "llm_model": "gpt-5.4-nano", ...}
+    Example: {"llm_provider": "openai", "llm_model": "gpt-5.6-luna", ...}
     """
     global _settings_cache, _settings_ts, _settings_version
     now = time.time()

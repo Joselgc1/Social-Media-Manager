@@ -397,7 +397,7 @@ async def test_checkout_agent_cannot_update_payment_status(monkeypatch):
         CHECKOUT_AGENT,
         "prompt",
         [],
-        {"llm_provider": "openai", "llm_model": "gpt-5.4-nano", "auto_fallback": False},
+        {"llm_provider": "openai", "llm_model": "gpt-5.6-luna", "auto_fallback": False},
         AgentRunContext(customer={"id": "customer-1"}, channel="whatsapp"),
     )
 

@@ -165,7 +165,7 @@ async def seed_test_data():
         await db.execute("""
             INSERT INTO settings (key, value) VALUES
                 ('llm_provider',      '"openai"'),
-                ('llm_model',         '"gpt-5.4-nano"'),
+                ('llm_model',         '"gpt-5.6-luna"'),
                 ('llm_temperature',   '0.7'),
                 ('llm_max_tokens',    '500'),
                 ('fallback_provider', '"anthropic"'),

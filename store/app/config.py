@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     kommo_ai_human_enum_id: int | None = None
     kommo_ai_paused_enum_id: int | None = None
     kommo_default_responsible_user_id: int | None = None
+    kommo_chats_media_enabled: bool = False
 
     # --- LLM Providers (at least one is required) ---
     openai_api_key: str = ""

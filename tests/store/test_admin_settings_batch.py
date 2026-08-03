@@ -26,7 +26,7 @@ async def test_settings_batch_validates_provider_before_model_and_writes_once(mo
     monkeypatch.setattr(
         settings.db,
         "get_settings",
-        AsyncMock(return_value={"llm_provider": "openai", "llm_model": "gpt-5.4-nano"}),
+        AsyncMock(return_value={"llm_provider": "openai", "llm_model": "gpt-5.6-luna"}),
     )
     monkeypatch.setattr(settings.db, "get_db", lambda: _database())
     monkeypatch.setattr(settings.db, "execute", execute)

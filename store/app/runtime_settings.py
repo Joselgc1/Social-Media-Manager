@@ -14,7 +14,7 @@ from app.shipping import DEFAULT_SHIPPING_POLICY
 
 RUNTIME_SETTING_DEFAULTS = {
     "llm_provider": "openai",
-    "llm_model": "gpt-5.4-nano",
+    "llm_model": "gpt-5.6-luna",
     "llm_temperature": 0.7,
     "llm_max_tokens": 500,
     "fallback_provider": "anthropic",

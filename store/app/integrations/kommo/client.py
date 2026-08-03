@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -125,6 +126,7 @@ class KommoClient:
         self.subdomain = subdomain.strip().lower()
         self.access_token = access_token
         self.base_url = f"https://{kommo_account_hostname(self.subdomain)}"
+        self._drive_url: str | None = None
 
     @classmethod
     def from_config(cls) -> KommoClient:
@@ -188,6 +190,97 @@ class KommoClient:
 
     async def get_account(self) -> dict:
         return await self._request("GET", "/api/v4/account", idempotent=True)
+
+    async def get_drive_url(self) -> str:
+        """Return and cache this account's Kommo Files API base URL."""
+        if self._drive_url:
+            return self._drive_url
+
+        account = await self._request(
+            "GET",
+            "/api/v4/account?with=drive_url",
+            idempotent=True,
+        )
+        drive_url = account.get("drive_url") if isinstance(account, dict) else None
+        if not isinstance(drive_url, str):
+            raise KommoAPIError("Kommo account response is missing drive_url")
+
+        drive_url = drive_url.strip().rstrip("/")
+        parsed = urlparse(drive_url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        try:
+            port = parsed.port
+        except ValueError as e:
+            raise KommoAPIError("Kommo account returned an invalid drive_url") from e
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or port not in (None, 443)
+            or not hostname.endswith(".kommo.com")
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise KommoAPIError("Kommo account returned an invalid drive_url")
+
+        self._drive_url = drive_url
+        return drive_url
+
+    async def send_talk_message(
+        self,
+        talk_id: str,
+        *,
+        text: str | None = None,
+        attachment: dict | None = None,
+    ) -> dict:
+        """Send text and/or one Drive attachment to an existing conversation."""
+        try:
+            normalized_talk_id = int(str(talk_id).strip())
+        except (TypeError, ValueError) as e:
+            raise KommoAPIError("Kommo talk ID is invalid") from e
+        if normalized_talk_id <= 0:
+            raise KommoAPIError("Kommo talk ID is invalid")
+
+        payload: dict[str, Any] = {}
+        if text is not None:
+            clean_text = str(text).strip()
+            if clean_text:
+                payload["text"] = clean_text
+
+        if attachment is not None:
+            if not isinstance(attachment, dict):
+                raise KommoAPIError("Kommo attachment is invalid")
+            attachment_type = attachment.get("type")
+            drive_uuid = attachment.get("drive_uuid")
+            version_uuid = attachment.get("drive_version_uuid")
+            if attachment_type not in {"file", "video", "picture"}:
+                raise KommoAPIError("Kommo attachment type is invalid")
+            if not isinstance(drive_uuid, str) or not drive_uuid.strip():
+                raise KommoAPIError("Kommo attachment file UUID is invalid")
+            if not isinstance(version_uuid, str) or not version_uuid.strip():
+                raise KommoAPIError("Kommo attachment version UUID is invalid")
+            payload["attachment"] = {
+                "drive_uuid": drive_uuid.strip(),
+                "drive_version_uuid": version_uuid.strip(),
+                "type": attachment_type,
+            }
+
+        if not payload:
+            raise KommoAPIError("Kommo talk message requires text or an attachment")
+
+        response = await self._request(
+            "POST",
+            f"/api/v4/talks/{normalized_talk_id}/send_message",
+            json=payload,
+            expected_statuses={202},
+        )
+        if not isinstance(response, dict):
+            raise KommoAPIError("Kommo send-message response is invalid")
+        message_id = response.get("id")
+        if not isinstance(message_id, str) or not message_id.strip():
+            raise KommoAPIError("Kommo send-message response is missing the message ID")
+        return response
 
     async def run_salesbot(
         self,

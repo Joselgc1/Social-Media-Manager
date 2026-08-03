@@ -19,7 +19,7 @@ async def test_ai_run_log_records_only_safe_metadata(monkeypatch):
         route_source="deterministic_keyword",
         route_confidence=0.75,
         provider="openai",
-        model="gpt-5.4-nano",
+        model="gpt-5.6-luna",
         usage={"input_tokens": 10, "output_tokens": 4},
         response_time_ms=123,
         tool_names=["update_checkout_draft", "finalize_checkout"],

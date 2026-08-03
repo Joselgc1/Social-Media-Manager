@@ -342,7 +342,7 @@ async def test_lazy_expiry_processing_allows_inbound_message_to_resume(monkeypat
         "ai_enabled": True,
         "ai_orchestration_mode": "legacy",
         "llm_provider": "openai",
-        "llm_model": "gpt-5.4-nano",
+        "llm_model": "gpt-5.6-luna",
         "llm_temperature": 0.2,
         "llm_max_tokens": 500,
         "max_conversation_history": 20,

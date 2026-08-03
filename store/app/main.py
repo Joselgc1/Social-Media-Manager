@@ -302,7 +302,7 @@ async def lifespan(app: FastAPI):
     # 4. Load settings into cache
     settings = await db.get_settings()
     active = settings.get("llm_provider", "openai")
-    model = settings.get("llm_model", "gpt-5.4-nano")
+    model = settings.get("llm_model", "gpt-5.6-luna")
     logger.info(f"Active LLM: {active}/{model}")
 
     # 5. Start safe maintenance jobs; restore mode omits all outbound processing.

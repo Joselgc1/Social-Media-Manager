@@ -269,7 +269,7 @@ You should see:
 [INFO] Database connected.
 [INFO] LLM providers initialized (OpenAI + Anthropic).
 [INFO] Catalog refreshed: 4 active products loaded.
-[INFO] Active LLM: openai/gpt-5.4-nano
+[INFO] Active LLM: openai/gpt-5.6-luna
 [INFO] Background scheduler started.
 [INFO] Chatbot is ready! Waiting for messages...
 ```

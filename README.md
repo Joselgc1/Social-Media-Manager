@@ -157,7 +157,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
   -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 
 # Switch to a specific model
-curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=openai&model=gpt-5.4-mini" \
+curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=openai&model=gpt-5.6-terra" \
   -H "Authorization: Bearer YOUR_ADMIN_PASSWORD"
 ```
 

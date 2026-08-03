@@ -49,7 +49,7 @@ async def refine_route_if_ambiguous(
     try:
         provider = get_provider(provider_name)
         response = await provider.chat(
-            model=str(settings.get("llm_model") or "gpt-5.4-nano"),
+            model=str(settings.get("llm_model") or "gpt-5.6-luna"),
             system_prompt=load_prompt_file("agents/router.md"),
             messages=[{"role": "user", "content": _router_user_content(message_text, history)}],
             tools=None,

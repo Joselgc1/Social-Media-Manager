@@ -219,7 +219,7 @@ async def test_llm_router_refines_only_ambiguous_default_route(monkeypatch):
     decision = await decide_orchestration_with_router(
         mode="multi_agent",
         message_text="Ajá y entonces qué hago?",
-        settings={"llm_provider": "openai", "llm_model": "gpt-5.4-nano"},
+        settings={"llm_provider": "openai", "llm_model": "gpt-5.6-luna"},
         history=[],
     )
 
@@ -240,7 +240,7 @@ async def test_llm_router_does_not_override_deterministic_route(monkeypatch):
     decision = await decide_orchestration_with_router(
         mode="multi_agent",
         message_text="Tienen pijamas disponibles?",
-        settings={"llm_provider": "openai", "llm_model": "gpt-5.4-nano"},
+        settings={"llm_provider": "openai", "llm_model": "gpt-5.6-luna"},
         history=[],
     )
 

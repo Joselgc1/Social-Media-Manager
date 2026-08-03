@@ -393,7 +393,7 @@ async def _resolve_railway_environment_id(project_id: str, environment_id: str =
 
 # Available models per provider (must match store app's AVAILABLE_MODELS)
 AVAILABLE_MODELS = {
-    "openai": ["gpt-5.4-nano", "gpt-5.4-mini"],
+    "openai": ["gpt-5.6-luna", "gpt-5.6-terra"],
     "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-6"],
 }
 VALID_ORCHESTRATION_MODES = {"legacy", "shadow", "multi_agent"}
@@ -930,8 +930,8 @@ async def get_llm_usage(store_id: str, days: int = 1):
 
 # Model cost rates (per 1M tokens) — must match store app's AVAILABLE_MODELS
 _MODEL_COSTS = {
-    "gpt-5.4-nano": {"input": 0.20, "output": 1.25},
-    "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
+    "gpt-5.6-luna": {"input": 0.20, "output": 1.25},
+    "gpt-5.6-terra": {"input": 0.75, "output": 4.50},
     "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
 }
