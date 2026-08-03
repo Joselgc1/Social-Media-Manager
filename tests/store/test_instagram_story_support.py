@@ -131,10 +131,21 @@ def test_parser_accepts_valid_story_reply_with_stable_identifiers():
         lambda event: event["message"].update(is_echo=True),
         lambda event: event["message"].update(is_deleted=True),
         lambda event: event["message"].update(deleted=True),
+        lambda event: event["message"].update(is_self=True),
         lambda event: event.update(is_echo=True),
+        lambda event: event.update(is_self=True),
         lambda event: event["sender"].update(id="ig-account"),
     ],
-    ids=["normal-dm", "message-echo", "is-deleted", "deleted", "event-echo", "self-sender"],
+    ids=[
+        "normal-dm",
+        "message-echo",
+        "is-deleted",
+        "deleted",
+        "message-is-self",
+        "event-echo",
+        "event-is-self",
+        "self-sender",
+    ],
 )
 def test_parser_ignores_non_story_or_unsafe_messaging_events(mutate):
     from app.integrations.meta_context.parser import parse_instagram_context_events
@@ -269,6 +280,7 @@ async def test_story_correlation_works_meta_first_and_kommo_first(monkeypatch, a
     job = _private_job()
     monkeypatch.setattr(correlation.db, "get_db", lambda: _DBHandle())
     monkeypatch.setattr(correlation.db, "fetch_one", AsyncMock(return_value={"locked": True}))
+    monkeypatch.setattr(correlation.db, "fetch_all", AsyncMock(return_value=[]))
     monkeypatch.setattr(correlation, "_load_event", AsyncMock(return_value=event))
     monkeypatch.setattr(correlation, "_load_job", AsyncMock(return_value=job))
     monkeypatch.setattr(correlation, "_candidate_jobs", AsyncMock(return_value=[job]))
@@ -305,6 +317,7 @@ async def test_duplicate_price_story_replies_remain_ambiguous(monkeypatch):
     job = _private_job()
     monkeypatch.setattr(correlation.db, "get_db", lambda: _DBHandle())
     monkeypatch.setattr(correlation.db, "fetch_one", AsyncMock(return_value={"locked": True}))
+    monkeypatch.setattr(correlation.db, "fetch_all", AsyncMock(return_value=[]))
     monkeypatch.setattr(correlation, "_load_job", AsyncMock(return_value=job))
     monkeypatch.setattr(correlation, "_candidate_events", AsyncMock(return_value=events))
     mark = AsyncMock()
@@ -476,6 +489,27 @@ async def test_story_session_store_replaces_context_and_loads_active_value(monke
 
 
 @pytest.mark.asyncio
+async def test_story_selected_product_update_replaces_previous_selection_atomically(monkeypatch):
+    from app.crm import sessions
+
+    updated = _session_context(skus=["SKU-1", "SKU-2"], selected="SKU-2")
+    updated["content_id"] = "4534aae1-e5b3-47b2-b321-8250a1e20444"
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(return_value={"instagram_content_context": json.dumps(updated)})
+    monkeypatch.setattr(sessions, "db", mock_db)
+
+    result = await sessions.update_instagram_selected_product("customer-1", "SKU-2")
+
+    assert result["selected_product_sku"] == "SKU-2"
+    query, values = mock_db.fetch_one.await_args.args
+    assert "jsonb_set" in query
+    assert "'{selected_product_sku}'" in query
+    assert "instagram_context_expires_at > NOW()" in query
+    assert "mapping.product_sku = :selected_product_sku" in query
+    assert values == {"customer_id": "customer-1", "selected_product_sku": "SKU-2"}
+
+
+@pytest.mark.asyncio
 async def test_story_session_expiry_or_invalid_mapping_clears_context(monkeypatch):
     from app.crm import sessions
 
@@ -520,6 +554,32 @@ async def test_archived_story_mapping_clears_active_session_context(monkeypatch)
     assert "instagram_content_context = '{}'::jsonb" in mock_db.execute.await_args.args[0]
 
 
+@pytest.mark.asyncio
+async def test_expired_story_mapping_does_not_invalidate_session_before_session_ttl(monkeypatch):
+    from app.crm import sessions
+
+    context = {
+        **_session_context(),
+        "content_id": "4534aae1-e5b3-47b2-b321-8250a1e20444",
+    }
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(return_value={
+        "instagram_content_context": context,
+        "instagram_context_expires_at": datetime.now(UTC) + timedelta(hours=1),
+    })
+    mock_db.fetch_all = AsyncMock(return_value=[{"product_sku": "SKU-1"}])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(sessions, "db", mock_db)
+
+    assert await sessions.load_active_instagram_content_context("customer-1") == {
+        key: value for key, value in context.items() if value is not None
+    }
+    session_mapping_query = mock_db.fetch_all.await_args.args[0]
+    assert "content.status = 'active'" in session_mapping_query
+    assert "content.expires_at" not in session_mapping_query
+    mock_db.execute.assert_not_awaited()
+
+
 def _products():
     return [
         {"sku": "SKU-1", "product_name": "Pijama Azul", "price_usd": 25, "sizes": "S, M", "stock": 2},
@@ -558,6 +618,36 @@ def test_live_catalog_story_context_supports_one_and_multiple_products():
     assert many["products"][1]["availability"] == "agotado"
 
 
+def test_multi_product_story_selection_and_follow_up_reuse_selected_sku():
+    from app.ai.engine import _resolve_private_instagram_content_context
+
+    integration = {
+        "provider": "kommo",
+        "interaction_type": "private_message",
+        "current_story_context": True,
+        "incoming_instagram_context": _session_context(skus=["SKU-1", "SKU-2"]),
+    }
+    initial_selection = _resolve_private_instagram_content_context(
+        channel="instagram",
+        integration_context=integration,
+        message_text="Me interesa el Set Rosa",
+        products=_products(),
+    )
+    assert initial_selection["selected_product_sku"] == "SKU-2"
+
+    integration["current_story_context"] = False
+    integration["incoming_instagram_context"] = _session_context(
+        skus=["SKU-1", "SKU-2"], selected="SKU-2"
+    )
+    follow_up = _resolve_private_instagram_content_context(
+        channel="instagram",
+        integration_context=integration,
+        message_text="Y que tallas tiene?",
+        products=_products(),
+    )
+    assert follow_up["selected_product_sku"] == "SKU-2"
+
+
 def test_explicit_product_override_and_context_leakage_guards():
     from app.ai.engine import _resolve_private_instagram_content_context
 
@@ -575,7 +665,7 @@ def test_explicit_product_override_and_context_leakage_guards():
     outside_mapping = _resolve_private_instagram_content_context(
         channel="instagram", integration_context=base, message_text="Precio de Bata Negra", products=_products()
     )
-    assert outside_mapping == {}
+    assert outside_mapping == {"_clear_story_context": True}
 
     for channel, interaction_type in [("whatsapp", "private_message"), ("instagram", "instagram_comment")]:
         assert _resolve_private_instagram_content_context(
@@ -630,6 +720,68 @@ async def test_salesbot_callback_waits_only_for_instagram_private_story_candidat
     assert "job.interaction_type = 'private_message'" in query
     assert values["story_context_enabled"] is True
     assert values["story_context_wait_seconds"] == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("interaction_type", "expected_wait"),
+    [("private_message", 5.2), ("instagram_comment", 12.2)],
+)
+async def test_context_accelerator_selects_private_and_comment_waits_separately(
+    monkeypatch, interaction_type, expected_wait
+):
+    from app.integrations.kommo import jobs
+    from app.integrations.meta_context import correlation
+
+    monkeypatch.setattr(correlation, "correlate_kommo_job", AsyncMock(return_value={"status": "pending"}))
+    monkeypatch.setattr(
+        correlation,
+        "get_config",
+        lambda: SimpleNamespace(
+            meta_story_context_wait_seconds=5,
+            meta_context_wait_seconds=12,
+        ),
+    )
+    monkeypatch.setattr(
+        correlation.db,
+        "fetch_one",
+        AsyncMock(return_value={"interaction_type": interaction_type}),
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(correlation.asyncio, "sleep", sleep)
+    monkeypatch.setattr(correlation, "process_waiting_context_jobs", AsyncMock())
+    monkeypatch.setattr(jobs, "process_ready_jobs", AsyncMock())
+
+    await correlation.schedule_context_job_processing("job-1")
+
+    sleep.assert_awaited_once_with(expected_wait)
+
+
+@pytest.mark.asyncio
+async def test_matched_story_released_ready_skips_full_context_sleep(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.meta_context import correlation, service
+
+    monkeypatch.setattr(
+        correlation,
+        "correlate_kommo_job",
+        AsyncMock(return_value={"status": "matched", "event_id": "event-1"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "resolve_and_release_matched_job",
+        AsyncMock(return_value={"status": "ready", "job_id": "job-1"}),
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(correlation.asyncio, "sleep", sleep)
+    monkeypatch.setattr(correlation, "process_waiting_context_jobs", AsyncMock())
+    monkeypatch.setattr(jobs, "process_ready_jobs", AsyncMock())
+
+    await correlation.schedule_context_job_processing("job-1")
+
+    sleep.assert_not_awaited()
+    correlation.process_waiting_context_jobs.assert_not_awaited()
+    jobs.process_ready_jobs.assert_awaited_once_with(limit=3)
 
 
 def test_story_prompt_uses_live_context_without_internal_or_unmapped_leakage():
@@ -703,6 +855,8 @@ async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_m
         AsyncMock(return_value={"text": "Cuesta $25.", "escalated": False}),
     )
     monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    persist_meta_sender = AsyncMock(return_value={"status": "created", "mapping_id": "mapping-1"})
+    monkeypatch.setattr(jobs, "persist_verified_meta_instagram_sender", persist_meta_sender)
     monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
     meta_send = AsyncMock()
     monkeypatch.setattr(instagram_sender, "send_text", meta_send)
@@ -711,6 +865,7 @@ async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_m
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
+    story_context = _session_context() | {"meta_sender_id": "meta-customer"}
     await jobs._process_ready_job({
         "id": "job-1",
         "processing_lease_id": "00000000-0000-0000-0000-000000000001",
@@ -718,7 +873,7 @@ async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_m
         "combined_message": "Precio?",
         "channel": "instagram",
         "interaction_type": "private_message",
-        "instagram_content_context": _session_context(),
+        "instagram_content_context": story_context,
         "correlation_id": "corr-1",
     })
 
@@ -730,3 +885,7 @@ async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_m
     integration_context = jobs.generate_response.await_args.kwargs["integration_context"]
     assert integration_context["incoming_instagram_context"]["story_id"] == "story-1"
     assert integration_context["current_story_context"] is True
+    persist_meta_sender.assert_awaited_once_with(
+        customer_id="customer-1",
+        external_author_id="meta-customer",
+    )

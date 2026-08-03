@@ -455,6 +455,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_channel_mappings_talk
 CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_author
     ON customer_channel_mappings(provider, channel, external_author_id, updated_at DESC)
     WHERE external_author_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_meta_instagram_sender
+    ON customer_channel_mappings(provider, channel, external_author_id)
+    WHERE provider = 'meta' AND channel = 'instagram' AND external_author_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_meta_instagram_identity
+    ON customer_channel_mappings(customer_id, provider, channel)
+    WHERE provider = 'meta' AND channel = 'instagram' AND external_author_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_customer
     ON customer_channel_mappings(customer_id, provider, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_customer_channel_mappings_lookup
@@ -659,6 +665,8 @@ CREATE TABLE IF NOT EXISTS kommo_message_receipts (
     channel TEXT,
     interaction_type TEXT NOT NULL DEFAULT 'private_message',
     receipt_status TEXT NOT NULL DEFAULT 'created',
+    message_text TEXT,
+    normalized_text_hash TEXT,
     received_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT kommo_message_receipts_status_check CHECK (receipt_status IN ('created', 'merged'))
@@ -666,7 +674,9 @@ CREATE TABLE IF NOT EXISTS kommo_message_receipts (
 
 ALTER TABLE kommo_message_receipts
     ADD COLUMN IF NOT EXISTS author_id TEXT,
-    ADD COLUMN IF NOT EXISTS interaction_type TEXT NOT NULL DEFAULT 'private_message';
+    ADD COLUMN IF NOT EXISTS interaction_type TEXT NOT NULL DEFAULT 'private_message',
+    ADD COLUMN IF NOT EXISTS message_text TEXT,
+    ADD COLUMN IF NOT EXISTS normalized_text_hash TEXT;
 
 ALTER TABLE kommo_message_receipts
     DROP CONSTRAINT IF EXISTS kommo_message_receipts_interaction_type_check;
@@ -680,6 +690,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_receipts_external_message
     ON kommo_message_receipts(external_message_id);
 CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_job
     ON kommo_message_receipts(job_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kommo_receipts_story_text
+    ON kommo_message_receipts(job_id, normalized_text_hash, received_at, created_at)
+    WHERE channel = 'instagram'
+      AND interaction_type = 'private_message'
+      AND normalized_text_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_correlation
     ON kommo_message_receipts(correlation_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_kommo_message_receipts_author

@@ -587,6 +587,58 @@ async def clear_instagram_content_context(customer_id: str) -> None:
     )
 
 
+async def update_instagram_selected_product(
+    customer_id: str,
+    selected_product_sku: str,
+) -> dict:
+    """Persist one explicit selection only while it remains in the active Story mapping."""
+    row = await db.fetch_one(
+        """
+        UPDATE conversation_sessions session
+        SET instagram_content_context = jsonb_set(
+                session.instagram_content_context,
+                '{selected_product_sku}',
+                to_jsonb(CAST(:selected_product_sku AS text)),
+                true
+            ),
+            updated_at = NOW()
+        WHERE session.customer_id = :customer_id
+          AND session.instagram_context_expires_at > NOW()
+          AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements_text(
+                  session.instagram_content_context -> 'product_skus'
+              ) sku
+              WHERE sku = :selected_product_sku
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM instagram_content content
+              JOIN instagram_content_products mapping ON mapping.content_id = content.id
+              WHERE content.id::text = session.instagram_content_context ->> 'content_id'
+                AND content.content_type = 'story'
+                AND content.status = 'active'
+                AND content.media_id = session.instagram_content_context ->> 'story_id'
+                AND mapping.product_sku = :selected_product_sku
+          )
+        RETURNING instagram_content_context
+        """,
+        {
+            "customer_id": _customer_id_text(customer_id),
+            "selected_product_sku": str(selected_product_sku or "").strip(),
+        },
+    )
+    if not row:
+        return {}
+    context = row["instagram_content_context"]
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except json.JSONDecodeError:
+            return {}
+    return context if isinstance(context, dict) else {}
+
+
 def _context_datetime(value) -> datetime:
     parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
         str(value).replace("Z", "+00:00")

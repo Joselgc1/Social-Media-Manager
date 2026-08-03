@@ -12,7 +12,11 @@ from app import db
 from app.ai.engine import generate_response
 from app.config import get_config
 from app.crm import conversations, escalations, sessions
-from app.crm.channel_mappings import resolve_customer_from_kommo_job, upsert_mapping
+from app.crm.channel_mappings import (
+    persist_verified_meta_instagram_sender,
+    resolve_customer_from_kommo_job,
+    upsert_mapping,
+)
 from app.integrations.kommo.client import KommoAPIError, KommoClient, sanitize_kommo_error
 from app.integrations.kommo.customer_profile import build_kommo_customer_profile
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
@@ -27,7 +31,10 @@ from app.integrations.kommo.text_sanitizer import (
     build_kommo_message_diagnostics,
     prepare_kommo_customer_message,
 )
-from app.integrations.meta_context.normalization import normalize_message_text
+from app.integrations.meta_context.normalization import (
+    normalize_message_text,
+    normalized_text_hash,
+)
 from app.webhooks.inbound_buffer import MESSAGE_DEBOUNCE_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -778,6 +785,32 @@ async def _process_ready_job(job: dict) -> None:
         ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else None
         profile = build_kommo_customer_profile(job=job, contact=contact)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
+        current_private_context = _job_instagram_content_context(job)
+        if (
+            job.get("channel") == "instagram"
+            and _job_interaction_type(job) == "private_message"
+            and current_private_context.get("source") == "story_reply"
+            and current_private_context.get("meta_sender_id")
+        ):
+            identity_result = await persist_verified_meta_instagram_sender(
+                customer_id=str(customer["id"]),
+                external_author_id=current_private_context["meta_sender_id"],
+            )
+            logger.info(
+                "Meta Instagram sender mapping result: status=%s",
+                identity_result.get("status"),
+            )
+            if identity_result.get("status") == "conflict":
+                current_private_context = {}
+                await db.execute(
+                    """
+                    UPDATE kommo_message_jobs
+                    SET instagram_content_context = '{}'::jsonb,
+                        updated_at = NOW()
+                    WHERE id = :id
+                    """,
+                    {"id": job["id"]},
+                )
         if ai_mode_enum is not None:
             synced_customer = await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
             if isinstance(synced_customer, dict):
@@ -803,7 +836,7 @@ async def _process_ready_job(job: dict) -> None:
             job.get("channel") == "instagram"
             and _job_interaction_type(job) == "private_message"
         ):
-            current_context = _job_instagram_content_context(job)
+            current_context = current_private_context
             if (
                 current_context.get("source") == "story_reply"
                 and current_context.get("mapping_status") == "resolved"
@@ -819,6 +852,22 @@ async def _process_ready_job(job: dict) -> None:
                 incoming_instagram_context = await sessions.load_active_instagram_content_context(
                     str(customer["id"])
                 )
+                if incoming_instagram_context:
+                    await db.execute(
+                        """
+                        UPDATE kommo_message_jobs
+                        SET instagram_content_context = CAST(:context AS jsonb),
+                            updated_at = NOW()
+                        WHERE id = :id AND status = 'processing'
+                        """,
+                        {
+                            "id": job["id"],
+                            "context": json.dumps(
+                                incoming_instagram_context | {"context_usage": "reused"},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    )
 
         sender_id = _local_sender_id(job)
         media_url = job.get("media_url")
@@ -1241,10 +1290,10 @@ async def _record_callback_receipt(values: dict, job_id: str) -> None:
         """
         INSERT INTO kommo_message_receipts (
             external_message_id, job_id, correlation_id, lead_id, contact_id, origin,
-            channel, interaction_type, receipt_status
+            channel, interaction_type, receipt_status, message_text, normalized_text_hash
         ) VALUES (
             :external_message_id, :job_id, :correlation_id, :lead_id, :contact_id, :origin,
-            :channel, :interaction_type, 'created'
+            :channel, :interaction_type, 'created', :message_text, :normalized_text_hash
         )
         ON CONFLICT (external_message_id) DO NOTHING
         """,
@@ -1257,6 +1306,8 @@ async def _record_callback_receipt(values: dict, job_id: str) -> None:
             "origin": values["origin"],
             "channel": values["channel"],
             "interaction_type": values["interaction_type"],
+            "message_text": values["combined_message"],
+            "normalized_text_hash": normalized_text_hash(values["combined_message"]),
         },
     )
 
@@ -1776,10 +1827,12 @@ async def _record_message_receipt(
         """
         INSERT INTO kommo_message_receipts (
             external_message_id, job_id, correlation_id, lead_id, contact_id, chat_id,
-            talk_id, author_id, origin, channel, interaction_type, receipt_status, received_at
+            talk_id, author_id, origin, channel, interaction_type, receipt_status, received_at,
+            message_text, normalized_text_hash
         ) VALUES (
             :external_message_id, :job_id, :correlation_id, :lead_id, :contact_id, :chat_id,
-            :talk_id, :author_id, :origin, :channel, :interaction_type, :receipt_status, :received_at
+            :talk_id, :author_id, :origin, :channel, :interaction_type, :receipt_status, :received_at,
+            :message_text, :normalized_text_hash
         )
         ON CONFLICT (external_message_id) DO NOTHING
         """,
@@ -1797,6 +1850,10 @@ async def _record_message_receipt(
             "interaction_type": event.interaction_type,
             "receipt_status": receipt_status,
             "received_at": event.created_at,
+            "message_text": (event.text or "").strip() or _message_placeholder(event),
+            "normalized_text_hash": normalized_text_hash(
+                (event.text or "").strip() or _message_placeholder(event)
+            ),
         },
     )
 

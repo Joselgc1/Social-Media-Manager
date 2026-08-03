@@ -737,6 +737,64 @@ async def diagnostics_summary() -> dict:
         WHERE interaction_type = 'instagram_comment' AND context_status = 'timed_out'
         """
     )
+    story_metrics = await db.fetch_one(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE event_type = 'story_reply') AS story_events_received,
+            COUNT(*) FILTER (
+                WHERE event_type = 'story_reply' AND correlation_status = 'matched'
+            ) AS story_events_matched,
+            COUNT(*) FILTER (
+                WHERE event_type = 'story_reply' AND correlation_status = 'ambiguous'
+            ) AS story_events_ambiguous,
+            COUNT(*) FILTER (
+                WHERE event_type = 'story_reply' AND correlation_status = 'expired'
+            ) AS story_events_expired,
+            COUNT(*) FILTER (
+                WHERE event_type = 'story_reply'
+                  AND correlation_details ->> 'mapping_status' = 'resolved'
+            ) AS story_mapping_resolved,
+            COUNT(*) FILTER (
+                WHERE event_type = 'story_reply'
+                  AND correlation_details ->> 'mapping_status' = 'not_found'
+            ) AS story_mapping_missing,
+            COUNT(*) FILTER (
+                WHERE event_type = 'story_reply'
+                  AND COALESCE(
+                      CAST(correlation_details ->> 'product_mapping_applied' AS boolean), false
+                  )
+            ) AS story_context_created,
+            COUNT(*) FILTER (
+                WHERE event_type = 'story_reply'
+                  AND correlation_details ->> 'text_match_source' = 'receipt'
+            ) AS receipt_level_text_matches
+        FROM meta_instagram_context_events
+        """
+    )
+    story_jobs = await db.fetch_one(
+        """
+        SELECT
+            COUNT(*) FILTER (
+                WHERE interaction_type = 'private_message'
+                  AND channel = 'instagram'
+                  AND context_status = 'timed_out'
+            ) AS story_correlation_timeouts,
+            COUNT(*) FILTER (
+                WHERE interaction_type = 'private_message'
+                  AND channel = 'instagram'
+                  AND instagram_content_context ->> 'context_usage' = 'reused'
+            ) AS story_context_reused
+        FROM kommo_message_jobs
+        """
+    )
+    expired_contexts = await db.fetch_one(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM conversation_sessions
+        WHERE instagram_context_expires_at <= NOW()
+          AND instagram_content_context <> '{}'::jsonb
+        """
+    )
     last_error = await db.fetch_one(
         """
         SELECT correlation_details ->> 'meta_api_error' AS error
@@ -746,6 +804,8 @@ async def diagnostics_summary() -> dict:
         LIMIT 1
         """
     )
+    story_metrics_dict = dict(story_metrics) if story_metrics else {}
+    story_jobs_dict = dict(story_jobs) if story_jobs else {}
     return {
         "last_meta_event": dict(last_event) if last_event else None,
         "pending_event_count": by_status.get("pending", 0),
@@ -754,4 +814,7 @@ async def diagnostics_summary() -> dict:
         "expired_event_count": by_status.get("expired", 0),
         "timed_out_kommo_job_count": timed_out["cnt"] if timed_out else 0,
         "last_meta_api_error": last_error["error"] if last_error else None,
+        **{key: int(value or 0) for key, value in story_metrics_dict.items()},
+        **{key: int(value or 0) for key, value in story_jobs_dict.items()},
+        "story_context_expired": int(expired_contexts["cnt"] or 0) if expired_contexts else 0,
     }

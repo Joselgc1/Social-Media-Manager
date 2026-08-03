@@ -66,9 +66,11 @@ def _parse_story_reply(
     sender_id = _text(sender.get("id"))
     if (
         message.get("is_echo") is True
+        or message.get("is_self") is True
         or message.get("is_deleted") is True
         or message.get("deleted") is True
         or value.get("is_echo") is True
+        or value.get("is_self") is True
         or sender_id == account_id
     ):
         return None

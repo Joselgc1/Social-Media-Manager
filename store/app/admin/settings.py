@@ -455,6 +455,17 @@ async def meta_instagram_context_status():
             "matched_event_count": 0,
             "ambiguous_event_count": 0,
             "timed_out_kommo_job_count": 0,
+            "story_events_received": 0,
+            "story_events_matched": 0,
+            "story_events_ambiguous": 0,
+            "story_events_expired": 0,
+            "story_correlation_timeouts": 0,
+            "story_mapping_resolved": 0,
+            "story_mapping_missing": 0,
+            "story_context_created": 0,
+            "story_context_reused": 0,
+            "story_context_expired": 0,
+            "receipt_level_text_matches": 0,
             "last_meta_api_error": "Diagnostics unavailable",
         }
     return {

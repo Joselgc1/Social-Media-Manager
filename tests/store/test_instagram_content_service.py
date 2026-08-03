@@ -115,6 +115,25 @@ async def test_resolves_story_mapping_by_stable_media_id_without_permalink(monke
 
 
 @pytest.mark.asyncio
+async def test_expired_story_mapping_is_rejected_by_resolver(monkeypatch):
+    from app.instagram_content import service
+
+    fetch_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(service.db, "fetch_all", fetch_all)
+
+    result = await service.resolve_content_product_mapping(
+        media_id="expired-story",
+        permalink=None,
+    )
+
+    assert result == {"status": "not_found"}
+    query = fetch_all.await_args.args[0]
+    assert "content.content_type <> 'story'" in query
+    assert "content.expires_at IS NULL" in query
+    assert "content.expires_at > NOW()" in query
+
+
+@pytest.mark.asyncio
 async def test_resolves_active_product_mapping_by_normalized_permalink(monkeypatch):
     from app.instagram_content import service
 

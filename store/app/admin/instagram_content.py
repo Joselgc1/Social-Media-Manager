@@ -1,6 +1,7 @@
 """Authenticated administration of Instagram content-to-product mappings."""
 
 import logging
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -150,6 +151,19 @@ async def list_instagram_content():
     result = []
     for row in rows:
         content_id = str(row["id"])
+        expires_at = row["expires_at"]
+        if isinstance(expires_at, str):
+            try:
+                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            except ValueError:
+                expires_at = None
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        is_expired = bool(
+            row["content_type"] == "story"
+            and expires_at
+            and expires_at <= datetime.now(UTC)
+        )
         product_skus = skus_by_content.get(content_id, [])
         products = []
         for sku in product_skus:
@@ -173,6 +187,10 @@ async def list_instagram_content():
             "published_at": row["published_at"],
             "expires_at": row["expires_at"],
             "status": row["status"],
+            "is_expired": is_expired,
+            "lifecycle_status": (
+                "archived" if row["status"] == "archived" else "expired" if is_expired else "active"
+            ),
             "mapping_status": "mapped" if product_skus else "assignment_required",
             "product_skus": product_skus,
             "product_names": [product["name"] for product in products],

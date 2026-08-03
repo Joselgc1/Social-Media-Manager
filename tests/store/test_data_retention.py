@@ -42,6 +42,9 @@ def test_retention_queries_preserve_active_and_reconciliation_state():
     assert "status = 'delivery_unknown'" in policies["kommo_unknown_payloads"]
     assert "status IN ('sent', 'failed')" in policies["broadcast_deliveries"]
     assert "sending" not in policies["broadcast_deliveries"]
+    for name in ("kommo_payloads", "kommo_unknown_payloads"):
+        assert "instagram_content_context <> '{}'::jsonb" in policies[name]
+        assert "instagram_content_context = '{}'::jsonb" in policies[name]
 
 
 @pytest.mark.asyncio

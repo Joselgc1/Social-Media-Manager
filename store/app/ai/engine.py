@@ -553,6 +553,22 @@ async def generate_response(
         message_text=original_message_text,
         products=group_catalog_products(get_cached_reference_catalog()),
     )
+    clear_story_context = bool(instagram_content_context.pop("_clear_story_context", False))
+    selected_story_sku = instagram_content_context.get("selected_product_sku")
+    incoming_story_context = (integration_context or {}).get("incoming_instagram_context") or {}
+    if clear_story_context:
+        await sessions.clear_instagram_content_context(str(customer["id"]))
+        instagram_content_context = {}
+    elif (
+        selected_story_sku
+        and selected_story_sku != incoming_story_context.get("selected_product_sku")
+    ):
+        persisted_context = await sessions.update_instagram_selected_product(
+            str(customer["id"]),
+            selected_story_sku,
+        )
+        if not persisted_context:
+            instagram_content_context["selected_product_sku"] = None
     catalog_md = format_catalog_as_markdown(catalog)
     catalog_pdf_supported = _catalog_pdf_supported(channel, integration_context, config)
     system_prompt = build_agent_prompt(
@@ -1539,24 +1555,22 @@ def _resolve_private_instagram_content_context(
         return {}
 
     selected_sku = str(context.get("selected_product_sku") or "").strip() or None
-    current_story = bool((integration_context or {}).get("current_story_context"))
-    if not current_story:
-        normalized_message = _normalize_catalog_text(message_text)
-        explicit_matches = []
-        for sku, product in products_by_sku.items():
-            normalized_name = _normalize_catalog_text(product.get("product_name") or "")
-            normalized_sku = _normalize_catalog_text(sku)
-            if (
-                normalized_name
-                and len(normalized_name) >= 3
-                and normalized_name in normalized_message
-            ) or (normalized_sku and normalized_sku in normalized_message):
-                explicit_matches.append(sku)
-        explicit_matches = list(dict.fromkeys(explicit_matches))
-        if len(explicit_matches) == 1:
-            if explicit_matches[0] not in mapped_skus:
-                return {}
-            selected_sku = explicit_matches[0]
+    normalized_message = _normalize_catalog_text(message_text)
+    explicit_matches = []
+    for sku, product in products_by_sku.items():
+        normalized_name = _normalize_catalog_text(product.get("product_name") or "")
+        normalized_sku = _normalize_catalog_text(sku)
+        if (
+            normalized_name
+            and len(normalized_name) >= 3
+            and normalized_name in normalized_message
+        ) or (normalized_sku and normalized_sku in normalized_message):
+            explicit_matches.append(sku)
+    explicit_matches = list(dict.fromkeys(explicit_matches))
+    if len(explicit_matches) == 1:
+        if explicit_matches[0] not in mapped_skus:
+            return {"_clear_story_context": True}
+        selected_sku = explicit_matches[0]
 
     resolved_products = []
     for sku in mapped_skus:

@@ -256,8 +256,13 @@ async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
     assert mock_db.execute.await_args_list[0].args[1]["sender_profile_url"] == "https://instagram.com/sender.profile"
     assert mock_db.execute.await_args_list[0].args[1]["interaction_type"] == "private_message"
     assert "INSERT INTO kommo_message_receipts" in mock_db.execute.await_args_list[1].args[0]
-    assert mock_db.execute.await_args_list[1].args[1]["author_id"] == "author-1"
-    assert mock_db.execute.await_args_list[1].args[1]["interaction_type"] == "private_message"
+    created_receipt = mock_db.execute.await_args_list[1].args[1]
+    assert created_receipt["author_id"] == "author-1"
+    assert created_receipt["interaction_type"] == "private_message"
+    assert created_receipt["message_text"] == "Hola"
+    assert created_receipt["normalized_text_hash"] == (
+        "b221d9dbb083a7f33428d7c2a3c3198ae925614d70210e28716ccaa7cd4ddb79"
+    )
 
     mock_db.fetch_one = AsyncMock(side_effect=[None, {"job_id": "existing", "receipt_status": "created"}])
     duplicate = await jobs.record_incoming_event(event)
@@ -307,6 +312,11 @@ async def test_debounce_merges_rapid_messages(monkeypatch):
     assert receipt_call.args[1]["receipt_status"] == "merged"
     assert receipt_call.args[1]["author_id"] == "author-new"
     assert receipt_call.args[1]["interaction_type"] == "private_message"
+    assert receipt_call.args[1]["message_text"] == "Tienen pijamas?"
+    assert receipt_call.args[1]["normalized_text_hash"] == (
+        "e50b75a2d85c9da8c1dbcd477b2d73f4f9f1e50c78121c72bf526255b968cbdc"
+    )
+    assert update_call.args[1]["combined_message"] == "Hola\nTienen pijamas?"
     assert all("'discarded'" not in call.args[0] for call in mock_db.execute.await_args_list)
 
 

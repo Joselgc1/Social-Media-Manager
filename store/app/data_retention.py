@@ -157,7 +157,8 @@ _POLICIES = (
               AND (
                   combined_message != '[redacted]' OR media_url IS NOT NULL
                   OR return_url IS NOT NULL OR callback_claims IS NOT NULL
-                  OR public_comment_context IS NOT NULL OR continuation_payload IS NOT NULL
+                   OR public_comment_context IS NOT NULL OR continuation_payload IS NOT NULL
+                   OR instagram_content_context <> '{}'::jsonb
                   OR continuation_response IS NOT NULL
               )
             ORDER BY completed_at LIMIT :batch_size
@@ -166,6 +167,7 @@ _POLICIES = (
             UPDATE kommo_message_jobs
             SET combined_message = '[redacted]', media_url = NULL, return_url = NULL,
                 callback_claims = NULL, public_comment_context = NULL,
+                instagram_content_context = '{}'::jsonb,
                 continuation_payload = NULL, continuation_response = NULL,
                 author_profile_url = NULL, sender_profile_url = NULL,
                 author_name = NULL, author_username = NULL, sender_username = NULL,
@@ -202,7 +204,8 @@ _POLICIES = (
               AND (
                   combined_message != '[redacted]' OR media_url IS NOT NULL
                   OR return_url IS NOT NULL OR callback_claims IS NOT NULL
-                  OR public_comment_context IS NOT NULL OR continuation_payload IS NOT NULL
+                   OR public_comment_context IS NOT NULL OR continuation_payload IS NOT NULL
+                   OR instagram_content_context <> '{}'::jsonb
                   OR continuation_response IS NOT NULL
               )
             ORDER BY completed_at LIMIT :batch_size
@@ -211,6 +214,7 @@ _POLICIES = (
             UPDATE kommo_message_jobs
             SET combined_message = '[redacted]', media_url = NULL, return_url = NULL,
                 callback_claims = NULL, public_comment_context = NULL,
+                instagram_content_context = '{}'::jsonb,
                 continuation_payload = NULL, continuation_response = NULL,
                 author_profile_url = NULL, sender_profile_url = NULL,
                 author_name = NULL, author_username = NULL, sender_username = NULL,

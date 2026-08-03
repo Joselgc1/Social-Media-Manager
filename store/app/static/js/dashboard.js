@@ -305,7 +305,9 @@ function renderInstagramMappings() {
     const productSkus = products.map(product => product.sku).join(', ') || 'Sin asignar';
     const prices = products.map(product => product.price === null ? 'No disponible' : `$${Number(product.price).toFixed(2)}`).join(', ') || 'Sin asignar';
     const stocks = products.map(product => product.stock === null ? 'No disponible' : String(product.stock)).join(', ') || 'Sin asignar';
-    const statusClass = mapping.status === 'active' ? 'badge-green' : 'badge-gray';
+    const lifecycleStatus = mapping.lifecycle_status || mapping.status;
+    const statusClass = lifecycleStatus === 'active' ? 'badge-green' : (lifecycleStatus === 'expired' ? 'badge-yellow' : 'badge-gray');
+    const statusLabel = lifecycleStatus === 'expired' ? 'Expirada' : lifecycleStatus;
     const statusButton = mapping.status === 'active'
       ? `<button class="btn btn-secondary text-xs" onclick="archiveInstagramMapping('${escapeHtml(mapping.id)}')">Archivar</button>`
       : `<button class="btn btn-secondary text-xs" onclick="restoreInstagramMapping('${escapeHtml(mapping.id)}')">Restaurar</button>`;
@@ -333,7 +335,7 @@ function renderInstagramMappings() {
           ${storyPreview}
           <div class="min-w-0">
             ${contentLink}
-            <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(contentTypeLabel)}</span><span class="badge ${statusClass}">${escapeHtml(mapping.status)}</span>${assignmentBadge}</div>
+             <div class="flex flex-wrap gap-2 mt-2"><span class="badge badge-blue">${escapeHtml(contentTypeLabel)}</span><span class="badge ${statusClass}">${escapeHtml(statusLabel)}</span>${assignmentBadge}</div>
           </div>
         </div>
         <div class="flex gap-2"><button class="btn btn-secondary text-xs" onclick="editInstagramMapping('${escapeHtml(mapping.id)}')">Editar</button>${statusButton}</div>

@@ -61,7 +61,7 @@ class _CorrelationDB:
                 for job in self.jobs.values()
                 if job["status"] == "waiting_for_context" and not job.get("meta_context_event_id")
             ]
-        if "FROM meta_instagram_context_events" in query and "SELECT *" in query:
+        if "FROM meta_instagram_context_events" in query and "SELECT event.*" in query:
             return [
                 event
                 for event in self.events.values()
@@ -288,6 +288,44 @@ async def test_different_meta_sender_and_kommo_author_ids_do_not_reject_match(mo
     assert result["status"] == "matched"
 
 
+def test_verified_customer_identity_is_exact_high_score_signal_despite_username_difference():
+    from app.integrations.meta_context import correlation
+
+    event = _event(username="meta-name", sender_id="meta-scoped-id")
+    job = _job(username="kommo-name", author_id="unrelated-kommo-author")
+    job["_event_customer_id"] = "customer-1"
+    job["_job_customer_id"] = "customer-1"
+
+    candidate = correlation._score_candidate(event, job, 45)
+
+    assert candidate is not None
+    assert candidate.score == 170
+    assert "customer_identity" in candidate.signals
+    assert "username" not in candidate.signals
+
+
+def test_verified_customer_identity_mismatch_rejects_candidate():
+    from app.integrations.meta_context import correlation
+
+    event = _event(sender_id="meta-scoped-id")
+    job = _job(author_id="kommo-author-id")
+    job["_event_customer_id"] = "customer-1"
+    job["_job_customer_id"] = "customer-2"
+
+    assert correlation._score_candidate(event, job, 45) is None
+
+
+def test_raw_meta_sender_and_kommo_author_ids_are_not_compared_as_customer_identity():
+    from app.integrations.meta_context import correlation
+
+    event = _event(sender_id="same-looking-id")
+    job = _job(author_id="different-id")
+    candidate = correlation._score_candidate(event, job, 45)
+
+    assert candidate is not None
+    assert "customer_identity" not in candidate.signals
+
+
 @pytest.mark.asyncio
 async def test_correlation_uses_best_timestamp_for_delayed_callback(monkeypatch):
     event = _event(seconds=0)
@@ -367,6 +405,120 @@ async def test_one_meta_event_cannot_match_two_kommo_jobs(monkeypatch):
     assert first["status"] == "matched"
     assert second["status"] == "pending"
     assert fake.jobs["job-2"]["meta_context_event_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_story_uses_matching_receipt_when_combined_message_contains_merged_text(monkeypatch):
+    from app.integrations.meta_context import correlation
+
+    event = _event(text="😍", username="cliente")
+    event["event_type"] = "story_reply"
+    job = _job(text="😍\nPrecio?", username="cliente")
+    job["interaction_type"] = "private_message"
+    receipt_time = event["event_timestamp"] + timedelta(seconds=1)
+    receipt = {
+        "id": "receipt-1",
+        "external_message_id": "kommo-message-emoji",
+        "correlation_timestamp": receipt_time,
+        "timestamp_source": "receipt_received_at",
+    }
+    monkeypatch.setattr(correlation.db, "get_db", lambda: _Handle())
+    monkeypatch.setattr(correlation.db, "fetch_one", AsyncMock(return_value={"locked": True}))
+    monkeypatch.setattr(correlation, "_load_job", AsyncMock(return_value=job))
+    monkeypatch.setattr(correlation, "_candidate_events", AsyncMock(return_value=[event]))
+    monkeypatch.setattr(correlation, "_matching_receipts", AsyncMock(return_value=[receipt]))
+    monkeypatch.setattr(correlation, "_verified_customer_ids", AsyncMock(return_value=(None, None)))
+    async def reciprocal(candidate, **_kwargs):
+        return [candidate]
+
+    monkeypatch.setattr(correlation, "_opposite_candidates", reciprocal)
+    persist = AsyncMock(return_value=True)
+    monkeypatch.setattr(correlation, "_persist_match", persist)
+    monkeypatch.setattr(
+        correlation,
+        "get_config",
+        lambda: SimpleNamespace(meta_story_context_match_window_seconds=45),
+    )
+
+    result = await correlation.correlate_kommo_job("job-1")
+
+    assert result["status"] == "matched"
+    candidate = persist.await_args.args[0]
+    assert candidate.text_match_source == "receipt"
+    assert candidate.matched_receipt_id == "receipt-1"
+    assert candidate.matched_external_message_id == "kommo-message-emoji"
+    assert "receipt_text" in candidate.signals
+
+
+@pytest.mark.asyncio
+async def test_multiple_matching_story_receipts_are_ambiguous(monkeypatch):
+    from app.integrations.meta_context import correlation
+
+    event = _event(text="😍")
+    event["event_type"] = "story_reply"
+    job = _job(text="😍\nPrecio?")
+    job["interaction_type"] = "private_message"
+    receipts = [
+        {
+            "id": f"receipt-{index}",
+            "external_message_id": f"message-{index}",
+            "correlation_timestamp": event["event_timestamp"] + timedelta(seconds=index),
+            "timestamp_source": "receipt_received_at",
+        }
+        for index in (1, 2)
+    ]
+    monkeypatch.setattr(correlation.db, "get_db", lambda: _Handle())
+    monkeypatch.setattr(correlation.db, "fetch_one", AsyncMock(return_value={"locked": True}))
+    monkeypatch.setattr(correlation, "_load_job", AsyncMock(return_value=job))
+    monkeypatch.setattr(correlation, "_candidate_events", AsyncMock(return_value=[event]))
+    monkeypatch.setattr(correlation, "_matching_receipts", AsyncMock(return_value=receipts))
+    monkeypatch.setattr(correlation, "_verified_customer_ids", AsyncMock(return_value=(None, None)))
+    mark = AsyncMock()
+    monkeypatch.setattr(correlation, "_mark_ambiguous", mark)
+    monkeypatch.setattr(
+        correlation,
+        "get_config",
+        lambda: SimpleNamespace(meta_story_context_match_window_seconds=45),
+    )
+
+    result = await correlation.correlate_kommo_job("job-1")
+
+    assert result["status"] == "ambiguous"
+    assert result["candidate_count"] == 2
+    mark.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_match_diagnostics_persist_receipt_and_external_message_ids(monkeypatch):
+    from app.integrations.meta_context import correlation
+
+    mock_db = AsyncMock()
+    mock_db.fetch_one = AsyncMock(return_value={"id": "job-1"})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(correlation, "db", mock_db)
+    event = _event(text="😍")
+    event["event_type"] = "story_reply"
+    candidate = correlation.Candidate(
+        event=event,
+        job=_job(text="😍\nPrecio?"),
+        score=190,
+        timestamp_difference_seconds=1,
+        signals=("customer_identity", "receipt_text", "time_5s"),
+        matched_receipt_id="receipt-1",
+        matched_external_message_id="external-message-1",
+        receipt_match_count=1,
+        text_match_source="receipt",
+        timestamp_source="receipt_received_at",
+    )
+
+    assert await correlation._persist_match(candidate) is True
+
+    details = json.loads(mock_db.execute.await_args.args[1]["details"])
+    assert details["matched_receipt_id"] == "receipt-1"
+    assert details["matched_external_message_id"] == "external-message-1"
+    assert details["matched_receipt_timestamp_source"] == "receipt_received_at"
+    assert details["text_match_source"] == "receipt"
+    assert details["verified_sender_reused"] is True
 
 
 @pytest.mark.asyncio

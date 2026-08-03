@@ -65,6 +65,77 @@ async def lookup_by_author_id(provider: str, external_author_id: str) -> dict | 
     return await _lookup_one(provider, "external_author_id", external_author_id)
 
 
+async def persist_verified_meta_instagram_sender(
+    *,
+    customer_id: str,
+    external_author_id: str,
+) -> dict:
+    """Bind one signed Meta Instagram sender to one customer without reassignment."""
+    customer_id = str(customer_id).strip()
+    external_author_id = str(external_author_id).strip()
+    if not customer_id or not external_author_id:
+        return {"status": "ignored"}
+
+    async with db.get_db().transaction():
+        await db.fetch_one(
+            """
+            SELECT pg_advisory_xact_lock(hashtext(:sender_lock)),
+                   pg_advisory_xact_lock(hashtext(:customer_lock))
+            """,
+            {
+                "sender_lock": f"meta-instagram-sender:{external_author_id}",
+                "customer_lock": f"meta-instagram-customer:{customer_id}",
+            },
+        )
+        sender_mapping = await db.fetch_one(
+            """
+            SELECT id, customer_id, external_author_id
+            FROM customer_channel_mappings
+            WHERE provider = 'meta'
+              AND channel = 'instagram'
+              AND external_author_id = :external_author_id
+            FOR UPDATE
+            """,
+            {"external_author_id": external_author_id},
+        )
+        if sender_mapping:
+            if str(sender_mapping["customer_id"]) != customer_id:
+                return {"status": "conflict"}
+            return {"status": "existing", "mapping_id": str(sender_mapping["id"])}
+
+        customer_mapping = await db.fetch_one(
+            """
+            SELECT id, customer_id, external_author_id
+            FROM customer_channel_mappings
+            WHERE customer_id = :customer_id
+              AND provider = 'meta'
+              AND channel = 'instagram'
+            FOR UPDATE
+            """,
+            {"customer_id": customer_id},
+        )
+        if customer_mapping:
+            if str(customer_mapping["external_author_id"]) != external_author_id:
+                return {"status": "conflict"}
+            return {"status": "existing", "mapping_id": str(customer_mapping["id"])}
+
+        inserted = await db.fetch_one(
+            """
+            INSERT INTO customer_channel_mappings (
+                customer_id, provider, channel, external_author_id, external_origin
+            ) VALUES (
+                :customer_id, 'meta', 'instagram', :external_author_id, 'story_reply'
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            """,
+            {"customer_id": customer_id, "external_author_id": external_author_id},
+        )
+        if inserted:
+            return {"status": "created", "mapping_id": str(inserted["id"])}
+        return {"status": "conflict"}
+
+
 async def upsert_mapping(
     *,
     customer_id: str,

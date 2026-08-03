@@ -2,6 +2,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = (ROOT / "store/migrations/006_instagram_story_context.sql").read_text(encoding="utf-8")
+PRODUCTION_FIXES = (ROOT / "store/migrations/007_instagram_story_production_fixes.sql").read_text(
+    encoding="utf-8"
+)
+BASELINE = (ROOT / "store/migrations/001_schema.sql").read_text(encoding="utf-8")
 RUNNER = (ROOT / "store/scripts/migrate.py").read_text(encoding="utf-8")
 
 
@@ -17,3 +21,30 @@ def test_story_migration_adds_durable_mapping_session_and_job_context():
 
 def test_story_migration_is_registered_by_runner():
     assert '"006_instagram_story_context.sql"' in RUNNER
+
+
+def test_story_production_fixes_add_receipt_text_hash_and_filtered_index():
+    for schema in (PRODUCTION_FIXES, BASELINE):
+        assert "message_text TEXT" in schema
+        assert "normalized_text_hash TEXT" in schema
+        assert "idx_kommo_receipts_story_text" in schema
+        assert "interaction_type = 'private_message'" in schema
+        assert "normalized_text_hash IS NOT NULL" in schema
+
+
+def test_story_production_fixes_enforce_unique_meta_sender_and_customer_identity():
+    for schema in (PRODUCTION_FIXES, BASELINE):
+        assert "uq_customer_meta_instagram_sender" in schema
+        assert "ON customer_channel_mappings(provider, channel, external_author_id)" in schema
+        assert "uq_customer_meta_instagram_identity" in schema
+        assert "ON customer_channel_mappings(customer_id, provider, channel)" in schema
+        assert "provider = 'meta'" in schema
+        assert "channel = 'instagram'" in schema
+    assert "(7, 'instagram_story_production_fixes')" in PRODUCTION_FIXES
+
+
+def test_story_production_fixes_are_registered_after_story_context_migration():
+    assert '"007_instagram_story_production_fixes.sql"' in RUNNER
+    assert RUNNER.index("INSTAGRAM_STORY_CONTEXT_MIGRATION_PATH.read_text") < RUNNER.index(
+        "INSTAGRAM_STORY_PRODUCTION_FIXES_MIGRATION_PATH.read_text"
+    )

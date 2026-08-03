@@ -75,6 +75,11 @@ class Candidate:
     score: int
     timestamp_difference_seconds: float
     signals: tuple[str, ...]
+    matched_receipt_id: str | None = None
+    matched_external_message_id: str | None = None
+    receipt_match_count: int = 0
+    text_match_source: str | None = None
+    timestamp_source: str | None = None
 
 
 async def correlate_meta_event(event_id: str) -> dict:
@@ -102,8 +107,11 @@ async def _correlate(
                 return {"status": "already_matched" if event else "missing"}
             window_seconds = _match_window_seconds(dict(event), config)
             jobs = await _candidate_jobs(event, window_seconds)
-            candidates = [_score_candidate(dict(event), dict(job), window_seconds) for job in jobs]
-            candidates = [item for item in candidates if item]
+            candidates = []
+            for job in jobs:
+                candidate = await _prepare_candidate(dict(event), dict(job), window_seconds)
+                if candidate:
+                    candidates.append(candidate)
             anchor_kind = "event"
         else:
             job = await _load_job(kommo_job_id)
@@ -111,8 +119,11 @@ async def _correlate(
                 return {"status": "already_matched" if job else "missing"}
             window_seconds = _match_window_seconds_for_job(dict(job), config)
             events = await _candidate_events(job, window_seconds)
-            candidates = [_score_candidate(dict(event), dict(job), window_seconds) for event in events]
-            candidates = [item for item in candidates if item]
+            candidates = []
+            for event in events:
+                candidate = await _prepare_candidate(dict(event), dict(job), window_seconds)
+                if candidate:
+                    candidates.append(candidate)
             anchor_kind = "job"
 
         if not candidates:
@@ -121,6 +132,14 @@ async def _correlate(
                 anchor_kind,
             )
             return {"status": "pending"}
+        receipt_ambiguous = [item for item in candidates if item.receipt_match_count > 1]
+        if receipt_ambiguous:
+            await _mark_ambiguous(receipt_ambiguous, anchor_kind)
+            return {
+                "status": "ambiguous",
+                "candidate_count": max(item.receipt_match_count for item in receipt_ambiguous),
+                "score": max(item.score for item in receipt_ambiguous),
+            }
         best_score = max(item.score for item in candidates)
         winners = [item for item in candidates if item.score == best_score]
         if len(winners) != 1:
@@ -311,10 +330,16 @@ async def schedule_context_job_processing(job_id: str) -> None:
             logger.exception("Meta context mapping gate failed: job_id=%s", job_id)
     if release_result.get("status") != "ready":
         config = get_config()
-        await asyncio.sleep(max(
-            config.meta_context_wait_seconds,
-            config.meta_story_context_wait_seconds,
-        ) + 0.2)
+        job_type = await db.fetch_one(
+            "SELECT interaction_type FROM kommo_message_jobs WHERE id = :id",
+            {"id": job_id},
+        )
+        wait_seconds = (
+            config.meta_story_context_wait_seconds
+            if job_type and job_type["interaction_type"] == "private_message"
+            else config.meta_context_wait_seconds
+        )
+        await asyncio.sleep(wait_seconds + 0.2)
         await process_waiting_context_jobs(limit=10)
     from app.integrations.kommo.jobs import process_ready_jobs
 
@@ -368,9 +393,23 @@ async def _candidate_jobs(event: dict, window_seconds: int):
           AND job.channel = 'instagram'
           AND job.context_status IN ('pending', 'ambiguous')
           AND job.meta_context_event_id IS NULL
-          AND ABS(EXTRACT(EPOCH FROM (
-              {_JOB_CORRELATION_TIMESTAMP_SQL} - :event_timestamp
-          ))) <= :window_seconds
+          AND (
+              EXISTS (
+                  SELECT 1
+                  FROM kommo_message_receipts matching_receipt
+                  WHERE matching_receipt.job_id = job.id
+                    AND matching_receipt.channel = 'instagram'
+                    AND matching_receipt.interaction_type = :interaction_type
+                    AND matching_receipt.normalized_text_hash = :normalized_text_hash
+                    AND ABS(EXTRACT(EPOCH FROM (
+                        COALESCE(matching_receipt.received_at, matching_receipt.created_at)
+                        - :event_timestamp
+                    ))) <= :window_seconds
+              )
+              OR ABS(EXTRACT(EPOCH FROM (
+                  {_JOB_CORRELATION_TIMESTAMP_SQL} - :event_timestamp
+              ))) <= :window_seconds
+          )
         ORDER BY job.created_at ASC, job.id ASC
         FOR UPDATE OF job
         """,
@@ -378,6 +417,7 @@ async def _candidate_jobs(event: dict, window_seconds: int):
             "event_timestamp": event["event_timestamp"],
             "window_seconds": window_seconds,
             "interaction_type": interaction_type,
+            "normalized_text_hash": normalized_text_hash(event.get("message_text")),
         },
     )
 
@@ -386,20 +426,36 @@ async def _candidate_events(job: dict, window_seconds: int):
     event_type = _event_type_for_job(job)
     return await db.fetch_all(
         """
-        SELECT *
-        FROM meta_instagram_context_events
-        WHERE event_type = :event_type
-          AND correlation_status IN ('pending', 'ambiguous')
-          AND matched_kommo_job_id IS NULL
-          AND expires_at > NOW()
-          AND ABS(EXTRACT(EPOCH FROM (event_timestamp - :job_timestamp))) <= :window_seconds
-        ORDER BY event_timestamp ASC, id ASC
+        SELECT event.*
+        FROM meta_instagram_context_events event
+        WHERE event.event_type = :event_type
+          AND event.correlation_status IN ('pending', 'ambiguous')
+          AND event.matched_kommo_job_id IS NULL
+          AND event.expires_at > NOW()
+          AND (
+              EXISTS (
+                  SELECT 1
+                  FROM kommo_message_receipts matching_receipt
+                  WHERE matching_receipt.job_id = :job_id
+                    AND matching_receipt.channel = 'instagram'
+                    AND matching_receipt.interaction_type = :interaction_type
+                    AND matching_receipt.normalized_text_hash = event.normalized_text_hash
+                    AND ABS(EXTRACT(EPOCH FROM (
+                        event.event_timestamp
+                        - COALESCE(matching_receipt.received_at, matching_receipt.created_at)
+                    ))) <= :window_seconds
+              )
+              OR ABS(EXTRACT(EPOCH FROM (event.event_timestamp - :job_timestamp))) <= :window_seconds
+          )
+        ORDER BY event.event_timestamp ASC, event.id ASC
         FOR UPDATE
         """,
         {
             "job_timestamp": _job_correlation_timestamp(dict(job)),
             "window_seconds": window_seconds,
             "event_type": event_type,
+            "job_id": job["id"],
+            "interaction_type": _job_interaction_type(job),
         },
     )
 
@@ -413,13 +469,13 @@ async def _opposite_candidates(
     if anchor_kind == "event":
         rows = await _candidate_events(candidate.job, window_seconds)
         candidates = [
-            _score_candidate(dict(event), candidate.job, window_seconds)
+            await _prepare_candidate(dict(event), candidate.job, window_seconds)
             for event in rows
         ]
     else:
         rows = await _candidate_jobs(candidate.event, window_seconds)
         candidates = [
-            _score_candidate(candidate.event, dict(job), window_seconds)
+            await _prepare_candidate(candidate.event, dict(job), window_seconds)
             for job in rows
         ]
     return [item for item in candidates if item]
@@ -432,11 +488,122 @@ def _same_pair(left: Candidate, right: Candidate) -> bool:
     )
 
 
+async def _prepare_candidate(event: dict, job: dict, window_seconds: int) -> Candidate | None:
+    enriched_job = dict(job)
+    enriched_job["_matching_receipts"] = await _matching_receipts(
+        event,
+        job,
+        window_seconds,
+    )
+    event_customer_id, job_customer_id = await _verified_customer_ids(event, job)
+    enriched_job["_event_customer_id"] = event_customer_id
+    enriched_job["_job_customer_id"] = job_customer_id
+    return _score_candidate(event, enriched_job, window_seconds)
+
+
+async def _matching_receipts(event: dict, job: dict, window_seconds: int) -> list[dict]:
+    event_hash = normalized_text_hash(event.get("message_text"))
+    if not event_hash:
+        return []
+    rows = await db.fetch_all(
+        """
+        SELECT id, external_message_id, received_at, created_at,
+               COALESCE(received_at, created_at) AS correlation_timestamp,
+               CASE WHEN received_at IS NOT NULL
+                    THEN 'receipt_received_at'
+                    ELSE 'receipt_created_at'
+               END AS timestamp_source
+        FROM kommo_message_receipts
+        WHERE job_id = :job_id
+          AND channel = 'instagram'
+          AND interaction_type = :interaction_type
+          AND normalized_text_hash = :normalized_text_hash
+          AND ABS(EXTRACT(EPOCH FROM (
+              COALESCE(received_at, created_at) - :event_timestamp
+          ))) <= :window_seconds
+        ORDER BY ABS(EXTRACT(EPOCH FROM (
+                     COALESCE(received_at, created_at) - :event_timestamp
+                 ))) ASC,
+                 created_at ASC,
+                 id ASC
+        FOR UPDATE
+        """,
+        {
+            "job_id": job["id"],
+            "interaction_type": _job_interaction_type(job),
+            "normalized_text_hash": event_hash,
+            "event_timestamp": event["event_timestamp"],
+            "window_seconds": window_seconds,
+        },
+    )
+    return [dict(row) for row in rows]
+
+
+async def _verified_customer_ids(event: dict, job: dict) -> tuple[str | None, str | None]:
+    sender_id = str(event.get("sender_id") or "").strip()
+    if not sender_id or event.get("event_type") != "story_reply":
+        return None, None
+    row = await db.fetch_one(
+        """
+        SELECT
+            (
+                SELECT CASE WHEN COUNT(DISTINCT mapping.customer_id) = 1
+                    THEN MIN(mapping.customer_id::text) END
+                FROM customer_channel_mappings mapping
+                WHERE mapping.provider = 'meta'
+                  AND mapping.channel = 'instagram'
+                  AND mapping.external_author_id = :meta_sender_id
+            ) AS event_customer_id,
+            (
+                SELECT CASE WHEN COUNT(DISTINCT mapping.customer_id) = 1
+                    THEN MIN(mapping.customer_id::text) END
+                FROM customer_channel_mappings mapping
+                WHERE mapping.provider = 'kommo'
+                  AND mapping.channel = 'instagram'
+                  AND (
+                      (CAST(:contact_id AS text) IS NOT NULL
+                       AND mapping.external_contact_id = CAST(:contact_id AS text))
+                      OR (CAST(:lead_id AS text) IS NOT NULL
+                          AND mapping.external_lead_id = CAST(:lead_id AS text))
+                      OR (CAST(:chat_id AS text) IS NOT NULL
+                          AND mapping.external_chat_id = CAST(:chat_id AS text))
+                      OR (CAST(:talk_id AS text) IS NOT NULL
+                          AND mapping.external_talk_id = CAST(:talk_id AS text))
+                      OR (CAST(:author_id AS text) IS NOT NULL
+                          AND mapping.external_author_id = CAST(:author_id AS text))
+                  )
+            ) AS job_customer_id
+        """,
+        {
+            "meta_sender_id": sender_id,
+            "contact_id": job.get("contact_id"),
+            "lead_id": job.get("lead_id"),
+            "chat_id": job.get("chat_id"),
+            "talk_id": job.get("talk_id"),
+            "author_id": job.get("author_id"),
+        },
+    )
+    if not row:
+        return None, None
+    row_data = dict(row)
+    return (
+        str(row_data["event_customer_id"]) if row_data.get("event_customer_id") else None,
+        str(row_data["job_customer_id"]) if row_data.get("job_customer_id") else None,
+    )
+
+
 def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate | None:
+    receipts = job.get("_matching_receipts") or []
+    matched_receipt = receipts[0] if receipts else None
+    correlation_timestamp = (
+        _as_datetime(matched_receipt["correlation_timestamp"])
+        if matched_receipt
+        else _job_correlation_timestamp(job)
+    )
     difference = abs(
         (
             _as_datetime(event["event_timestamp"])
-            - _job_correlation_timestamp(job)
+            - correlation_timestamp
         ).total_seconds()
     )
     if difference > window_seconds:
@@ -447,15 +614,29 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
         and context.get("comment_id")
         and str(event["comment_id"]) == str(context["comment_id"])
     )
-    exact_text = normalized_text_hash(event.get("message_text")) == normalized_text_hash(
-        job.get("combined_message")
+    receipt_text = bool(matched_receipt)
+    exact_text = receipt_text or (
+        normalized_text_hash(event.get("message_text"))
+        == normalized_text_hash(job.get("combined_message"))
     )
     if not exact_comment_id and not exact_text:
         return None
 
     event_username = normalize_username(event.get("sender_username"))
     job_usernames = _job_usernames(job)
-    if event_username and job_usernames and event_username not in job_usernames:
+    event_customer_id = str(job.get("_event_customer_id") or "").strip() or None
+    job_customer_id = str(job.get("_job_customer_id") or "").strip() or None
+    identity_match = bool(
+        event_customer_id and job_customer_id and event_customer_id == job_customer_id
+    )
+    if event_customer_id and job_customer_id and not identity_match:
+        return None
+    if (
+        not identity_match
+        and event_username
+        and job_usernames
+        and event_username not in job_usernames
+    ):
         return None
 
     score = 0
@@ -463,12 +644,15 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
     if exact_comment_id:
         score += 100
         signals.append("comment_id")
+    if identity_match:
+        score += 120
+        signals.append("customer_identity")
     if event_username and event_username in job_usernames:
         score += 40
         signals.append("username")
     if exact_text:
         score += 30
-        signals.append("text")
+        signals.append("receipt_text" if receipt_text else "text")
     if difference <= 5:
         score += 20
         signals.append("time_5s")
@@ -478,7 +662,24 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
     else:
         score += 5
         signals.append("time_window")
-    return Candidate(event, job, score, difference, tuple(signals))
+    return Candidate(
+        event,
+        job,
+        score,
+        difference,
+        tuple(signals),
+        matched_receipt_id=(str(matched_receipt["id"]) if matched_receipt else None),
+        matched_external_message_id=(
+            str(matched_receipt["external_message_id"]) if matched_receipt else None
+        ),
+        receipt_match_count=len(receipts),
+        text_match_source="receipt" if receipt_text else ("combined_message" if exact_text else None),
+        timestamp_source=(
+            str(matched_receipt["timestamp_source"])
+            if matched_receipt
+            else _job_correlation_timestamp_source(job)
+        ),
+    )
 
 
 def _job_usernames(job: dict) -> set[str]:
@@ -494,7 +695,13 @@ def _job_usernames(job: dict) -> set[str]:
 async def _mark_ambiguous(candidates: list[Candidate], anchor_kind: str) -> None:
     event_ids = {str(item.event["id"]) for item in candidates}
     job_ids = {str(item.job["id"]) for item in candidates}
-    details = json.dumps({"reason": "equal_best_candidates", "candidate_count": len(candidates)})
+    receipt_count = max((item.receipt_match_count for item in candidates), default=0)
+    details = json.dumps({
+        "reason": (
+            "multiple_matching_receipts" if receipt_count > 1 else "equal_best_candidates"
+        ),
+        "candidate_count": receipt_count if receipt_count > 1 else len(candidates),
+    })
     for event_id in event_ids:
         await db.execute(
             """
@@ -542,13 +749,24 @@ async def _persist_match(candidate: Candidate) -> bool:
             "correlation_status": "matched",
         }
     context = {key: value for key, value in context.items() if value is not None}
+    effective_timestamp = (
+        _as_datetime(candidate.job["_matching_receipts"][0]["correlation_timestamp"])
+        if candidate.matched_receipt_id and candidate.job.get("_matching_receipts")
+        else _job_correlation_timestamp(candidate.job)
+    )
     details = {
         "score": candidate.score,
         "signals": list(candidate.signals),
         "timestamp_difference_seconds": candidate.timestamp_difference_seconds,
         "job_timestamp_source": _job_correlation_timestamp_source(candidate.job),
-        "job_correlation_timestamp": _job_correlation_timestamp(candidate.job).isoformat(),
+        "job_correlation_timestamp": effective_timestamp.isoformat(),
+        "text_match_source": candidate.text_match_source,
+        "matched_receipt_id": candidate.matched_receipt_id,
+        "matched_external_message_id": candidate.matched_external_message_id,
+        "matched_receipt_timestamp_source": candidate.timestamp_source,
+        "verified_sender_reused": "customer_identity" in candidate.signals,
     }
+    details = {key: value for key, value in details.items() if value is not None}
     context_column = "instagram_content_context" if is_story else "public_comment_context"
     job = await db.fetch_one(
         f"""

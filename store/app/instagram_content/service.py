@@ -76,6 +76,11 @@ async def resolve_content_product_mapping(
         LEFT JOIN instagram_content_products mapping ON mapping.content_id = content.id
         WHERE content.status = 'active'
           AND (
+              content.content_type <> 'story'
+              OR content.expires_at IS NULL
+              OR content.expires_at > NOW()
+          )
+          AND (
               (
                   CAST(:media_id AS text) IS NOT NULL
                   AND content.media_id = CAST(:media_id AS text)

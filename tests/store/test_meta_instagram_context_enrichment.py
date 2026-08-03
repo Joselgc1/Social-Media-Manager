@@ -888,3 +888,46 @@ async def test_graph_success_without_permalink_does_not_force_tight_mapping_retr
         '"media_enrichment_status": "succeeded"' in call.args[1].get("details", "")
         for call in mock_db.execute.await_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_story_diagnostics_return_expected_keys_and_use_story_queries(monkeypatch):
+    from app.integrations.meta_context import service
+
+    story_metrics = {
+        "story_events_received": 10,
+        "story_events_matched": 7,
+        "story_events_ambiguous": 1,
+        "story_events_expired": 2,
+        "story_mapping_resolved": 6,
+        "story_mapping_missing": 1,
+        "story_context_created": 5,
+        "receipt_level_text_matches": 4,
+    }
+    story_jobs = {
+        "story_correlation_timeouts": 3,
+        "story_context_reused": 2,
+    }
+    mock_db = MagicMock()
+    mock_db.fetch_all = AsyncMock(return_value=[{"correlation_status": "matched", "cnt": 7}])
+    mock_db.fetch_one = AsyncMock(
+        side_effect=[
+            {"id": "event-1"},
+            {"cnt": 1},
+            story_metrics,
+            story_jobs,
+            {"cnt": 2},
+            {"error": None},
+        ]
+    )
+    monkeypatch.setattr(service, "db", mock_db)
+
+    result = await service.diagnostics_summary()
+
+    assert {key: result[key] for key in story_metrics} == story_metrics
+    assert {key: result[key] for key in story_jobs} == story_jobs
+    assert result["story_context_expired"] == 2
+    queries = [call.args[0] for call in mock_db.fetch_one.await_args_list]
+    assert any("text_match_source' = 'receipt'" in query for query in queries)
+    assert any("instagram_content_context ->> 'context_usage' = 'reused'" in query for query in queries)
+    assert any("instagram_context_expires_at <= NOW()" in query for query in queries)
