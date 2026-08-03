@@ -6,6 +6,7 @@ calls the active LLM provider, executes any tool calls, and returns
 the final text response.
 """
 
+import json
 import logging
 import re
 import time
@@ -108,6 +109,42 @@ _PUBLIC_COMMENT_STOPWORDS = {
     "nuevo",
     "disponible",
     "disponibles",
+}
+_PUBLIC_COMMENT_REFERENCE_STOPWORDS = _PUBLIC_COMMENT_STOPWORDS | {
+    "cuanto",
+    "cuanta",
+    "cuantos",
+    "cuantas",
+    "cual",
+    "cuales",
+    "precio",
+    "precios",
+    "costo",
+    "costos",
+    "cuesta",
+    "vale",
+    "valor",
+    "sale",
+    "esta",
+    "estan",
+    "hay",
+    "tienen",
+    "queda",
+    "quedan",
+    "agotado",
+    "agotada",
+    "que",
+    "tiene",
+    "el",
+    "ella",
+    "la",
+    "las",
+    "lo",
+    "los",
+    "de",
+    "es",
+    "bonita",
+    "bonito",
 }
 
 
@@ -881,8 +918,9 @@ async def _handle_public_instagram_comment(
     persist_assistant_message: bool = True,
     message_source_id: str | None = None,
 ) -> dict:
-    """Deterministically answer safe public Instagram comment intents."""
+    """Answer safe public Instagram comment intents using mapped catalog context."""
     t_start = time.monotonic()
+    recent_history = await conversations.get_history(customer["id"], limit=2)
     await conversations.store_message(
         customer_id=customer["id"],
         role="user",
@@ -893,7 +931,10 @@ async def _handle_public_instagram_comment(
     )
 
     request_kind = _classify_public_comment_request(message_text)
+    if request_kind == "other":
+        request_kind = _public_comment_follow_up_request_kind(recent_history) or request_kind
     reply_text = None
+    resolution = None
     route_intent = f"public_comment_{request_kind}"
     if request_kind in {"price", "stock"}:
         product = None
@@ -903,9 +944,10 @@ async def _handle_public_instagram_comment(
         except Exception:
             logger.warning("Public comment catalog lookup skipped because the catalog is stale")
         else:
-            product, should_clarify = _resolve_public_comment_product(
+            product, should_clarify, resolution = await _resolve_public_comment_product(
                 integration_context,
                 message_text,
+                settings,
             )
         if product:
             reply_text = (
@@ -936,11 +978,11 @@ async def _handle_public_instagram_comment(
         orchestration_mode=orchestration_mode,
         selected_agent="direct",
         route_intent=route_intent,
-        route_source="public_comment_guard",
+        route_source="public_comment_llm_matcher" if resolution else "public_comment_guard",
         route_confidence=1.0,
-        provider=None,
-        model=None,
-        usage={},
+        provider=resolution["provider"] if resolution else None,
+        model=resolution["model"] if resolution else None,
+        usage=resolution["usage"] if resolution else {},
         response_time_ms=response_time_ms,
         tool_names=[],
         tool_rounds=0,
@@ -983,6 +1025,21 @@ def _classify_public_comment_request(message_text: str) -> str:
     return "other"
 
 
+def _public_comment_follow_up_request_kind(history: list[dict]) -> str | None:
+    """Keep the prior price/stock intent when a commenter names the product next."""
+    if len(history) != 2:
+        return None
+    question, clarification = history
+    if (
+        question.get("role") != "user"
+        or clarification.get("role") != "assistant"
+        or str(clarification.get("content") or "").strip() != _PUBLIC_COMMENT_CLARIFICATION
+    ):
+        return None
+    request_kind = _classify_public_comment_request(str(question.get("content") or ""))
+    return request_kind if request_kind in {"price", "stock"} else None
+
+
 def _public_comment_private_invite_text(settings: dict) -> str:
     phone = _normalize_public_store_phone(settings.get("store_phone_number"))
     if phone:
@@ -994,27 +1051,28 @@ def _normalize_public_store_phone(value) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def _resolve_public_comment_product(
+async def _resolve_public_comment_product(
     integration_context: dict | None,
     message_text: str,
-) -> tuple[dict | None, bool]:
+    settings: dict,
+) -> tuple[dict | None, bool, dict | None]:
     context = _public_comment_context(integration_context)
     if not context:
-        return None, False
+        return None, False, None
 
     if context.get("mapping_status") != "resolved":
-        return None, False
+        return None, False, None
 
     mapped_skus = context.get("product_skus")
     if not isinstance(mapped_skus, list):
         mapped_skus = [context.get("product_sku")] if context.get("product_sku") else []
     mapped_skus = list(dict.fromkeys(mapped_skus))
     if not mapped_skus:
-        return None, False
+        return None, False, None
 
     grouped_products = group_catalog_products(get_cached_reference_catalog())
     if not grouped_products:
-        return None, False
+        return None, False, None
 
     mapped_products = []
     for mapped_sku in mapped_skus:
@@ -1022,7 +1080,7 @@ def _resolve_public_comment_product(
             _match_public_comment_product_by_sku(mapped_sku, grouped_products)
         )
         if not product:
-            return None, False
+            return None, False, None
         mapped_products.append(product)
 
     unique_mapped_products = {
@@ -1034,9 +1092,9 @@ def _resolve_public_comment_product(
         message_text,
         list(unique_mapped_products.values()),
     ):
-        return None, True
+        return None, True, None
     if len(unique_mapped_products) == 1:
-        return next(iter(unique_mapped_products.values())), False
+        return next(iter(unique_mapped_products.values())), False, None
 
     matched_product = _single_public_comment_match(
         _match_public_comment_product_by_text(
@@ -1044,7 +1102,94 @@ def _resolve_public_comment_product(
             list(unique_mapped_products.values()),
         )
     )
-    return (matched_product, False) if matched_product else (None, True)
+    if matched_product:
+        return matched_product, False, None
+
+    mapped_products = list(unique_mapped_products.values())
+    if not _public_comment_has_product_reference(message_text):
+        return None, True, None
+    return await _resolve_public_comment_product_with_llm(message_text, mapped_products, settings)
+
+
+async def _resolve_public_comment_product_with_llm(
+    message_text: str,
+    mapped_products: list[dict],
+    settings: dict,
+) -> tuple[dict | None, bool, dict | None]:
+    """Select one mapped product from semantic catalog context, or fail closed."""
+    provider_name = str(settings.get("llm_provider") or "openai")
+    if provider_name not in _list_providers():
+        return None, True, None
+
+    model = str(settings.get("llm_model") or "gpt-5.4-nano")
+    allowed_products = [
+        {
+            "sku": product.get("parent_sku") or product.get("sku"),
+            "name": str(product.get("product_name") or "")[:300],
+            "category": str(product.get("category") or "")[:200],
+            "description": str(product.get("description") or "")[:500],
+        }
+        for product in mapped_products
+    ]
+    try:
+        response = await get_provider(provider_name).chat(
+            model=model,
+            system_prompt=(
+                "Selecciona el producto de Instagram al que se refiere el comentario. "
+                "Usa nombre, categoria y descripcion. Solo puedes seleccionar un SKU de la lista. "
+                "Si no hay una referencia clara o hay empate, responde exactamente JSON con sku null. "
+                'Responde solo JSON: {"sku":"SKU permitido o null","confidence":0.0 a 1.0}.'
+            ),
+            messages=[{
+                "role": "user",
+                "content": "Comentario:\n"
+                f"{message_text[:1000]}\n\nProductos mapeados:\n"
+                f"{json.dumps(allowed_products, ensure_ascii=False)}",
+            }],
+            tools=None,
+            temperature=0,
+            max_tokens=100,
+        )
+    except Exception as exc:
+        logger.warning("Public comment product matcher failed: %s", exc)
+        return None, True, None
+
+    selected_sku = _parse_public_comment_matcher_response(response.text or "", allowed_products)
+    resolution = {
+        "provider": provider_name,
+        "model": model,
+        "usage": response.usage,
+    }
+    if not selected_sku:
+        return None, True, resolution
+    product = _single_public_comment_match(
+        _match_public_comment_product_by_sku(selected_sku, mapped_products)
+    )
+    return (product, False, resolution) if product else (None, True, resolution)
+
+
+def _parse_public_comment_matcher_response(text: str, allowed_products: list[dict]) -> str | None:
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        result = json.loads(match.group(0))
+        confidence = float(result.get("confidence", 0))
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    sku = _normalize_catalog_text(result.get("sku") or "")
+    allowed_skus = {
+        _normalize_catalog_text(product.get("sku") or "")
+        for product in allowed_products
+    }
+    return sku if confidence >= 0.7 and sku in allowed_skus else None
+
+
+def _public_comment_has_product_reference(message_text: str) -> bool:
+    return any(
+        len(term) > 2 and term not in _PUBLIC_COMMENT_REFERENCE_STOPWORDS
+        for term in re.findall(r"\w+", _normalize_catalog_text(message_text))
+    )
 
 
 def _public_comment_context(integration_context: dict | None) -> dict:
@@ -1135,15 +1280,21 @@ def _match_public_comment_product_by_text(value: str | None, grouped_products: l
     text = _normalize_catalog_text(value or "")
     if not text:
         return []
+    product_terms = {
+        _public_comment_product_identity(product): _public_comment_product_name_terms(product)
+        for product in grouped_products
+    }
+    term_product_counts: dict[str, int] = {}
+    for terms in product_terms.values():
+        for term in terms:
+            term_product_counts[term] = term_product_counts.get(term, 0) + 1
+
     matches = []
     for product in grouped_products:
         product_name = _normalize_catalog_text(product.get("product_name", ""))
         if not product_name:
             continue
-        terms = [
-            term for term in product_name.split()
-            if len(term) > 2 and term not in _PUBLIC_COMMENT_STOPWORDS
-        ]
+        terms = product_terms.get(_public_comment_product_identity(product), set())
         product_skus = {
             _normalize_catalog_text(product.get("sku", "")),
             _normalize_catalog_text(product.get("parent_sku", "")),
@@ -1152,10 +1303,29 @@ def _match_public_comment_product_by_text(value: str | None, grouped_products: l
             sku and re.search(rf"(?<![\w-]){re.escape(sku)}(?![\w-])", text)
             for sku in product_skus
         )
-        name_matches = product_name == text or product_name in text or (len(terms) >= 2 and all(term in text for term in terms))
+        matched_terms = {term for term in terms if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text)}
+        name_matches = (
+            product_name == text
+            or product_name in text
+            or (len(terms) >= 2 and terms.issubset(matched_terms))
+            # A comment often omits a material or style word (for example,
+            # "pijama azul" for "Pijama satén azul"). Two matching product
+            # terms, or one term unique to this mapped content, is specific
+            # enough without considering products outside the post.
+            or len(matched_terms) >= 2
+            or any(len(term) >= 4 and term_product_counts[term] == 1 for term in matched_terms)
+        )
         if sku_matches or name_matches:
             matches.append(product)
     return matches
+
+
+def _public_comment_product_name_terms(product: dict) -> set[str]:
+    return {
+        term
+        for term in _normalize_catalog_text(product.get("product_name", "")).split()
+        if len(term) > 2 and term not in _PUBLIC_COMMENT_STOPWORDS
+    }
 
 
 def _single_public_comment_match(matches: list[dict]) -> dict | None:
@@ -1180,7 +1350,9 @@ def _public_comment_price_reply(product: dict) -> str | None:
     name = str(product.get("product_name") or "").strip()
     if price is None or not name:
         return None
-    return _sanitize_public_comment_reply(f"{name} cuesta {_format_usd_price(price)}.")
+    return _sanitize_public_comment_reply(
+        f"¡Hola! El precio de {name} es {_format_usd_price(price)}."
+    )
 
 
 def _public_comment_stock_reply(product: dict) -> str | None:
@@ -1191,8 +1363,8 @@ def _public_comment_stock_reply(product: dict) -> str | None:
     if stock is None:
         return None
     if stock > 0:
-        return _sanitize_public_comment_reply(f"Sí, {name} está disponible.")
-    return _sanitize_public_comment_reply(f"Por ahora {name} no está disponible.")
+        return _sanitize_public_comment_reply(f"¡Hola! Sí, {name} está disponible.")
+    return _sanitize_public_comment_reply(f"¡Hola! Por ahora {name} no está disponible.")
 
 
 def _single_public_comment_price(product: dict) -> float | None:

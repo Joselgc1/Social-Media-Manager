@@ -79,6 +79,10 @@ def test_instagram_formatter_removes_bold_markers_and_converts_lists():
     assert "\n* Set" not in formatted
 
 
+def test_instagram_formatter_removes_emojis_without_removing_spanish_punctuation():
+    assert format_customer_text("¡Hola! Pijama azul 😊 💕", "instagram") == "¡Hola! Pijama azul"
+
+
 def test_kommo_formatter_uses_safe_emoji_mode_by_default():
     message, diagnostics = prepare_kommo_customer_message(
         "¡Hola! **Oferta** 💕\n¿Qué buscas?",
@@ -98,15 +102,15 @@ def test_kommo_formatter_uses_safe_emoji_mode_by_default():
     assert diagnostics["kommo_strip_emoji_applied"] is False
 
 
-def test_kommo_formatter_can_preserve_emoji_per_channel():
+def test_kommo_instagram_formatter_removes_emoji_even_when_preserve_is_configured():
     message, diagnostics = prepare_kommo_customer_message(
         "¡Hola! **Oferta** 💕",
         "instagram",
         {"kommo_emoji_mode_instagram": "preserve"},
     )
 
-    assert message == "¡Hola! Oferta 💕"
-    assert diagnostics["emoji_present"] is True
+    assert message == "¡Hola! Oferta"
+    assert diagnostics["emoji_present"] is False
     assert diagnostics["kommo_emoji_mode"] == "preserve"
 
 

@@ -38,7 +38,7 @@ def format_customer_text(text: str | None, channel: str | None) -> str:
     if channel == "whatsapp":
         return _format_whatsapp_text(formatted)
     if channel == "instagram":
-        return _format_instagram_text(formatted)
+        return _strip_instagram_emojis(_format_instagram_text(formatted))
     return formatted
 
 
@@ -153,6 +153,23 @@ def _format_instagram_text(text: str) -> str:
     formatted = _INSTAGRAM_BOLD_RE.sub(r"\1", text)
     lines = [_INSTAGRAM_LIST_MARKER_RE.sub(r"\1• ", line) for line in formatted.split("\n")]
     return _remove_asterisks_outside_urls("\n".join(lines)).strip()
+
+
+def _strip_instagram_emojis(text: str) -> str:
+    """Remove emoji sequences that Instagram cannot reliably render."""
+    stripped = "".join(char for char in text if not _is_emoji_codepoint(ord(char)))
+    return re.sub(r"[ \t]{2,}", " ", stripped).strip()
+
+
+def _is_emoji_codepoint(codepoint: int) -> bool:
+    return (
+        codepoint in {0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139, 0x3030, 0x303D, 0x3297, 0x3299}
+        or 0x1F000 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x27BF
+        or 0xFE00 <= codepoint <= 0xFE0F
+        or 0xE0020 <= codepoint <= 0xE007F
+        or codepoint == 0x200D
+    )
 
 
 def _remove_asterisks_outside_urls(text: str) -> str:

@@ -123,6 +123,23 @@ def _second_catalog_product(**overrides) -> dict:
     return product
 
 
+def _pajama_catalog_product(**overrides) -> dict:
+    product = {
+        "sku": "PJ-002-S",
+        "parent_sku": "PJ-002",
+        "product_name": "Pijama amarilla",
+        "category": "Pijamas",
+        "description": "Pijama suave amarilla",
+        "size": "S",
+        "sizes": "S",
+        "price_usd": 27,
+        "stock": 3,
+        "image_url": "https://example.com/pijama-amarilla.jpg",
+    }
+    product.update(overrides)
+    return product
+
+
 def _tool_call(name: str, arguments: dict, tool_id: str = "tool-1") -> dict:
     return {"id": tool_id, "name": name, "arguments": arguments}
 
@@ -561,7 +578,7 @@ async def test_public_instagram_comment_unresolved_widget_sku_uses_fallback(engi
     assert response["catalog_pdf"] is None
     assert response["product_image"] is None
     engine_harness.provider.chat.assert_not_awaited()
-    engine.conversations.get_history.assert_not_awaited()
+    engine.conversations.get_history.assert_awaited_once_with("customer-1", limit=2)
     engine.orders.get_latest_open_order.assert_not_awaited()
     assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_private_invite"
 
@@ -582,7 +599,7 @@ async def test_resolved_instagram_mapping_uses_injected_product_sku(engine_harne
         },
     )
 
-    assert response["text"] == "Pijama satén azul cuesta $28."
+    assert response["text"] == "¡Hola! El precio de Pijama satén azul es $28."
     engine_harness.provider.chat.assert_not_awaited()
 
 
@@ -649,7 +666,7 @@ async def test_public_instagram_comment_stock_uses_resolved_mapping_without_stoc
         },
     )
 
-    assert response["text"] == "Sí, Pijama satén azul está disponible."
+    assert response["text"] == "¡Hola! Sí, Pijama satén azul está disponible."
     assert "4" not in response["text"]
     engine_harness.provider.chat.assert_not_awaited()
     assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_stock"
@@ -674,7 +691,7 @@ async def test_public_instagram_comment_resolved_product_out_of_stock(engine_har
         },
     )
 
-    assert response["text"] == "Por ahora Pijama satén azul no está disponible."
+    assert response["text"] == "¡Hola! Por ahora Pijama satén azul no está disponible."
     engine_harness.provider.chat.assert_not_awaited()
 
 
@@ -754,8 +771,123 @@ async def test_multi_product_explicit_name_returns_mapped_product_price(engine_h
         },
     )
 
-    assert response["text"] == "Body negro cuesta $25."
+    assert response["text"] == "¡Hola! El precio de Body negro es $25."
     engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_partial_name_returns_the_uniquely_referenced_product_price(engine_harness):
+    engine_harness.catalog.extend([
+        _pajama_catalog_product(),
+        _pajama_catalog_product(
+            sku="PJ-003-S",
+            parent_sku="PJ-003",
+            product_name="Pijama rayas rosa",
+            price_usd=29,
+        ),
+    ])
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "Que bonita la pijama azul! Que precio tiene?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-002", "PJ-003", "PJ-001"],
+            },
+        },
+    )
+
+    assert response["text"] == "¡Hola! El precio de Pijama satén azul es $28."
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_price"
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_follow_up_inherits_price_intent_after_clarification(engine_harness):
+    engine_harness.catalog.extend([
+        _pajama_catalog_product(
+            sku="PJ-002-S",
+            parent_sku="PJ-002",
+            product_name="Pijama rayas rosa",
+            price_usd=27,
+        ),
+        _second_catalog_product(
+            sku="SET-003-S",
+            parent_sku="SET-003",
+            product_name="Set completo negro",
+            description="Set completo negro de dos piezas",
+            price_usd=35,
+        ),
+        _second_catalog_product(
+            sku="SET-004-S",
+            parent_sku="SET-004",
+            product_name="Set completo rojo",
+            description="Set completo rojo de dos piezas",
+            price_usd=36,
+        ),
+    ])
+    engine.conversations.get_history.return_value = [
+        {"role": "user", "content": "Precio?"},
+        {"role": "assistant", "content": engine._PUBLIC_COMMENT_CLARIFICATION},
+    ]
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "El negro",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-002", "SET-003", "SET-004"],
+            },
+        },
+    )
+
+    assert response["text"] == "¡Hola! El precio de Set completo negro es $35."
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_price"
+    engine_harness.provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_product_description_reference_uses_llm_matcher(engine_harness):
+    engine_harness.catalog.extend([
+        _pajama_catalog_product(description="Pijama fresca amarilla para descansar"),
+        _pajama_catalog_product(
+            sku="PJ-003-S",
+            parent_sku="PJ-003",
+            product_name="Pijama rayas rosa",
+            description="Pijama con rayas rosas",
+            price_usd=29,
+        ),
+    ])
+    engine_harness.provider.chat.return_value = LLMResponse(
+        text='{"sku":"PJ-001","confidence":0.94}',
+        usage={"input_tokens": 80, "output_tokens": 12},
+    )
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-commenter",
+        "La de seda para dormir, que precio tiene?",
+        integration_context={
+            "provider": "kommo",
+            "interaction_type": "instagram_comment",
+            "public_comment_context": {
+                "mapping_status": "resolved",
+                "product_skus": ["PJ-002", "PJ-003", "PJ-001"],
+            },
+        },
+    )
+
+    assert response["text"] == "¡Hola! El precio de Pijama satén azul es $28."
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_source"] == "public_comment_llm_matcher"
+    engine_harness.provider.chat.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -776,7 +908,7 @@ async def test_multi_product_explicit_name_returns_mapped_product_availability(e
         },
     )
 
-    assert response["text"] == "Sí, Pijama satén azul está disponible."
+    assert response["text"] == "¡Hola! Sí, Pijama satén azul está disponible."
     engine_harness.provider.chat.assert_not_awaited()
 
 
@@ -808,7 +940,7 @@ async def test_multi_product_does_not_resolve_unmapped_global_catalog_product(en
 
     assert response["text"].startswith("¿Cuál producto de la publicación")
     assert "$35" not in response["text"]
-    engine_harness.provider.chat.assert_not_awaited()
+    engine_harness.provider.chat.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -853,7 +985,7 @@ async def test_multi_product_zero_stock_product_returns_unavailable(engine_harne
         },
     )
 
-    assert response["text"] == "Por ahora Body negro no está disponible."
+    assert response["text"] == "¡Hola! Por ahora Body negro no está disponible."
     engine_harness.provider.chat.assert_not_awaited()
 
 

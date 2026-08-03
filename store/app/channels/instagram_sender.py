@@ -66,7 +66,7 @@ async def send_text_with_quick_replies(to: str, text: str, quick_replies: list[d
     qr_objects = [
         {
             "content_type": "text",
-            "title": qr["title"][:20],
+            "title": format_customer_text(qr["title"], "instagram")[:20],
             "payload": qr.get("payload", qr["title"].upper().replace(" ", "_")),
         }
         for qr in quick_replies[:13]
