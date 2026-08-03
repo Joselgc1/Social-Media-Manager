@@ -811,6 +811,26 @@ async def _process_ready_job(job: dict) -> None:
                     """,
                     {"id": job["id"]},
                 )
+
+        incoming_instagram_context = {}
+        current_story_context = False
+        has_current_story_event = False
+        is_instagram_private_message = (
+            job.get("channel") == "instagram"
+            and _job_interaction_type(job) == "private_message"
+        )
+        if is_instagram_private_message:
+            has_current_story_event = bool(job.get("meta_context_event_id"))
+            if _is_resolved_story_context(current_private_context):
+                current_story_context = True
+                incoming_instagram_context = await sessions.store_instagram_content_context(
+                    str(customer["id"]),
+                    current_private_context,
+                    ttl_hours=config.instagram_story_context_ttl_hours,
+                )
+            elif has_current_story_event:
+                await sessions.clear_instagram_content_context(str(customer["id"]))
+
         if ai_mode_enum is not None:
             synced_customer = await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
             if isinstance(synced_customer, dict):
@@ -830,43 +850,30 @@ async def _process_ready_job(job: dict) -> None:
             await _continue_and_discard_job(client, job, before.reason)
             return
 
-        incoming_instagram_context = {}
-        current_story_context = False
         if (
-            job.get("channel") == "instagram"
-            and _job_interaction_type(job) == "private_message"
+            is_instagram_private_message
+            and not current_story_context
+            and not has_current_story_event
         ):
-            current_context = current_private_context
-            has_current_story_event = bool(job.get("meta_context_event_id"))
-            if _is_resolved_story_context(current_context):
-                current_story_context = True
-                incoming_instagram_context = await sessions.store_instagram_content_context(
-                    str(customer["id"]),
-                    current_context,
-                    ttl_hours=config.instagram_story_context_ttl_hours,
+            incoming_instagram_context = await sessions.load_active_instagram_content_context(
+                str(customer["id"])
+            )
+            if incoming_instagram_context:
+                await db.execute(
+                    """
+                    UPDATE kommo_message_jobs
+                    SET instagram_content_context = CAST(:context AS jsonb),
+                        updated_at = NOW()
+                    WHERE id = :id AND status = 'processing'
+                    """,
+                    {
+                        "id": job["id"],
+                        "context": json.dumps(
+                            incoming_instagram_context | {"context_usage": "reused"},
+                            ensure_ascii=False,
+                        ),
+                    },
                 )
-            elif has_current_story_event:
-                await sessions.clear_instagram_content_context(str(customer["id"]))
-            else:
-                incoming_instagram_context = await sessions.load_active_instagram_content_context(
-                    str(customer["id"])
-                )
-                if incoming_instagram_context:
-                    await db.execute(
-                        """
-                        UPDATE kommo_message_jobs
-                        SET instagram_content_context = CAST(:context AS jsonb),
-                            updated_at = NOW()
-                        WHERE id = :id AND status = 'processing'
-                        """,
-                        {
-                            "id": job["id"],
-                            "context": json.dumps(
-                                incoming_instagram_context | {"context_usage": "reused"},
-                                ensure_ascii=False,
-                            ),
-                        },
-                    )
 
         sender_id = _local_sender_id(job)
         media_url = job.get("media_url")
