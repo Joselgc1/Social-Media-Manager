@@ -51,7 +51,7 @@ def _base_config(**overrides):
     return SimpleNamespace(**data)
 
 
-def test_story_context_wait_default_is_five_seconds():
+def test_story_context_wait_default_is_three_seconds():
     settings = Settings(
         database_url="postgresql://test:test@localhost:5432/test",
         google_sheets_credentials_b64="e30=",
@@ -59,7 +59,7 @@ def test_story_context_wait_default_is_five_seconds():
         _env_file=None,
     )
 
-    assert settings.meta_story_context_wait_seconds == 5
+    assert settings.meta_story_context_wait_seconds == 3
 
 
 def test_meta_mode_startup_validation_requires_meta_credentials():

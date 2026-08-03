@@ -23,6 +23,48 @@ class _DBHandle:
         return _Tx()
 
 
+class _DurableStoryDB:
+    def __init__(self, *, expires_at):
+        self.story = {
+            "id": "content-expired",
+            "status": "active",
+            "content_type": "story",
+            "media_id": "story-expired",
+            "thumbnail_url": "https://cdn.example/original.jpg",
+            "published_at": expires_at - timedelta(hours=24),
+            "expires_at": expires_at,
+        }
+        self.product_skus = ["SKU-OLD"]
+        self.discovery_query = None
+
+    async def fetch_one(self, query, values=None):
+        assert "INSERT INTO instagram_content" in query
+        self.discovery_query = query
+        if values["media_id"] != self.story["media_id"]:
+            return None
+        self.story["thumbnail_url"] = values["thumbnail_url"] or self.story["thumbnail_url"]
+        self.story["published_at"] = self.story["published_at"] or values["published_at"]
+        self.story["expires_at"] = self.story["expires_at"] or values["expires_at"]
+        return {"id": self.story["id"], "status": self.story["status"]}
+
+    async def fetch_all(self, query, values=None):
+        assert "content.expires_at > NOW()" in query
+        if values["media_id"] != self.story["media_id"]:
+            return []
+        if self.story["expires_at"] <= datetime.now(UTC):
+            return []
+        return [
+            {
+                "content_id": self.story["id"],
+                "media_id": self.story["media_id"],
+                "normalized_permalink": None,
+                "product_sku": sku,
+                "display_order": index,
+            }
+            for index, sku in enumerate(self.product_skus)
+        ]
+
+
 def _story_payload(*, text="Precio?", sender_id="customer-1", message_id="mid-1"):
     return {
         "object": "instagram",
@@ -269,6 +311,38 @@ async def test_story_discovery_is_idempotent_and_uses_stable_id_not_cdn_url(monk
     assert "WHERE instagram_content.content_type = 'story'" in query
     assert all(call.args[1]["media_id"] == "story-1" for call in mock_db.fetch_one.await_args_list)
     assert mock_db.fetch_one.await_args_list[1].args[1]["thumbnail_url"].endswith("rotated.jpg")
+
+
+@pytest.mark.asyncio
+async def test_story_rediscovery_preserves_expired_mapping_and_resolver_rejects_it(monkeypatch):
+    from app.instagram_content import service as content_service
+    from app.integrations.meta_context import service as context_service
+
+    original_expiration = datetime.now(UTC) - timedelta(minutes=5)
+    fake_db = _DurableStoryDB(expires_at=original_expiration)
+    monkeypatch.setattr(context_service, "db", fake_db)
+    monkeypatch.setattr(content_service, "db", fake_db)
+    monkeypatch.setattr(
+        context_service,
+        "get_config",
+        lambda: SimpleNamespace(instagram_story_mapping_ttl_hours=24),
+    )
+
+    discovery = await context_service.discover_instagram_story({
+        "story_id": "story-expired",
+        "story_url": "https://cdn.example/rediscovered.jpg",
+        "event_timestamp": datetime.now(UTC),
+    })
+    resolution = await content_service.resolve_content_product_mapping(
+        media_id="story-expired",
+        permalink=None,
+    )
+
+    assert discovery == {"status": "discovered", "content_id": "content-expired"}
+    assert fake_db.story["expires_at"] == original_expiration
+    assert "expires_at = COALESCE(instagram_content.expires_at, EXCLUDED.expires_at)" in fake_db.discovery_query
+    assert "GREATEST(instagram_content.expires_at, EXCLUDED.expires_at)" not in fake_db.discovery_query
+    assert resolution == {"status": "not_found"}
 
 
 @pytest.mark.asyncio
@@ -700,7 +774,7 @@ async def test_salesbot_callback_waits_only_for_instagram_private_story_candidat
         "get_config",
         lambda: SimpleNamespace(
             meta_story_context_enabled=True,
-            meta_story_context_wait_seconds=10,
+            meta_story_context_wait_seconds=3,
         ),
     )
 
@@ -719,13 +793,13 @@ async def test_salesbot_callback_waits_only_for_instagram_private_story_candidat
     assert "job.channel = 'instagram'" in query
     assert "job.interaction_type = 'private_message'" in query
     assert values["story_context_enabled"] is True
-    assert values["story_context_wait_seconds"] == 10
+    assert values["story_context_wait_seconds"] == 3
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("interaction_type", "expected_wait"),
-    [("private_message", 5.2), ("instagram_comment", 12.2)],
+    [("private_message", 3.2), ("instagram_comment", 12.2)],
 )
 async def test_context_accelerator_selects_private_and_comment_waits_separately(
     monkeypatch, interaction_type, expected_wait
@@ -738,7 +812,7 @@ async def test_context_accelerator_selects_private_and_comment_waits_separately(
         correlation,
         "get_config",
         lambda: SimpleNamespace(
-            meta_story_context_wait_seconds=5,
+            meta_story_context_wait_seconds=3,
             meta_context_wait_seconds=12,
         ),
     )
@@ -803,6 +877,155 @@ def test_story_prompt_uses_live_context_without_internal_or_unmapped_leakage():
     assert "Producto seleccionado" in rendered
     assert "Nunca reveles SKUs internos" in rendered
     assert _build_instagram_content_context({"source": "story_reply", "products": []}) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "normal_instagram_dm",
+        "unmapped_story_b",
+        "ambiguous_story_b",
+        "timed_out_story_b",
+        "resolved_story_b",
+        "whatsapp",
+        "public_comment",
+    ],
+)
+async def test_ready_job_story_context_lifecycle(monkeypatch, case):
+    from app.channels import instagram_sender
+    from app.integrations.kommo import jobs
+
+    story_a = _session_context(story_id="story-a", skus=["SKU-A"])
+    story_b = _session_context(story_id="story-b", skus=["SKU-B"])
+    story_b["meta_context_event_id"] = "event-b"
+    channel = "whatsapp" if case == "whatsapp" else "instagram"
+    interaction_type = "instagram_comment" if case == "public_comment" else "private_message"
+    event_id = None
+    job_context = {}
+    if case == "unmapped_story_b":
+        event_id = "event-b"
+        job_context = {
+            "source": "story_reply",
+            "story_id": "story-b",
+            "mapping_status": "not_found",
+            "product_skus": [],
+        }
+    elif case == "ambiguous_story_b":
+        event_id = "event-b"
+        job_context = {
+            "source": "story_reply",
+            "story_id": "story-b",
+            "mapping_status": "ambiguous",
+            "product_skus": ["SKU-B", "SKU-C"],
+        }
+    elif case == "timed_out_story_b":
+        event_id = "event-b"
+    elif case in {"resolved_story_b", "whatsapp", "public_comment"}:
+        event_id = "event-b"
+        job_context = story_b
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.get_settings = AsyncMock(
+        return_value={"ai_enabled": True, f"kommo_emoji_mode_{channel}": "preserve"}
+    )
+    mock_db.fetch_one = AsyncMock(side_effect=[
+        {"conversation_state": "active"},
+        {"id": "job-1"},
+        {"assistant_message_persisted_at": None},
+        {"id": "job-1"},
+    ])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_ai_active_enum_id=1,
+            instagram_story_context_ttl_hours=24,
+        ),
+    )
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            reason=None,
+            needs_ai_mode_initialization=False,
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer-1", "conversation_state": "active"}),
+    )
+    load_context = AsyncMock(return_value=story_a)
+    clear_context = AsyncMock()
+    store_context = AsyncMock(return_value=story_b)
+    monkeypatch.setattr(jobs.sessions, "load_active_instagram_content_context", load_context)
+    monkeypatch.setattr(jobs.sessions, "clear_instagram_content_context", clear_context)
+    monkeypatch.setattr(jobs.sessions, "store_instagram_content_context", store_context)
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(return_value={"text": "Respuesta Kommo", "escalated": False}),
+    )
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    persist_meta_sender = AsyncMock()
+    monkeypatch.setattr(jobs, "persist_verified_meta_instagram_sender", persist_meta_sender)
+    monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
+    meta_send = AsyncMock()
+    monkeypatch.setattr(instagram_sender, "send_text", meta_send)
+
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+    public_context = {"media_id": "post-1", "mapping_status": "resolved"}
+    await jobs._process_ready_job({
+        "id": "job-1",
+        "processing_lease_id": "00000000-0000-0000-0000-000000000001",
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "combined_message": "Precio?",
+        "channel": channel,
+        "interaction_type": interaction_type,
+        "instagram_content_context": job_context,
+        "public_comment_context": public_context,
+        "meta_context_event_id": event_id,
+        "correlation_id": "corr-1",
+    })
+
+    integration_context = jobs.generate_response.await_args.kwargs["integration_context"]
+    if case == "normal_instagram_dm":
+        load_context.assert_awaited_once_with("customer-1")
+        assert integration_context["incoming_instagram_context"] == story_a
+        assert integration_context["current_story_context"] is False
+    elif case in {"unmapped_story_b", "ambiguous_story_b", "timed_out_story_b"}:
+        clear_context.assert_awaited_once_with("customer-1")
+        load_context.assert_not_awaited()
+        assert integration_context["incoming_instagram_context"] == {}
+        assert integration_context["current_story_context"] is False
+    elif case == "resolved_story_b":
+        store_context.assert_awaited_once_with("customer-1", story_b, ttl_hours=24)
+        load_context.assert_not_awaited()
+        assert integration_context["incoming_instagram_context"] == story_b
+        assert integration_context["current_story_context"] is True
+    else:
+        load_context.assert_not_awaited()
+        clear_context.assert_not_awaited()
+        store_context.assert_not_awaited()
+        assert integration_context["incoming_instagram_context"] == {}
+        assert integration_context["current_story_context"] is False
+    if case == "public_comment":
+        assert integration_context["public_comment_context"] == public_context
+
+    client.continue_salesbot.assert_awaited_once_with(
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        data={"status": "success", "message": "Respuesta Kommo"},
+    )
+    persist_meta_sender.assert_not_awaited()
+    meta_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

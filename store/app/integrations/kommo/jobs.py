@@ -837,17 +837,16 @@ async def _process_ready_job(job: dict) -> None:
             and _job_interaction_type(job) == "private_message"
         ):
             current_context = current_private_context
-            if (
-                current_context.get("source") == "story_reply"
-                and current_context.get("mapping_status") == "resolved"
-                and current_context.get("product_skus")
-            ):
+            has_current_story_event = bool(job.get("meta_context_event_id"))
+            if _is_resolved_story_context(current_context):
                 current_story_context = True
                 incoming_instagram_context = await sessions.store_instagram_content_context(
                     str(customer["id"]),
                     current_context,
                     ttl_hours=config.instagram_story_context_ttl_hours,
                 )
+            elif has_current_story_event:
+                await sessions.clear_instagram_content_context(str(customer["id"]))
             else:
                 incoming_instagram_context = await sessions.load_active_instagram_content_context(
                     str(customer["id"])
@@ -1947,6 +1946,15 @@ def _job_instagram_content_context(job: dict) -> dict:
             return {}
         return loaded if isinstance(loaded, dict) else {}
     return {}
+
+
+def _is_resolved_story_context(context: dict) -> bool:
+    return bool(
+        context.get("source") == "story_reply"
+        and context.get("mapping_status") == "resolved"
+        and context.get("story_id")
+        and context.get("product_skus")
+    )
 
 
 def _timestamp_for_log(value) -> str | None:

@@ -605,7 +605,7 @@ async def discover_instagram_story(event: dict) -> dict:
         ON CONFLICT (media_id) WHERE media_id IS NOT NULL DO UPDATE
         SET thumbnail_url = COALESCE(EXCLUDED.thumbnail_url, instagram_content.thumbnail_url),
             published_at = COALESCE(instagram_content.published_at, EXCLUDED.published_at),
-            expires_at = GREATEST(instagram_content.expires_at, EXCLUDED.expires_at),
+            expires_at = COALESCE(instagram_content.expires_at, EXCLUDED.expires_at),
             updated_at = NOW()
         WHERE instagram_content.content_type = 'story'
         RETURNING id, status
