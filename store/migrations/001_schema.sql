@@ -700,6 +700,32 @@ COMMENT ON TABLE kommo_outbound_deliveries IS 'Transport-specific outbound deliv
 COMMENT ON COLUMN kommo_outbound_deliveries.attachment_metadata IS 'Transport/provider attachment metadata; never include this JSON in LLM conversation history.';
 
 -- ============================================================
+-- Kommo Drive media upload cache (transport details, not history)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS kommo_media_cache (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    media_type TEXT NOT NULL CHECK (media_type IN ('product_image', 'catalog_pdf')),
+    cache_key TEXT NOT NULL,
+    drive_uuid UUID NOT NULL,
+    drive_version_uuid UUID NOT NULL,
+    file_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL CHECK (
+        mime_type IN ('image/jpeg', 'image/png', 'image/webp', 'application/pdf')
+    ),
+    file_size BIGINT NOT NULL CHECK (file_size > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (media_type, cache_key)
+);
+
+DROP TRIGGER IF EXISTS trg_kommo_media_cache_updated_at ON kommo_media_cache;
+CREATE TRIGGER trg_kommo_media_cache_updated_at
+    BEFORE UPDATE ON kommo_media_cache
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+COMMENT ON TABLE kommo_media_cache IS 'Reusable Kommo Drive upload identifiers keyed by semantic media content. This table is transport state, not LLM history.';
+
+-- ============================================================
 -- Kommo inbound message receipts
 -- ============================================================
 CREATE TABLE IF NOT EXISTS kommo_message_receipts (
@@ -800,6 +826,7 @@ ALTER TABLE meta_inbound_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meta_inbound_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kommo_message_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kommo_outbound_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kommo_media_cache ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kommo_message_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
 

@@ -1,0 +1,491 @@
+"""Transport router for opt-in Kommo Chats media delivery.
+
+This module is intentionally not wired into the live Salesbot job flow yet.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
+
+from app import db
+from app.catalog.pdf_generator import catalog_fingerprint, ensure_catalog_pdf
+from app.catalog.sheets import get_cached_catalog
+from app.config import get_config
+from app.integrations.kommo.client import KommoAPIError, KommoClient, sanitize_kommo_error
+from app.integrations.kommo.files import (
+    KommoFiles,
+    KommoPDFSendUnsupportedError,
+    KommoUploadedFile,
+)
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    transport: Literal["salesbot", "chats_api"]
+    customer_text: str
+    delivered_attachments: list[dict]
+    provider_message_ids: list[str]
+
+
+class KommoDeliveryStateError(RuntimeError):
+    """Raised when an earlier paid send cannot safely be repeated."""
+
+
+@dataclass(frozen=True)
+class _MediaRequest:
+    media_type: Literal["product_image", "catalog_pdf"]
+    cache_key: str
+    attachment_type: Literal["picture", "file"]
+    semantic_attachment: dict
+    image_url: str | None = None
+    pdf_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class _DeliveryClaim:
+    status: str
+    provider_message_id: str | None
+    send_allowed: bool
+
+
+async def deliver_response(
+    *,
+    job: dict,
+    result: dict,
+    customer_text: str,
+    client: KommoClient | None = None,
+    files: KommoFiles | None = None,
+) -> DeliveryResult:
+    """Prepare and send supported media, or defer text delivery to Salesbot."""
+    clean_text = str(customer_text or "").strip()
+    product_image = _product_image_payload(result)
+    catalog_pdf = _catalog_pdf_payload(result)
+    if not product_image and not catalog_pdf:
+        return _salesbot_result(clean_text)
+
+    config = get_config()
+    if (
+        str(job.get("channel") or "").strip().lower() != "whatsapp"
+        or str(job.get("interaction_type") or "private_message").strip().lower()
+        != "private_message"
+        or not config.kommo_chats_media_enabled
+    ):
+        return _salesbot_result(clean_text)
+
+    if catalog_pdf and not config.kommo_chats_pdf_attachment_type:
+        raise KommoPDFSendUnsupportedError(
+            "PDF Chats attachment type is not configured and must be validated in Kommo"
+        )
+
+    talk_id = _validated_talk_id(job.get("talk_id"))
+    delivery_client = client or (files.client if files else KommoClient.from_config())
+    delivery_files = files or KommoFiles.from_config(delivery_client)
+    media_requests = await _build_media_requests(
+        product_image,
+        catalog_pdf,
+        pdf_attachment_type=config.kommo_chats_pdf_attachment_type,
+    )
+    delivered_attachments: list[dict] = []
+    provider_message_ids: list[str] = []
+    for index, media in enumerate(media_requests):
+        uploaded = await _get_or_upload_media(media, delivery_files)
+        send_text = clean_text if index == 0 else ""
+        request_fingerprint = _request_fingerprint(
+            job_id=str(job.get("id") or ""),
+            talk_id=talk_id,
+            media=media,
+            text=send_text,
+            position=index,
+        )
+        metadata = {
+            "media_type": media.media_type,
+            "cache_key": media.cache_key,
+            "drive_uuid": uploaded.drive_uuid,
+            "drive_version_uuid": uploaded.drive_version_uuid,
+            "file_name": uploaded.file_name,
+            "mime_type": uploaded.mime_type,
+            "file_size": uploaded.file_size,
+            "attachment_type": media.attachment_type,
+        }
+        claim = await _claim_delivery(
+            job_id=str(job.get("id") or ""),
+            media_type=media.media_type,
+            request_fingerprint=request_fingerprint,
+            attachment_metadata=metadata,
+        )
+        status = claim.status
+        if status in {"accepted", "confirmed"}:
+            provider_message_id = claim.provider_message_id
+            if not provider_message_id:
+                raise KommoDeliveryStateError(
+                    f"Kommo delivery {request_fingerprint} is {status} without a provider message ID"
+                )
+        elif status == "sending" and claim.send_allowed:
+            provider_message_id = await _send_claimed_delivery(
+                delivery_client,
+                job_id=str(job.get("id") or ""),
+                talk_id=talk_id,
+                text=send_text,
+                uploaded=uploaded,
+                media=media,
+                request_fingerprint=request_fingerprint,
+            )
+        else:
+            raise KommoDeliveryStateError(
+                f"Kommo delivery {request_fingerprint} is {status}; refusing an unsafe resend"
+            )
+
+        delivered_attachments.append(media.semantic_attachment)
+        provider_message_ids.append(str(provider_message_id))
+
+    return DeliveryResult(
+        transport="chats_api",
+        customer_text=clean_text,
+        delivered_attachments=delivered_attachments,
+        provider_message_ids=provider_message_ids,
+    )
+
+
+def _salesbot_result(customer_text: str) -> DeliveryResult:
+    return DeliveryResult(
+        transport="salesbot",
+        customer_text=customer_text,
+        delivered_attachments=[],
+        provider_message_ids=[],
+    )
+
+
+def _product_image_payload(result: dict) -> dict | None:
+    payload = result.get("product_image")
+    if not isinstance(payload, dict) or payload.get("type") != "product_image":
+        return None
+    image_url = payload.get("image_url")
+    return payload if isinstance(image_url, str) and image_url.strip() else None
+
+
+def _catalog_pdf_payload(result: dict) -> dict | None:
+    payload = result.get("catalog_pdf")
+    return payload if isinstance(payload, dict) and payload.get("type") == "catalog_pdf" else None
+
+
+def _validated_talk_id(value) -> str:
+    try:
+        talk_id = int(str(value).strip())
+    except (TypeError, ValueError) as error:
+        raise KommoAPIError("Kommo talk ID is invalid") from error
+    if talk_id <= 0:
+        raise KommoAPIError("Kommo talk ID is invalid")
+    return str(talk_id)
+
+
+async def _build_media_requests(
+    product_image: dict | None,
+    catalog_pdf: dict | None,
+    *,
+    pdf_attachment_type: Literal["file"] | None,
+) -> list[_MediaRequest]:
+    requests = []
+    if product_image:
+        image_url = product_image["image_url"].strip()
+        requests.append(
+            _MediaRequest(
+                media_type="product_image",
+                cache_key=hashlib.sha256(_normalize_source_url(image_url).encode()).hexdigest(),
+                attachment_type="picture",
+                semantic_attachment=_semantic_attachments(
+                    {"product_image": product_image}
+                )[0],
+                image_url=image_url,
+            )
+        )
+
+    if catalog_pdf:
+        if pdf_attachment_type != "file":
+            raise KommoPDFSendUnsupportedError(
+                "PDF Chats attachment type is not configured and must be validated in Kommo"
+            )
+        catalog = get_cached_catalog()
+        if not catalog:
+            raise KommoAPIError("Catalog is empty, cannot prepare the PDF for Kommo")
+        fingerprint = catalog_fingerprint(catalog)
+        pdf_path = await asyncio.to_thread(ensure_catalog_pdf, catalog)
+        semantic_pdf = {
+            "type": "catalog_pdf",
+            "filename": pdf_path.name,
+            "catalog_fingerprint": fingerprint,
+        }
+        requests.append(
+            _MediaRequest(
+                media_type="catalog_pdf",
+                cache_key=fingerprint,
+                attachment_type="file",
+                semantic_attachment=_semantic_attachments({"catalog_pdf": semantic_pdf})[0],
+                pdf_path=pdf_path,
+            )
+        )
+    return requests
+
+
+def _semantic_attachments(result: dict) -> list[dict]:
+    # Imported lazily so Phase 4 can import this router from jobs without a module cycle.
+    from app.integrations.kommo.jobs import _semantic_attachments_from_result
+
+    return _semantic_attachments_from_result(result)
+
+
+def _normalize_source_url(source_url: str) -> str:
+    value = source_url.strip()
+    try:
+        parsed = urlsplit(value)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return value
+    if not parsed.scheme or not hostname:
+        return value
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    if port and not ((parsed.scheme.lower() == "https" and port == 443) or (parsed.scheme.lower() == "http" and port == 80)):
+        host = f"{host}:{port}"
+    return urlunsplit((parsed.scheme.lower(), host, parsed.path or "/", parsed.query, ""))
+
+
+async def _get_or_upload_media(media: _MediaRequest, files: KommoFiles) -> KommoUploadedFile:
+    lock_key = f"kommo-media:{media.media_type}:{media.cache_key}"
+    async with db.get_db().transaction():
+        await db.fetch_one("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))", {"lock_key": lock_key})
+        cached = await db.fetch_one(
+            """
+            SELECT drive_uuid, drive_version_uuid, file_name, mime_type, file_size
+            FROM kommo_media_cache
+            WHERE media_type = :media_type AND cache_key = :cache_key
+            """,
+            {"media_type": media.media_type, "cache_key": media.cache_key},
+        )
+        if cached:
+            return _uploaded_file_from_record(cached)
+
+        if media.media_type == "product_image":
+            uploaded = await files.upload_image_from_url(media.image_url or "")
+        else:
+            uploaded = await files.upload_file(media.pdf_path or Path(), mime_type="application/pdf")
+        await db.execute(
+            """
+            INSERT INTO kommo_media_cache (
+                media_type, cache_key, drive_uuid, drive_version_uuid,
+                file_name, mime_type, file_size
+            ) VALUES (
+                :media_type, :cache_key, CAST(:drive_uuid AS uuid),
+                CAST(:drive_version_uuid AS uuid), :file_name, :mime_type, :file_size
+            )
+            ON CONFLICT (media_type, cache_key) DO NOTHING
+            """,
+            {
+                "media_type": media.media_type,
+                "cache_key": media.cache_key,
+                "drive_uuid": uploaded.drive_uuid,
+                "drive_version_uuid": uploaded.drive_version_uuid,
+                "file_name": uploaded.file_name,
+                "mime_type": uploaded.mime_type,
+                "file_size": uploaded.file_size,
+            },
+        )
+        return uploaded
+
+
+def _uploaded_file_from_record(record) -> KommoUploadedFile:
+    return KommoUploadedFile(
+        drive_uuid=str(record["drive_uuid"]),
+        drive_version_uuid=str(record["drive_version_uuid"]),
+        file_name=str(record["file_name"]),
+        mime_type=str(record["mime_type"]),
+        file_size=int(record["file_size"]),
+    )
+
+
+def _request_fingerprint(
+    *,
+    job_id: str,
+    talk_id: str,
+    media: _MediaRequest,
+    text: str,
+    position: int,
+) -> str:
+    logical_send = {
+        "job_id": job_id,
+        "talk_id": talk_id,
+        "media_type": media.media_type,
+        "cache_key": media.cache_key,
+        "attachment_type": media.attachment_type,
+        "text_hash": hashlib.sha256(text.encode()).hexdigest(),
+        "position": position,
+    }
+    encoded = json.dumps(logical_send, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def _claim_delivery(
+    *,
+    job_id: str,
+    media_type: str,
+    request_fingerprint: str,
+    attachment_metadata: dict,
+):
+    values = {
+        "job_id": job_id,
+        "media_type": media_type,
+        "request_fingerprint": request_fingerprint,
+        "attachment_metadata": json.dumps(attachment_metadata, separators=(",", ":")),
+    }
+    async with db.get_db().transaction():
+        await db.execute(
+            """
+            INSERT INTO kommo_outbound_deliveries (
+                job_id, transport, media_type, status, request_fingerprint, attachment_metadata
+            ) VALUES (
+                CAST(:job_id AS uuid), 'chats_api', :media_type, 'prepared',
+                :request_fingerprint, CAST(:attachment_metadata AS jsonb)
+            )
+            ON CONFLICT (job_id, transport, request_fingerprint)
+                WHERE request_fingerprint IS NOT NULL
+            DO NOTHING
+            """,
+            values,
+        )
+        claimed = await db.fetch_one(
+            """
+            UPDATE kommo_outbound_deliveries
+            SET status = 'sending',
+                attachment_metadata = CAST(:attachment_metadata AS jsonb),
+                provider_message_id = NULL,
+                accepted_at = NULL,
+                last_error = NULL,
+                updated_at = NOW()
+            WHERE job_id = CAST(:job_id AS uuid)
+              AND transport = 'chats_api'
+              AND request_fingerprint = :request_fingerprint
+              AND status IN ('prepared', 'failed')
+            RETURNING status, provider_message_id
+            """,
+            values,
+        )
+        if claimed:
+            return _DeliveryClaim(
+                status=str(claimed["status"]),
+                provider_message_id=(
+                    str(claimed["provider_message_id"])
+                    if claimed["provider_message_id"]
+                    else None
+                ),
+                send_allowed=True,
+            )
+        existing = await db.fetch_one(
+            """
+            SELECT status, provider_message_id
+            FROM kommo_outbound_deliveries
+            WHERE job_id = CAST(:job_id AS uuid)
+              AND transport = 'chats_api'
+              AND request_fingerprint = :request_fingerprint
+            """,
+            values,
+        )
+        if not existing:
+            raise KommoDeliveryStateError("Kommo delivery claim could not be established")
+        return _DeliveryClaim(
+            status=str(existing["status"]),
+            provider_message_id=(
+                str(existing["provider_message_id"])
+                if existing["provider_message_id"]
+                else None
+            ),
+            send_allowed=False,
+        )
+
+
+async def _send_claimed_delivery(
+    client: KommoClient,
+    *,
+    job_id: str,
+    talk_id: str,
+    text: str,
+    uploaded: KommoUploadedFile,
+    media: _MediaRequest,
+    request_fingerprint: str,
+) -> str:
+    try:
+        response = await client.send_talk_message(
+            talk_id,
+            text=text or None,
+            attachment=uploaded.attachment(media.attachment_type),
+        )
+        provider_message_id = response.get("id") if isinstance(response, dict) else None
+        if not isinstance(provider_message_id, str) or not provider_message_id.strip():
+            raise KommoAPIError("Kommo send-message response is missing the message ID")
+    except Exception as error:
+        status = "failed" if _is_definitive_failure(error) else "delivery_unknown"
+        await _mark_delivery_error(job_id, request_fingerprint, status, error)
+        raise
+
+    accepted = await db.fetch_one(
+        """
+        UPDATE kommo_outbound_deliveries
+        SET status = 'accepted',
+            provider_message_id = :provider_message_id,
+            accepted_at = NOW(),
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE transport = 'chats_api'
+          AND job_id = CAST(:job_id AS uuid)
+          AND request_fingerprint = :request_fingerprint
+          AND status = 'sending'
+        RETURNING provider_message_id
+        """,
+        {
+            "job_id": job_id,
+            "request_fingerprint": request_fingerprint,
+            "provider_message_id": provider_message_id.strip(),
+        },
+    )
+    if not accepted:
+        raise KommoDeliveryStateError("Kommo delivery acceptance could not be persisted")
+    return provider_message_id.strip()
+
+
+def _is_definitive_failure(error: Exception) -> bool:
+    return (
+        isinstance(error, KommoAPIError)
+        and error.status_code is not None
+        and error.status_code < 500
+        and error.status_code != 408
+    )
+
+
+async def _mark_delivery_error(
+    job_id: str,
+    request_fingerprint: str,
+    status: str,
+    error: Exception,
+) -> None:
+    await db.execute(
+        """
+        UPDATE kommo_outbound_deliveries
+        SET status = :status,
+            last_error = :last_error,
+            updated_at = NOW()
+        WHERE transport = 'chats_api'
+          AND job_id = CAST(:job_id AS uuid)
+          AND request_fingerprint = :request_fingerprint
+          AND status = 'sending'
+        """,
+        {
+            "job_id": job_id,
+            "request_fingerprint": request_fingerprint,
+            "status": status,
+            "last_error": sanitize_kommo_error(error),
+        },
+    )
