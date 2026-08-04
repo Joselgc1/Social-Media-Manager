@@ -223,6 +223,7 @@ class PersistentKommoJob(BaseModel):
     sender_profile_url: str | None = None
     combined_message: str
     media_url: str | None = None
+    message_type: str | None = None
     return_url: str | None = None
     public_comment_context: dict | None = None
     meta_context_event_id: str | None = None

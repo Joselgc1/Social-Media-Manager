@@ -212,6 +212,57 @@ def test_nested_form_data_parsing():
     assert parsed["add"][0]["author"]["type"] == "external"
 
 
+def test_whatsapp_voice_attachment_preserves_type_and_url():
+    event = normalize_kommo_webhook({
+        "add[0][id]": "voice-1",
+        "add[0][origin]": "whatsapp",
+        "add[0][message_type]": "text",
+        "add[0][attachment][type]": "voice",
+        "add[0][attachment][link]": "https://media.example/voice.ogg?signature=secret",
+    })[0]
+
+    assert event.channel == "whatsapp"
+    assert event.message_type == "voice"
+    assert event.media_url == "https://media.example/voice.ogg?signature=secret"
+
+
+@pytest.mark.parametrize("message_type", ["audio", "voice"])
+def test_instagram_audio_attachment_preserves_type_and_url(message_type):
+    event = normalize_kommo_webhook({
+        "message": {
+            "add": [{
+                "id": "audio-1",
+                "origin": "instagram",
+                "attachment": {
+                    "type": message_type,
+                    "link": "https://media.example/instagram.m4a",
+                },
+            }],
+        },
+    })[0]
+
+    assert event.channel == "instagram"
+    assert event.message_type == message_type
+    assert event.media_url == "https://media.example/instagram.m4a"
+
+
+@pytest.mark.parametrize("message_type", ["picture", "image"])
+def test_existing_image_attachment_preserves_url(message_type):
+    event = normalize_kommo_webhook({
+        "add": [{
+            "id": "image-1",
+            "origin": "whatsapp",
+            "attachment": {
+                "type": message_type,
+                "link": "https://media.example/product.jpg",
+            },
+        }],
+    })[0]
+
+    assert event.message_type == message_type
+    assert event.media_url == "https://media.example/product.jpg"
+
+
 def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
     from app.config import get_config
 

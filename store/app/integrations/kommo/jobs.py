@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 from app import db
 from app.ai.engine import generate_response
+from app.ai.transcription import AudioTranscriptionError, transcribe_audio_url
 from app.config import get_config
 from app.crm import conversations, escalations, sessions
 from app.crm.channel_mappings import (
@@ -59,6 +60,7 @@ _ACTIVE_SALESBOT_STATUSES = {
     "continuing",
 }
 _TRANSIENT_CONTINUATION_STATUSES = {429, 500, 502, 503, 504}
+_AUDIO_MESSAGE_TYPES = {"voice", "audio"}
 COMMENT_MIRROR_RECONCILIATION_SECONDS = 30
 COMMENT_CALLBACK_DEDUP_SECONDS = 300
 COMMENT_PRIVATE_SUPERSEDED_REASON = "superseded_by_instagram_comment"
@@ -114,7 +116,7 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
 
         pending = await db.fetch_one(
             """
-            SELECT id, combined_message
+            SELECT id, combined_message, message_type
             FROM kommo_message_jobs
             WHERE correlation_id = :correlation_id
               AND interaction_type = :interaction_type
@@ -132,6 +134,10 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                 UPDATE kommo_message_jobs
                 SET combined_message = :combined_message,
                     media_url = COALESCE(:media_url, media_url),
+                    message_type = CASE
+                        WHEN :message_type IN ('voice', 'audio') THEN :message_type
+                        ELSE COALESCE(message_type, :message_type)
+                    END,
                     lead_id = COALESCE(lead_id, :lead_id),
                     contact_id = COALESCE(contact_id, :contact_id),
                     chat_id = COALESCE(chat_id, :chat_id),
@@ -152,6 +158,7 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                 {
                     "combined_message": merged,
                     "media_url": event.media_url,
+                    "message_type": event.message_type,
                     "lead_id": event.lead_id,
                     "contact_id": event.contact_id,
                     "chat_id": event.chat_id,
@@ -178,12 +185,13 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
             INSERT INTO kommo_message_jobs (
                 correlation_id, external_message_id, lead_id, contact_id, chat_id, talk_id,
                 author_id, author_name, author_username, author_profile_url, sender_username, sender_profile_url,
-                origin, channel, interaction_type, combined_message, media_url, status, buffer_expires_at
+                origin, channel, interaction_type, combined_message, media_url, message_type,
+                status, buffer_expires_at
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :chat_id, :talk_id,
                 :author_id, :author_name, :author_username, :author_profile_url, :sender_username, :sender_profile_url,
-                :origin, :channel, :interaction_type, :combined_message, :media_url, 'pending',
-                NOW() + (:debounce_seconds * INTERVAL '1 second')
+                :origin, :channel, :interaction_type, :combined_message, :media_url, :message_type,
+                'pending', NOW() + (:debounce_seconds * INTERVAL '1 second')
             )
             RETURNING id
             """,
@@ -824,6 +832,8 @@ async def _process_ready_job(job: dict) -> None:
         ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else None
         profile = build_kommo_customer_profile(job=job, contact=contact)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
+        effective_message_text = await _effective_customer_message(job)
+        job = {**job, "combined_message": effective_message_text}
         current_private_context = _job_instagram_content_context(job)
         if (
             job.get("channel") == "instagram"
@@ -926,7 +936,7 @@ async def _process_ready_job(job: dict) -> None:
                 )
 
         sender_id = _local_sender_id(job)
-        media_url = job.get("media_url")
+        media_url = None if _is_audio_job(job) else job.get("media_url")
         result = await generate_response(
             channel=job.get("channel") or "whatsapp",
             sender_id=sender_id,
@@ -1090,6 +1100,13 @@ async def _process_ready_job(job: dict) -> None:
                 delivered_attachments=None,
             )
         await _mark_job_sent(job["id"], job.get("processing_lease_id"), response_payload)
+    except AudioTranscriptionError as e:
+        error = sanitize_job_error(e)
+        logger.warning("Kommo voice transcription failed: job_id=%s error=%s", job["id"], error)
+        if e.retryable and int(job.get("attempt_count") or 0) < MAX_JOB_ATTEMPTS:
+            await _retry_ready_job(job, error)
+        else:
+            await _fail_ready_job(client, job, error)
     except KommoPartialDeliveryError as e:
         logger.warning(
             "Kommo media response partially delivered: job_id=%s delivered_count=%s",
@@ -1771,6 +1788,50 @@ async def _mark_job_continuing(
     return bool(updated)
 
 
+async def _retry_ready_job(job: dict, error: str) -> None:
+    await db.execute(
+        """
+        UPDATE kommo_message_jobs
+        SET status = 'ready',
+            last_error = :last_error,
+            processing_started_at = NULL,
+            processing_lease_id = NULL,
+            ai_started_at = NULL,
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'processing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+        """,
+        {
+            "id": job["id"],
+            "processing_lease_id": job.get("processing_lease_id"),
+            "last_error": sanitize_job_error(error),
+        },
+    )
+
+
+async def _fail_ready_job(client: KommoClient, job: dict, error: str) -> None:
+    if job.get("return_url"):
+        continuation_data = {"status": "fail", "message": ""}
+        if await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
+            try:
+                await client.continue_salesbot(job["return_url"], data=continuation_data)
+            except Exception as continuation_error:
+                await _mark_job(
+                    job["id"],
+                    "delivery_unknown",
+                    sanitize_job_error(continuation_error),
+                    processing_lease_id=job.get("processing_lease_id"),
+                )
+                return
+    await _mark_job(
+        job["id"],
+        "failed",
+        error,
+        processing_lease_id=job.get("processing_lease_id"),
+    )
+
+
 async def _mark_job_sent(job_id: str, processing_lease_id: str | None, response_payload) -> bool:
     updated = await db.fetch_one(
         """
@@ -2028,6 +2089,7 @@ def _event_values(event: NormalizedKommoEvent, external_message_id: str, text: s
         "interaction_type": event.interaction_type,
         "combined_message": text,
         "media_url": event.media_url,
+        "message_type": event.message_type,
     }
 
 
@@ -2073,11 +2135,46 @@ async def _record_message_receipt(
 
 
 def _message_placeholder(event: NormalizedKommoEvent) -> str:
+    if _is_audio_message_type(event.message_type):
+        return _audio_placeholder(event.message_type)
     if event.media_url:
         return "El cliente envio una imagen por Kommo."
     if event.message_type:
         return f"[Mensaje de tipo no soportado por Kommo: {event.message_type}]"
     return "[Mensaje recibido sin texto por Kommo]"
+
+
+async def _effective_customer_message(job: dict) -> str:
+    combined_message = str(job.get("combined_message") or "").strip()
+    if not _is_audio_job(job):
+        return combined_message
+
+    media_url = str(job.get("media_url") or "").strip()
+    if not media_url:
+        raise AudioTranscriptionError("Audio attachment URL is missing", retryable=False)
+    transcription = (await transcribe_audio_url(media_url)).strip()
+    if not transcription:
+        raise AudioTranscriptionError("Audio transcription was empty", retryable=False)
+
+    for message_type in _AUDIO_MESSAGE_TYPES:
+        placeholder = _audio_placeholder(message_type)
+        if placeholder in combined_message:
+            # One URL is retained per debounce job; separate attachment storage is needed for multiple voice notes.
+            return combined_message.replace(placeholder, transcription, 1)
+    return "\n".join(part for part in (combined_message, transcription) if part)
+
+
+def _is_audio_job(job: dict) -> bool:
+    return _is_audio_message_type(job.get("message_type"))
+
+
+def _is_audio_message_type(message_type: object) -> bool:
+    return str(message_type or "").strip().lower() in _AUDIO_MESSAGE_TYPES
+
+
+def _audio_placeholder(message_type: object) -> str:
+    normalized = str(message_type or "voice").strip().lower()
+    return f"[Kommo {normalized} pendiente de transcripcion]"
 
 
 def _local_sender_id(job: dict) -> str:

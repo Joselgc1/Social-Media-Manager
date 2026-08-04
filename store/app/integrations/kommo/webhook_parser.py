@@ -10,6 +10,8 @@ from app.integrations.kommo.models import NormalizedKommoEvent
 
 logger = logging.getLogger(__name__)
 
+INCOMING_MEDIA_TYPES = {"picture", "image", "voice", "audio"}
+
 
 def parse_nested_form(flat_items: dict[str, Any]) -> dict[str, Any]:
     root: dict[str, Any] = {}
@@ -87,10 +89,13 @@ def _message_event(
     sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else {}
     origin = _string_or_none(item.get("origin"))
-    message_type = _string_or_none(item.get("message_type") or attachment.get("type"))
+    attachment_type = _string_or_none(attachment.get("type"))
+    message_type = _string_or_none(item.get("message_type") or attachment_type)
+    if str(attachment_type or "").strip().lower() in {"voice", "audio"}:
+        message_type = attachment_type
     channel = origin_to_channel(origin)
     media_url = None
-    if attachment.get("type") in {"picture", "image"}:
+    if str(attachment_type or "").strip().lower() in INCOMING_MEDIA_TYPES:
         media_url = _string_or_none(attachment.get("link"))
     explicit_interaction_type = normalize_interaction_type(item.get("interaction_type")) or default_interaction_type
     comment_fields = _comment_fields(item)

@@ -1473,6 +1473,161 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch, ca
     assert "Kommo Salesbot continuation succeeded: job_id=job interaction_type=private_message" in caplog.text
 
 
+def _install_voice_ready_job_dependencies(monkeypatch, jobs, *, allowed=True):
+    mock_db = _install_ready_job_db(
+        monkeypatch,
+        jobs,
+        settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"},
+    )
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=allowed,
+            reason=None if allowed else "global_ai_paused",
+            needs_ai_mode_initialization=False,
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+    return mock_db, client
+
+
+def _voice_ready_job(**overrides):
+    job = {
+        "id": "voice-job",
+        "processing_lease_id": LEASE_ID,
+        "attempt_count": 1,
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "combined_message": "[Kommo voice pendiente de transcripcion]",
+        "message_type": "voice",
+        "media_url": "https://media.example/voice.ogg?signature=secret",
+        "channel": "whatsapp",
+        "correlation_id": "corr",
+    }
+    job.update(overrides)
+    return job
+
+
+@pytest.mark.asyncio
+async def test_ready_voice_job_transcribes_before_existing_salesbot_flow(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    _, client = _install_voice_ready_job_dependencies(monkeypatch, jobs)
+    transcribe = AsyncMock(return_value="Quiero una pijama rosada")
+    monkeypatch.setattr(jobs, "transcribe_audio_url", transcribe)
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(return_value={"text": "Claro, te muestro opciones.", "escalated": False}),
+    )
+
+    await jobs._process_ready_job(_voice_ready_job())
+
+    transcribe.assert_awaited_once()
+    assert jobs.generate_response.await_args.kwargs["message_text"] == "Quiero una pijama rosada"
+    assert jobs.generate_response.await_args.kwargs["media_url"] is None
+    assert jobs.generate_response.await_args.kwargs["message_source_id"] == "kommo-job:voice-job"
+    client.continue_salesbot.assert_awaited_once()
+    assert client.continue_salesbot.await_args.kwargs["data"]["message"] == "Claro, te muestro opciones."
+
+
+@pytest.mark.asyncio
+async def test_ready_text_job_does_not_invoke_transcription(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    _, client = _install_voice_ready_job_dependencies(monkeypatch, jobs)
+    transcribe = AsyncMock()
+    monkeypatch.setattr(jobs, "transcribe_audio_url", transcribe)
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(return_value={"text": "Si tenemos.", "escalated": False}),
+    )
+
+    await jobs._process_ready_job(_voice_ready_job(
+        combined_message="Tienen pijamas?",
+        message_type="text",
+        media_url=None,
+    ))
+
+    transcribe.assert_not_awaited()
+    assert jobs.generate_response.await_args.kwargs["message_text"] == "Tienen pijamas?"
+    client.continue_salesbot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ready_voice_job_missing_url_fails_without_ai_reply(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db, client = _install_voice_ready_job_dependencies(monkeypatch, jobs)
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock())
+
+    await jobs._process_ready_job(_voice_ready_job(media_url=None))
+
+    jobs.generate_response.assert_not_awaited()
+    client.continue_salesbot.assert_awaited_once_with(
+        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        data={"status": "fail", "message": ""},
+    )
+    assert any(
+        call.args[1].get("status") == "failed"
+        and call.args[1].get("last_error") == "Audio attachment URL is missing"
+        for call in mock_db.execute.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_retryable_voice_failure_is_sanitized_and_requeued(monkeypatch):
+    from app.ai.transcription import AudioTranscriptionError
+    from app.integrations.kommo import jobs
+
+    mock_db, client = _install_voice_ready_job_dependencies(monkeypatch, jobs)
+    signed_url = "https://media.example/voice.ogg?access_token=secret"
+    monkeypatch.setattr(
+        jobs,
+        "transcribe_audio_url",
+        AsyncMock(side_effect=AudioTranscriptionError(f"download failed {signed_url}", retryable=True)),
+    )
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock())
+
+    await jobs._process_ready_job(_voice_ready_job(media_url=signed_url, attempt_count=1))
+
+    jobs.generate_response.assert_not_awaited()
+    client.continue_salesbot.assert_not_awaited()
+    retry_call = next(call for call in mock_db.execute.await_args_list if "SET status = 'ready'" in call.args[0])
+    assert signed_url not in retry_call.args[1]["last_error"]
+    assert "secret" not in retry_call.args[1]["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_suppressed_voice_job_persists_transcription_once(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    _, client = _install_voice_ready_job_dependencies(monkeypatch, jobs, allowed=False)
+    monkeypatch.setattr(jobs, "transcribe_audio_url", AsyncMock(return_value="Necesito hablar con alguien"))
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock())
+
+    await jobs._process_ready_job(_voice_ready_job())
+
+    jobs.generate_response.assert_not_awaited()
+    jobs.conversations.store_message.assert_awaited_once()
+    persisted = jobs.conversations.store_message.await_args.kwargs
+    assert persisted["content"] == "Necesito hablar con alguien"
+    assert "pendiente de transcripcion" not in persisted["content"]
+    assert persisted["source_id"] == "kommo-job:voice-job"
+    client.continue_salesbot.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("ai_result", "delivered_attachments", "expected_text"),

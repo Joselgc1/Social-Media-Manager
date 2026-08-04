@@ -48,6 +48,7 @@ async def test_store_migration_runner_executes_schema_and_closes_connection(monk
     media_content_hash_migration_sql = runner.KOMMO_MEDIA_CONTENT_HASH_MIGRATION_PATH.read_text(
         encoding="utf-8"
     )
+    inbound_voice_migration_sql = runner.KOMMO_INBOUND_VOICE_MIGRATION_PATH.read_text(encoding="utf-8")
     assert connection.execute.await_args_list[1].args == (migration_sql,)
     assert connection.execute.await_args_list[2].args == (delivery_migration_sql,)
     assert connection.execute.await_args_list[3].args == (instagram_content_migration_sql,)
@@ -59,8 +60,9 @@ async def test_store_migration_runner_executes_schema_and_closes_connection(monk
     assert connection.execute.await_args_list[9].args == (outbound_uniqueness_migration_sql,)
     assert connection.execute.await_args_list[10].args == (media_cache_migration_sql,)
     assert connection.execute.await_args_list[11].args == (media_content_hash_migration_sql,)
+    assert connection.execute.await_args_list[12].args == (inbound_voice_migration_sql,)
     assert connection.execute.await_args_list[0].args[0] == "SELECT pg_advisory_lock($1)"
-    assert connection.execute.await_args_list[12].args[0] == "SELECT pg_advisory_unlock($1)"
+    assert connection.execute.await_args_list[13].args[0] == "SELECT pg_advisory_unlock($1)"
     connection.close.assert_awaited_once()
 
 
