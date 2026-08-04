@@ -66,16 +66,26 @@ def _final_upload_response(*, file_uuid=FILE_UUID, version_uuid=VERSION_UUID, si
             "download_version": {
                 "href": f"{DRIVE_URL}/download/account/{file_uuid}/{version_uuid}/product.png"
             },
-            "self": {"href": f"{DRIVE_URL}/v1.0/files/{file_uuid}"},
+            "self": {
+                "href": f"{DRIVE_URL}/v1.0/files/{file_uuid}/versions/{version_uuid}"
+            },
         },
         "name": "product",
         "type": "image",
         "session_id": SESSION_ID,
         "size": size,
-        "uuid": file_uuid,
-        "version_uuid": version_uuid,
+        "uuid": version_uuid,
+        "file_uuid": file_uuid,
     }
     return body
+
+
+def _file_response(*, file_uuid=FILE_UUID, version_uuid=VERSION_UUID):
+    return {
+        "uuid": file_uuid,
+        "version_uuid": version_uuid,
+        "_links": {"self": {"href": f"{DRIVE_URL}/v1.0/files/{file_uuid}"}},
+    }
 
 
 def _upload_handler(request, *, content=PNG, part_size=1_000):
@@ -180,6 +190,72 @@ async def test_single_part_upload_uses_self_link_for_file_uuid(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_documented_version_response_maps_uuid_to_version_and_file_uuid_to_parent(monkeypatch):
+    _install_transport(monkeypatch, _upload_handler)
+
+    uploaded = await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+    assert uploaded.drive_uuid == FILE_UUID
+    assert uploaded.drive_version_uuid == VERSION_UUID
+
+
+@pytest.mark.asyncio
+async def test_upload_resolves_parent_from_link_and_documented_file_lookup(monkeypatch):
+    requests = []
+
+    def handler(request):
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response())
+        if request.method == "GET":
+            return httpx.Response(200, json=_file_response())
+        response = _final_upload_response()
+        response.pop("file_uuid")
+        return httpx.Response(200, json=response)
+
+    _install_transport(monkeypatch, handler)
+    uploaded = await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+    assert uploaded.drive_uuid == FILE_UUID
+    assert uploaded.drive_version_uuid == VERSION_UUID
+    assert ("GET", f"/v1.0/files/{FILE_UUID}") in requests
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_file_lookup_with_different_active_version(monkeypatch):
+    other_version = "17006a5b-aa43-4b2f-a380-e851786b9a57"
+
+    def handler(request):
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response())
+        if request.method == "GET":
+            return httpx.Response(200, json=_file_response(version_uuid=other_version))
+        response = _final_upload_response()
+        response.pop("file_uuid")
+        return httpx.Response(200, json=response)
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(KommoAPIError, match="does not contain the uploaded version"):
+        await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_conflicting_direct_version_identifiers(monkeypatch):
+    other_version = "17006a5b-aa43-4b2f-a380-e851786b9a57"
+
+    def handler(request):
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response())
+        response = _final_upload_response()
+        response["version_uuid"] = other_version
+        return httpx.Response(200, json=response)
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(KommoAPIError, match="conflicting version UUIDs"):
+        await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+
+@pytest.mark.asyncio
 async def test_multi_part_upload_follows_each_returned_next_url(monkeypatch):
     uploaded_parts = []
 
@@ -213,8 +289,11 @@ async def test_multi_part_upload_follows_each_returned_next_url(monkeypatch):
 @pytest.mark.parametrize(
     ("mutate", "error"),
     [
-        (lambda response: response.pop("uuid"), "file UUID"),
-        (lambda response: response.pop("version_uuid"), "file-version UUID"),
+        (lambda response: response.pop("uuid"), "valid UUID"),
+        (
+            lambda response: (response.pop("file_uuid"), response.pop("_links")),
+            "parent file UUID",
+        ),
     ],
 )
 async def test_upload_rejects_missing_required_identifiers(monkeypatch, mutate, error):
@@ -270,7 +349,7 @@ async def test_final_chunk_rejects_http_202(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ["uuid", "version_uuid"])
+@pytest.mark.parametrize("field", ["uuid", "file_uuid"])
 async def test_upload_rejects_malformed_final_uuids(monkeypatch, field):
     def handler(request):
         if request.url.path == "/v1.0/sessions":
@@ -307,7 +386,9 @@ async def test_upload_rejects_conflicting_self_link_uuid(monkeypatch):
         if request.url.path == "/v1.0/sessions":
             return httpx.Response(200, json=_session_response())
         response = _final_upload_response()
-        response["_links"]["self"]["href"] = f"{DRIVE_URL}/v1.0/files/{conflicting_uuid}"
+        response["_links"]["self"]["href"] = (
+            f"{DRIVE_URL}/v1.0/files/{conflicting_uuid}/versions/{VERSION_UUID}"
+        )
         return httpx.Response(200, json=response)
 
     _install_transport(monkeypatch, handler)

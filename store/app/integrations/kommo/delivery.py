@@ -54,6 +54,12 @@ class _DeliveryClaim:
     send_allowed: bool
 
 
+@dataclass(frozen=True)
+class _CachedUpload:
+    uploaded: KommoUploadedFile
+    content_hash: str
+
+
 async def deliver_response(
     *,
     job: dict,
@@ -94,7 +100,8 @@ async def deliver_response(
     delivered_attachments: list[dict] = []
     provider_message_ids: list[str] = []
     for index, media in enumerate(media_requests):
-        uploaded = await _get_or_upload_media(media, delivery_files)
+        cached_upload = await _get_or_upload_media(media, delivery_files)
+        uploaded = cached_upload.uploaded
         send_text = clean_text if index == 0 else ""
         request_fingerprint = _request_fingerprint(
             job_id=str(job.get("id") or ""),
@@ -106,6 +113,7 @@ async def deliver_response(
         metadata = {
             "media_type": media.media_type,
             "cache_key": media.cache_key,
+            "content_hash": cached_upload.content_hash,
             "drive_uuid": uploaded.drive_uuid,
             "drive_version_uuid": uploaded.drive_version_uuid,
             "file_name": uploaded.file_name,
@@ -255,47 +263,83 @@ def _normalize_source_url(source_url: str) -> str:
     return urlunsplit((parsed.scheme.lower(), host, parsed.path or "/", parsed.query, ""))
 
 
-async def _get_or_upload_media(media: _MediaRequest, files: KommoFiles) -> KommoUploadedFile:
-    lock_key = f"kommo-media:{media.media_type}:{media.cache_key}"
-    async with db.get_db().transaction():
-        await db.fetch_one("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))", {"lock_key": lock_key})
-        cached = await db.fetch_one(
-            """
-            SELECT drive_uuid, drive_version_uuid, file_name, mime_type, file_size
-            FROM kommo_media_cache
-            WHERE media_type = :media_type AND cache_key = :cache_key
-            """,
-            {"media_type": media.media_type, "cache_key": media.cache_key},
-        )
-        if cached:
-            return _uploaded_file_from_record(cached)
+async def _get_or_upload_media(media: _MediaRequest, files: KommoFiles) -> _CachedUpload:
+    if media.media_type == "product_image":
+        downloaded = await files.download_image(media.image_url or "")
+        content_hash = downloaded.content_hash
+        pdf_data = None
+    else:
+        downloaded = None
+        pdf_data = await asyncio.to_thread(_read_file_bytes, media.pdf_path or Path())
+        content_hash = hashlib.sha256(pdf_data).hexdigest()
 
-        if media.media_type == "product_image":
-            uploaded = await files.upload_image_from_url(media.image_url or "")
-        else:
-            uploaded = await files.upload_file(media.pdf_path or Path(), mime_type="application/pdf")
-        await db.execute(
-            """
-            INSERT INTO kommo_media_cache (
-                media_type, cache_key, drive_uuid, drive_version_uuid,
-                file_name, mime_type, file_size
-            ) VALUES (
-                :media_type, :cache_key, CAST(:drive_uuid AS uuid),
-                CAST(:drive_version_uuid AS uuid), :file_name, :mime_type, :file_size
-            )
-            ON CONFLICT (media_type, cache_key) DO NOTHING
-            """,
-            {
-                "media_type": media.media_type,
-                "cache_key": media.cache_key,
-                "drive_uuid": uploaded.drive_uuid,
-                "drive_version_uuid": uploaded.drive_version_uuid,
-                "file_name": uploaded.file_name,
-                "mime_type": uploaded.mime_type,
-                "file_size": uploaded.file_size,
-            },
+    cached = await _find_cached_upload(media, content_hash)
+    if cached:
+        return _CachedUpload(_uploaded_file_from_record(cached), content_hash)
+
+    if downloaded:
+        uploaded = await files.upload_downloaded_image(downloaded)
+    else:
+        uploaded = await files.upload(
+            pdf_data or b"",
+            file_name=(media.pdf_path or Path()).name,
+            mime_type="application/pdf",
         )
-        return uploaded
+    values = {
+        "media_type": media.media_type,
+        "cache_key": media.cache_key,
+        "content_hash": content_hash,
+        "drive_uuid": uploaded.drive_uuid,
+        "drive_version_uuid": uploaded.drive_version_uuid,
+        "file_name": uploaded.file_name,
+        "mime_type": uploaded.mime_type,
+        "file_size": uploaded.file_size,
+    }
+    stored = await db.fetch_one(
+        """
+        INSERT INTO kommo_media_cache (
+            media_type, cache_key, content_hash, drive_uuid, drive_version_uuid,
+            file_name, mime_type, file_size
+        ) VALUES (
+            :media_type, :cache_key, :content_hash, CAST(:drive_uuid AS uuid),
+            CAST(:drive_version_uuid AS uuid), :file_name, :mime_type, :file_size
+        )
+        ON CONFLICT (media_type, cache_key, content_hash) DO NOTHING
+        RETURNING drive_uuid, drive_version_uuid, file_name, mime_type, file_size
+        """,
+        values,
+    )
+    if not stored:
+        stored = await _find_cached_upload(media, content_hash)
+    if not stored:
+        raise KommoDeliveryStateError("Kommo media cache race could not be resolved")
+    return _CachedUpload(_uploaded_file_from_record(stored), content_hash)
+
+
+async def _find_cached_upload(media: _MediaRequest, content_hash: str):
+    return await db.fetch_one(
+        """
+        SELECT drive_uuid, drive_version_uuid, file_name, mime_type, file_size
+        FROM kommo_media_cache
+        WHERE media_type = :media_type
+          AND cache_key = :cache_key
+          AND content_hash = :content_hash
+        """,
+        {
+            "media_type": media.media_type,
+            "cache_key": media.cache_key,
+            "content_hash": content_hash,
+        },
+    )
+
+
+def _read_file_bytes(path: Path) -> bytes:
+    if not path.is_file():
+        raise KommoAPIError("Kommo cache source path is not an existing file")
+    data = path.read_bytes()
+    if not data:
+        raise KommoAPIError("Kommo cache source file is empty")
+    return data
 
 
 def _uploaded_file_from_record(record) -> KommoUploadedFile:

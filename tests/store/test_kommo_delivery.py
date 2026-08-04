@@ -7,7 +7,7 @@ import pytest
 from app.integrations.kommo import delivery
 from app.integrations.kommo.client import KommoAPIError
 from app.integrations.kommo.delivery import KommoDeliveryStateError, deliver_response
-from app.integrations.kommo.files import KommoUploadedFile
+from app.integrations.kommo.files import KommoDownloadedImage, KommoUploadedFile
 
 JOB = {
     "id": "5d81fb83-a66f-44da-af6d-518d52eb1baf",
@@ -69,7 +69,12 @@ def _install_chats_dependencies(monkeypatch, *, claim_status="sending"):
     monkeypatch.setattr(
         delivery,
         "_get_or_upload_media",
-        AsyncMock(side_effect=lambda media, files: _uploaded(media.media_type)),
+        AsyncMock(
+            side_effect=lambda media, files: delivery._CachedUpload(
+                _uploaded(media.media_type),
+                "a" * 64,
+            )
+        ),
     )
     monkeypatch.setattr(
         delivery,
@@ -264,8 +269,28 @@ class _TransactionDB:
         yield
 
 
+def _downloaded(content_hash="a" * 64):
+    return KommoDownloadedImage(
+        data=b"image-bytes",
+        file_name="item.png",
+        mime_type="image/png",
+        content_hash=content_hash,
+    )
+
+
+def _cache_record(uploaded=None):
+    uploaded = uploaded or _uploaded("product_image")
+    return {
+        "drive_uuid": uploaded.drive_uuid,
+        "drive_version_uuid": uploaded.drive_version_uuid,
+        "file_name": uploaded.file_name,
+        "mime_type": uploaded.mime_type,
+        "file_size": uploaded.file_size,
+    }
+
+
 @pytest.mark.asyncio
-async def test_media_cache_hit_avoids_reupload(monkeypatch):
+async def test_identical_image_bytes_reuse_cached_upload(monkeypatch):
     media = delivery._MediaRequest(
         media_type="product_image",
         cache_key="image-key",
@@ -273,29 +298,109 @@ async def test_media_cache_hit_avoids_reupload(monkeypatch):
         semantic_attachment={"type": "product_image"},
         image_url="https://cdn.example.com/item.png",
     )
-    files = SimpleNamespace(upload_image_from_url=AsyncMock())
-    monkeypatch.setattr(delivery.db, "get_db", lambda: _TransactionDB())
+    files = SimpleNamespace(
+        download_image=AsyncMock(return_value=_downloaded()),
+        upload_downloaded_image=AsyncMock(),
+    )
     monkeypatch.setattr(
         delivery.db,
         "fetch_one",
-        AsyncMock(
-            side_effect=[
-                {"pg_advisory_xact_lock": None},
-                {
-                    "drive_uuid": FILE_UUID,
-                    "drive_version_uuid": VERSION_UUID,
-                    "file_name": "item.png",
-                    "mime_type": "image/png",
-                    "file_size": 100,
-                },
-            ]
-        ),
+        AsyncMock(return_value=_cache_record()),
     )
 
-    uploaded = await delivery._get_or_upload_media(media, files)
+    cached = await delivery._get_or_upload_media(media, files)
 
-    assert uploaded.drive_uuid == FILE_UUID
-    files.upload_image_from_url.assert_not_awaited()
+    assert cached.uploaded.drive_uuid == FILE_UUID
+    assert cached.content_hash == "a" * 64
+    files.download_image.assert_awaited_once()
+    files.upload_downloaded_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_image_source_with_changed_bytes_creates_new_cache_entry(monkeypatch):
+    media = delivery._MediaRequest(
+        media_type="product_image",
+        cache_key="image-key",
+        attachment_type="picture",
+        semantic_attachment={"type": "product_image"},
+        image_url="https://cdn.example.com/item.png",
+    )
+    changed_upload = KommoUploadedFile(
+        drive_uuid="944fc3ca-19f2-4942-8bba-e77fbccd8e31",
+        drive_version_uuid="a9512734-7622-4d19-bf37-f7e44e87940f",
+        file_name="item.png",
+        mime_type="image/png",
+        file_size=101,
+    )
+    files = SimpleNamespace(
+        download_image=AsyncMock(return_value=_downloaded("b" * 64)),
+        upload_downloaded_image=AsyncMock(return_value=changed_upload),
+    )
+    fetch_one = AsyncMock(side_effect=[None, _cache_record(changed_upload)])
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    cached = await delivery._get_or_upload_media(media, files)
+
+    assert cached.uploaded.drive_uuid == changed_upload.drive_uuid
+    files.upload_downloaded_image.assert_awaited_once()
+    insert_values = fetch_one.await_args_list[1].args[1]
+    assert insert_values["cache_key"] == "image-key"
+    assert insert_values["content_hash"] == "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_cache_upload_does_not_hold_database_transaction_during_network_io(monkeypatch):
+    media = delivery._MediaRequest(
+        media_type="product_image",
+        cache_key="image-key",
+        attachment_type="picture",
+        semantic_attachment={"type": "product_image"},
+        image_url="https://cdn.example.com/item.png",
+    )
+    files = SimpleNamespace(
+        download_image=AsyncMock(return_value=_downloaded()),
+        upload_downloaded_image=AsyncMock(return_value=_uploaded("product_image")),
+    )
+    monkeypatch.setattr(
+        delivery.db,
+        "get_db",
+        lambda: (_ for _ in ()).throw(AssertionError("transaction opened")),
+    )
+    monkeypatch.setattr(
+        delivery.db,
+        "fetch_one",
+        AsyncMock(side_effect=[None, _cache_record()]),
+    )
+
+    cached = await delivery._get_or_upload_media(media, files)
+
+    assert cached.uploaded.drive_uuid == FILE_UUID
+    files.upload_downloaded_image.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_catalog_fingerprint_and_pdf_bytes_reuse_cached_upload(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "catalog.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\ncatalog")
+    media = delivery._MediaRequest(
+        media_type="catalog_pdf",
+        cache_key="catalog-fingerprint",
+        attachment_type="file",
+        semantic_attachment={"type": "catalog_pdf"},
+        pdf_path=pdf_path,
+    )
+    files = SimpleNamespace(upload=AsyncMock())
+    fetch_one = AsyncMock(return_value=_cache_record(_uploaded("catalog_pdf")))
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    cached = await delivery._get_or_upload_media(media, files)
+
+    assert cached.uploaded.drive_uuid == PDF_FILE_UUID
+    assert len(cached.content_hash) == 64
+    values = fetch_one.await_args.args[1]
+    assert values["cache_key"] == "catalog-fingerprint"
+    assert values["content_hash"] == cached.content_hash
+    files.upload.assert_not_awaited()
 
 
 @pytest.mark.asyncio

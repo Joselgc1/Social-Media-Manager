@@ -706,6 +706,7 @@ CREATE TABLE IF NOT EXISTS kommo_media_cache (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     media_type TEXT NOT NULL CHECK (media_type IN ('product_image', 'catalog_pdf')),
     cache_key TEXT NOT NULL,
+    content_hash TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
     drive_uuid UUID NOT NULL,
     drive_version_uuid UUID NOT NULL,
     file_name TEXT NOT NULL,
@@ -715,7 +716,8 @@ CREATE TABLE IF NOT EXISTS kommo_media_cache (
     file_size BIGINT NOT NULL CHECK (file_size > 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (media_type, cache_key)
+    CONSTRAINT kommo_media_cache_identity_content_key
+        UNIQUE (media_type, cache_key, content_hash)
 );
 
 DROP TRIGGER IF EXISTS trg_kommo_media_cache_updated_at ON kommo_media_cache;
@@ -724,6 +726,8 @@ CREATE TRIGGER trg_kommo_media_cache_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 COMMENT ON TABLE kommo_media_cache IS 'Reusable Kommo Drive upload identifiers keyed by semantic media content. This table is transport state, not LLM history.';
+COMMENT ON COLUMN kommo_media_cache.cache_key IS 'Deterministic source identity: normalized image URL hash or catalog fingerprint.';
+COMMENT ON COLUMN kommo_media_cache.content_hash IS 'SHA-256 of the validated bytes uploaded to Kommo Drive.';
 
 -- ============================================================
 -- Kommo inbound message receipts

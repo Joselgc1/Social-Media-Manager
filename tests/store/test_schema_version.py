@@ -45,6 +45,7 @@ async def test_store_schema_version_accepts_consolidated_upgrade_version(monkeyp
                     {"version": 9},
                     {"version": 10},
                     {"version": 11},
+                    {"version": 12},
                 ],
                 META_LEASE_COLUMNS,
             ]
@@ -90,6 +91,7 @@ async def test_store_schema_version_rejects_historical_upgrade_without_meta_leas
                     {"version": 9},
                     {"version": 10},
                     {"version": 11},
+                    {"version": 12},
                 ],
                 [{"column_name": "outbound_started_at"}],
             ]

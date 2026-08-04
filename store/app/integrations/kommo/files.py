@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import mimetypes
 import socket
@@ -55,6 +56,14 @@ class KommoUploadedFile:
             "drive_version_uuid": self.drive_version_uuid,
             "type": attachment_type,
         }
+
+
+@dataclass(frozen=True)
+class KommoDownloadedImage:
+    data: bytes
+    file_name: str
+    mime_type: str
+    content_hash: str
 
 
 @dataclass(frozen=True)
@@ -158,7 +167,13 @@ class KommoFiles:
             for offset in range(0, len(data), session.max_part_size)
         )
         result = await self._upload_chunks(session, chunks, clean_mime)
-        return _uploaded_file(result, file_name, clean_mime, len(data), session.drive_url)
+        return await self._resolve_uploaded_file(
+            result,
+            file_name,
+            clean_mime,
+            len(data),
+            session.drive_url,
+        )
 
     async def upload_file(
         self,
@@ -210,14 +225,21 @@ class KommoFiles:
             return final or {}
 
         result = await upload_path()
-        return _uploaded_file(result, file_path.name, clean_mime, file_size, session.drive_url)
+        return await self._resolve_uploaded_file(
+            result,
+            file_path.name,
+            clean_mime,
+            file_size,
+            session.drive_url,
+        )
 
-    async def upload_image_from_url(
+    async def download_image(
         self,
         image_url: str,
         *,
         file_name: str | None = None,
-    ) -> KommoUploadedFile:
+    ) -> KommoDownloadedImage:
+        """Download and validate an image once for hashing and upload."""
         self._require_enabled()
         try:
             data, header_mime, final_url = await self._download_image(image_url)
@@ -232,8 +254,37 @@ class KommoFiles:
         mime_type = header_mime if header_mime in IMAGE_MIME_TYPES else detected_mime
         if not mime_type:
             raise KommoAPIError("Downloaded content is not a supported image")
-        upload_name = file_name or _image_file_name(final_url, mime_type)
-        return await self.upload(data, file_name=upload_name, mime_type=mime_type)
+        upload_name = _validate_file_name(file_name or _image_file_name(final_url, mime_type))
+        return KommoDownloadedImage(
+            data=data,
+            file_name=upload_name,
+            mime_type=mime_type,
+            content_hash=hashlib.sha256(data).hexdigest(),
+        )
+
+    async def upload_downloaded_image(
+        self,
+        image: KommoDownloadedImage,
+    ) -> KommoUploadedFile:
+        """Upload bytes returned by download_image without fetching them again."""
+        if not isinstance(image, KommoDownloadedImage):
+            raise KommoAPIError("Downloaded Kommo image payload is invalid")
+        if hashlib.sha256(image.data).hexdigest() != image.content_hash:
+            raise KommoAPIError("Downloaded Kommo image content hash is invalid")
+        return await self.upload(
+            image.data,
+            file_name=image.file_name,
+            mime_type=image.mime_type,
+        )
+
+    async def upload_image_from_url(
+        self,
+        image_url: str,
+        *,
+        file_name: str | None = None,
+    ) -> KommoUploadedFile:
+        image = await self.download_image(image_url, file_name=file_name)
+        return await self.upload_downloaded_image(image)
 
     async def _download_image(self, image_url: str) -> tuple[bytes, str, str]:
         current_url = image_url
@@ -379,6 +430,80 @@ class KommoFiles:
             raise KommoAPIError(sanitize_kommo_error(e)) from e
         return _files_response_json(response)
 
+    async def _get_json(self, url: str) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=KOMMO_FILES_TIMEOUT_SECONDS) as http_client:
+                response = await http_client.get(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self.client.access_token}",
+                        "Accept": "application/json",
+                    },
+                )
+        except httpx.HTTPError as e:
+            raise KommoAPIError(sanitize_kommo_error(e)) from e
+        return _files_response_json(response)
+
+    async def _resolve_uploaded_file(
+        self,
+        response: dict[str, Any],
+        file_name: str,
+        mime_type: str,
+        file_size: int,
+        drive_url: str,
+    ) -> KommoUploadedFile:
+        _validate_uploaded_file_metadata(response, file_size)
+        response_uuid = response.get("uuid")
+        if not _valid_uuid(response_uuid):
+            raise KommoAPIError("Kommo final upload response is missing a valid UUID")
+
+        linked_file_uuid, linked_version_uuid = _identifiers_from_self_link(response, drive_url)
+        direct_file_uuid = response.get("file_uuid")
+        direct_version_uuid = response.get("version_uuid")
+        if direct_file_uuid is not None:
+            file_uuid = _required_uuid(direct_file_uuid, "parent file UUID")
+            version_uuid = response_uuid.strip()
+            if direct_version_uuid is not None:
+                stated_version_uuid = _required_uuid(direct_version_uuid, "file-version UUID")
+                if stated_version_uuid.lower() != version_uuid.lower():
+                    raise KommoAPIError("Kommo final upload response has conflicting version UUIDs")
+        else:
+            if not linked_file_uuid:
+                raise KommoAPIError("Kommo final upload response is missing the parent file UUID")
+            file_response = await self._get_json(f"{drive_url}/v1.0/files/{linked_file_uuid}")
+            file_uuid, active_version_uuid = _file_identifiers(file_response, drive_url)
+            if file_uuid.lower() != linked_file_uuid.lower():
+                raise KommoAPIError("Kommo file lookup conflicts with the upload response link")
+            if response_uuid.strip().lower() == file_uuid.lower():
+                version_uuid = _required_uuid(direct_version_uuid, "file-version UUID")
+            else:
+                version_uuid = response_uuid.strip()
+                if direct_version_uuid is not None:
+                    stated_version_uuid = _required_uuid(
+                        direct_version_uuid,
+                        "file-version UUID",
+                    )
+                    if stated_version_uuid.lower() != version_uuid.lower():
+                        raise KommoAPIError(
+                            "Kommo final upload response has conflicting version UUIDs"
+                        )
+            if active_version_uuid.lower() != version_uuid.lower():
+                raise KommoAPIError("Kommo file lookup does not contain the uploaded version")
+
+        _validate_identifier_relationship(
+            file_uuid,
+            version_uuid,
+            linked_file_uuid,
+            linked_version_uuid,
+        )
+        return KommoUploadedFile(
+            drive_uuid=file_uuid,
+            drive_version_uuid=version_uuid,
+            file_name=_validate_file_name(file_name),
+            mime_type=mime_type,
+            file_size=file_size,
+        )
+
     async def _post_chunk(
         self,
         url: str,
@@ -430,21 +555,7 @@ def _files_response_json(
     return body
 
 
-def _uploaded_file(
-    response: dict[str, Any],
-    file_name: str,
-    mime_type: str,
-    file_size: int,
-    drive_url: str,
-) -> KommoUploadedFile:
-    file_uuid = response.get("uuid")
-    version_uuid = response.get("version_uuid")
-    if not _valid_uuid(file_uuid):
-        raise KommoAPIError("Kommo final upload response is missing the file UUID")
-    if not _valid_uuid(version_uuid):
-        raise KommoAPIError("Kommo final upload response is missing the file-version UUID")
-    if file_uuid.strip().lower() == version_uuid.strip().lower():
-        raise KommoAPIError("Kommo final upload response does not distinguish file UUIDs")
+def _validate_uploaded_file_metadata(response: dict[str, Any], file_size: int) -> None:
     response_size = response.get("size")
     if not isinstance(response_size, int) or isinstance(response_size, bool):
         raise KommoAPIError("Kommo final upload response is missing the file size")
@@ -454,21 +565,38 @@ def _uploaded_file(
     if not isinstance(file_type, str) or not file_type.strip():
         raise KommoAPIError("Kommo final upload response is missing the file type")
 
-    links = response.get("_links")
-    self_link = links.get("self") if isinstance(links, dict) else None
-    if self_link is not None:
-        linked_file_uuid = _file_uuid_from_self_link(response, drive_url)
-        if not _valid_uuid(linked_file_uuid):
-            raise KommoAPIError("Kommo final upload response has an invalid self link")
-        if linked_file_uuid.strip().lower() != file_uuid.strip().lower():
-            raise KommoAPIError("Kommo final upload response self link conflicts with the file UUID")
-    return KommoUploadedFile(
-        drive_uuid=file_uuid.strip(),
-        drive_version_uuid=version_uuid.strip(),
-        file_name=_validate_file_name(file_name),
-        mime_type=mime_type,
-        file_size=file_size,
+
+def _required_uuid(value: Any, label: str) -> str:
+    if not _valid_uuid(value):
+        raise KommoAPIError(f"Kommo final upload response is missing a valid {label}")
+    return value.strip()
+
+
+def _file_identifiers(response: dict[str, Any], drive_url: str) -> tuple[str, str]:
+    file_uuid = _required_uuid(response.get("uuid"), "file UUID")
+    version_uuid = _required_uuid(response.get("version_uuid"), "file-version UUID")
+    linked_file_uuid, linked_version_uuid = _identifiers_from_self_link(response, drive_url)
+    _validate_identifier_relationship(
+        file_uuid,
+        version_uuid,
+        linked_file_uuid,
+        linked_version_uuid,
     )
+    return file_uuid, version_uuid
+
+
+def _validate_identifier_relationship(
+    file_uuid: str,
+    version_uuid: str,
+    linked_file_uuid: str | None,
+    linked_version_uuid: str | None,
+) -> None:
+    if file_uuid.lower() == version_uuid.lower():
+        raise KommoAPIError("Kommo response does not distinguish file and version UUIDs")
+    if linked_file_uuid and linked_file_uuid.lower() != file_uuid.lower():
+        raise KommoAPIError("Kommo response self link conflicts with the file UUID")
+    if linked_version_uuid and linked_version_uuid.lower() != version_uuid.lower():
+        raise KommoAPIError("Kommo response self link conflicts with the version UUID")
 
 
 def _next_upload_url(response: dict[str, Any], drive_url: str) -> str:
@@ -596,18 +724,23 @@ def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -
     )
 
 
-def _file_uuid_from_self_link(response: dict[str, Any], drive_url: str) -> str | None:
+def _identifiers_from_self_link(
+    response: dict[str, Any],
+    drive_url: str,
+) -> tuple[str | None, str | None]:
     links = response.get("_links")
     self_link = links.get("self") if isinstance(links, dict) else None
     href = self_link.get("href") if isinstance(self_link, dict) else None
+    if href is None:
+        return None, None
     if not isinstance(href, str):
-        return None
+        raise KommoAPIError("Kommo response has an invalid self link")
     try:
         parsed = urlparse(href.strip())
         drive = urlparse(drive_url)
         port = parsed.port
-    except ValueError:
-        return None
+    except ValueError as e:
+        raise KommoAPIError("Kommo response has an invalid self link") from e
     if (
         parsed.scheme != "https"
         or parsed.hostname != drive.hostname
@@ -617,11 +750,23 @@ def _file_uuid_from_self_link(response: dict[str, Any], drive_url: str) -> str |
         or parsed.query
         or parsed.fragment
     ):
-        return None
+        raise KommoAPIError("Kommo response has an invalid self link")
     path_parts = parsed.path.strip("/").split("/")
-    if len(path_parts) != 3 or path_parts[:2] != ["v1.0", "files"]:
-        return None
-    return path_parts[2]
+    if len(path_parts) == 3 and path_parts[:2] == ["v1.0", "files"]:
+        file_uuid = path_parts[2]
+        version_uuid = None
+    elif (
+        len(path_parts) == 5
+        and path_parts[:2] == ["v1.0", "files"]
+        and path_parts[3] == "versions"
+    ):
+        file_uuid = path_parts[2]
+        version_uuid = path_parts[4]
+    else:
+        raise KommoAPIError("Kommo response has an invalid self link")
+    if not _valid_uuid(file_uuid) or (version_uuid is not None and not _valid_uuid(version_uuid)):
+        raise KommoAPIError("Kommo response has an invalid self link")
+    return file_uuid.strip(), version_uuid.strip() if version_uuid else None
 
 
 def _valid_uuid(value: Any) -> bool:
