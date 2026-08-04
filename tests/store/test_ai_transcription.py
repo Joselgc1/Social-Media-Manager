@@ -57,3 +57,33 @@ async def test_transcription_rejects_empty_url_without_download(monkeypatch):
 )
 def test_audio_filename_uses_headers_url_or_mime(content_disposition, url, mime_type, expected):
     assert transcription._audio_filename(content_disposition, url, mime_type) == expected
+
+
+@pytest.mark.parametrize(
+    ("content_disposition", "url", "expected_filename", "expected_mime"),
+    [
+        ('attachment; filename="voice.ogg"', "https://media.example/download", "voice.ogg", "audio/ogg"),
+        (None, "https://media.example/voice.m4a?token=secret", "voice.m4a", "audio/mp4"),
+        (None, "https://media.example/voice.opus", "voice.opus", "audio/opus"),
+    ],
+)
+def test_octet_stream_requires_and_uses_supported_audio_extension(
+    content_disposition,
+    url,
+    expected_filename,
+    expected_mime,
+):
+    assert transcription._validated_audio_metadata(
+        content_disposition,
+        url,
+        "application/octet-stream",
+    ) == (expected_filename, expected_mime)
+
+
+def test_octet_stream_without_supported_extension_is_rejected():
+    with pytest.raises(transcription.AudioTranscriptionError, match="unsupported content type"):
+        transcription._validated_audio_metadata(
+            None,
+            "https://media.example/download?token=secret",
+            "application/octet-stream",
+        )

@@ -270,11 +270,46 @@ async def test_persistent_job_creation_and_duplicate_prevention(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_voice_job_creation_persists_ordered_attachment_and_stable_placeholder(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[None, None, None])
+    mock_db.execute = AsyncMock(return_value="voice-job")
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    await jobs.record_incoming_event(NormalizedKommoEvent(
+        event_type="incoming_message",
+        message_id="voice-1",
+        chat_id="chat",
+        message_type="voice",
+        media_url="https://media.example/voice-1.ogg?signature=secret",
+        origin="whatsapp",
+        channel="whatsapp",
+    ))
+
+    _, values = mock_db.execute.await_args_list[0].args
+    assert values["combined_message"] == "[Kommo voice:voice-1 pendiente de transcripcion]"
+    assert json.loads(values["inbound_attachments"]) == [{
+        "external_message_id": "voice-1",
+        "message_type": "voice",
+        "media_url": "https://media.example/voice-1.ogg?signature=secret",
+    }]
+
+
+@pytest.mark.asyncio
 async def test_debounce_merges_rapid_messages(monkeypatch):
     from app.integrations.kommo import jobs
 
     mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(side_effect=[None, None, {"id": "pending-id", "combined_message": "Hola"}])
+    mock_db.fetch_one = AsyncMock(side_effect=[None, None, {
+        "id": "pending-id",
+        "combined_message": "Hola",
+        "media_url": None,
+        "message_type": None,
+        "inbound_attachments": [],
+    }])
     mock_db.execute = AsyncMock(side_effect=[None, "discarded-id"])
     mock_db.get_db = MagicMock(return_value=_DBHandle())
     monkeypatch.setattr(jobs, "db", mock_db)
@@ -318,6 +353,72 @@ async def test_debounce_merges_rapid_messages(monkeypatch):
     )
     assert update_call.args[1]["combined_message"] == "Hola\nTienen pijamas?"
     assert all("'discarded'" not in call.args[0] for call in mock_db.execute.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_debounce_voice_then_image_keeps_legacy_media_fields_consistent(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[None, None, {
+        "id": "pending-id",
+        "combined_message": jobs._audio_placeholder("voice", "voice-1"),
+        "media_url": "https://media.example/voice-1.ogg",
+        "message_type": "voice",
+        "inbound_attachments": [{
+            "external_message_id": "voice-1",
+            "message_type": "voice",
+            "media_url": "https://media.example/voice-1.ogg",
+        }],
+    }])
+    mock_db.execute = AsyncMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    result = await jobs.record_incoming_event(NormalizedKommoEvent(
+        event_type="incoming_message",
+        message_id="image-1",
+        chat_id="chat",
+        message_type="image",
+        media_url="https://media.example/image-1.jpg",
+        origin="whatsapp",
+        channel="whatsapp",
+    ))
+
+    assert result["status"] == "merged"
+    query, values = mock_db.execute.await_args_list[0].args
+    assert values["media_url"] == "https://media.example/image-1.jpg"
+    assert values["message_type"] == "image"
+    assert json.loads(values["inbound_attachments"]) == []
+    assert "attachment ->> 'external_message_id' = :external_message_id" in query
+
+
+@pytest.mark.asyncio
+async def test_duplicate_voice_webhook_does_not_append_attachment(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[
+        None,
+        {"job_id": "existing-job", "receipt_status": "created"},
+    ])
+    mock_db.execute = AsyncMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    monkeypatch.setattr(jobs, "db", mock_db)
+    event = NormalizedKommoEvent(
+        event_type="incoming_message",
+        message_id="voice-duplicate",
+        chat_id="chat",
+        message_type="voice",
+        media_url="https://media.example/voice.ogg?signature=secret",
+        origin="whatsapp",
+        channel="whatsapp",
+    )
+
+    result = await jobs.record_incoming_event(event)
+
+    assert result == {"status": "duplicate", "job_id": "existing-job"}
+    mock_db.execute.assert_not_awaited()
 
 
 def test_comment_and_private_messages_have_separate_job_correlation():
@@ -1508,14 +1609,92 @@ def _voice_ready_job(**overrides):
         "processing_lease_id": LEASE_ID,
         "attempt_count": 1,
         "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        "combined_message": "[Kommo voice pendiente de transcripcion]",
+        "external_message_id": "voice-message-1",
+        "combined_message": "[Kommo voice:voice-message-1 pendiente de transcripcion]",
         "message_type": "voice",
         "media_url": "https://media.example/voice.ogg?signature=secret",
+        "inbound_attachments": [{
+            "external_message_id": "voice-message-1",
+            "message_type": "voice",
+            "media_url": "https://media.example/voice.ogg?signature=secret",
+        }],
         "channel": "whatsapp",
         "correlation_id": "corr",
     }
     job.update(overrides)
     return job
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("combined_message", "expected"),
+    [
+        (
+            "[Kommo voice:voice-1 pendiente de transcripcion]\n"
+            "[Kommo audio:voice-2 pendiente de transcripcion]\n"
+            "Y también quiero saber el precio",
+            "Primera nota\nSegunda nota\nY también quiero saber el precio",
+        ),
+        (
+            "Primero revisa el catálogo\n"
+            "[Kommo voice:voice-1 pendiente de transcripcion]\n"
+            "[Kommo audio:voice-2 pendiente de transcripcion]",
+            "Primero revisa el catálogo\nPrimera nota\nSegunda nota",
+        ),
+    ],
+    ids=["voice-voice-text", "text-voice-voice"],
+)
+async def test_multiple_voice_notes_preserve_debounce_arrival_order(monkeypatch, combined_message, expected):
+    from app.integrations.kommo import jobs
+
+    transcribe = AsyncMock(side_effect=["Primera nota", "Segunda nota"])
+    monkeypatch.setattr(jobs, "transcribe_audio_url", transcribe)
+    job = {
+        "combined_message": combined_message,
+        "message_type": "audio",
+        "media_url": "https://media.example/voice-2.ogg",
+        "inbound_attachments": [
+            {
+                "external_message_id": "voice-1",
+                "message_type": "voice",
+                "media_url": "https://media.example/voice-1.ogg?signature=one",
+            },
+            {
+                "external_message_id": "voice-2",
+                "message_type": "audio",
+                "media_url": "https://media.example/voice-2.ogg?signature=two",
+            },
+        ],
+    }
+
+    result = await jobs._effective_customer_message(job)
+
+    assert result == expected
+    assert [call.args[0] for call in transcribe.await_args_list] == [
+        "https://media.example/voice-1.ogg?signature=one",
+        "https://media.example/voice-2.ogg?signature=two",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_attachment_metadata_is_transcribed_once(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    transcribe = AsyncMock(return_value="Una sola nota")
+    monkeypatch.setattr(jobs, "transcribe_audio_url", transcribe)
+    attachment = {
+        "external_message_id": "voice-1",
+        "message_type": "voice",
+        "media_url": "https://media.example/voice-1.ogg",
+    }
+
+    result = await jobs._effective_customer_message({
+        "combined_message": "[Kommo voice:voice-1 pendiente de transcripcion]",
+        "inbound_attachments": [attachment, attachment],
+    })
+
+    assert result == "Una sola nota"
+    transcribe.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1558,6 +1737,7 @@ async def test_ready_text_job_does_not_invoke_transcription(monkeypatch):
         combined_message="Tienen pijamas?",
         message_type="text",
         media_url=None,
+        inbound_attachments=[],
     ))
 
     transcribe.assert_not_awaited()
@@ -1572,7 +1752,14 @@ async def test_ready_voice_job_missing_url_fails_without_ai_reply(monkeypatch):
     mock_db, client = _install_voice_ready_job_dependencies(monkeypatch, jobs)
     monkeypatch.setattr(jobs, "generate_response", AsyncMock())
 
-    await jobs._process_ready_job(_voice_ready_job(media_url=None))
+    await jobs._process_ready_job(_voice_ready_job(
+        media_url=None,
+        inbound_attachments=[{
+            "external_message_id": "voice-message-1",
+            "message_type": "voice",
+            "media_url": None,
+        }],
+    ))
 
     jobs.generate_response.assert_not_awaited()
     client.continue_salesbot.assert_awaited_once_with(
@@ -1600,7 +1787,15 @@ async def test_retryable_voice_failure_is_sanitized_and_requeued(monkeypatch):
     )
     monkeypatch.setattr(jobs, "generate_response", AsyncMock())
 
-    await jobs._process_ready_job(_voice_ready_job(media_url=signed_url, attempt_count=1))
+    await jobs._process_ready_job(_voice_ready_job(
+        media_url=signed_url,
+        inbound_attachments=[{
+            "external_message_id": "voice-message-1",
+            "message_type": "voice",
+            "media_url": signed_url,
+        }],
+        attempt_count=1,
+    ))
 
     jobs.generate_response.assert_not_awaited()
     client.continue_salesbot.assert_not_awaited()

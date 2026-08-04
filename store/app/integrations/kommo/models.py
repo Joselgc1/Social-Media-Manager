@@ -224,6 +224,7 @@ class PersistentKommoJob(BaseModel):
     combined_message: str
     media_url: str | None = None
     message_type: str | None = None
+    inbound_attachments: list[dict] = Field(default_factory=list)
     return_url: str | None = None
     public_comment_context: dict | None = None
     meta_context_event_id: str | None = None

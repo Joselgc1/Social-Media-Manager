@@ -95,8 +95,9 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
     """Persist an inbound message and merge it into any still-pending debounce job."""
     external_message_id = event.message_id or f"{event.correlation_id}:{event.created_at or datetime.now(UTC)}"
     text = (event.text or "").strip()
-    if not text:
-        text = _message_placeholder(event)
+    if _is_audio_message_type(event.message_type) or not text:
+        text = _message_placeholder(event, external_message_id)
+    inbound_attachments = _event_inbound_attachments(event, external_message_id)
 
     async with db.get_db().transaction():
         await db.fetch_one(
@@ -116,7 +117,7 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
 
         pending = await db.fetch_one(
             """
-            SELECT id, combined_message, message_type
+            SELECT id, combined_message, media_url, message_type, inbound_attachments
             FROM kommo_message_jobs
             WHERE correlation_id = :correlation_id
               AND interaction_type = :interaction_type
@@ -129,14 +130,25 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
         )
         if pending:
             merged = "\n".join(part for part in (pending["combined_message"], text) if part)
+            merged_media_url, merged_message_type = _merged_legacy_media(
+                pending["media_url"],
+                pending["message_type"],
+                event,
+            )
             await db.execute(
                 """
                 UPDATE kommo_message_jobs
                 SET combined_message = :combined_message,
-                    media_url = COALESCE(:media_url, media_url),
-                    message_type = CASE
-                        WHEN :message_type IN ('voice', 'audio') THEN :message_type
-                        ELSE COALESCE(message_type, :message_type)
+                    media_url = :media_url,
+                    message_type = :message_type,
+                    inbound_attachments = CASE
+                        WHEN CAST(:inbound_attachments AS jsonb) = '[]'::jsonb THEN inbound_attachments
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM jsonb_array_elements(inbound_attachments) AS attachment
+                            WHERE attachment ->> 'external_message_id' = :external_message_id
+                        ) THEN inbound_attachments
+                        ELSE inbound_attachments || CAST(:inbound_attachments AS jsonb)
                     END,
                     lead_id = COALESCE(lead_id, :lead_id),
                     contact_id = COALESCE(contact_id, :contact_id),
@@ -157,8 +169,10 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                 """,
                 {
                     "combined_message": merged,
-                    "media_url": event.media_url,
-                    "message_type": event.message_type,
+                    "media_url": merged_media_url,
+                    "message_type": merged_message_type,
+                    "inbound_attachments": json.dumps(inbound_attachments),
+                    "external_message_id": external_message_id,
                     "lead_id": event.lead_id,
                     "contact_id": event.contact_id,
                     "chat_id": event.chat_id,
@@ -186,11 +200,13 @@ async def record_incoming_event(event: NormalizedKommoEvent) -> dict:
                 correlation_id, external_message_id, lead_id, contact_id, chat_id, talk_id,
                 author_id, author_name, author_username, author_profile_url, sender_username, sender_profile_url,
                 origin, channel, interaction_type, combined_message, media_url, message_type,
+                inbound_attachments,
                 status, buffer_expires_at
             ) VALUES (
                 :correlation_id, :external_message_id, :lead_id, :contact_id, :chat_id, :talk_id,
                 :author_id, :author_name, :author_username, :author_profile_url, :sender_username, :sender_profile_url,
                 :origin, :channel, :interaction_type, :combined_message, :media_url, :message_type,
+                CAST(:inbound_attachments AS jsonb),
                 'pending', NOW() + (:debounce_seconds * INTERVAL '1 second')
             )
             RETURNING id
@@ -2090,6 +2106,7 @@ def _event_values(event: NormalizedKommoEvent, external_message_id: str, text: s
         "combined_message": text,
         "media_url": event.media_url,
         "message_type": event.message_type,
+        "inbound_attachments": json.dumps(_event_inbound_attachments(event, external_message_id)),
     }
 
 
@@ -2126,17 +2143,23 @@ async def _record_message_receipt(
             "interaction_type": event.interaction_type,
             "receipt_status": receipt_status,
             "received_at": event.created_at,
-            "message_text": (event.text or "").strip() or _message_placeholder(event),
+            "message_text": (
+                _message_placeholder(event, external_message_id)
+                if _is_audio_message_type(event.message_type)
+                else (event.text or "").strip() or _message_placeholder(event, external_message_id)
+            ),
             "normalized_text_hash": normalized_text_hash(
-                (event.text or "").strip() or _message_placeholder(event)
+                _message_placeholder(event, external_message_id)
+                if _is_audio_message_type(event.message_type)
+                else (event.text or "").strip() or _message_placeholder(event, external_message_id)
             ),
         },
     )
 
 
-def _message_placeholder(event: NormalizedKommoEvent) -> str:
+def _message_placeholder(event: NormalizedKommoEvent, external_message_id: str | None = None) -> str:
     if _is_audio_message_type(event.message_type):
-        return _audio_placeholder(event.message_type)
+        return _audio_placeholder(event.message_type, external_message_id or event.message_id)
     if event.media_url:
         return "El cliente envio una imagen por Kommo."
     if event.message_type:
@@ -2146,6 +2169,26 @@ def _message_placeholder(event: NormalizedKommoEvent) -> str:
 
 async def _effective_customer_message(job: dict) -> str:
     combined_message = str(job.get("combined_message") or "").strip()
+    attachments = _job_inbound_audio_attachments(job)
+    if attachments:
+        effective_message = combined_message
+        for attachment in attachments:
+            media_url = str(attachment.get("media_url") or "").strip()
+            if not media_url:
+                raise AudioTranscriptionError("Audio attachment URL is missing", retryable=False)
+            transcription = (await transcribe_audio_url(media_url)).strip()
+            if not transcription:
+                raise AudioTranscriptionError("Audio transcription was empty", retryable=False)
+            placeholder = _audio_placeholder(
+                attachment.get("message_type"),
+                attachment.get("external_message_id"),
+            )
+            if placeholder not in effective_message:
+                raise AudioTranscriptionError("Audio attachment placeholder is missing", retryable=False)
+            effective_message = effective_message.replace(placeholder, transcription, 1)
+        return effective_message
+
+    # Jobs created before inbound_attachments was introduced retain the original one-URL behavior.
     if not _is_audio_job(job):
         return combined_message
 
@@ -2172,9 +2215,56 @@ def _is_audio_message_type(message_type: object) -> bool:
     return str(message_type or "").strip().lower() in _AUDIO_MESSAGE_TYPES
 
 
-def _audio_placeholder(message_type: object) -> str:
+def _audio_placeholder(message_type: object, external_message_id: object | None = None) -> str:
     normalized = str(message_type or "voice").strip().lower()
+    if external_message_id:
+        return f"[Kommo {normalized}:{str(external_message_id).strip()} pendiente de transcripcion]"
     return f"[Kommo {normalized} pendiente de transcripcion]"
+
+
+def _event_inbound_attachments(event: NormalizedKommoEvent, external_message_id: str) -> list[dict[str, str | None]]:
+    if not _is_audio_message_type(event.message_type):
+        return []
+    return [{
+        "external_message_id": external_message_id,
+        "message_type": str(event.message_type).strip().lower(),
+        "media_url": event.media_url,
+    }]
+
+
+def _merged_legacy_media(
+    pending_media_url: str | None,
+    pending_message_type: str | None,
+    event: NormalizedKommoEvent,
+) -> tuple[str | None, str | None]:
+    if event.media_url:
+        return event.media_url, event.message_type or pending_message_type
+    return pending_media_url, pending_message_type or event.message_type
+
+
+def _job_inbound_audio_attachments(job: dict) -> list[dict]:
+    value = job.get("inbound_attachments") or []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise AudioTranscriptionError("Audio attachment metadata is invalid", retryable=False) from error
+    if not isinstance(value, list):
+        raise AudioTranscriptionError("Audio attachment metadata is invalid", retryable=False)
+
+    attachments = []
+    seen_message_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or not _is_audio_message_type(item.get("message_type")):
+            continue
+        external_message_id = str(item.get("external_message_id") or "").strip()
+        if not external_message_id:
+            raise AudioTranscriptionError("Audio attachment metadata is invalid", retryable=False)
+        if external_message_id in seen_message_ids:
+            continue
+        seen_message_ids.add(external_message_id)
+        attachments.append(item)
+    return attachments
 
 
 def _local_sender_id(job: dict) -> str:

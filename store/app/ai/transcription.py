@@ -32,6 +32,17 @@ _MIME_EXTENSIONS = {
     "audio/x-wav": ".wav",
     "audio/webm": ".webm",
 }
+_EXTENSION_MIME_TYPES = {
+    ".ogg": "audio/ogg",
+    ".opus": "audio/opus",
+    ".mp3": "audio/mpeg",
+    ".mp4": "audio/mp4",
+    ".mpeg": "audio/mpeg",
+    ".mpga": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+}
 
 
 class AudioTranscriptionError(RuntimeError):
@@ -145,10 +156,11 @@ async def _download_audio_url(url: str) -> DownloadedAudio:
                 if total == 0:
                     raise AudioTranscriptionError("Audio attachment is empty", retryable=False)
 
-                mime_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                filename = _audio_filename(response.headers.get("content-disposition"), safe_url, mime_type)
-                if mime_type and not (mime_type.startswith("audio/") or mime_type == "application/ogg"):
-                    raise AudioTranscriptionError("Audio attachment has an unsupported content type", retryable=False)
+                filename, mime_type = _validated_audio_metadata(
+                    response.headers.get("content-disposition"),
+                    safe_url,
+                    response.headers.get("content-type", ""),
+                )
                 return DownloadedAudio(
                     data=b"".join(chunks),
                     filename=filename,
@@ -165,6 +177,15 @@ async def _download_audio_url(url: str) -> DownloadedAudio:
 
 
 def _audio_filename(content_disposition: str | None, url: str, mime_type: str) -> str:
+    filename = _source_audio_filename(content_disposition, url)
+    clean_name = Path(str(filename or "voice-note")).name
+    suffix = Path(clean_name).suffix.lower()
+    if suffix not in _SUPPORTED_EXTENSIONS:
+        clean_name = f"voice-note{_MIME_EXTENSIONS.get(mime_type, '.ogg')}"
+    return clean_name
+
+
+def _source_audio_filename(content_disposition: str | None, url: str) -> str | None:
     filename = None
     if content_disposition:
         message = Message()
@@ -172,11 +193,28 @@ def _audio_filename(content_disposition: str | None, url: str, mime_type: str) -
         filename = message.get_filename()
     if not filename:
         filename = Path(unquote(urlparse(url).path)).name
-    clean_name = Path(str(filename or "voice-note")).name
-    suffix = Path(clean_name).suffix.lower()
-    if suffix not in _SUPPORTED_EXTENSIONS:
-        clean_name = f"voice-note{_MIME_EXTENSIONS.get(mime_type, '.ogg')}"
-    return clean_name
+    return Path(str(filename)).name if filename else None
+
+
+def _validated_audio_metadata(
+    content_disposition: str | None,
+    url: str,
+    content_type: str,
+) -> tuple[str, str]:
+    mime_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    source_filename = _source_audio_filename(content_disposition, url)
+    source_extension = Path(source_filename or "").suffix.lower()
+    if mime_type in {"", "application/octet-stream"}:
+        if source_extension not in _SUPPORTED_EXTENSIONS:
+            raise AudioTranscriptionError(
+                "Audio attachment has an unsupported content type",
+                retryable=False,
+            )
+        # Preserve raw .opus as audio/opus; do not relabel or convert it to an OGG container.
+        mime_type = _EXTENSION_MIME_TYPES[source_extension]
+    elif not (mime_type.startswith("audio/") or mime_type == "application/ogg"):
+        raise AudioTranscriptionError("Audio attachment has an unsupported content type", retryable=False)
+    return _audio_filename(content_disposition, url, mime_type), mime_type
 
 
 async def _validate_audio_url(url: str) -> tuple[str, list[str]]:
