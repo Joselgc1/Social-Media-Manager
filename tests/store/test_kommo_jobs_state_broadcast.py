@@ -27,14 +27,14 @@ def _install_ready_job_db(monkeypatch, jobs, *, settings=None, assistant_persist
     mock_db = MagicMock()
     mock_db.get_settings = AsyncMock(return_value=settings or {"ai_enabled": True})
     mock_db.get_db = MagicMock(return_value=_DBHandle())
-    mock_db.fetch_one = AsyncMock(
-        side_effect=[
-            {"conversation_state": "active"},
-            {"id": "job"},
-            {"assistant_message_persisted_at": assistant_persisted_at},
-            {"id": "job"},
-        ]
-    )
+    async def fetch_one(query, values=None):
+        if "SELECT conversation_state FROM customers" in query:
+            return {"conversation_state": "active"}
+        if "SELECT assistant_message_persisted_at" in query:
+            return {"assistant_message_persisted_at": assistant_persisted_at}
+        return {"id": "job"}
+
+    mock_db.fetch_one = AsyncMock(side_effect=fetch_one)
     mock_db.execute = AsyncMock()
     monkeypatch.setattr(jobs, "db", mock_db)
     monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
@@ -1556,14 +1556,25 @@ async def test_ready_job_native_media_uses_chats_mode_and_persists_semantic_atta
     )
     monkeypatch.setattr(jobs, "deliver_response", deliver)
     stored_messages = []
+    events = []
+
+    async def store_message(**kwargs):
+        events.append("history")
+        stored_messages.append(kwargs)
+
     monkeypatch.setattr(
         jobs.conversations,
         "store_message",
-        AsyncMock(side_effect=lambda **kwargs: stored_messages.append(kwargs)),
+        AsyncMock(side_effect=store_message),
     )
 
     client = MagicMock()
-    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+
+    async def continue_salesbot(*_args, **_kwargs):
+        events.append("continue")
+        return {"accepted": True}
+
+    client.continue_salesbot = AsyncMock(side_effect=continue_salesbot)
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
     job = {
         "id": "job",
@@ -1595,7 +1606,151 @@ async def test_ready_job_native_media_uses_chats_mode_and_persists_semantic_atta
             "attachments": delivered_attachments,
         }
     ]
+    assert events == ["history", "continue"]
     assert any("status = 'sent'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_media_history_persists_when_mark_continuing_loses_lease(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import DeliveryResult
+
+    _install_ready_job_db(monkeypatch, jobs)
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            reason=None,
+            needs_ai_mode_initialization=False,
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    ai_result = {
+        "text": "Foto",
+        "product_image": {
+            "type": "product_image",
+            "caption": "Foto",
+            "image_url": "https://cdn.example/product.jpg",
+        },
+        "escalated": False,
+    }
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock(return_value=ai_result))
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    attachments = [{"type": "product_image", "product_name": "Pijama"}]
+    deliver = AsyncMock(
+        return_value=DeliveryResult(
+            transport="chats_api",
+            customer_text="Foto",
+            delivered_attachments=attachments,
+            provider_message_ids=["provider-message-1"],
+        )
+    )
+    monkeypatch.setattr(jobs, "deliver_response", deliver)
+    mark_continuing = AsyncMock(return_value=False)
+    monkeypatch.setattr(jobs, "_mark_job_continuing", mark_continuing)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock()
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            "combined_message": "Foto",
+            "channel": "whatsapp",
+            "talk_id": "105",
+            "correlation_id": "corr",
+        }
+    )
+
+    deliver.assert_awaited_once()
+    store_message.assert_awaited_once()
+    assert store_message.await_args.kwargs["content"] == "Foto"
+    assert store_message.await_args.kwargs["attachments"] == attachments
+    assert store_message.await_args.kwargs["source_id"] == "kommo-job:job"
+    mark_continuing.assert_awaited_once()
+    client.continue_salesbot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_partial_image_delivery_persists_only_image_and_never_falls_back(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import KommoPartialDeliveryError
+
+    mock_db = _install_ready_job_db(monkeypatch, jobs)
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            reason=None,
+            needs_ai_mode_initialization=False,
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    ai_result = {
+        "text": "Imagen y catalogo",
+        "product_image": {
+            "type": "product_image",
+            "caption": "Imagen",
+            "image_url": "https://cdn.example/product.jpg",
+        },
+        "catalog_pdf": {"type": "catalog_pdf", "caption": "Catalogo"},
+        "escalated": False,
+    }
+    monkeypatch.setattr(jobs, "generate_response", AsyncMock(return_value=ai_result))
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    image_attachment = {"type": "product_image", "product_name": "Pijama"}
+    partial = KommoPartialDeliveryError(
+        "PDF delivery failed after image acceptance",
+        customer_text="Imagen y catalogo",
+        delivered_attachments=[image_attachment],
+        provider_message_ids=["image-message-id"],
+    )
+    monkeypatch.setattr(jobs, "deliver_response", AsyncMock(side_effect=partial))
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock()
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            "combined_message": "Imagen y PDF",
+            "channel": "whatsapp",
+            "talk_id": "105",
+            "correlation_id": "corr",
+        }
+    )
+
+    store_message.assert_awaited_once()
+    assert store_message.await_args.kwargs["content"] == "Imagen y catalogo"
+    assert store_message.await_args.kwargs["attachments"] == [image_attachment]
+    assert all(
+        attachment["type"] != "catalog_pdf"
+        for attachment in store_message.await_args.kwargs["attachments"]
+    )
+    assert mock_db.execute.await_args.args[1]["status"] == "delivery_unknown"
+    client.continue_salesbot.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1708,12 +1863,20 @@ async def test_media_history_is_persisted_before_salesbot_resume_failure(monkeyp
             )
         ),
     )
-    store_message = AsyncMock()
+    events = []
+
+    async def store_message_impl(**_kwargs):
+        events.append("history")
+
+    store_message = AsyncMock(side_effect=store_message_impl)
     monkeypatch.setattr(jobs.conversations, "store_message", store_message)
     client = MagicMock()
-    client.continue_salesbot = AsyncMock(
-        side_effect=KommoAPIError("Kommo API returned HTTP 503", status_code=503)
-    )
+
+    async def fail_continuation(*_args, **_kwargs):
+        events.append("continue")
+        raise KommoAPIError("Kommo API returned HTTP 503", status_code=503)
+
+    client.continue_salesbot = AsyncMock(side_effect=fail_continuation)
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
     await jobs._process_ready_job(
@@ -1730,6 +1893,7 @@ async def test_media_history_is_persisted_before_salesbot_resume_failure(monkeyp
 
     store_message.assert_awaited_once()
     assert store_message.await_args.kwargs["attachments"] == attachments
+    assert events == ["history", "continue"]
     assert mock_db.execute.await_args.args[1]["status"] == "delivery_unknown"
 
 
@@ -1908,14 +2072,21 @@ async def test_assistant_history_persisted_after_accepted_kommo_continuation(mon
     )
     monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
     stored_messages = []
+    events = []
 
     async def store_message(**kwargs):
+        events.append("history")
         stored_messages.append(kwargs)
 
     monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock(side_effect=store_message))
 
     client = MagicMock()
-    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+
+    async def continue_salesbot(*_args, **_kwargs):
+        events.append("continue")
+        return {"accepted": True}
+
+    client.continue_salesbot = AsyncMock(side_effect=continue_salesbot)
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
     await jobs._process_ready_job({
@@ -1938,6 +2109,7 @@ async def test_assistant_history_persisted_after_accepted_kommo_continuation(mon
             "attachments": None,
         }
     ]
+    assert events == ["continue", "history"]
     assert any("status = 'sent'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
 
 
@@ -1961,6 +2133,39 @@ async def test_assistant_history_persistence_is_idempotent_per_kommo_job(monkeyp
 
     jobs.conversations.store_message.assert_not_awaited()
     mock_db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_previously_persisted_media_history_is_not_duplicated_on_retry(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock(
+        return_value={"assistant_message_persisted_at": "2026-01-01T00:00:00Z"}
+    )
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+
+    for _ in range(2):
+        await jobs._store_assistant_message_after_delivery(
+            {"id": "customer", "channel": "whatsapp"},
+            {"id": "job", "channel": "whatsapp"},
+            {"function_calls": [{"name": "send_product_image"}]},
+            "Foto enviada",
+            delivered_attachments=[{"type": "product_image", "product_name": "Pijama"}],
+            expected_job_status=None,
+        )
+
+    store_message.assert_not_awaited()
+    mock_db.execute.assert_not_awaited()
+    assert mock_db.fetch_one.await_count == 2
+    assert all(
+        "status =" not in call.args[0] and "processing_lease_id" not in call.args[0]
+        for call in mock_db.fetch_one.await_args_list
+    )
 
 
 @pytest.mark.asyncio

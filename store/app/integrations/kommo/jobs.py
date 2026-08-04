@@ -22,6 +22,7 @@ from app.integrations.kommo.customer_profile import build_kommo_customer_profile
 from app.integrations.kommo.delivery import (
     KommoDeliveryStateError,
     KommoDeliveryUnknownError,
+    KommoPartialDeliveryError,
     deliver_response,
 )
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
@@ -1035,17 +1036,17 @@ async def _process_ready_job(job: dict) -> None:
                 "delivery_mode": "chats_api",
                 "message": "",
             }
-        if not await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
-            logger.warning("Kommo ready job lost its processing lease before continuation: job_id=%s", job["id"])
-            return
-        if media_delivery_succeeded:
             await _store_assistant_message_after_delivery(
                 customer,
                 job,
                 result,
-                customer_text,
+                delivery_result.customer_text,
                 delivered_attachments=delivery_result.delivered_attachments,
+                expected_job_status=None,
             )
+        if not await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
+            logger.warning("Kommo ready job lost its processing lease before continuation: job_id=%s", job["id"])
+            return
         continuation_started = True
         _log_continuation_prepared(job["id"], continuation_data, message_diagnostics)
         try:
@@ -1083,6 +1084,33 @@ async def _process_ready_job(job: dict) -> None:
                 delivered_attachments=None,
             )
         await _mark_job_sent(job["id"], job.get("processing_lease_id"), response_payload)
+    except KommoPartialDeliveryError as e:
+        logger.warning(
+            "Kommo media response partially delivered: job_id=%s delivered_count=%s",
+            job["id"],
+            len(e.delivered_attachments),
+        )
+        try:
+            await _store_assistant_message_after_delivery(
+                customer,
+                job,
+                result,
+                e.customer_text,
+                delivered_attachments=e.delivered_attachments,
+                expected_job_status=None,
+            )
+        except Exception as persistence_error:
+            logger.exception(
+                "Kommo partial media history persistence failed: job_id=%s error=%s",
+                job["id"],
+                sanitize_job_error(persistence_error),
+            )
+        await _mark_job(
+            job["id"],
+            "delivery_unknown",
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
     except (KommoDeliveryUnknownError, KommoDeliveryStateError) as e:
         logger.warning(
             "Kommo media delivery requires manual reconciliation: job_id=%s error=%s",
@@ -1829,25 +1857,46 @@ async def _store_assistant_message_after_delivery(
     customer_text: str | None,
     *,
     delivered_attachments: list[dict] | None = None,
+    expected_job_status: str | None = "continuing",
 ) -> None:
+    if expected_job_status not in {None, "processing", "continuing"}:
+        raise ValueError("Unsupported Kommo assistant persistence job status")
     content = customer_text or result.get("text") or ""
     attachments = delivered_attachments or []
     if not content and not attachments:
         return
+    status_condition = (
+        "AND status = :expected_job_status "
+        "AND processing_lease_id = CAST(:processing_lease_id AS uuid)"
+        if expected_job_status is not None
+        else ""
+    )
+    values = {"id": job["id"]}
+    if expected_job_status is not None:
+        values.update(
+            {
+                "processing_lease_id": job.get("processing_lease_id"),
+                "expected_job_status": expected_job_status,
+            }
+        )
     async with db.get_db().transaction():
         existing = await db.fetch_one(
-            """
+            f"""
             SELECT assistant_message_persisted_at
             FROM kommo_message_jobs
             WHERE id = :id
-              AND status = 'continuing'
-              AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+              {status_condition}
             FOR UPDATE
             """,
-            {"id": job["id"], "processing_lease_id": job.get("processing_lease_id")},
+            values,
         )
         if not existing:
-            logger.warning("Kommo assistant history skipped after processing lease loss: job_id=%s", job["id"])
+            reason = "job_missing" if expected_job_status is None else "processing_lease_lost"
+            logger.warning(
+                "Kommo assistant history skipped: job_id=%s reason=%s",
+                job["id"],
+                reason,
+            )
             return
         if existing and existing["assistant_message_persisted_at"]:
             logger.info("Kommo assistant history already persisted: job_id=%s", job["id"])
@@ -1862,15 +1911,15 @@ async def _store_assistant_message_after_delivery(
             attachments=attachments or None,
         )
         await db.execute(
-            """
+            f"""
             UPDATE kommo_message_jobs
             SET assistant_message_persisted_at = NOW(),
                 updated_at = NOW()
             WHERE id = :id
-              AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+              {status_condition}
               AND assistant_message_persisted_at IS NULL
             """,
-            {"id": job["id"], "processing_lease_id": job.get("processing_lease_id")},
+            values,
         )
     logger.info("Kommo assistant history persisted: job_id=%s", job["id"])
 

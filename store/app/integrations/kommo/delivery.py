@@ -41,6 +41,23 @@ class KommoDeliveryUnknownError(KommoAPIError):
     """Raised when a paid send may have succeeded and must not be repeated."""
 
 
+class KommoPartialDeliveryError(KommoDeliveryUnknownError):
+    """Raised when a known prefix of a multi-media response was delivered."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        customer_text: str,
+        delivered_attachments: list[dict],
+        provider_message_ids: list[str],
+    ):
+        super().__init__(message)
+        self.customer_text = customer_text
+        self.delivered_attachments = list(delivered_attachments)
+        self.provider_message_ids = list(provider_message_ids)
+
+
 @dataclass(frozen=True)
 class _MediaRequest:
     media_type: Literal["product_image", "catalog_pdf"]
@@ -153,12 +170,13 @@ async def deliver_response(
                 raise KommoDeliveryStateError(
                     f"Kommo delivery {request_fingerprint} is {status}; refusing an unsafe resend"
                 )
-        except (KommoDeliveryUnknownError, KommoDeliveryStateError):
-            raise
         except Exception as error:
             if provider_message_ids:
-                raise KommoDeliveryUnknownError(
-                    "Kommo media response was only partially delivered"
+                raise KommoPartialDeliveryError(
+                    "Kommo media response was only partially delivered",
+                    customer_text=clean_text,
+                    delivered_attachments=delivered_attachments,
+                    provider_message_ids=provider_message_ids,
                 ) from error
             raise
 

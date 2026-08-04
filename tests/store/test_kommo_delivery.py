@@ -543,7 +543,7 @@ async def test_second_media_failure_after_first_acceptance_is_quarantined(monkey
     )
     client = SimpleNamespace(send_talk_message=AsyncMock())
 
-    with pytest.raises(delivery.KommoDeliveryUnknownError, match="partially delivered"):
+    with pytest.raises(delivery.KommoPartialDeliveryError, match="partially delivered") as exc_info:
         await deliver_response(
             job=JOB,
             result={**_image_result(), **_pdf_result()},
@@ -551,6 +551,12 @@ async def test_second_media_failure_after_first_acceptance_is_quarantined(monkey
             client=client,
             files=SimpleNamespace(client=client),
         )
+
+    assert exc_info.value.customer_text == "Imagen y catalogo"
+    assert exc_info.value.delivered_attachments == [
+        {"type": "product_image", "product_name": "Pijama Satin", "sku": "PJ-1"}
+    ]
+    assert exc_info.value.provider_message_ids == ["message-image"]
 
 
 @pytest.mark.asyncio
