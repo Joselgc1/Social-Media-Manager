@@ -389,7 +389,11 @@ async def test_debounce_voice_then_image_keeps_legacy_media_fields_consistent(mo
     query, values = mock_db.execute.await_args_list[0].args
     assert values["media_url"] == "https://media.example/image-1.jpg"
     assert values["message_type"] == "image"
-    assert json.loads(values["inbound_attachments"]) == []
+    assert json.loads(values["inbound_attachments"]) == [{
+        "external_message_id": "image-1",
+        "message_type": "image",
+        "media_url": "https://media.example/image-1.jpg",
+    }]
     assert "attachment ->> 'external_message_id' = :external_message_id" in query
 
 
@@ -418,6 +422,33 @@ async def test_duplicate_voice_webhook_does_not_append_attachment(monkeypatch):
     result = await jobs.record_incoming_event(event)
 
     assert result == {"status": "duplicate", "job_id": "existing-job"}
+    mock_db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_image_in_mixed_media_job_does_not_append_attachment(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[
+        None,
+        {"job_id": "mixed-job", "receipt_status": "merged"},
+    ])
+    mock_db.execute = AsyncMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    monkeypatch.setattr(jobs, "db", mock_db)
+
+    result = await jobs.record_incoming_event(NormalizedKommoEvent(
+        event_type="incoming_message",
+        message_id="image-duplicate",
+        chat_id="chat",
+        message_type="picture",
+        media_url="https://media.example/image.jpg?signature=secret",
+        origin="whatsapp",
+        channel="whatsapp",
+    ))
+
+    assert result == {"status": "duplicate", "job_id": "mixed-job"}
     mock_db.execute.assert_not_awaited()
 
 
@@ -1623,6 +1654,109 @@ def _voice_ready_job(**overrides):
     }
     job.update(overrides)
     return job
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job", "expected_message"),
+    [
+        (
+            {
+                "combined_message": (
+                    "El cliente envio una imagen por Kommo.\n"
+                    "[Kommo voice:voice-1 pendiente de transcripcion]"
+                ),
+                "message_type": "voice",
+                "media_url": "https://media.example/voice.ogg",
+                "inbound_attachments": [
+                    {
+                        "external_message_id": "image-1",
+                        "message_type": "image",
+                        "media_url": "https://media.example/image.jpg",
+                    },
+                    {
+                        "external_message_id": "voice-1",
+                        "message_type": "voice",
+                        "media_url": "https://media.example/voice.ogg",
+                    },
+                ],
+            },
+            "El cliente envio una imagen por Kommo.\nQuiero esa pijama",
+        ),
+        (
+            {
+                "combined_message": (
+                    "[Kommo voice:voice-1 pendiente de transcripcion]\n"
+                    "El cliente envio una imagen por Kommo."
+                ),
+                "message_type": "image",
+                "media_url": "https://media.example/image.jpg",
+                "inbound_attachments": [
+                    {
+                        "external_message_id": "voice-1",
+                        "message_type": "voice",
+                        "media_url": "https://media.example/voice.ogg",
+                    },
+                    {
+                        "external_message_id": "image-1",
+                        "message_type": "image",
+                        "media_url": "https://media.example/image.jpg",
+                    },
+                ],
+            },
+            "Quiero esa pijama\nEl cliente envio una imagen por Kommo.",
+        ),
+        (
+            {
+                "combined_message": (
+                    "El cliente envio una imagen por Kommo.\n"
+                    "[Kommo voice:voice-1 pendiente de transcripcion]\n"
+                    "¿La tienen disponible?"
+                ),
+                "message_type": "voice",
+                "media_url": "https://media.example/voice.ogg",
+                "inbound_attachments": [
+                    {
+                        "external_message_id": "image-1",
+                        "message_type": "picture",
+                        "media_url": "https://media.example/image.jpg",
+                    },
+                    {
+                        "external_message_id": "voice-1",
+                        "message_type": "voice",
+                        "media_url": "https://media.example/voice.ogg",
+                    },
+                ],
+            },
+            "El cliente envio una imagen por Kommo.\nQuiero esa pijama\n¿La tienen disponible?",
+        ),
+    ],
+    ids=["image-voice", "voice-image", "image-voice-text"],
+)
+async def test_ready_mixed_media_preserves_transcription_and_image_context(
+    monkeypatch,
+    job,
+    expected_message,
+):
+    from app.integrations.kommo import jobs
+
+    _, client = _install_voice_ready_job_dependencies(monkeypatch, jobs)
+    transcribe = AsyncMock(return_value="Quiero esa pijama")
+    monkeypatch.setattr(jobs, "transcribe_audio_url", transcribe)
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(return_value={"text": "Sí, la reviso.", "escalated": False}),
+    )
+
+    await jobs._process_ready_job(_voice_ready_job(**job))
+
+    transcribe.assert_awaited_once_with("https://media.example/voice.ogg")
+    generated = jobs.generate_response.await_args.kwargs
+    assert generated["message_text"] == expected_message
+    assert generated["media_url"] == "https://media.example/image.jpg"
+    assert generated["integration_context"]["media_url_is_direct"] is True
+    client.continue_salesbot.assert_awaited_once()
 
 
 @pytest.mark.asyncio

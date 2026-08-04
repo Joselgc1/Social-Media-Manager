@@ -61,6 +61,7 @@ _ACTIVE_SALESBOT_STATUSES = {
 }
 _TRANSIENT_CONTINUATION_STATUSES = {429, 500, 502, 503, 504}
 _AUDIO_MESSAGE_TYPES = {"voice", "audio"}
+_IMAGE_MESSAGE_TYPES = {"image", "picture"}
 COMMENT_MIRROR_RECONCILIATION_SECONDS = 30
 COMMENT_CALLBACK_DEDUP_SECONDS = 300
 COMMENT_PRIVATE_SUPERSEDED_REASON = "superseded_by_instagram_comment"
@@ -849,7 +850,11 @@ async def _process_ready_job(job: dict) -> None:
         profile = build_kommo_customer_profile(job=job, contact=contact)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
         effective_message_text = await _effective_customer_message(job)
-        job = {**job, "combined_message": effective_message_text}
+        job = {
+            **job,
+            "combined_message": effective_message_text,
+            "media_url": _job_image_media_url(job),
+        }
         current_private_context = _job_instagram_content_context(job)
         if (
             job.get("channel") == "instagram"
@@ -952,7 +957,7 @@ async def _process_ready_job(job: dict) -> None:
                 )
 
         sender_id = _local_sender_id(job)
-        media_url = None if _is_audio_job(job) else job.get("media_url")
+        media_url = job.get("media_url")
         result = await generate_response(
             channel=job.get("channel") or "whatsapp",
             sender_id=sender_id,
@@ -968,7 +973,7 @@ async def _process_ready_job(job: dict) -> None:
                 "talk_id": job.get("talk_id"),
                 "author_id": job.get("author_id"),
                 "interaction_type": _job_interaction_type(job),
-                "media_url_is_direct": bool(job.get("media_url")),
+                "media_url_is_direct": bool(media_url),
                 "public_comment_context": _job_public_comment_context(job),
                 "incoming_instagram_context": incoming_instagram_context,
                 "current_story_context": current_story_context,
@@ -2223,11 +2228,12 @@ def _audio_placeholder(message_type: object, external_message_id: object | None 
 
 
 def _event_inbound_attachments(event: NormalizedKommoEvent, external_message_id: str) -> list[dict[str, str | None]]:
-    if not _is_audio_message_type(event.message_type):
+    normalized_type = str(event.message_type or "").strip().lower()
+    if normalized_type not in _AUDIO_MESSAGE_TYPES | _IMAGE_MESSAGE_TYPES:
         return []
     return [{
         "external_message_id": external_message_id,
-        "message_type": str(event.message_type).strip().lower(),
+        "message_type": normalized_type,
         "media_url": event.media_url,
     }]
 
@@ -2243,6 +2249,26 @@ def _merged_legacy_media(
 
 
 def _job_inbound_audio_attachments(job: dict) -> list[dict]:
+    return [
+        item
+        for item in _job_inbound_attachments(job)
+        if _is_audio_message_type(item.get("message_type"))
+    ]
+
+
+def _job_image_media_url(job: dict) -> str | None:
+    for item in reversed(_job_inbound_attachments(job)):
+        if str(item.get("message_type") or "").strip().lower() not in _IMAGE_MESSAGE_TYPES:
+            continue
+        media_url = str(item.get("media_url") or "").strip()
+        if media_url:
+            return media_url
+    if _is_audio_job(job):
+        return None
+    return job.get("media_url")
+
+
+def _job_inbound_attachments(job: dict) -> list[dict]:
     value = job.get("inbound_attachments") or []
     if isinstance(value, str):
         try:
@@ -2255,7 +2281,10 @@ def _job_inbound_audio_attachments(job: dict) -> list[dict]:
     attachments = []
     seen_message_ids: set[str] = set()
     for item in value:
-        if not isinstance(item, dict) or not _is_audio_message_type(item.get("message_type")):
+        if not isinstance(item, dict):
+            continue
+        message_type = str(item.get("message_type") or "").strip().lower()
+        if message_type not in _AUDIO_MESSAGE_TYPES | _IMAGE_MESSAGE_TYPES:
             continue
         external_message_id = str(item.get("external_message_id") or "").strip()
         if not external_message_id:

@@ -5,7 +5,7 @@ ALTER TABLE kommo_message_jobs
     ADD COLUMN IF NOT EXISTS inbound_attachments JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 COMMENT ON COLUMN kommo_message_jobs.inbound_attachments IS
-    'Ordered inbound voice/audio metadata used to replace message-specific transcription placeholders.';
+    'Ordered inbound audio/image metadata used for transcription and existing image analysis.';
 
 INSERT INTO schema_migrations (version, name) VALUES
     (14, 'kommo_inbound_attachments')
