@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock
 
 import pytest
+from app.crm import conversations
 from app.crm.conversations import prepare_history_for_generation
 
 
@@ -36,6 +37,146 @@ def test_prepare_history_for_generation_drops_unanswered_user_runs():
         {"role": "user", "content": "Me interesa el set negro"},
     ]
 
+
+@pytest.mark.asyncio
+async def test_store_message_persists_only_semantic_attachments(monkeypatch):
+    execute = AsyncMock()
+    monkeypatch.setattr(conversations.db, "execute", execute)
+
+    await conversations.store_message(
+        customer_id="customer",
+        role="assistant",
+        content="Aquí lo tienes.",
+        channel="whatsapp",
+        attachments=[
+            {
+                "type": "product_image",
+                "product_name": "Coconut Passion",
+                "sku": "VS-CP-01",
+                "drive_uuid": "must-not-be-stored",
+                "source_url": "https://example.com/private",
+            }
+        ],
+    )
+
+    query, values = execute.await_args.args
+    assert "CAST(:attachments AS jsonb)" in query
+    assert values["attachments"] == (
+        '[{"type": "product_image", "product_name": "Coconut Passion", "sku": "VS-CP-01"}]'
+    )
+    assert "drive_uuid" not in values["attachments"]
+    assert "source_url" not in values["attachments"]
+
+
+@pytest.mark.asyncio
+async def test_get_history_keeps_legacy_messages_without_attachments(monkeypatch):
+    monkeypatch.setattr(
+        conversations.db,
+        "fetch_all",
+        AsyncMock(
+            return_value=[
+                {"role": "assistant", "content": "Respuesta anterior", "attachments": None},
+                {"role": "user", "content": "Hola"},
+            ]
+        ),
+    )
+
+    assert await conversations.get_history("customer") == [
+        {"role": "user", "content": "Hola"},
+        {"role": "assistant", "content": "Respuesta anterior"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_history_adds_product_image_context_without_transport_data(monkeypatch):
+    monkeypatch.setattr(
+        conversations.db,
+        "fetch_all",
+        AsyncMock(
+            return_value=[
+                {
+                    "role": "assistant",
+                    "content": "Claro 💕 Aquí lo tienes.",
+                    "attachments": [
+                        {
+                            "type": "product_image",
+                            "product_name": "Coconut Passion",
+                            "sku": "VS-CP-01",
+                            "drive_uuid": "hidden",
+                        }
+                    ],
+                }
+            ]
+        ),
+    )
+
+    history = await conversations.get_history("customer")
+
+    assert history[0]["content"] == (
+        'Claro 💕 Aquí lo tienes.\n\n[Contexto de entrega: Eva también envió una imagen '
+        'del producto "Coconut Passion", SKU VS-CP-01.]'
+    )
+    assert "drive_uuid" not in history[0]["content"]
+    assert "hidden" not in history[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_get_history_adds_catalog_pdf_context_without_internal_metadata(monkeypatch):
+    monkeypatch.setattr(
+        conversations.db,
+        "fetch_all",
+        AsyncMock(
+            return_value=[
+                {
+                    "role": "assistant",
+                    "content": "Aquí tienes nuestro catálogo actualizado 💕",
+                    "attachments": '[{"type":"catalog_pdf","filename":"Catalogo Zona Pink.pdf",'
+                    '"catalog_fingerprint":"secret-fingerprint"}]',
+                }
+            ]
+        ),
+    )
+
+    history = await conversations.get_history("customer")
+
+    assert history[0]["content"].endswith(
+        "[Contexto de entrega: Eva envió el catálogo PDF actualizado.]"
+    )
+    assert "secret-fingerprint" not in history[0]["content"]
+    assert "Catalogo Zona Pink.pdf" not in history[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_kommo_job_persistence_keeps_one_row_per_role(monkeypatch):
+    logical_rows = set()
+
+    async def execute(query, values):
+        assert "ON CONFLICT (channel, role, source_id)" in query
+        logical_rows.add((values["channel"], values["role"], values["source_id"]))
+
+    monkeypatch.setattr(conversations.db, "execute", execute)
+    source_id = "kommo-job:11111111-1111-4111-8111-111111111111"
+    for _ in range(2):
+        await conversations.store_message(
+            "customer",
+            "user",
+            "Hola",
+            "whatsapp",
+            source_id=source_id,
+        )
+        await conversations.store_message(
+            "customer",
+            "assistant",
+            "Hola bella",
+            "whatsapp",
+            source_id=source_id,
+            function_calls=[{"name": "check_inventory"}],
+        )
+
+    assert logical_rows == {
+        ("whatsapp", "user", source_id),
+        ("whatsapp", "assistant", source_id),
+    }
 
 @pytest.mark.asyncio
 async def test_generate_response_uses_alternating_history_and_strips_later_greeting(monkeypatch):

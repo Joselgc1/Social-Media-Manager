@@ -83,13 +83,15 @@ CREATE TABLE IF NOT EXISTS conversations (
     content         TEXT NOT NULL,
     channel         TEXT NOT NULL,
     media_url       TEXT,
+    attachments     JSONB,                       -- Transport-independent semantic attachments
     function_calls  JSONB,                       -- Log of any tools the AI invoked
     source_id       TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE conversations
-    ADD COLUMN IF NOT EXISTS source_id TEXT;
+    ADD COLUMN IF NOT EXISTS source_id TEXT,
+    ADD COLUMN IF NOT EXISTS attachments JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_conv_customer ON conversations(customer_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations(created_at DESC);
@@ -655,6 +657,48 @@ COMMENT ON COLUMN kommo_message_jobs.suppress_after_context IS 'When true, Story
 COMMENT ON COLUMN kommo_message_jobs.automation_block_reason IS 'Durable pre-Salesbot automation block reason used after Story context correlation.';
 
 -- ============================================================
+-- Kommo outbound delivery state (transport details, not history)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS kommo_outbound_deliveries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id UUID NOT NULL REFERENCES kommo_message_jobs(id) ON DELETE CASCADE,
+    transport TEXT NOT NULL CHECK (transport IN ('salesbot', 'chats_api')),
+    media_type TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'prepared', 'sending', 'accepted', 'confirmed', 'failed', 'delivery_unknown')
+    ),
+    provider_message_id TEXT,
+    request_fingerprint TEXT,
+    attachment_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    accepted_at TIMESTAMPTZ,
+    confirmed_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_kommo_outbound_deliveries_job
+    ON kommo_outbound_deliveries(job_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kommo_outbound_deliveries_status
+    ON kommo_outbound_deliveries(status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_outbound_deliveries_job_transport_media
+    ON kommo_outbound_deliveries(job_id, transport, COALESCE(media_type, ''));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_outbound_deliveries_provider_message
+    ON kommo_outbound_deliveries(transport, provider_message_id)
+    WHERE provider_message_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_outbound_deliveries_request
+    ON kommo_outbound_deliveries(job_id, transport, request_fingerprint)
+    WHERE request_fingerprint IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_kommo_outbound_deliveries_updated_at ON kommo_outbound_deliveries;
+CREATE TRIGGER trg_kommo_outbound_deliveries_updated_at
+    BEFORE UPDATE ON kommo_outbound_deliveries
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+COMMENT ON TABLE kommo_outbound_deliveries IS 'Transport-specific outbound delivery state. Semantic media history belongs in conversations.attachments.';
+COMMENT ON COLUMN kommo_outbound_deliveries.attachment_metadata IS 'Transport/provider attachment metadata; never include this JSON in LLM conversation history.';
+
+-- ============================================================
 -- Kommo inbound message receipts
 -- ============================================================
 CREATE TABLE IF NOT EXISTS kommo_message_receipts (
@@ -754,6 +798,7 @@ ALTER TABLE customer_channel_mappings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meta_inbound_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meta_inbound_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kommo_message_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kommo_outbound_deliveries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kommo_message_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
 

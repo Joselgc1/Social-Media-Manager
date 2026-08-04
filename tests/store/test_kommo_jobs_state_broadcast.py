@@ -1165,6 +1165,7 @@ async def test_non_story_human_mode_keeps_early_suppression(
 
     client.run_salesbot.assert_not_awaited()
     store_message.assert_awaited_once()
+    assert store_message.await_args.kwargs["source_id"] == "kommo-job:job"
     query, values = mock_db.execute.await_args.args
     assert "suppress_after_context" not in query
     assert values["status"] == "discarded"
@@ -1454,6 +1455,7 @@ async def test_ready_job_sends_ai_reply_in_salesbot_data_message(monkeypatch, ca
 
     client.continue_salesbot.assert_awaited_once()
     assert jobs.generate_response.await_args.kwargs["integration_context"]["interaction_type"] == "private_message"
+    assert jobs.generate_response.await_args.kwargs["message_source_id"] == "kommo-job:job"
     assert client.continue_salesbot.await_args.kwargs == {
         "data": {"status": "success", "message": reply},
     }
@@ -1629,7 +1631,17 @@ async def test_assistant_history_persisted_after_accepted_kommo_continuation(mon
         "resolve_customer_from_kommo_job",
         AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
     )
-    monkeypatch.setattr(jobs, "generate_response", AsyncMock(return_value={"text": "**Listo** 💕", "escalated": False}))
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(
+            return_value={
+                "text": "**Listo** 💕",
+                "escalated": False,
+                "function_calls": [{"name": "check_inventory"}],
+            }
+        ),
+    )
     monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
     stored_messages = []
 
@@ -1657,7 +1669,8 @@ async def test_assistant_history_persisted_after_accepted_kommo_continuation(mon
             "role": "assistant",
             "content": "*Listo* 💕",
             "channel": "whatsapp",
-            "function_calls": None,
+            "function_calls": [{"name": "check_inventory"}],
+            "source_id": "kommo-job:job",
         }
     ]
     assert any("status = 'sent'" in call.args[0] for call in mock_db.fetch_one.await_args_list)

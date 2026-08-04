@@ -940,6 +940,7 @@ async def _process_ready_job(job: dict) -> None:
                 "current_story_context": current_story_context,
             },
             persist_assistant_message=False,
+            message_source_id=_conversation_source_id(job),
         )
         if result.get("customer_id"):
             await upsert_mapping(
@@ -1776,6 +1777,7 @@ async def _store_assistant_message_after_delivery(customer: dict, job: dict, res
             content=content,
             channel=job.get("channel") or customer.get("channel") or "whatsapp",
             function_calls=result.get("function_calls"),
+            source_id=_conversation_source_id(job),
         )
         await db.execute(
             """
@@ -1840,7 +1842,12 @@ async def _store_user_message_if_suppressed(customer: dict, job: dict) -> None:
         content=job["combined_message"],
         channel=job.get("channel") or customer.get("channel") or "whatsapp",
         media_url=job.get("media_url"),
+        source_id=_conversation_source_id(job),
     )
+
+
+def _conversation_source_id(job: dict) -> str:
+    return f"kommo-job:{job['id']}"
 
 
 def _event_values(event: NormalizedKommoEvent, external_message_id: str, text: str) -> dict:

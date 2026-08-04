@@ -38,6 +38,9 @@ async def test_store_migration_runner_executes_schema_and_closes_connection(monk
     deferred_suppression_migration_sql = (
         runner.KOMMO_STORY_DEFERRED_SUPPRESSION_MIGRATION_PATH.read_text(encoding="utf-8")
     )
+    media_history_migration_sql = runner.KOMMO_MEDIA_HISTORY_FOUNDATION_MIGRATION_PATH.read_text(
+        encoding="utf-8"
+    )
     assert connection.execute.await_args_list[1].args == (migration_sql,)
     assert connection.execute.await_args_list[2].args == (delivery_migration_sql,)
     assert connection.execute.await_args_list[3].args == (instagram_content_migration_sql,)
@@ -45,8 +48,9 @@ async def test_store_migration_runner_executes_schema_and_closes_connection(monk
     assert connection.execute.await_args_list[5].args == (instagram_story_context_migration_sql,)
     assert connection.execute.await_args_list[6].args == (story_fixes_migration_sql,)
     assert connection.execute.await_args_list[7].args == (deferred_suppression_migration_sql,)
+    assert connection.execute.await_args_list[8].args == (media_history_migration_sql,)
     assert connection.execute.await_args_list[0].args[0] == "SELECT pg_advisory_lock($1)"
-    assert connection.execute.await_args_list[8].args[0] == "SELECT pg_advisory_unlock($1)"
+    assert connection.execute.await_args_list[9].args[0] == "SELECT pg_advisory_unlock($1)"
     connection.close.assert_awaited_once()
 
 
