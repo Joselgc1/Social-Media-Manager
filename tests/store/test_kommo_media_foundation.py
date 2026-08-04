@@ -17,6 +17,7 @@ DRIVE_URL = "https://drive-c.kommo.com"
 FILE_UUID = "367b9f38-5f01-4cea-947e-dfab47aea522"
 VERSION_UUID = "43de3be7-307b-4766-a23e-5e88211b9a8d"
 MESSAGE_UUID = "ec1cadc7-4963-4c53-81c4-7e6ed05b92db"
+SESSION_ID = 291839664
 PNG = b"\x89PNG\r\n\x1a\n" + b"image-data"
 PDF = b"%PDF-1.7\nmock catalog"
 
@@ -52,12 +53,13 @@ def _session_response(*, file_size=1_000, part_size=1_000):
     return {
         "max_file_size": file_size,
         "max_part_size": part_size,
-        "session_id": 26136001,
-        "upload_url": f"{DRIVE_URL}/v1.0/sessions/upload/session-token-1",
+        "session_id": SESSION_ID,
+        "upload_url": f"{DRIVE_URL}/upload/signed-token-1",
     }
 
 
 def _final_upload_response(*, file_uuid=FILE_UUID, version_uuid=VERSION_UUID, size=None):
+    size = len(PNG) if size is None else size
     body = {
         "_links": {
             "download": {"href": f"{DRIVE_URL}/download/account/{file_uuid}/product.png"},
@@ -68,11 +70,11 @@ def _final_upload_response(*, file_uuid=FILE_UUID, version_uuid=VERSION_UUID, si
         },
         "name": "product",
         "type": "image",
+        "session_id": SESSION_ID,
+        "size": size,
         "uuid": file_uuid,
         "version_uuid": version_uuid,
     }
-    if size is not None:
-        body["size"] = size
     return body
 
 
@@ -134,6 +136,7 @@ async def test_create_upload_session_sends_documented_metadata_once(monkeypatch)
     )
 
     assert session.max_part_size == 1_000
+    assert session.upload_url == f"{DRIVE_URL}/upload/signed-token-1"
     assert len(requests) == 1
     assert requests[0].url == f"{DRIVE_URL}/v1.0/sessions"
     assert json.loads(requests[0].content) == {
@@ -177,23 +180,6 @@ async def test_single_part_upload_uses_self_link_for_file_uuid(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_final_upload_uuid_is_accepted_as_version_when_version_uuid_is_absent(monkeypatch):
-    def handler(request):
-        if request.url.path == "/v1.0/sessions":
-            return httpx.Response(200, json=_session_response())
-        response = _final_upload_response()
-        response["uuid"] = VERSION_UUID
-        response.pop("version_uuid")
-        return httpx.Response(200, json=response)
-
-    _install_transport(monkeypatch, handler)
-    uploaded = await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
-
-    assert uploaded.drive_uuid == FILE_UUID
-    assert uploaded.drive_version_uuid == VERSION_UUID
-
-
-@pytest.mark.asyncio
 async def test_multi_part_upload_follows_each_returned_next_url(monkeypatch):
     uploaded_parts = []
 
@@ -203,10 +189,10 @@ async def test_multi_part_upload_follows_each_returned_next_url(monkeypatch):
         uploaded_parts.append((request.url.path, request.content))
         if len(uploaded_parts) < 3:
             return httpx.Response(
-                200,
+                202,
                 json={
-                    "session_id": 26136001,
-                    "next_url": f"{DRIVE_URL}/v1.0/sessions/upload/session-token-{len(uploaded_parts) + 1}",
+                    "session_id": SESSION_ID,
+                    "next_url": f"{DRIVE_URL}/upload/signed-token-{len(uploaded_parts) + 1}",
                 },
             )
         return httpx.Response(200, json=_final_upload_response(size=len(PNG)))
@@ -216,9 +202,9 @@ async def test_multi_part_upload_follows_each_returned_next_url(monkeypatch):
 
     assert uploaded.drive_uuid == FILE_UUID
     assert [part[0] for part in uploaded_parts] == [
-        "/v1.0/sessions/upload/session-token-1",
-        "/v1.0/sessions/upload/session-token-2",
-        "/v1.0/sessions/upload/session-token-3",
+        "/upload/signed-token-1",
+        "/upload/signed-token-2",
+        "/upload/signed-token-3",
     ]
     assert b"".join(part[1] for part in uploaded_parts) == PNG
 
@@ -227,11 +213,8 @@ async def test_multi_part_upload_follows_each_returned_next_url(monkeypatch):
 @pytest.mark.parametrize(
     ("mutate", "error"),
     [
-        (lambda response: response["_links"].pop("self"), "file UUID"),
-        (
-            lambda response: (response.pop("version_uuid"), response.pop("uuid")),
-            "file-version UUID",
-        ),
+        (lambda response: response.pop("uuid"), "file UUID"),
+        (lambda response: response.pop("version_uuid"), "file-version UUID"),
     ],
 )
 async def test_upload_rejects_missing_required_identifiers(monkeypatch, mutate, error):
@@ -248,13 +231,68 @@ async def test_upload_rejects_missing_required_identifiers(monkeypatch, mutate, 
 
 
 @pytest.mark.asyncio
-async def test_upload_does_not_treat_file_uuid_as_version_uuid(monkeypatch):
+async def test_non_final_chunk_rejects_http_200(monkeypatch):
+    def handler(request):
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response(part_size=8))
+        return httpx.Response(
+            200,
+            json={"next_url": f"{DRIVE_URL}/upload/signed-token-2", "session_id": SESSION_ID},
+        )
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(KommoAPIError, match="expected HTTP 202"):
+        await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+async def test_non_final_chunk_requires_next_url(monkeypatch):
+    def handler(request):
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response(part_size=8))
+        return httpx.Response(202, json={"session_id": SESSION_ID})
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(KommoAPIError, match="missing next_url"):
+        await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+async def test_final_chunk_rejects_http_202(monkeypatch):
+    def handler(request):
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response())
+        return httpx.Response(202, json=_final_upload_response())
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(KommoAPIError, match="expected HTTP 200"):
+        await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["uuid", "version_uuid"])
+async def test_upload_rejects_malformed_final_uuids(monkeypatch, field):
     def handler(request):
         if request.url.path == "/v1.0/sessions":
             return httpx.Response(200, json=_session_response())
         response = _final_upload_response()
-        response.pop("version_uuid")
+        response[field] = "not-a-uuid"
         return httpx.Response(200, json=response)
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(KommoAPIError, match="UUID"):
+        await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_identical_file_and_version_uuids(monkeypatch):
+    def handler(request):
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response())
+        return httpx.Response(
+            200,
+            json=_final_upload_response(file_uuid=FILE_UUID, version_uuid=FILE_UUID),
+        )
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(KommoAPIError, match="does not distinguish"):
@@ -262,18 +300,35 @@ async def test_upload_does_not_treat_file_uuid_as_version_uuid(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_upload_does_not_fallback_when_version_uuid_is_present_but_empty(monkeypatch):
+async def test_upload_rejects_conflicting_self_link_uuid(monkeypatch):
+    conflicting_uuid = "89a61e7b-ba30-476f-b2f6-705a964e85c6"
+
     def handler(request):
         if request.url.path == "/v1.0/sessions":
             return httpx.Response(200, json=_session_response())
         response = _final_upload_response()
-        response["version_uuid"] = ""
-        response["uuid"] = VERSION_UUID
+        response["_links"]["self"]["href"] = f"{DRIVE_URL}/v1.0/files/{conflicting_uuid}"
         return httpx.Response(200, json=response)
 
     _install_transport(monkeypatch, handler)
-    with pytest.raises(KommoAPIError, match="file-version UUID"):
+    with pytest.raises(KommoAPIError, match="self link conflicts"):
         await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+async def test_upload_accepts_final_response_without_optional_self_link(monkeypatch):
+    def handler(request):
+        if request.url.path == "/v1.0/sessions":
+            return httpx.Response(200, json=_session_response())
+        response = _final_upload_response()
+        response.pop("_links")
+        return httpx.Response(200, json=response)
+
+    _install_transport(monkeypatch, handler)
+    uploaded = await _files_client().upload(PNG, file_name="product.png", mime_type="image/png")
+
+    assert uploaded.drive_uuid == FILE_UUID
+    assert uploaded.drive_version_uuid == VERSION_UUID
 
 
 @pytest.mark.asyncio

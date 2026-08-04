@@ -198,7 +198,13 @@ class KommoFiles:
                     if not chunk:
                         raise KommoAPIError("Kommo upload file changed while it was being read")
                     remaining -= len(chunk)
-                    final = await self._post_chunk(upload_url, chunk, clean_mime)
+                    is_final = remaining == 0
+                    final = await self._post_chunk(
+                        upload_url,
+                        chunk,
+                        clean_mime,
+                        is_final=is_final,
+                    )
                     if remaining:
                         upload_url = _next_upload_url(final, drive_url)
             return final or {}
@@ -345,7 +351,13 @@ class KommoFiles:
         chunk = next(chunk_iterator, None)
         while chunk is not None:
             next_chunk = next(chunk_iterator, None)
-            final = await self._post_chunk(upload_url, chunk, mime_type)
+            is_final = next_chunk is None
+            final = await self._post_chunk(
+                upload_url,
+                chunk,
+                mime_type,
+                is_final=is_final,
+            )
             if next_chunk is not None:
                 upload_url = _next_upload_url(final, drive_url)
             chunk = next_chunk
@@ -367,7 +379,14 @@ class KommoFiles:
             raise KommoAPIError(sanitize_kommo_error(e)) from e
         return _files_response_json(response)
 
-    async def _post_chunk(self, url: str, chunk: bytes, mime_type: str) -> dict[str, Any]:
+    async def _post_chunk(
+        self,
+        url: str,
+        chunk: bytes,
+        mime_type: str,
+        *,
+        is_final: bool,
+    ) -> dict[str, Any]:
         drive_url = await self.client.get_drive_url()
         _validate_upload_url(url, drive_url)
         try:
@@ -383,13 +402,24 @@ class KommoFiles:
                 )
         except httpx.HTTPError as e:
             raise KommoAPIError(sanitize_kommo_error(e)) from e
-        return _files_response_json(response)
+        expected_status = 200 if is_final else 202
+        body = _files_response_json(response, expected_status=expected_status)
+        if not is_final:
+            _next_upload_url(body, drive_url)
+        return body
 
 
-def _files_response_json(response: httpx.Response) -> dict[str, Any]:
-    if response.status_code != 200:
+def _files_response_json(
+    response: httpx.Response,
+    *,
+    expected_status: int = 200,
+) -> dict[str, Any]:
+    if response.status_code != expected_status:
         detail = _safe_response_detail(response, None)
-        message = f"Kommo Files API returned HTTP {response.status_code}"
+        message = (
+            f"Kommo Files API returned HTTP {response.status_code}; "
+            f"expected HTTP {expected_status}"
+        )
         raise KommoAPIError(f"{message}: {detail}" if detail else message, status_code=response.status_code)
     try:
         body = response.json()
@@ -407,10 +437,8 @@ def _uploaded_file(
     file_size: int,
     drive_url: str,
 ) -> KommoUploadedFile:
-    file_uuid = _file_uuid_from_self_link(response, drive_url)
-    version_uuid = (
-        response.get("uuid") if "version_uuid" not in response else response.get("version_uuid")
-    )
+    file_uuid = response.get("uuid")
+    version_uuid = response.get("version_uuid")
     if not _valid_uuid(file_uuid):
         raise KommoAPIError("Kommo final upload response is missing the file UUID")
     if not _valid_uuid(version_uuid):
@@ -418,8 +446,22 @@ def _uploaded_file(
     if file_uuid.strip().lower() == version_uuid.strip().lower():
         raise KommoAPIError("Kommo final upload response does not distinguish file UUIDs")
     response_size = response.get("size")
-    if isinstance(response_size, int) and response_size != file_size:
+    if not isinstance(response_size, int) or isinstance(response_size, bool):
+        raise KommoAPIError("Kommo final upload response is missing the file size")
+    if response_size != file_size:
         raise KommoAPIError("Kommo final upload response has an unexpected file size")
+    file_type = response.get("type")
+    if not isinstance(file_type, str) or not file_type.strip():
+        raise KommoAPIError("Kommo final upload response is missing the file type")
+
+    links = response.get("_links")
+    self_link = links.get("self") if isinstance(links, dict) else None
+    if self_link is not None:
+        linked_file_uuid = _file_uuid_from_self_link(response, drive_url)
+        if not _valid_uuid(linked_file_uuid):
+            raise KommoAPIError("Kommo final upload response has an invalid self link")
+        if linked_file_uuid.strip().lower() != file_uuid.strip().lower():
+            raise KommoAPIError("Kommo final upload response self link conflicts with the file UUID")
     return KommoUploadedFile(
         drive_uuid=file_uuid.strip(),
         drive_version_uuid=version_uuid.strip(),

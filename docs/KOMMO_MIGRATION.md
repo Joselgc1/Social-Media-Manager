@@ -318,17 +318,31 @@ The Kommo private integration requires these additional scopes before the transp
 
 Set `KOMMO_CHATS_MEDIA_ENABLED=true` only in a development account while validating the transport. It defaults to `false`. `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` also defaults to empty; PDF files can be uploaded, but `send_pdf_to_talk()` is blocked until this setting is explicitly configured with the live-tested value.
 
-The implemented upload flow is:
+The base flow follows Kommo's Files and Chats APIs:
 
 1. Request `GET /api/v4/account?with=drive_url` and cache the returned Drive URL in memory.
 2. Create a session with `POST {drive_url}/v1.0/sessions`, including file name, byte size, and MIME type.
-3. Respect the returned `max_file_size` and `max_part_size`. Kommo's official chunk-upload recipe sends each part as the raw binary request body, authenticated with the bearer token and using the file's MIME type as `Content-Type`; it does not wrap chunks in multipart form data. Each non-final response supplies the next signed `next_url`.
-4. Resolve the attachment identifiers from the documented final response without assuming that `uuid` is the parent file. The parent file UUID is parsed from `_links.self.href`, whose documented form is `{drive_url}/v1.0/files/{file_uuid}`. The file-version UUID comes from the documented `version_uuid` field when present, or from `uuid` only for the documented response variant where `uuid` is the version UUID. If the self-link is absent, the version identifier is absent, or both identifiers are the same, the upload result is rejected and cannot become a Chats attachment.
+3. Respect the returned `max_file_size` and `max_part_size`, then upload each chunk through the exact `upload_url` or `next_url` returned by Kommo.
+4. Map the final response's `uuid` to Chats `drive_uuid` and `version_uuid` to `drive_version_uuid`. Both identifiers must be valid and distinct. `_links.self`, when present, is checked for consistency with `uuid`.
 5. Send an attachment, optionally with text, through `POST /api/v4/talks/{talk_id}/send_message`; `202 Accepted` is success.
+
+### Live-Verified Contract (2026-08-04)
+
+The following details were learned from successful manual tests against the Kommo development account, not solely from Kommo's published reference:
+
+- Session creation returned `200 OK` with `max_file_size`, `max_part_size`, `session_id`, and an upload URL shaped as `https://drive-c.kommo.com/upload/<signed-token>`.
+- File chunks were accepted as the raw binary request body with bearer authorization, `Accept: application/json`, and the original file MIME type as `Content-Type`. Multipart form data was not used.
+- Every non-final chunk returned `202 Accepted` with `session_id` and a signed `next_url`.
+- The final chunk returned `200 OK` with file metadata, including distinct `uuid`, `version_uuid`, `size`, `type`, and `_links.self`.
+- Final `uuid` is the Chats attachment `drive_uuid`; final `version_uuid` is `drive_version_uuid`.
+- Chats image attachment type `picture` delivered a native image successfully.
+- One `POST /api/v4/talks/{talk_id}/send_message` request successfully carried both text and the image attachment and returned `202 Accepted` with a message `id`.
+
+The implementation validates intermediate and final chunk statuses separately. It does not retry upload-session creation or chunk POSTs because an ambiguous retry could create a duplicate file or corrupt an upload session.
 
 Inventory image downloads allow at most three manual redirects. Every initial and redirected hostname is resolved asynchronously and rejected if any resolved address is private, loopback, link-local, multicast, reserved, or unspecified. Each request is then pinned to the validated address while preserving the original HTTP Host and TLS SNI hostname, preventing a second DNS lookup from bypassing validation. URL schemes, ports, userinfo, response size, MIME type, and binary signatures are also validated at every applicable step.
 
-Images use the documented Chats attachment type `picture`. PDF sending is intentionally disabled unless `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` is explicitly set to an allowed value; the currently accepted candidate is `file`, but it must be confirmed against the development account and connected WhatsApp/Instagram channel before configuration. No Eva tool, prompt, Salesbot continuation, Kommo job, conversation-history path, broadcast, or normal production customer workflow calls this Phase 1 code.
+Image attachment type `picture` is now live-verified. PDF sending remains intentionally disabled unless `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` is explicitly configured after a separate live test; PDF uploads alone remain supported. No Eva tool, prompt, Salesbot continuation, Kommo job, conversation-history path, broadcast, or normal production customer workflow calls this Phase 1 code.
 
 ## Payment-Image Limitations
 
