@@ -1026,7 +1026,13 @@ async def _process_ready_job(job: dict) -> None:
             job["id"],
             _job_interaction_type(job),
         )
-        await _store_assistant_message_after_delivery(customer, job, result, customer_text)
+        await _store_assistant_message_after_delivery(
+            customer,
+            job,
+            result,
+            customer_text,
+            delivered_attachments=None,
+        )
         await _mark_job_sent(job["id"], job.get("processing_lease_id"), response_payload)
     except KommoAPIError as e:
         logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
@@ -1749,9 +1755,16 @@ async def _mark_job_discarded(
     return bool(updated)
 
 
-async def _store_assistant_message_after_delivery(customer: dict, job: dict, result: dict, customer_text: str | None) -> None:
+async def _store_assistant_message_after_delivery(
+    customer: dict,
+    job: dict,
+    result: dict,
+    customer_text: str | None,
+    *,
+    delivered_attachments: list[dict] | None = None,
+) -> None:
     content = customer_text or result.get("text") or ""
-    attachments = _semantic_attachments_from_result(result)
+    attachments = delivered_attachments or []
     if not content and not attachments:
         return
     async with db.get_db().transaction():

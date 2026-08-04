@@ -1701,7 +1701,13 @@ async def test_assistant_history_persistence_is_idempotent_per_kommo_job(monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("result", "customer_text", "expected_content", "expected_attachments"),
+    (
+        "result",
+        "customer_text",
+        "delivered_attachments",
+        "expected_content",
+        "expected_attachments",
+    ),
     [
         (
             {
@@ -1715,6 +1721,13 @@ async def test_assistant_history_persistence_is_idempotent_per_kommo_job(monkeyp
                 "function_calls": [{"name": "send_product_image"}],
             },
             "Mira esta opción",
+            [
+                {
+                    "type": "product_image",
+                    "product_name": "Coconut Passion",
+                    "sku": "VS-CP-01",
+                }
+            ],
             "Mira esta opción",
             [
                 {
@@ -1734,6 +1747,7 @@ async def test_assistant_history_persistence_is_idempotent_per_kommo_job(monkeyp
                 },
             },
             None,
+            [{"type": "product_image", "product_name": "Coconut Passion"}],
             "",
             [{"type": "product_image", "product_name": "Coconut Passion"}],
         ),
@@ -1748,6 +1762,13 @@ async def test_assistant_history_persistence_is_idempotent_per_kommo_job(monkeyp
                 },
             },
             None,
+            [
+                {
+                    "type": "catalog_pdf",
+                    "filename": "Catalogo Zona Pink.pdf",
+                    "catalog_fingerprint": "catalog-v1",
+                }
+            ],
             "",
             [
                 {
@@ -1763,6 +1784,7 @@ async def test_assistant_history_persists_semantic_media_turns(
     monkeypatch,
     result,
     customer_text,
+    delivered_attachments,
     expected_content,
     expected_attachments,
 ):
@@ -1781,6 +1803,7 @@ async def test_assistant_history_persists_semantic_media_turns(
         {"id": "job", "channel": "whatsapp", "processing_lease_id": LEASE_ID},
         result,
         customer_text,
+        delivered_attachments=delivered_attachments,
     )
 
     store_message.assert_awaited_once()
@@ -1792,6 +1815,75 @@ async def test_assistant_history_persists_semantic_media_turns(
     assert "image_url" not in str(persisted["attachments"])
     assert "download_url" not in str(persisted["attachments"])
     assert any("assistant_message_persisted_at = NOW()" in call.args[0] for call in mock_db.execute.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_salesbot_product_image_intent_persists_text_without_attachment(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock(return_value={"assistant_message_persisted_at": None})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+    result = {
+        "text": "Aquí está la imagen: https://example.com/product.jpg",
+        "product_image": {
+            "type": "product_image",
+            "product_name": "Coconut Passion",
+            "sku": "VS-CP-01",
+            "image_url": "https://example.com/product.jpg",
+        },
+    }
+
+    await jobs._store_assistant_message_after_delivery(
+        {"id": "customer", "channel": "whatsapp"},
+        {"id": "job", "channel": "whatsapp", "processing_lease_id": LEASE_ID},
+        result,
+        result["text"],
+        delivered_attachments=None,
+    )
+
+    persisted = store_message.await_args.kwargs
+    assert persisted["content"] == result["text"]
+    assert persisted["attachments"] is None
+
+
+def test_semantic_attachment_builder_keeps_only_transport_independent_fields():
+    from app.integrations.kommo import jobs
+
+    attachments = jobs._semantic_attachments_from_result(
+        {
+            "product_image": {
+                "type": "product_image",
+                "product_name": "Coconut Passion",
+                "sku": "VS-CP-01",
+                "image_url": "https://example.com/product.jpg",
+                "drive_uuid": "hidden",
+            },
+            "catalog_pdf": {
+                "type": "catalog_pdf",
+                "filename": "Catalogo Zona Pink.pdf",
+                "catalog_fingerprint": "catalog-v1",
+                "download_url": "https://example.com/catalog.pdf",
+            },
+        }
+    )
+
+    assert attachments == [
+        {
+            "type": "product_image",
+            "product_name": "Coconut Passion",
+            "sku": "VS-CP-01",
+        },
+        {
+            "type": "catalog_pdf",
+            "filename": "Catalogo Zona Pink.pdf",
+            "catalog_fingerprint": "catalog-v1",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -1816,10 +1908,18 @@ async def test_repeated_media_assistant_persistence_writes_one_logical_row(monke
     }
 
     await jobs._store_assistant_message_after_delivery(
-        {"id": "customer"}, job, result, None
+        {"id": "customer"},
+        job,
+        result,
+        None,
+        delivered_attachments=[{"type": "product_image", "product_name": "Coconut Passion"}],
     )
     await jobs._store_assistant_message_after_delivery(
-        {"id": "customer"}, job, result, None
+        {"id": "customer"},
+        job,
+        result,
+        None,
+        delivered_attachments=[{"type": "product_image", "product_name": "Coconut Passion"}],
     )
 
     store_message.assert_awaited_once()
