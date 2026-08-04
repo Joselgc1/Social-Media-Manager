@@ -1658,7 +1658,7 @@ def _voice_ready_job(**overrides):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("job", "expected_message"),
+    ("job", "expected_message", "expected_image_url"),
     [
         (
             {
@@ -1682,6 +1682,7 @@ def _voice_ready_job(**overrides):
                 ],
             },
             "El cliente envio una imagen por Kommo.\nQuiero esa pijama",
+            "https://media.example/image.jpg",
         ),
         (
             {
@@ -1705,6 +1706,7 @@ def _voice_ready_job(**overrides):
                 ],
             },
             "Quiero esa pijama\nEl cliente envio una imagen por Kommo.",
+            "https://media.example/image.jpg",
         ),
         (
             {
@@ -1729,14 +1731,90 @@ def _voice_ready_job(**overrides):
                 ],
             },
             "El cliente envio una imagen por Kommo.\nQuiero esa pijama\n¿La tienen disponible?",
+            "https://media.example/image.jpg",
+        ),
+        (
+            {
+                "combined_message": (
+                    "El cliente envio una imagen por Kommo.\n"
+                    "El cliente envio una imagen por Kommo.\n"
+                    "[Kommo voice:voice-1 pendiente de transcripcion]"
+                ),
+                "message_type": "voice",
+                "media_url": "https://media.example/voice.ogg",
+                "inbound_attachments": [
+                    {
+                        "external_message_id": "image-1",
+                        "message_type": "image",
+                        "media_url": "https://media.example/image-1.jpg",
+                    },
+                    {
+                        "external_message_id": "image-2",
+                        "message_type": "picture",
+                        "media_url": "https://media.example/image-2.jpg",
+                    },
+                    {
+                        "external_message_id": "voice-1",
+                        "message_type": "voice",
+                        "media_url": "https://media.example/voice.ogg",
+                    },
+                ],
+            },
+            (
+                "El cliente envio una imagen por Kommo.\n"
+                "El cliente envio una imagen por Kommo.\n"
+                "Quiero esa pijama"
+            ),
+            "https://media.example/image-2.jpg",
+        ),
+        (
+            {
+                "combined_message": (
+                    "[Kommo voice:voice-1 pendiente de transcripcion]\n"
+                    "El cliente envio una imagen por Kommo.\n"
+                    "El cliente envio una imagen por Kommo."
+                ),
+                "message_type": "picture",
+                "media_url": "https://media.example/image-2.jpg",
+                "inbound_attachments": [
+                    {
+                        "external_message_id": "voice-1",
+                        "message_type": "voice",
+                        "media_url": "https://media.example/voice.ogg",
+                    },
+                    {
+                        "external_message_id": "image-1",
+                        "message_type": "image",
+                        "media_url": "https://media.example/image-1.jpg",
+                    },
+                    {
+                        "external_message_id": "image-2",
+                        "message_type": "picture",
+                        "media_url": "https://media.example/image-2.jpg",
+                    },
+                ],
+            },
+            (
+                "Quiero esa pijama\n"
+                "El cliente envio una imagen por Kommo.\n"
+                "El cliente envio una imagen por Kommo."
+            ),
+            "https://media.example/image-2.jpg",
         ),
     ],
-    ids=["image-voice", "voice-image", "image-voice-text"],
+    ids=[
+        "image-voice",
+        "voice-image",
+        "image-voice-text",
+        "image-image-voice",
+        "voice-image-image",
+    ],
 )
 async def test_ready_mixed_media_preserves_transcription_and_image_context(
     monkeypatch,
     job,
     expected_message,
+    expected_image_url,
 ):
     from app.integrations.kommo import jobs
 
@@ -1754,9 +1832,17 @@ async def test_ready_mixed_media_preserves_transcription_and_image_context(
     transcribe.assert_awaited_once_with("https://media.example/voice.ogg")
     generated = jobs.generate_response.await_args.kwargs
     assert generated["message_text"] == expected_message
-    assert generated["media_url"] == "https://media.example/image.jpg"
+    assert generated["media_url"] == expected_image_url
     assert generated["integration_context"]["media_url_is_direct"] is True
     client.continue_salesbot.assert_awaited_once()
+
+
+def test_invalid_inbound_attachment_metadata_uses_generalized_error():
+    from app.ai.transcription import AudioTranscriptionError
+    from app.integrations.kommo import jobs
+
+    with pytest.raises(AudioTranscriptionError, match="Inbound attachment metadata is invalid"):
+        jobs._job_inbound_attachments({"inbound_attachments": "not-json"})
 
 
 @pytest.mark.asyncio

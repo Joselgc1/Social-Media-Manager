@@ -2257,6 +2257,7 @@ def _job_inbound_audio_attachments(job: dict) -> list[dict]:
 
 
 def _job_image_media_url(job: dict) -> str | None:
+    # generate_response accepts one image, so intentionally analyze the latest image in the debounce batch.
     for item in reversed(_job_inbound_attachments(job)):
         if str(item.get("message_type") or "").strip().lower() not in _IMAGE_MESSAGE_TYPES:
             continue
@@ -2274,9 +2275,9 @@ def _job_inbound_attachments(job: dict) -> list[dict]:
         try:
             value = json.loads(value)
         except json.JSONDecodeError as error:
-            raise AudioTranscriptionError("Audio attachment metadata is invalid", retryable=False) from error
+            raise AudioTranscriptionError("Inbound attachment metadata is invalid", retryable=False) from error
     if not isinstance(value, list):
-        raise AudioTranscriptionError("Audio attachment metadata is invalid", retryable=False)
+        raise AudioTranscriptionError("Inbound attachment metadata is invalid", retryable=False)
 
     attachments = []
     seen_message_ids: set[str] = set()
@@ -2288,7 +2289,7 @@ def _job_inbound_attachments(job: dict) -> list[dict]:
             continue
         external_message_id = str(item.get("external_message_id") or "").strip()
         if not external_message_id:
-            raise AudioTranscriptionError("Audio attachment metadata is invalid", retryable=False)
+            raise AudioTranscriptionError("Inbound attachment metadata is invalid", retryable=False)
         if external_message_id in seen_message_ids:
             continue
         seen_message_ids.add(external_message_id)
