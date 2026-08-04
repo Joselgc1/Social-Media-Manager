@@ -142,12 +142,22 @@ def should_block_product_inquiry_escalation(reason: str, latest_user_message: st
 
 
 def _catalog_pdf_supported(channel: str, integration_context: dict | None) -> bool:
+    config = get_config()
     delivery_provider = (integration_context or {}).get("provider")
     if not delivery_provider:
-        delivery_provider = getattr(get_config(), "channel_backend", "meta")
+        delivery_provider = getattr(config, "channel_backend", "meta")
     if not isinstance(delivery_provider, str) or delivery_provider not in {"meta", "kommo"}:
         delivery_provider = "meta"
-    return channel == "whatsapp" and delivery_provider == "meta"
+    if channel != "whatsapp":
+        return False
+    if delivery_provider == "meta":
+        return True
+    return (
+        (integration_context or {}).get("interaction_type", "private_message")
+        == "private_message"
+        and bool(getattr(config, "kommo_chats_media_enabled", False))
+        and getattr(config, "kommo_chats_pdf_attachment_type", None) == "file"
+    )
 
 
 async def _sync_kommo_escalation_if_needed(

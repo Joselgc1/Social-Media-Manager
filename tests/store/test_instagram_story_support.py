@@ -1188,7 +1188,11 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
 
     client.continue_salesbot.assert_awaited_once_with(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        data={"status": "success", "message": "Respuesta Kommo"},
+        data={
+            "status": "success",
+            "delivery_mode": "salesbot",
+            "message": "Respuesta Kommo",
+        },
     )
     persist_meta_sender.assert_not_awaited()
     meta_send.assert_not_awaited()
@@ -1425,7 +1429,7 @@ async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_m
 
     client.continue_salesbot.assert_awaited_once_with(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        data={"status": "success", "message": "Cuesta $25."},
+        data={"status": "success", "delivery_mode": "salesbot", "message": "Cuesta $25."},
     )
     meta_send.assert_not_awaited()
     integration_context = jobs.generate_response.await_args.kwargs["integration_context"]

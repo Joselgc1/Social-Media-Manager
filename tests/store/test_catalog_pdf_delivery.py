@@ -22,6 +22,53 @@ def test_send_catalog_pdf_excluded_from_kommo_tool_availability():
     assert "send_catalog_pdf" not in _tool_names(tools)
 
 
+def test_send_catalog_pdf_available_for_configured_kommo_whatsapp_private_message():
+    from app.ai.engine import _tools_for_delivery
+
+    tools = _tools_for_delivery(
+        "whatsapp",
+        {"provider": "kommo", "interaction_type": "private_message"},
+        SimpleNamespace(
+            channel_backend="kommo",
+            kommo_chats_media_enabled=True,
+            kommo_chats_pdf_attachment_type="file",
+        ),
+    )
+
+    assert "send_catalog_pdf" in _tool_names(tools)
+
+
+@pytest.mark.parametrize(
+    ("channel", "interaction_type", "enabled", "pdf_type"),
+    [
+        ("instagram", "private_message", True, "file"),
+        ("instagram", "instagram_comment", True, "file"),
+        ("whatsapp", "instagram_comment", True, "file"),
+        ("whatsapp", "private_message", False, "file"),
+        ("whatsapp", "private_message", True, None),
+    ],
+)
+def test_send_catalog_pdf_stays_unavailable_outside_configured_kommo_whatsapp_private_media(
+    channel,
+    interaction_type,
+    enabled,
+    pdf_type,
+):
+    from app.ai.engine import _tools_for_delivery
+
+    tools = _tools_for_delivery(
+        channel,
+        {"provider": "kommo", "interaction_type": interaction_type},
+        SimpleNamespace(
+            channel_backend="kommo",
+            kommo_chats_media_enabled=enabled,
+            kommo_chats_pdf_attachment_type=pdf_type,
+        ),
+    )
+
+    assert "send_catalog_pdf" not in _tool_names(tools)
+
+
 def test_send_catalog_pdf_available_for_direct_meta_whatsapp():
     from app.ai.engine import _tools_for_delivery
 

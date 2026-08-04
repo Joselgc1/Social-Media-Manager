@@ -52,6 +52,7 @@ widget.i18n = section => {{
       instagram_comment_handler_name: 'Ask Eva AI for Instagram comments',
       webhook_url: 'Salesbot callback URL override',
       success_exit: 'AI response completed',
+      media_exit: 'Media delivered by backend',
       fail_exit: 'AI response failed'
     }}
   }};
@@ -128,15 +129,19 @@ def _widget_request_url(flow: list[dict]) -> str:
 
 
 def _flow_exit_codes(flow: list[dict]) -> set[str]:
-    success_result = flow[1]["question"][0]["params"]["result"]
-    fail_exit = flow[1]["question"][1]
-    return {success_result[0]["params"]["value"], fail_exit["params"]["value"]}
+    codes = set()
+    for step in flow[1]["question"]:
+        if step["handler"] == "conditions":
+            codes.update(item["params"]["value"] for item in step["params"]["result"])
+        elif step["handler"] == "exits":
+            codes.add(step["params"]["value"])
+    return codes
 
 
 def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     manifest = _source_manifest()
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.11"
+    assert manifest["widget"]["version"] == "1.2.12"
     assert manifest["locations"] == ["settings", "salesbot_designer"]
     assert manifest["settings"]["backend_url"] == {
         "name": "settings.backend_url",
@@ -177,6 +182,7 @@ def test_all_manifest_localization_keys_exist_in_both_locales():
         assert "instagram_comment_handler_name" in translations["salesbot"]
         assert "webhook_url" in translations["salesbot"]
         assert translations["salesbot"]["success_exit"]
+        assert translations["salesbot"]["media_exit"]
         assert translations["salesbot"]["fail_exit"]
 
 
@@ -212,7 +218,7 @@ def test_widget_build_substitutes_widget_code_and_includes_expected_archive_cont
     assert "manifest.json" in names
     assert "__WIDGET_CODE__" not in json.dumps(manifest)
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.11"
+    assert manifest["widget"]["version"] == "1.2.12"
     assert "settings" in manifest
     assert {"settings", "salesbot_designer"}.issubset(set(manifest["locations"]))
     assert manifest["salesbot_designer"]["logo"] == "/widgets/social_media_manager_kommo_v2/images/logo_small.png"
@@ -227,11 +233,11 @@ def test_widget_build_rejects_placeholder_widget_code(tmp_path):
         builder.build("__WIDGET_CODE__", output=tmp_path / "bad.zip")
 
 
-def test_salesbot_designer_settings_exists_and_returns_success_and_fail_exits():
+def test_salesbot_designer_settings_exposes_text_media_and_fail_exits():
     result = _run_widget_script_probe()
     assert "salesbotDesignerSettings" in result["callbackNames"]
     exits = result["designerSettings"]["exits"]
-    assert [exit_["code"] for exit_ in exits] == ["success", "fail"]
+    assert [exit_["code"] for exit_ in exits] == ["success", "media", "fail"]
     assert all(exit_["title"] for exit_ in exits)
 
 
@@ -297,10 +303,19 @@ def test_salesbot_script_uses_documented_widget_request_flow_and_matching_exits(
     assert flow[1]["require"] == []
     assert flow[1]["question"][0]["handler"] == "conditions"
     assert flow[1]["question"][0]["params"]["conditions"] == [
+        {"term1": "{{json.status}}", "term2": "success", "operation": "="},
+        {"term1": "{{json.delivery_mode}}", "term2": "chats_api", "operation": "="},
+    ]
+    assert flow[1]["question"][0]["params"]["result"] == [
+        {"handler": "exits", "params": {"value": "media"}}
+    ]
+    assert flow[1]["question"][1]["params"]["conditions"] == [
         {"term1": "{{json.status}}", "term2": "success", "operation": "="}
     ]
-    assert flow[1]["question"][0]["params"]["result"] == [{"handler": "exits", "params": {"value": "success"}}]
-    assert flow[1]["question"][1] == {"handler": "exits", "params": {"value": "fail"}}
+    assert flow[1]["question"][1]["params"]["result"] == [
+        {"handler": "exits", "params": {"value": "success"}}
+    ]
+    assert flow[1]["question"][2] == {"handler": "exits", "params": {"value": "fail"}}
     assert _flow_exit_codes(flow) == {exit_["code"] for exit_ in result["designerSettings"]["exits"]}
     whatsapp_data = result["whatsappBlockFlow"][0]["question"][0]["params"]["data"]
     assert whatsapp_data["interaction_type"] == "private_message"

@@ -502,6 +502,58 @@ async def test_success_persists_provider_message_id_and_accepted_status(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_accepted_send_with_database_persistence_error_is_delivery_unknown(monkeypatch):
+    monkeypatch.setattr(
+        delivery.db,
+        "fetch_one",
+        AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "message-1"}))
+    media = delivery._MediaRequest(
+        media_type="product_image",
+        cache_key="key",
+        attachment_type="picture",
+        semantic_attachment={"type": "product_image"},
+    )
+
+    with pytest.raises(delivery.KommoDeliveryUnknownError, match="accepted the media send"):
+        await delivery._send_claimed_delivery(
+            client,
+            job_id=JOB["id"],
+            talk_id="105",
+            text="Foto",
+            uploaded=_uploaded("product_image"),
+            media=media,
+            request_fingerprint="fingerprint",
+        )
+
+
+@pytest.mark.asyncio
+async def test_second_media_failure_after_first_acceptance_is_quarantined(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        delivery,
+        "_send_claimed_delivery",
+        AsyncMock(
+            side_effect=[
+                "message-image",
+                KommoAPIError("bad PDF request", status_code=400),
+            ]
+        ),
+    )
+    client = SimpleNamespace(send_talk_message=AsyncMock())
+
+    with pytest.raises(delivery.KommoDeliveryUnknownError, match="partially delivered"):
+        await deliver_response(
+            job=JOB,
+            result={**_image_result(), **_pdf_result()},
+            customer_text="Imagen y catalogo",
+            client=client,
+            files=SimpleNamespace(client=client),
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "expected_status"),
     [
@@ -536,6 +588,35 @@ async def test_send_failure_persists_safe_retry_status(monkeypatch, error, expec
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_send_stays_unknown_when_status_persistence_also_fails(monkeypatch):
+    monkeypatch.setattr(
+        delivery.db,
+        "execute",
+        AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+    client = SimpleNamespace(
+        send_talk_message=AsyncMock(side_effect=KommoAPIError("connection lost"))
+    )
+    media = delivery._MediaRequest(
+        media_type="product_image",
+        cache_key="key",
+        attachment_type="picture",
+        semantic_attachment={"type": "product_image"},
+    )
+
+    with pytest.raises(delivery.KommoDeliveryUnknownError, match="outcome is unknown"):
+        await delivery._send_claimed_delivery(
+            client,
+            job_id=JOB["id"],
+            talk_id="105",
+            text="Foto",
+            uploaded=_uploaded("product_image"),
+            media=media,
+            request_fingerprint="fingerprint",
+        )
+
+
+@pytest.mark.asyncio
 async def test_delivery_result_semantic_attachments_exclude_drive_identifiers(monkeypatch):
     _install_chats_dependencies(monkeypatch)
     client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "message-image"}))
@@ -553,3 +634,26 @@ async def test_delivery_result_semantic_attachments_exclude_drive_identifiers(mo
     assert VERSION_UUID not in serialized
     assert "drive_uuid" not in serialized
     assert "image_url" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_outgoing_confirmation_moves_only_accepted_chats_delivery(monkeypatch):
+    confirmed = AsyncMock(return_value={"id": "delivery-1"})
+    monkeypatch.setattr(delivery.db, "fetch_one", confirmed)
+
+    assert await delivery.confirm_outbound_delivery("message-1") is True
+
+    query, values = confirmed.await_args.args
+    assert "transport = 'chats_api'" in query
+    assert "status = 'accepted'" in query
+    assert "status = 'confirmed'" in query
+    assert "confirmed_at = COALESCE(confirmed_at, NOW())" in query
+    assert values == {"provider_message_id": "message-1"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_outgoing_confirmation_is_harmless(monkeypatch):
+    monkeypatch.setattr(delivery.db, "fetch_one", AsyncMock(return_value=None))
+
+    assert await delivery.confirm_outbound_delivery("unknown-message") is False
+    assert await delivery.confirm_outbound_delivery(None) is False

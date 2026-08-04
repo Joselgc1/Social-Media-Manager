@@ -180,6 +180,34 @@ async def test_mirrored_comment_general_webhook_creates_private_message_job_for_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("matched", [True, False])
+async def test_outgoing_webhook_only_reconciles_existing_delivery(client, monkeypatch, matched):
+    confirm = AsyncMock(return_value=matched)
+    record = AsyncMock()
+    monkeypatch.setattr(kommo, "confirm_outbound_delivery", confirm)
+    monkeypatch.setattr(kommo, "record_incoming_event", record)
+
+    response = await client.post(
+        "/webhooks/kommo/events/secret-path",
+        json={
+            "outgoing_message": {
+                "add": [
+                    {
+                        "id": "provider-message-1",
+                        "origin": "whatsapp",
+                        "author": {"type": "internal"},
+                    }
+                ]
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    confirm.assert_awaited_once_with("provider-message-1")
+    record.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_salesbot_callback_accepts_flattened_form_data_fields(client):
     response = await _post(
         client,

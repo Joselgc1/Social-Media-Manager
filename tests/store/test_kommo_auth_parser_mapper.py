@@ -429,6 +429,70 @@ def test_text_button_and_image_response_mapping():
     assert "Hola, aqui tienes opciones" in output.customer_text
 
 
+def test_native_image_mapping_uses_caption_without_raw_source_url_or_duplication():
+    image_url = "https://drive.google.com/uc?id=private-image"
+    output = map_ai_response_to_salesbot(
+        {
+            "text": f"Aqui tienes la foto. {image_url}",
+            "product_image": {
+                "type": "product_image",
+                "caption": "Aqui tienes la foto.",
+                "image_url": image_url,
+            },
+        },
+        native_media=True,
+    )
+
+    assert output.customer_text == "Aqui tienes la foto."
+    assert image_url not in output.customer_text
+    assert output.customer_text.count("Aqui tienes la foto.") == 1
+
+
+def test_native_image_mapping_normalizes_equivalent_source_urls_and_caption_punctuation():
+    output = map_ai_response_to_salesbot(
+        {
+            "text": "Aqui tienes la foto: https://cdn.example.com/product.jpg",
+            "product_image": {
+                "type": "product_image",
+                "caption": "Aqui tienes la foto.",
+                "image_url": "https://CDN.example.com:443/product.jpg#preview",
+            },
+        },
+        native_media=True,
+    )
+
+    assert output.customer_text == "Aqui tienes la foto:"
+    assert "cdn.example.com" not in output.customer_text
+
+
+def test_native_media_mapping_removes_bare_googleusercontent_url():
+    output = map_ai_response_to_salesbot(
+        {
+            "text": "Foto https://googleusercontent.com/private-image",
+            "product_image": {
+                "type": "product_image",
+                "caption": "Foto",
+                "image_url": "https://cdn.example.com/image.jpg",
+            },
+        },
+        native_media=True,
+    )
+
+    assert output.customer_text == "Foto"
+
+
+def test_native_pdf_mapping_uses_caption_when_reply_text_is_empty():
+    output = map_ai_response_to_salesbot(
+        {
+            "text": "",
+            "catalog_pdf": {"type": "catalog_pdf", "caption": "Aqui tienes el catalogo."},
+        },
+        native_media=True,
+    )
+
+    assert output.customer_text == "Aqui tienes el catalogo."
+
+
 def test_catalog_pdf_payload_is_ignored_for_kommo_when_text_exists():
     reply = (
         "Tenemos pijamas, sets y lencería con encaje.\n"

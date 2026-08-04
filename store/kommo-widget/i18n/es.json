@@ -14,6 +14,7 @@
     "instagram_comment_handler_name": "Consultar a Eva AI en comentarios de Instagram",
     "webhook_url": "URL alternativa del callback de Salesbot",
     "success_exit": "Respuesta de AI completada",
+    "media_exit": "Contenido multimedia enviado por el backend",
     "fail_exit": "Error en la respuesta de AI"
   }
 }

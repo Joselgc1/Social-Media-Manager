@@ -13,7 +13,7 @@ STORE_ROOT = Path(__file__).resolve().parents[1]
 if str(STORE_ROOT) not in sys.path:
     sys.path.insert(0, str(STORE_ROOT))
 
-from app.integrations.kommo.client import KommoAPIError  # noqa: E402
+from app.integrations.kommo.client import KommoAPIError, sanitize_kommo_error # noqa: E402
 from app.integrations.kommo.files import (  # noqa: E402
     KommoFiles,
     KommoPDFSendUnsupportedError,
@@ -84,7 +84,10 @@ def main() -> int:
     try:
         metadata = asyncio.run(verify(_parser().parse_args()))
     except Exception as error:
-        print(f"Kommo media verification failed: {type(error).__name__}", file=sys.stderr)
+        print(
+            f"Kommo media verification failed: {sanitize_kommo_error(error)}",
+            file=sys.stderr,
+        )
         return 1
     print(json.dumps(metadata, sort_keys=True))
     return 0

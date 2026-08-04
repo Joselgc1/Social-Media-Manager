@@ -152,6 +152,10 @@ define(['jquery'], function ($) {
               title: self.i18n('salesbot').success_exit
             },
             {
+              code: 'media',
+              title: self.i18n('salesbot').media_exit
+            },
+            {
               code: 'fail',
               title: self.i18n('salesbot').fail_exit
             }
@@ -237,6 +241,32 @@ define(['jquery'], function ($) {
           },
           {
             question: [
+              {
+                handler: 'conditions',
+                params: {
+                  logic: 'and',
+                  conditions: [
+                    {
+                      term1: '{{json.status}}',
+                      term2: 'success',
+                      operation: '='
+                    },
+                    {
+                      term1: '{{json.delivery_mode}}',
+                      term2: 'chats_api',
+                      operation: '='
+                    }
+                  ],
+                  result: [
+                    {
+                      handler: 'exits',
+                      params: {
+                        value: 'media'
+                      }
+                    }
+                  ]
+                }
+              },
               {
                 handler: 'conditions',
                 params: {

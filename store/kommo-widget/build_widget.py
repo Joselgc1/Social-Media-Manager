@@ -39,7 +39,7 @@ INCLUDE = [
 ]
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_IMAGE_BYTES = 300 * 1024
-EXPECTED_WIDGET_VERSION = "1.2.11"
+EXPECTED_WIDGET_VERSION = "1.2.12"
 REQUIRED_I18N_KEYS = {
     "widget": {"name", "short_description", "description", "tour_description"},
     "settings": {"backend_url"},
@@ -49,6 +49,7 @@ REQUIRED_I18N_KEYS = {
         "instagram_comment_handler_name",
         "webhook_url",
         "success_exit",
+        "media_exit",
         "fail_exit",
     },
 }

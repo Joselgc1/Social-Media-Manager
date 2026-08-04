@@ -37,6 +37,10 @@ class KommoDeliveryStateError(RuntimeError):
     """Raised when an earlier paid send cannot safely be repeated."""
 
 
+class KommoDeliveryUnknownError(KommoAPIError):
+    """Raised when a paid send may have succeeded and must not be repeated."""
+
+
 @dataclass(frozen=True)
 class _MediaRequest:
     media_type: Literal["product_image", "catalog_pdf"]
@@ -100,54 +104,63 @@ async def deliver_response(
     delivered_attachments: list[dict] = []
     provider_message_ids: list[str] = []
     for index, media in enumerate(media_requests):
-        cached_upload = await _get_or_upload_media(media, delivery_files)
-        uploaded = cached_upload.uploaded
-        send_text = clean_text if index == 0 else ""
-        request_fingerprint = _request_fingerprint(
-            job_id=str(job.get("id") or ""),
-            talk_id=talk_id,
-            media=media,
-            text=send_text,
-            position=index,
-        )
-        metadata = {
-            "media_type": media.media_type,
-            "cache_key": media.cache_key,
-            "content_hash": cached_upload.content_hash,
-            "drive_uuid": uploaded.drive_uuid,
-            "drive_version_uuid": uploaded.drive_version_uuid,
-            "file_name": uploaded.file_name,
-            "mime_type": uploaded.mime_type,
-            "file_size": uploaded.file_size,
-            "attachment_type": media.attachment_type,
-        }
-        claim = await _claim_delivery(
-            job_id=str(job.get("id") or ""),
-            media_type=media.media_type,
-            request_fingerprint=request_fingerprint,
-            attachment_metadata=metadata,
-        )
-        status = claim.status
-        if status in {"accepted", "confirmed"}:
-            provider_message_id = claim.provider_message_id
-            if not provider_message_id:
-                raise KommoDeliveryStateError(
-                    f"Kommo delivery {request_fingerprint} is {status} without a provider message ID"
-                )
-        elif status == "sending" and claim.send_allowed:
-            provider_message_id = await _send_claimed_delivery(
-                delivery_client,
+        try:
+            cached_upload = await _get_or_upload_media(media, delivery_files)
+            uploaded = cached_upload.uploaded
+            send_text = clean_text if index == 0 else ""
+            request_fingerprint = _request_fingerprint(
                 job_id=str(job.get("id") or ""),
                 talk_id=talk_id,
-                text=send_text,
-                uploaded=uploaded,
                 media=media,
+                text=send_text,
+                position=index,
+            )
+            metadata = {
+                "media_type": media.media_type,
+                "cache_key": media.cache_key,
+                "content_hash": cached_upload.content_hash,
+                "drive_uuid": uploaded.drive_uuid,
+                "drive_version_uuid": uploaded.drive_version_uuid,
+                "file_name": uploaded.file_name,
+                "mime_type": uploaded.mime_type,
+                "file_size": uploaded.file_size,
+                "attachment_type": media.attachment_type,
+            }
+            claim = await _claim_delivery(
+                job_id=str(job.get("id") or ""),
+                media_type=media.media_type,
                 request_fingerprint=request_fingerprint,
+                attachment_metadata=metadata,
             )
-        else:
-            raise KommoDeliveryStateError(
-                f"Kommo delivery {request_fingerprint} is {status}; refusing an unsafe resend"
-            )
+            status = claim.status
+            if status in {"accepted", "confirmed"}:
+                provider_message_id = claim.provider_message_id
+                if not provider_message_id:
+                    raise KommoDeliveryStateError(
+                        f"Kommo delivery {request_fingerprint} is {status} without a provider message ID"
+                    )
+            elif status == "sending" and claim.send_allowed:
+                provider_message_id = await _send_claimed_delivery(
+                    delivery_client,
+                    job_id=str(job.get("id") or ""),
+                    talk_id=talk_id,
+                    text=send_text,
+                    uploaded=uploaded,
+                    media=media,
+                    request_fingerprint=request_fingerprint,
+                )
+            else:
+                raise KommoDeliveryStateError(
+                    f"Kommo delivery {request_fingerprint} is {status}; refusing an unsafe resend"
+                )
+        except (KommoDeliveryUnknownError, KommoDeliveryStateError):
+            raise
+        except Exception as error:
+            if provider_message_ids:
+                raise KommoDeliveryUnknownError(
+                    "Kommo media response was only partially delivered"
+                ) from error
+            raise
 
         delivered_attachments.append(media.semantic_attachment)
         provider_message_ids.append(str(provider_message_id))
@@ -472,29 +485,43 @@ async def _send_claimed_delivery(
             raise KommoAPIError("Kommo send-message response is missing the message ID")
     except Exception as error:
         status = "failed" if _is_definitive_failure(error) else "delivery_unknown"
-        await _mark_delivery_error(job_id, request_fingerprint, status, error)
+        try:
+            await _mark_delivery_error(job_id, request_fingerprint, status, error)
+        except Exception as persistence_error:
+            if status == "delivery_unknown":
+                raise KommoDeliveryUnknownError(
+                    "Kommo media send outcome is unknown and its state could not be persisted"
+                ) from error
+            raise error from persistence_error
+        if status == "delivery_unknown":
+            raise KommoDeliveryUnknownError(sanitize_kommo_error(error)) from error
         raise
 
-    accepted = await db.fetch_one(
-        """
-        UPDATE kommo_outbound_deliveries
-        SET status = 'accepted',
-            provider_message_id = :provider_message_id,
-            accepted_at = NOW(),
-            last_error = NULL,
-            updated_at = NOW()
-        WHERE transport = 'chats_api'
-          AND job_id = CAST(:job_id AS uuid)
-          AND request_fingerprint = :request_fingerprint
-          AND status = 'sending'
-        RETURNING provider_message_id
-        """,
-        {
-            "job_id": job_id,
-            "request_fingerprint": request_fingerprint,
-            "provider_message_id": provider_message_id.strip(),
-        },
-    )
+    try:
+        accepted = await db.fetch_one(
+            """
+            UPDATE kommo_outbound_deliveries
+            SET status = 'accepted',
+                provider_message_id = :provider_message_id,
+                accepted_at = NOW(),
+                last_error = NULL,
+                updated_at = NOW()
+            WHERE transport = 'chats_api'
+              AND job_id = CAST(:job_id AS uuid)
+              AND request_fingerprint = :request_fingerprint
+              AND status = 'sending'
+            RETURNING provider_message_id
+            """,
+            {
+                "job_id": job_id,
+                "request_fingerprint": request_fingerprint,
+                "provider_message_id": provider_message_id.strip(),
+            },
+        )
+    except Exception as error:
+        raise KommoDeliveryUnknownError(
+            "Kommo accepted the media send but its delivery state could not be persisted"
+        ) from error
     if not accepted:
         raise KommoDeliveryStateError("Kommo delivery acceptance could not be persisted")
     return provider_message_id.strip()
@@ -533,3 +560,24 @@ async def _mark_delivery_error(
             "last_error": sanitize_kommo_error(error),
         },
     )
+
+
+async def confirm_outbound_delivery(provider_message_id: str | None) -> bool:
+    """Confirm an accepted Chats API delivery from an outgoing webhook."""
+    message_id = str(provider_message_id or "").strip()
+    if not message_id:
+        return False
+    confirmed = await db.fetch_one(
+        """
+        UPDATE kommo_outbound_deliveries
+        SET status = 'confirmed',
+            confirmed_at = COALESCE(confirmed_at, NOW()),
+            updated_at = NOW()
+        WHERE transport = 'chats_api'
+          AND provider_message_id = :provider_message_id
+          AND status = 'accepted'
+        RETURNING id
+        """,
+        {"provider_message_id": message_id},
+    )
+    return bool(confirmed)

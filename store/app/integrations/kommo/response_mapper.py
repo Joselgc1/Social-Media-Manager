@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
+import re
+from urllib.parse import urlsplit, urlunsplit
 
 from app.ai.safety import sanitize_customer_facing_text
 from app.integrations.kommo.models import NormalizedResponseOutput
 
 _MAX_BUTTONS = 25
+_URL_RE = re.compile(r"https://[^\s<>()]+", re.IGNORECASE)
 
 
 def _clean_text(text: str | None) -> str:
@@ -17,14 +19,24 @@ def _clean_text(text: str | None) -> str:
 def _is_public_url(value: str | None) -> bool:
     if not value:
         return False
-    parsed = urlparse(value)
+    parsed = urlsplit(value)
     return parsed.scheme == "https" and bool(parsed.hostname)
 
 
 def _append_customer_part(parts: list[str], text: str | None) -> None:
     cleaned = _clean_text(text)
-    if cleaned and cleaned not in "\n".join(parts):
-        parts.append(cleaned)
+    if not cleaned:
+        return
+    comparison = _dedup_text(cleaned)
+    for existing in parts:
+        existing_comparison = _dedup_text(existing)
+        if cleaned in existing or (
+            comparison
+            and existing_comparison
+            and (comparison == existing_comparison or comparison in existing_comparison)
+        ):
+            return
+    parts.append(cleaned)
 
 
 def _buttons_as_numbered_text(body_text: str, buttons: list[str]) -> str:
@@ -36,7 +48,63 @@ def _buttons_as_numbered_text(body_text: str, buttons: list[str]) -> str:
     return "\n".join(lines)
 
 
-def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
+def _dedup_text(text: str) -> str:
+    without_urls = _URL_RE.sub(" ", text).casefold()
+    return re.sub(r"[^\w]+", " ", without_urls, flags=re.UNICODE).strip()
+
+
+def _url_identity(value: str) -> str:
+    try:
+        parsed = urlsplit(value.strip())
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return value.strip()
+    if not parsed.scheme or not hostname:
+        return value.strip()
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    if port and not (
+        (parsed.scheme.lower() == "https" and port == 443)
+        or (parsed.scheme.lower() == "http" and port == 80)
+    ):
+        host = f"{host}:{port}"
+    return urlunsplit(
+        (parsed.scheme.lower(), host, parsed.path or "/", parsed.query, "")
+    )
+
+
+def _without_native_media_urls(text: str, result: dict) -> str:
+    source_urls = set()
+    for payload_name in ("product_image", "catalog_pdf"):
+        payload = result.get(payload_name)
+        if not isinstance(payload, dict):
+            continue
+        for field in ("image_url", "url", "pdf_url", "download_url"):
+            value = payload.get(field)
+            if isinstance(value, str) and value.strip():
+                source_urls.add(_url_identity(value))
+
+    def replace(match: re.Match) -> str:
+        url = match.group(0).rstrip(".,;:!?")
+        hostname = (urlsplit(url).hostname or "").lower()
+        if (
+            _url_identity(url) in source_urls
+            or hostname == "drive.google.com"
+            or hostname == "googleusercontent.com"
+            or hostname.endswith(".googleusercontent.com")
+        ):
+            return ""
+        return match.group(0)
+
+    cleaned = _URL_RE.sub(replace, text)
+    return "\n".join(line.strip() for line in cleaned.splitlines() if line.strip()).strip()
+
+
+def map_ai_response_to_salesbot(
+    result: dict,
+    *,
+    native_media: bool = False,
+) -> NormalizedResponseOutput:
     customer_parts: list[str] = []
 
     interactive = result.get("interactive") or {}
@@ -59,17 +127,31 @@ def map_ai_response_to_salesbot(result: dict) -> NormalizedResponseOutput:
         urls = "\n".join(buttons[:_MAX_BUTTONS])
         _append_customer_part(customer_parts, "\n".join(part for part in (body_text, urls) if part))
 
+    reply_text = _clean_text(result.get("text"))
+    if native_media:
+        reply_text = _without_native_media_urls(reply_text, result)
+    _append_customer_part(customer_parts, reply_text)
+
     product_image = result.get("product_image") or {}
     if product_image.get("type") == "product_image":
         caption = _clean_text(product_image.get("caption")) or "Aqui tienes la foto del producto:"
-        image_url = product_image.get("image_url")
-        text = f"{caption}\n{image_url}" if _is_public_url(image_url) else caption
-        _append_customer_part(customer_parts, text)
+        if native_media:
+            caption = _without_native_media_urls(caption, result)
+        _append_customer_part(customer_parts, caption)
+        if not native_media and _is_public_url(product_image.get("image_url")):
+            _append_customer_part(customer_parts, product_image["image_url"])
 
-    reply_text = _clean_text(result.get("text"))
-    _append_customer_part(customer_parts, reply_text)
+    catalog_pdf = result.get("catalog_pdf") or {}
+    if native_media and catalog_pdf.get("type") == "catalog_pdf":
+        caption = _without_native_media_urls(
+            _clean_text(catalog_pdf.get("caption") or "Aqui tienes el catalogo:"),
+            result,
+        )
+        _append_customer_part(customer_parts, caption)
 
     customer_text = "\n".join(part for part in customer_parts if part).strip()
+    if native_media:
+        customer_text = _without_native_media_urls(customer_text, result)
     if not customer_text:
         return NormalizedResponseOutput(discarded=True, reason="empty_response")
 

@@ -19,6 +19,7 @@ from app.integrations.kommo.auth import (
     validate_salesbot_jwt,
     validate_webhook_secret,
 )
+from app.integrations.kommo.delivery import confirm_outbound_delivery
 from app.integrations.kommo.jobs import (
     persist_salesbot_callback,
     process_ready_jobs,
@@ -91,7 +92,13 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
             continue
 
         if event.event_type == "outgoing_message":
-            logger.info("Kommo outgoing message event ignored for auto-reply: %s", _event_log_context(event))
+            confirmed = await confirm_outbound_delivery(event.message_id)
+            logger.info(
+                "Kommo outgoing message reconciled without auto-reply: matched=%s context=%s",
+                confirmed,
+                _event_log_context(event),
+            )
+            continue
 
     return Response(content="OK", status_code=200)
 

@@ -14,6 +14,7 @@
     "instagram_comment_handler_name": "Ask Eva AI for Instagram comments",
     "webhook_url": "Salesbot callback URL override",
     "success_exit": "AI response completed",
+    "media_exit": "Media delivered by backend",
     "fail_exit": "AI response failed"
   }
 }

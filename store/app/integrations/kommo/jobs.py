@@ -19,6 +19,11 @@ from app.crm.channel_mappings import (
 )
 from app.integrations.kommo.client import KommoAPIError, KommoClient, sanitize_kommo_error
 from app.integrations.kommo.customer_profile import build_kommo_customer_profile
+from app.integrations.kommo.delivery import (
+    KommoDeliveryStateError,
+    KommoDeliveryUnknownError,
+    deliver_response,
+)
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 from app.integrations.kommo.response_mapper import map_ai_response_to_salesbot
 from app.integrations.kommo.state import (
@@ -807,6 +812,7 @@ async def _process_ready_job(job: dict) -> None:
     config = get_config()
     client = KommoClient.from_config()
     continuation_started = False
+    media_delivery_succeeded = False
     try:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
         settings = await db.get_settings()
@@ -971,7 +977,7 @@ async def _process_ready_job(job: dict) -> None:
                 await _continue_and_discard_job(client, job, after.reason)
                 return
 
-        mapped = map_ai_response_to_salesbot(result)
+        mapped = map_ai_response_to_salesbot(result, native_media=True)
         raw_customer_text = (mapped.customer_text or "").strip()
         if not raw_customer_text:
             logger.info(
@@ -994,10 +1000,52 @@ async def _process_ready_job(job: dict) -> None:
             )
             await _continue_and_discard_job(client, job, "empty_after_sanitization")
             return
-        continuation_data = {"status": "success", "message": customer_text}
+        delivery_result = await deliver_response(
+            job=job,
+            result=result,
+            customer_text=customer_text,
+            client=client,
+        )
+        if delivery_result.transport == "salesbot":
+            fallback_mapped = map_ai_response_to_salesbot(result)
+            fallback_text = (fallback_mapped.customer_text or "").strip()
+            if not fallback_text:
+                await _continue_and_discard_job(
+                    client,
+                    job,
+                    fallback_mapped.reason or "empty_response",
+                )
+                return
+            customer_text, message_diagnostics = prepare_kommo_customer_message(
+                fallback_text,
+                job.get("channel") or "whatsapp",
+                settings,
+                interaction_type=_job_interaction_type(job),
+            )
+            continuation_data = {
+                "status": "success",
+                "delivery_mode": "salesbot",
+                "message": customer_text,
+            }
+        else:
+            media_delivery_succeeded = True
+            customer_text = delivery_result.customer_text
+            continuation_data = {
+                "status": "success",
+                "delivery_mode": "chats_api",
+                "message": "",
+            }
         if not await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
             logger.warning("Kommo ready job lost its processing lease before continuation: job_id=%s", job["id"])
             return
+        if media_delivery_succeeded:
+            await _store_assistant_message_after_delivery(
+                customer,
+                job,
+                result,
+                customer_text,
+                delivered_attachments=delivery_result.delivered_attachments,
+            )
         continuation_started = True
         _log_continuation_prepared(job["id"], continuation_data, message_diagnostics)
         try:
@@ -1026,33 +1074,52 @@ async def _process_ready_job(job: dict) -> None:
             job["id"],
             _job_interaction_type(job),
         )
-        await _store_assistant_message_after_delivery(
-            customer,
-            job,
-            result,
-            customer_text,
-            delivered_attachments=None,
-        )
+        if not media_delivery_succeeded:
+            await _store_assistant_message_after_delivery(
+                customer,
+                job,
+                result,
+                customer_text,
+                delivered_attachments=None,
+            )
         await _mark_job_sent(job["id"], job.get("processing_lease_id"), response_payload)
+    except (KommoDeliveryUnknownError, KommoDeliveryStateError) as e:
+        logger.warning(
+            "Kommo media delivery requires manual reconciliation: job_id=%s error=%s",
+            job["id"],
+            sanitize_job_error(e),
+        )
+        await _mark_job(
+            job["id"],
+            "delivery_unknown",
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
     except KommoAPIError as e:
         logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
-        if not continuation_started and job.get("return_url"):
+        if not continuation_started and not media_delivery_succeeded and job.get("return_url"):
             await _continue_and_discard_job(client, job, sanitize_job_error(e))
             return
         await _mark_job(
             job["id"],
-            _status_after_continuation_error(e, continuation_started),
+            (
+                "delivery_unknown"
+                if media_delivery_succeeded
+                else _status_after_continuation_error(e, continuation_started)
+            ),
             sanitize_job_error(e),
             processing_lease_id=job.get("processing_lease_id"),
         )
     except Exception as e:
         logger.exception("Kommo ready job failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
-        if not continuation_started and job.get("return_url"):
+        if not continuation_started and not media_delivery_succeeded and job.get("return_url"):
             await _continue_and_discard_job(client, job, sanitize_job_error(e))
             return
         await _mark_job(
             job["id"],
-            "delivery_unknown" if continuation_started else "failed",
+            "delivery_unknown"
+            if continuation_started or media_delivery_succeeded
+            else "failed",
             sanitize_job_error(e),
             processing_lease_id=job.get("processing_lease_id"),
         )
