@@ -153,7 +153,8 @@ def _content_with_delivery_context(content: str, attachments: list[dict]) -> str
             annotations.append("[Contexto de entrega: Eva envió el catálogo PDF actualizado.]")
     if not annotations:
         return content
-    return f"{content}\n\n" + "\n".join(annotations)
+    annotation_text = "\n".join(annotations)
+    return f"{content}\n\n{annotation_text}" if content else annotation_text
 
 
 def _safe_context_value(value) -> str:

@@ -29,8 +29,9 @@ CREATE INDEX IF NOT EXISTS idx_kommo_outbound_deliveries_job
     ON kommo_outbound_deliveries(job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_kommo_outbound_deliveries_status
     ON kommo_outbound_deliveries(status, updated_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_outbound_deliveries_job_transport_media
-    ON kommo_outbound_deliveries(job_id, transport, COALESCE(media_type, ''));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_outbound_deliveries_salesbot_job
+    ON kommo_outbound_deliveries(job_id)
+    WHERE transport = 'salesbot';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_outbound_deliveries_provider_message
     ON kommo_outbound_deliveries(transport, provider_message_id)
     WHERE provider_message_id IS NOT NULL;

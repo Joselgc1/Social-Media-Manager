@@ -1671,6 +1671,7 @@ async def test_assistant_history_persisted_after_accepted_kommo_continuation(mon
             "channel": "whatsapp",
             "function_calls": [{"name": "check_inventory"}],
             "source_id": "kommo-job:job",
+            "attachments": None,
         }
     ]
     assert any("status = 'sent'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
@@ -1695,6 +1696,157 @@ async def test_assistant_history_persistence_is_idempotent_per_kommo_job(monkeyp
     )
 
     jobs.conversations.store_message.assert_not_awaited()
+    mock_db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "customer_text", "expected_content", "expected_attachments"),
+    [
+        (
+            {
+                "text": "Mira esta opción",
+                "product_image": {
+                    "type": "product_image",
+                    "product_name": "Coconut Passion",
+                    "sku": "VS-CP-01",
+                    "image_url": "https://example.com/private.jpg",
+                },
+                "function_calls": [{"name": "send_product_image"}],
+            },
+            "Mira esta opción",
+            "Mira esta opción",
+            [
+                {
+                    "type": "product_image",
+                    "product_name": "Coconut Passion",
+                    "sku": "VS-CP-01",
+                }
+            ],
+        ),
+        (
+            {
+                "text": "",
+                "product_image": {
+                    "type": "product_image",
+                    "product_name": "Coconut Passion",
+                    "image_url": "https://example.com/private.jpg",
+                },
+            },
+            None,
+            "",
+            [{"type": "product_image", "product_name": "Coconut Passion"}],
+        ),
+        (
+            {
+                "text": None,
+                "catalog_pdf": {
+                    "type": "catalog_pdf",
+                    "filename": "Catalogo Zona Pink.pdf",
+                    "catalog_fingerprint": "catalog-v1",
+                    "download_url": "https://example.com/private.pdf",
+                },
+            },
+            None,
+            "",
+            [
+                {
+                    "type": "catalog_pdf",
+                    "filename": "Catalogo Zona Pink.pdf",
+                    "catalog_fingerprint": "catalog-v1",
+                }
+            ],
+        ),
+    ],
+)
+async def test_assistant_history_persists_semantic_media_turns(
+    monkeypatch,
+    result,
+    customer_text,
+    expected_content,
+    expected_attachments,
+):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock(return_value={"assistant_message_persisted_at": None})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+
+    await jobs._store_assistant_message_after_delivery(
+        {"id": "customer", "channel": "whatsapp"},
+        {"id": "job", "channel": "whatsapp", "processing_lease_id": LEASE_ID},
+        result,
+        customer_text,
+    )
+
+    store_message.assert_awaited_once()
+    persisted = store_message.await_args.kwargs
+    assert persisted["content"] == expected_content
+    assert persisted["attachments"] == expected_attachments
+    assert persisted["function_calls"] == result.get("function_calls")
+    assert persisted["source_id"] == "kommo-job:job"
+    assert "image_url" not in str(persisted["attachments"])
+    assert "download_url" not in str(persisted["attachments"])
+    assert any("assistant_message_persisted_at = NOW()" in call.args[0] for call in mock_db.execute.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_repeated_media_assistant_persistence_writes_one_logical_row(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock(
+        side_effect=[
+            {"assistant_message_persisted_at": None},
+            {"assistant_message_persisted_at": "2026-08-04T00:00:00Z"},
+        ]
+    )
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+    job = {"id": "job", "channel": "whatsapp", "processing_lease_id": LEASE_ID}
+    result = {
+        "product_image": {"type": "product_image", "product_name": "Coconut Passion"}
+    }
+
+    await jobs._store_assistant_message_after_delivery(
+        {"id": "customer"}, job, result, None
+    )
+    await jobs._store_assistant_message_after_delivery(
+        {"id": "customer"}, job, result, None
+    )
+
+    store_message.assert_awaited_once()
+    mock_db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_empty_assistant_result_does_not_persist_history(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock()
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+
+    await jobs._store_assistant_message_after_delivery(
+        {"id": "customer"},
+        {"id": "job", "processing_lease_id": LEASE_ID},
+        {"text": "", "function_calls": [{"name": "check_inventory"}]},
+        None,
+    )
+
+    store_message.assert_not_awaited()
+    mock_db.fetch_one.assert_not_awaited()
     mock_db.execute.assert_not_awaited()
 
 

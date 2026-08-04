@@ -35,6 +35,11 @@ KOMMO_MEDIA_HISTORY_FOUNDATION_MIGRATION_PATH = (
     / "migrations"
     / "009_kommo_media_history_foundation.sql"
 )
+KOMMO_OUTBOUND_DELIVERY_UNIQUENESS_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "migrations"
+    / "010_kommo_outbound_delivery_uniqueness.sql"
+)
 ADVISORY_LOCK_KEY = 891_014_001
 
 
@@ -62,6 +67,9 @@ async def run_migration(database_url: str | None = None) -> None:
     kommo_media_history_foundation_migration_sql = (
         KOMMO_MEDIA_HISTORY_FOUNDATION_MIGRATION_PATH.read_text(encoding="utf-8")
     )
+    kommo_outbound_delivery_uniqueness_migration_sql = (
+        KOMMO_OUTBOUND_DELIVERY_UNIQUENESS_MIGRATION_PATH.read_text(encoding="utf-8")
+    )
     connection = await asyncpg.connect(database_url)
     try:
         await connection.execute("SELECT pg_advisory_lock($1)", ADVISORY_LOCK_KEY)
@@ -74,6 +82,7 @@ async def run_migration(database_url: str | None = None) -> None:
             await connection.execute(instagram_story_production_fixes_migration_sql)
             await connection.execute(kommo_story_deferred_suppression_migration_sql)
             await connection.execute(kommo_media_history_foundation_migration_sql)
+            await connection.execute(kommo_outbound_delivery_uniqueness_migration_sql)
         finally:
             await connection.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
     finally:

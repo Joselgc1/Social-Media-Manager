@@ -147,6 +147,44 @@ async def test_get_history_adds_catalog_pdf_context_without_internal_metadata(mo
 
 
 @pytest.mark.asyncio
+async def test_attachment_only_assistant_turn_produces_non_empty_model_history(monkeypatch):
+    monkeypatch.setattr(
+        conversations.db,
+        "fetch_all",
+        AsyncMock(
+            return_value=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "attachments": [
+                        {
+                            "type": "product_image",
+                            "product_name": "Coconut Passion",
+                            "sku": "VS-CP-01",
+                        }
+                    ],
+                },
+                {"role": "user", "content": "Muéstrame Coconut Passion", "attachments": None},
+            ]
+        ),
+    )
+
+    history = await conversations.get_history("customer")
+    prepared = prepare_history_for_generation(history)
+
+    assert prepared == [
+        {"role": "user", "content": "Muéstrame Coconut Passion"},
+        {
+            "role": "assistant",
+            "content": (
+                '[Contexto de entrega: Eva también envió una imagen del producto '
+                '"Coconut Passion", SKU VS-CP-01.]'
+            ),
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_repeated_kommo_job_persistence_keeps_one_row_per_role(monkeypatch):
     logical_rows = set()
 

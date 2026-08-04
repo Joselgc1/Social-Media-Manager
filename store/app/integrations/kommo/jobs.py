@@ -1750,8 +1750,9 @@ async def _mark_job_discarded(
 
 
 async def _store_assistant_message_after_delivery(customer: dict, job: dict, result: dict, customer_text: str | None) -> None:
-    content = customer_text or result.get("text")
-    if not content:
+    content = customer_text or result.get("text") or ""
+    attachments = _semantic_attachments_from_result(result)
+    if not content and not attachments:
         return
     async with db.get_db().transaction():
         existing = await db.fetch_one(
@@ -1778,6 +1779,7 @@ async def _store_assistant_message_after_delivery(customer: dict, job: dict, res
             channel=job.get("channel") or customer.get("channel") or "whatsapp",
             function_calls=result.get("function_calls"),
             source_id=_conversation_source_id(job),
+            attachments=attachments or None,
         )
         await db.execute(
             """
@@ -1791,6 +1793,28 @@ async def _store_assistant_message_after_delivery(customer: dict, job: dict, res
             {"id": job["id"], "processing_lease_id": job.get("processing_lease_id")},
         )
     logger.info("Kommo assistant history persisted: job_id=%s", job["id"])
+
+
+def _semantic_attachments_from_result(result: dict) -> list[dict]:
+    attachments = []
+    product_image = result.get("product_image")
+    if isinstance(product_image, dict) and product_image.get("type") == "product_image":
+        attachment = {"type": "product_image"}
+        for field in ("product_name", "sku"):
+            value = product_image.get(field)
+            if isinstance(value, str) and value.strip():
+                attachment[field] = value.strip()
+        attachments.append(attachment)
+
+    catalog_pdf = result.get("catalog_pdf")
+    if isinstance(catalog_pdf, dict) and catalog_pdf.get("type") == "catalog_pdf":
+        attachment = {"type": "catalog_pdf"}
+        for field in ("filename", "catalog_fingerprint"):
+            value = catalog_pdf.get(field)
+            if isinstance(value, str) and value.strip():
+                attachment[field] = value.strip()
+        attachments.append(attachment)
+    return attachments
 
 
 def _status_after_continuation_error(error: KommoAPIError, continuation_started: bool) -> str:

@@ -23,7 +23,7 @@ from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 _db: databases.Database | None = None
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_VERSION = 9
+EXPECTED_SCHEMA_VERSION = 10
 
 
 async def connect():
@@ -83,11 +83,14 @@ async def verify_schema_version() -> None:
         ) from e
 
     versions = {int(row["version"]) for row in rows}
-    accepted_versions = ({1, 3, 4, 5, 6, 7, 8, 9}, {1, 2, 3, 4, 5, 6, 7, 8, 9})
+    accepted_versions = (
+        {1, 3, 4, 5, 6, 7, 8, 9, 10},
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+    )
     if versions not in accepted_versions:
         raise RuntimeError(
             f"Store database schema version mismatch: expected one of {[sorted(item) for item in accepted_versions]}, found {sorted(versions)}. "
-            "Apply Store migrations through store/migrations/009_kommo_media_history_foundation.sql."
+            "Apply Store migrations through store/migrations/010_kommo_outbound_delivery_uniqueness.sql."
         )
 
     required_meta_columns = {
