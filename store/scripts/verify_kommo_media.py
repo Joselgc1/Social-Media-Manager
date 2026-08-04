@@ -13,7 +13,7 @@ STORE_ROOT = Path(__file__).resolve().parents[1]
 if str(STORE_ROOT) not in sys.path:
     sys.path.insert(0, str(STORE_ROOT))
 
-from app.integrations.kommo.client import KommoAPIError, sanitize_kommo_error # noqa: E402
+from app.integrations.kommo.client import KommoAPIError, sanitize_kommo_error  # noqa: E402
 from app.integrations.kommo.files import (  # noqa: E402
     KommoFiles,
     KommoPDFSendUnsupportedError,

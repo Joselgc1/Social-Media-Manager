@@ -1528,7 +1528,16 @@ async def test_ready_job_native_media_uses_chats_mode_and_persists_semantic_atta
         jobs,
         settings={"ai_enabled": True, "kommo_emoji_mode_whatsapp": "preserve"},
     )
-    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_ai_active_enum_id=1,
+            kommo_chats_media_enabled=True,
+            kommo_chats_product_images_enabled=True,
+            kommo_chats_catalog_pdf_enabled=True,
+        ),
+    )
     monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
     monkeypatch.setattr(
         jobs,

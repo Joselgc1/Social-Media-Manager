@@ -24,6 +24,7 @@ from app.integrations.kommo.delivery import (
     KommoDeliveryUnknownError,
     KommoPartialDeliveryError,
     deliver_response,
+    get_enabled_media_types,
 )
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 from app.integrations.kommo.response_mapper import map_ai_response_to_salesbot
@@ -978,7 +979,12 @@ async def _process_ready_job(job: dict) -> None:
                 await _continue_and_discard_job(client, job, after.reason)
                 return
 
-        mapped = map_ai_response_to_salesbot(result, native_media=True)
+        enabled_media_types = get_enabled_media_types(job, result, config=config)
+        mapped = map_ai_response_to_salesbot(
+            result,
+            native_media=bool(enabled_media_types),
+            native_media_types=enabled_media_types,
+        )
         raw_customer_text = (mapped.customer_text or "").strip()
         if not raw_customer_text:
             logger.info(

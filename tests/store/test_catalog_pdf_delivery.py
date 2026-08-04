@@ -31,6 +31,7 @@ def test_send_catalog_pdf_available_for_configured_kommo_whatsapp_private_messag
         SimpleNamespace(
             channel_backend="kommo",
             kommo_chats_media_enabled=True,
+            kommo_chats_catalog_pdf_enabled=True,
             kommo_chats_pdf_attachment_type="file",
         ),
     )
@@ -39,19 +40,21 @@ def test_send_catalog_pdf_available_for_configured_kommo_whatsapp_private_messag
 
 
 @pytest.mark.parametrize(
-    ("channel", "interaction_type", "enabled", "pdf_type"),
+    ("channel", "interaction_type", "enabled", "pdf_enabled", "pdf_type"),
     [
-        ("instagram", "private_message", True, "file"),
-        ("instagram", "instagram_comment", True, "file"),
-        ("whatsapp", "instagram_comment", True, "file"),
-        ("whatsapp", "private_message", False, "file"),
-        ("whatsapp", "private_message", True, None),
+        ("instagram", "private_message", True, True, "file"),
+        ("instagram", "instagram_comment", True, True, "file"),
+        ("whatsapp", "instagram_comment", True, True, "file"),
+        ("whatsapp", "private_message", False, True, "file"),
+        ("whatsapp", "private_message", True, False, "file"),
+        ("whatsapp", "private_message", True, True, None),
     ],
 )
 def test_send_catalog_pdf_stays_unavailable_outside_configured_kommo_whatsapp_private_media(
     channel,
     interaction_type,
     enabled,
+    pdf_enabled,
     pdf_type,
 ):
     from app.ai.engine import _tools_for_delivery
@@ -62,6 +65,7 @@ def test_send_catalog_pdf_stays_unavailable_outside_configured_kommo_whatsapp_pr
         SimpleNamespace(
             channel_backend="kommo",
             kommo_chats_media_enabled=enabled,
+            kommo_chats_catalog_pdf_enabled=pdf_enabled,
             kommo_chats_pdf_attachment_type=pdf_type,
         ),
     )

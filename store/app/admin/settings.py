@@ -354,6 +354,25 @@ async def kommo_status():
             "stale_job_count": 0,
             "last_kommo_api_error_summary": "Diagnostics unavailable",
         }
+    try:
+        from app.integrations.kommo.delivery import monthly_usage_summary
+
+        media_usage = await monthly_usage_summary(config.kommo_chats_api_monthly_limit)
+    except Exception as e:
+        logger.warning("Kommo media usage diagnostics unavailable: %s", e)
+        media_usage = {
+            "attempted_requests": 0,
+            "product_image_requests": 0,
+            "catalog_pdf_requests": 0,
+            "accepted_or_confirmed_deliveries": 0,
+            "failed_deliveries": 0,
+            "delivery_unknown_deliveries": 0,
+            "configured_monthly_limit": config.kommo_chats_api_monthly_limit,
+            "estimated_remaining_requests": None,
+            "utilization_percent": None,
+            "warning_level": "normal",
+            "diagnostics_available": False,
+        }
     return {
         "channel_backend": config.channel_backend,
         "kommo_subdomain_configured": bool(config.kommo_subdomain),
@@ -381,6 +400,17 @@ async def kommo_status():
             )
         ),
         "kommo_responsible_user_configured": config.kommo_default_responsible_user_id is not None,
+        "kommo_chats_media_enabled": config.kommo_chats_media_enabled,
+        "kommo_chats_product_images_enabled": (
+            config.kommo_chats_media_enabled and config.kommo_chats_product_images_enabled
+        ),
+        "kommo_chats_catalog_pdf_enabled": (
+            config.kommo_chats_media_enabled and config.kommo_chats_catalog_pdf_enabled
+        ),
+        "kommo_chats_pdf_attachment_type_configured": (
+            config.kommo_chats_pdf_attachment_type is not None
+        ),
+        "kommo_chats_api_monthly_usage": media_usage,
         **diagnostics,
     }
 

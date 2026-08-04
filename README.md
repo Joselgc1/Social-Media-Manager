@@ -200,12 +200,12 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 
 ### Kommo Mode
 
-- Text-first WhatsApp and Instagram DM handling through the private-message Kommo Salesbot.
+- WhatsApp and Instagram DM text handling through the private-message Kommo Salesbot.
 - Public Instagram comment replies use Kommo's native comment-triggered Salesbot flow; the authenticated widget callback creates a durable `instagram_comment` job directly.
 - Salesbot buttons when supported, otherwise numbered text choices.
-- Product images degrade to caption plus public image URL when rich media is not supported by the Kommo channel.
-- Catalog PDF delivery is not offered through Kommo; catalog requests are answered as normal text from the loaded catalog.
-- Durable Salesbot jobs track `delivery_unknown` when continuation delivery cannot be confirmed; inspect Kommo before manual retry.
+- Opted-in WhatsApp product images and catalog PDFs use Kommo Files API/cache plus Chats API; disabled media safely falls back to Salesbot behavior.
+- Product images and PDFs have independent rollout flags under a global media kill switch. PDF delivery remains WhatsApp-only.
+- Durable jobs and outbound records track `delivery_unknown` when Salesbot or Chats API acceptance cannot be confirmed; inspect Kommo before manual retry.
 - Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable job reconciliation discards the mirrored private-message job before `KOMMO_SALESBOT_ID` can launch.
 
 ## Telegram Admin Commands

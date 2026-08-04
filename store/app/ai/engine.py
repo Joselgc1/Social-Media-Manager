@@ -1625,6 +1625,7 @@ def _catalog_pdf_supported(channel: str, integration_context: dict | None, confi
         (integration_context or {}).get("interaction_type", "private_message")
         == "private_message"
         and bool(getattr(config, "kommo_chats_media_enabled", False))
+        and bool(getattr(config, "kommo_chats_catalog_pdf_enabled", False))
         and getattr(config, "kommo_chats_pdf_attachment_type", None) == "file"
     )
 

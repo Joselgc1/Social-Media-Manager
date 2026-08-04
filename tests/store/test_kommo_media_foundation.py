@@ -668,6 +668,24 @@ def test_pdf_attachment_setting_defaults_to_none_and_rejects_unknown_values():
         Settings(**required, kommo_chats_pdf_attachment_type="document")
 
 
+def test_media_rollout_flags_and_monthly_limit_are_safe_by_default():
+    required = {
+        "database_url": "postgresql://test:test@localhost:5432/test",
+        "google_sheets_credentials_b64": "e30=",
+        "product_sheet_id": "sheet",
+        "_env_file": None,
+    }
+    settings = Settings(**required)
+
+    assert settings.kommo_chats_media_enabled is False
+    assert settings.kommo_chats_product_images_enabled is False
+    assert settings.kommo_chats_catalog_pdf_enabled is False
+    assert settings.kommo_chats_api_monthly_limit is None
+    assert Settings(**required, kommo_chats_api_monthly_limit="").kommo_chats_api_monthly_limit is None
+    with pytest.raises(ValidationError, match="kommo_chats_api_monthly_limit"):
+        Settings(**required, kommo_chats_api_monthly_limit=0)
+
+
 @pytest.mark.asyncio
 async def test_media_helpers_are_disabled_by_default():
     with pytest.raises(KommoMediaDisabledError, match="KOMMO_CHATS_MEDIA_ENABLED"):

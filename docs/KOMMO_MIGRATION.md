@@ -5,16 +5,32 @@
 `CHANNEL_BACKEND=meta` keeps the current direct Meta webhook and sender flow. `CHANNEL_BACKEND=kommo` uses Kommo official WhatsApp and Instagram integrations as the channel provider and shared inbox, while this app remains the AI, CRM, catalog, order, analytics, escalation, Telegram, and multi-store backend.
 
 ```text
-Instagram comment -> native Kommo comment Salesbot -> Social-Media-Manager callback -> Customer
-Instagram DM -> Kommo webhook -> Social-Media-Manager -> Instagram DM Salesbot -> Customer
-WhatsApp message -> Kommo webhook -> Social-Media-Manager -> WhatsApp Salesbot -> Customer
+WhatsApp text
+-> existing Salesbot
+
+WhatsApp product image
+-> Kommo Files API/cache
+-> Chats API, text + attachment
+-> Salesbot media branch finishes silently
+
+WhatsApp catalog PDF
+-> generated PDF
+-> Kommo Files API/cache
+-> Chats API, text + attachment
+-> Salesbot media branch finishes silently
+
+Instagram DM
+-> existing Salesbot path
+
+Instagram public comment
+-> existing native comment Salesbot
 ```
 
 Kommo owns the WhatsApp and Instagram channel connection. The app does not create a custom Kommo Chats API channel and does not call Meta sender modules in Kommo mode.
 
 ## Why Kommo
 
-Kommo removes the need to manage Meta Developers app review, long-lived Meta access tokens, WhatsApp Cloud API setup, Instagram Messaging API permissions, and webhook subscriptions directly. The tradeoff is that outbound AI replies must be sent by Salesbot through Kommo's connected channels.
+Kommo removes the need to manage Meta Developers app review, long-lived Meta access tokens, WhatsApp Cloud API setup, Instagram Messaging API permissions, and webhook subscriptions directly. Ordinary text replies use Salesbot through Kommo's connected channels. Opted-in WhatsApp product images and catalog PDFs use the Files API plus Chats API without creating a custom channel or calling Meta directly.
 
 ## Backend Modes
 
@@ -28,7 +44,8 @@ Kommo removes the need to manage Meta Developers app review, long-lived Meta acc
 
 - Registers `/webhooks/kommo/events/{webhook_secret}` and `/webhooks/kommo/salesbot`.
 - Does not require Meta credentials.
-- Launches the Salesbot configured for the private-message channel and resumes it for replies.
+- Launches the Salesbot configured for the private-message channel and resumes it with text replies or a silent media completion.
+- Uses Chats API only for opted-in WhatsApp media responses; Instagram remains on Salesbot.
 - Rejects direct WhatsApp broadcast delivery.
 
 ## Kommo Plan Prerequisites
@@ -83,6 +100,8 @@ Grant only the scopes needed for this integration:
 - Users read when `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` is used.
 - Notes write for escalation notes.
 - Salesbot/bot execution access according to Kommo permissions.
+- `Sending to external chats` for opted-in Chats API media delivery.
+- `Access to files` for image and PDF uploads to Kommo Drive.
 
 ## Long-Lived Token Creation
 
@@ -137,14 +156,19 @@ KOMMO_AI_HUMAN_ENUM_ID=
 KOMMO_AI_PAUSED_ENUM_ID=
 KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
 KOMMO_CHATS_MEDIA_ENABLED=false
+KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false
+KOMMO_CHATS_CATALOG_PDF_ENABLED=false
+KOMMO_CHATS_API_MONTHLY_LIMIT=
 KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 ```
 
 `KOMMO_INSTAGRAM_DM_SALESBOT_ID` and `KOMMO_WHATSAPP_SALESBOT_ID` are optional while migrating. For each missing dedicated ID, the backend temporarily falls back to `KOMMO_SALESBOT_ID`. New installations should configure both dedicated IDs; remove the legacy fallback only after both channels have been tested. `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` is optional. Do not add `KOMMO_ACCOUNT_ID`, `KOMMO_RETURN_URL_ALLOWLIST`, `KOMMO_AUTO_TAKEOVER_ON_HUMAN_REPLY`, or `KOMMO_REQUEST_TIMEOUT_SECONDS`.
 
+`KOMMO_CHATS_MEDIA_ENABLED` is the global kill switch. Product images additionally require `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=true`; PDFs additionally require `KOMMO_CHATS_CATALOG_PDF_ENABLED=true` and the live-validated `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file`. If a response contains both media types, only the independently enabled types are sent. All media flags default to `false`. `KOMMO_CHATS_API_MONTHLY_LIMIT` is an optional positive integer used only for local monitoring; Kommo remains authoritative for billing and quota.
+
 ## Database Migration
 
-For a fresh database, run `store/migrations/001_schema.sql` once. For an existing pre-consolidation store database, back it up and run `store/migrations/002_consolidated_upgrade.sql` once; never rerun `001_schema.sql` as an upgrade. Confirm `schema_migrations` contains either `{1}` or `{1,2}` before enabling Kommo mode.
+Run `python3 store/scripts/migrate.py` through the Railway pre-deploy command or against the intended database before enabling media. The current Store schema version is 12; migrations 009 through 012 add semantic conversation attachments, idempotent outbound delivery state, the upload cache, and content hashes. Confirm `schema_migrations` includes every applicable version through `12`. Never rerun `001_schema.sql` manually as an upgrade.
 
 ## Widget Build
 
@@ -297,9 +321,15 @@ The existing `escalate_to_human` tool now also attempts to:
 - Preserve Telegram notification.
 - Send one final customer handoff response.
 
-## Rich-Media Limitations
+## Hybrid Media Delivery
 
-The first release is text-first. Product images become caption plus public image URL when the Kommo channel cannot carry native rich media. Catalog PDF delivery is intentionally not offered through Kommo: `send_catalog_pdf` is excluded from Kommo tool availability, and catalog requests are answered as normal text from the loaded catalog. Unsupported buttons degrade to numbered text choices.
+Text-only WhatsApp responses and all Instagram responses remain on Salesbot and consume zero outgoing Chats API sends. A WhatsApp response containing an opted-in product image or catalog PDF uses Chats API for the whole response, including accompanying text. One attachment produces one `POST /api/v4/talks/{talk_id}/send_message` request. An image plus PDF produces two requests because Kommo currently accepts one attachment per request; customer text is included only on the first request. PDF delivery remains WhatsApp-only. Unsupported buttons degrade to numbered text choices.
+
+The Files API upload/cache lifecycle is separate from outgoing Chats API message usage. The metered operation is `POST /api/v4/talks/{talk_id}/send_message`; ordinary Salesbot text replies do not consume that outgoing Chats API pool.
+
+Only incoming external Kommo messages create AI jobs. Outgoing `add_outgoing_message` webhooks only reconcile an existing outbound delivery when the provider message ID matches; they never trigger Eva or create another `kommo_message_job`.
+
+Conversation history stores one logical assistant turn regardless of transport. `conversations.attachments` contains only semantic product-image or catalog-PDF context. Kommo Drive UUIDs, provider message IDs, request fingerprints, signed URLs, and raw provider payloads stay in Kommo delivery/cache tables and are never supplied to the LLM.
 
 Kommo Salesbot continuations are data-only payloads shaped as `{"data":{"status":"success","message":"..."}}` or `{"data":{"status":"fail","message":""}}`. They do not include `execute_handlers`, `attachment_type`, or public catalog PDF URLs.
 
@@ -307,16 +337,16 @@ Emoji and markdown formatting are normalized before Kommo continuation. Per-chan
 
 For `interaction_type=instagram_comment`, final text is additionally collapsed to one short public-safe message before continuation.
 
-## Phase 1: Media Foundation
+## Kommo Media Transport
 
-Phase 1 adds an opt-in, low-level transport foundation only. It is not wired into Eva, Salesbot continuations, Kommo jobs, conversation persistence, broadcasts, or normal customer delivery. Existing production behavior remains text-first.
+The Files and Chats transport is wired into WhatsApp private-message job processing behind the three rollout flags. Text-only and feature-disabled responses safely remain on the existing Salesbot path.
 
 The Kommo private integration requires these additional scopes before the transport can be exercised:
 
 - `Access to files` for the Files API.
 - `Sending to external chats` for the Chats API add-on.
 
-Set `KOMMO_CHATS_MEDIA_ENABLED=true` only in a development account while validating the transport. It defaults to `false`. `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` also defaults to empty; PDF files can be uploaded, but `send_pdf_to_talk()` is blocked until this setting is explicitly configured with the live-tested value.
+Enable the global flag and each media-specific flag only after development-account validation. `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` defaults to empty; PDF sending remains blocked until it is explicitly configured with the live-tested value `file`. Do not introduce or configure undocumented attachment types.
 
 The base flow follows Kommo's Files and Chats APIs:
 
@@ -342,7 +372,7 @@ The implementation validates intermediate and final chunk statuses separately. I
 
 Inventory image downloads allow at most three manual redirects. Every initial and redirected hostname is resolved asynchronously and rejected if any resolved address is private, loopback, link-local, multicast, reserved, or unspecified. Each request is then pinned to the validated address while preserving the original HTTP Host and TLS SNI hostname, preventing a second DNS lookup from bypassing validation. URL schemes, ports, userinfo, response size, MIME type, and binary signatures are also validated at every applicable step.
 
-Image attachment type `picture` is now live-verified. PDF sending remains intentionally disabled unless `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` is explicitly configured after a separate live test; PDF uploads alone remain supported. No Eva tool, prompt, Salesbot continuation, Kommo job, conversation-history path, broadcast, or normal production customer workflow calls this Phase 1 code.
+Image attachment type `picture` is live-verified. PDF sending remains disabled unless the global flag, PDF-specific flag, and `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file` are all configured. Files may still be uploaded independently for diagnostics without consuming an outgoing Chats API send.
 
 ## Payment-Image Limitations
 
@@ -377,9 +407,29 @@ Authenticated endpoints:
 
 They return booleans, timestamps, counts, and sanitized errors only. They do not return tokens, secrets, JWTs, phone numbers, full messages, or raw payloads.
 
+`GET /admin/settings/kommo/status` also reports current-calendar-month Chats API media attempts, product-image and catalog-PDF request counts, final-state accepted/confirmed, failed, and `delivery_unknown` delivery counts, the configured monitoring allowance, estimated remaining requests, utilization percentage, and warning level. Each claimed send increments transport-only attempt metadata; `sending` and `delivery_unknown` attempts count conservatively because the request may already have reached Kommo. Final-state delivery counts describe current durable records rather than every historical retry outcome. These values are local estimates from `kommo_outbound_deliveries`, not Kommo billing records, and do not enforce a hard quota. Direct manual calls such as `verify_kommo_media.py --send` do not have a durable job row and are not included in this local estimate; account for them separately and use Kommo as the billing source of truth.
+
+## Staged Media Rollout
+
+1. Apply all Store migrations through schema version 12.
+2. Deploy with `KOMMO_CHATS_MEDIA_ENABLED=false`, `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false`, and `KOMMO_CHATS_CATALOG_PDF_ENABLED=false`.
+3. Verify `POST /admin/settings/kommo/test` succeeds.
+4. Run `KOMMO_CHATS_MEDIA_ENABLED=true python3 store/scripts/verify_kommo_media.py --talk-id DEVELOPMENT_TALK_ID --send` against a development talk. The command-scoped global override enables the low-level diagnostic while the deployed media-specific flags remain false; `--send` makes one real metered Chats API request.
+5. Enable `KOMMO_CHATS_MEDIA_ENABLED=true` and `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=true`; leave PDF disabled.
+6. Test a text-only reply and a real product-image reply end to end. Confirm text uses Salesbot and the image uses one Chats API request with its caption.
+7. Verify conversation history, `kommo_outbound_deliveries`, and that outgoing webhook events created no duplicate AI jobs.
+8. Set `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file` and enable `KOMMO_CHATS_CATALOG_PDF_ENABLED=true`.
+9. Test a real PDF plus text delivery and confirm it uses one Chats API request.
+10. Check `/admin/settings/kommo/status` quota diagnostics and manually reconcile any `delivery_unknown` rows before retrying or sending replacements.
+11. Only after these checks pass, apply the same flags and validated attachment type in production.
+
 ## Delivery-Unknown Reconciliation
 
-Jobs marked `delivery_unknown` mean the backend started a Salesbot continuation but could not confirm whether Kommo accepted it, usually because of a timeout, transient 5xx/429 response, or process interruption while status was `continuing`. Do not blindly retry these jobs. First check the Kommo lead/chat to see whether the customer already received the message, then either leave the job as an audit record or reconcile manually with a one-off human reply.
+Jobs or outbound deliveries marked `delivery_unknown` mean the backend started a Salesbot continuation or Chats API send but could not confirm whether Kommo accepted it, usually because of a timeout, transient 5xx/429 response, persistence failure, or process interruption. Do not blindly retry these records. First check the Kommo lead/chat to see whether the customer already received the message, then either leave the record as an audit trail or reconcile manually with a one-off human reply.
+
+## Media Rollback
+
+Set `KOMMO_CHATS_MEDIA_ENABLED=false` and redeploy. Ordinary Salesbot text processing continues without reverting migrations. Leave migrations 009 through 012 and existing delivery/cache records in place for auditability and safe future re-enablement.
 
 ## Troubleshooting
 

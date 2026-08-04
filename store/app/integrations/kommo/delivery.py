@@ -1,6 +1,7 @@
 """Transport router for opt-in Kommo Chats media delivery.
 
-This module is intentionally not wired into the live Salesbot job flow yet.
+Routes Kommo WhatsApp media responses through the Chats API while
+leaving text-only responses on the existing Salesbot transport.
 """
 
 from __future__ import annotations
@@ -97,12 +98,12 @@ async def deliver_response(
         return _salesbot_result(clean_text)
 
     config = get_config()
-    if (
-        str(job.get("channel") or "").strip().lower() != "whatsapp"
-        or str(job.get("interaction_type") or "private_message").strip().lower()
-        != "private_message"
-        or not config.kommo_chats_media_enabled
-    ):
+    enabled_media_types = get_enabled_media_types(job, result, config=config)
+    if "product_image" not in enabled_media_types:
+        product_image = None
+    if "catalog_pdf" not in enabled_media_types:
+        catalog_pdf = None
+    if not product_image and not catalog_pdf:
         return _salesbot_result(clean_text)
 
     if catalog_pdf and not config.kommo_chats_pdf_attachment_type:
@@ -189,6 +190,26 @@ async def deliver_response(
         delivered_attachments=delivered_attachments,
         provider_message_ids=provider_message_ids,
     )
+
+
+def get_enabled_media_types(job: dict, result: dict, *, config=None) -> frozenset[str]:
+    """Return media types enabled for this Kommo job and response."""
+    config = config or get_config()
+    if (
+        str(job.get("channel") or "").strip().lower() != "whatsapp"
+        or str(job.get("interaction_type") or "private_message").strip().lower()
+        != "private_message"
+        or not getattr(config, "kommo_chats_media_enabled", False)
+    ):
+        return frozenset()
+    enabled = set()
+    if _product_image_payload(result) and getattr(
+        config, "kommo_chats_product_images_enabled", False
+    ):
+        enabled.add("product_image")
+    if _catalog_pdf_payload(result) and getattr(config, "kommo_chats_catalog_pdf_enabled", False):
+        enabled.add("catalog_pdf")
+    return frozenset(enabled)
 
 
 def _salesbot_result(customer_text: str) -> DeliveryResult:
@@ -436,7 +457,40 @@ async def _claim_delivery(
             """
             UPDATE kommo_outbound_deliveries
             SET status = 'sending',
-                attachment_metadata = CAST(:attachment_metadata AS jsonb),
+                attachment_metadata = jsonb_set(
+                    jsonb_set(
+                        CAST(:attachment_metadata AS jsonb),
+                        '{send_attempt_count}',
+                        to_jsonb(
+                            CASE
+                                WHEN attachment_metadata->>'send_attempt_count' ~ '^[0-9]+$'
+                                  AND (
+                                      attachment_metadata->>'send_attempt_month' =
+                                          to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM')
+                                      OR (
+                                          attachment_metadata->>'send_attempt_month' IS NULL
+                                          AND updated_at >= date_trunc(
+                                              'month',
+                                              CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+                                          ) AT TIME ZONE 'UTC'
+                                      )
+                                  )
+                                    THEN (attachment_metadata->>'send_attempt_count')::integer
+                                WHEN status = 'failed'
+                                  AND updated_at >= date_trunc(
+                                      'month',
+                                      CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+                                  ) AT TIME ZONE 'UTC'
+                                    THEN 1
+                                ELSE 0
+                            END + 1
+                        ),
+                        true
+                    ),
+                    '{send_attempt_month}',
+                    to_jsonb(to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM')),
+                    true
+                ),
                 provider_message_id = NULL,
                 accepted_at = NULL,
                 last_error = NULL,
@@ -599,3 +653,83 @@ async def confirm_outbound_delivery(provider_message_id: str | None) -> bool:
         {"provider_message_id": message_id},
     )
     return bool(confirmed)
+
+
+async def monthly_usage_summary(monthly_limit: int | None) -> dict:
+    """Return conservative current-month Chats API request counts."""
+    row = await db.fetch_one(
+        """
+        WITH monthly_deliveries AS (
+            SELECT
+                media_type,
+                status,
+                CASE
+                    WHEN status IN ('sending', 'accepted', 'confirmed', 'failed', 'delivery_unknown')
+                        THEN CASE
+                            WHEN attachment_metadata->>'send_attempt_count' ~ '^[0-9]+$'
+                              AND (
+                                  attachment_metadata->>'send_attempt_month' =
+                                      to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM')
+                                  OR attachment_metadata->>'send_attempt_month' IS NULL
+                              )
+                                THEN GREATEST(
+                                    (attachment_metadata->>'send_attempt_count')::integer,
+                                    1
+                                )
+                            ELSE 1
+                        END
+                    ELSE 0
+                END AS send_attempt_count
+            FROM kommo_outbound_deliveries
+            WHERE transport = 'chats_api'
+              AND COALESCE(accepted_at, updated_at, created_at) >=
+                  date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        )
+        SELECT
+            COALESCE(SUM(send_attempt_count), 0) AS attempted_requests,
+            COALESCE(
+                SUM(send_attempt_count) FILTER (WHERE media_type = 'product_image'),
+                0
+            ) AS product_image_requests,
+            COALESCE(
+                SUM(send_attempt_count) FILTER (WHERE media_type = 'catalog_pdf'),
+                0
+            ) AS catalog_pdf_requests,
+            COUNT(*) FILTER (WHERE status IN ('accepted', 'confirmed')) AS accepted_or_confirmed_deliveries,
+            COUNT(*) FILTER (WHERE status = 'failed') AS failed_deliveries,
+            COUNT(*) FILTER (WHERE status = 'delivery_unknown') AS delivery_unknown_deliveries
+        FROM monthly_deliveries
+        """
+    )
+    attempted = int(row["attempted_requests"] or 0) if row else 0
+    utilization = round((attempted / monthly_limit) * 100, 1) if monthly_limit else None
+    return {
+        "attempted_requests": attempted,
+        "product_image_requests": int(row["product_image_requests"] or 0) if row else 0,
+        "catalog_pdf_requests": int(row["catalog_pdf_requests"] or 0) if row else 0,
+        "accepted_or_confirmed_deliveries": (
+            int(row["accepted_or_confirmed_deliveries"] or 0) if row else 0
+        ),
+        "failed_deliveries": int(row["failed_deliveries"] or 0) if row else 0,
+        "delivery_unknown_deliveries": (
+            int(row["delivery_unknown_deliveries"] or 0) if row else 0
+        ),
+        "configured_monthly_limit": monthly_limit,
+        "estimated_remaining_requests": (
+            max(monthly_limit - attempted, 0) if monthly_limit else None
+        ),
+        "utilization_percent": utilization,
+        "warning_level": _usage_warning_level(utilization),
+    }
+
+
+def _usage_warning_level(utilization_percent: float | None) -> str:
+    if utilization_percent is None or utilization_percent < 50:
+        return "normal"
+    if utilization_percent >= 100:
+        return "exhausted"
+    if utilization_percent >= 90:
+        return "90_percent"
+    if utilization_percent >= 75:
+        return "75_percent"
+    return "50_percent"

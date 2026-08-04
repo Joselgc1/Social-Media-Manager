@@ -73,9 +73,15 @@ def _url_identity(value: str) -> str:
     )
 
 
-def _without_native_media_urls(text: str, result: dict) -> str:
+def _without_native_media_urls(
+    text: str,
+    result: dict,
+    payload_names: set[str] | None = None,
+) -> str:
     source_urls = set()
     for payload_name in ("product_image", "catalog_pdf"):
+        if payload_names is not None and payload_name not in payload_names:
+            continue
         payload = result.get(payload_name)
         if not isinstance(payload, dict):
             continue
@@ -87,11 +93,15 @@ def _without_native_media_urls(text: str, result: dict) -> str:
     def replace(match: re.Match) -> str:
         url = match.group(0).rstrip(".,;:!?")
         hostname = (urlsplit(url).hostname or "").lower()
+        strip_unattributed_image_url = payload_names is None or "product_image" in payload_names
         if (
             _url_identity(url) in source_urls
-            or hostname == "drive.google.com"
-            or hostname == "googleusercontent.com"
-            or hostname.endswith(".googleusercontent.com")
+            or strip_unattributed_image_url
+            and (
+                hostname == "drive.google.com"
+                or hostname == "googleusercontent.com"
+                or hostname.endswith(".googleusercontent.com")
+            )
         ):
             return ""
         return match.group(0)
@@ -104,8 +114,14 @@ def map_ai_response_to_salesbot(
     result: dict,
     *,
     native_media: bool = False,
+    native_media_types: set[str] | frozenset[str] | None = None,
 ) -> NormalizedResponseOutput:
     customer_parts: list[str] = []
+    native_payload_names = (
+        set(native_media_types)
+        if native_media and native_media_types is not None
+        else {"product_image", "catalog_pdf"} if native_media else set()
+    )
 
     interactive = result.get("interactive") or {}
     if interactive.get("type") == "interactive_buttons":
@@ -129,29 +145,31 @@ def map_ai_response_to_salesbot(
 
     reply_text = _clean_text(result.get("text"))
     if native_media:
-        reply_text = _without_native_media_urls(reply_text, result)
+        reply_text = _without_native_media_urls(reply_text, result, native_payload_names)
     _append_customer_part(customer_parts, reply_text)
 
     product_image = result.get("product_image") or {}
     if product_image.get("type") == "product_image":
         caption = _clean_text(product_image.get("caption")) or "Aqui tienes la foto del producto:"
-        if native_media:
-            caption = _without_native_media_urls(caption, result)
+        product_image_is_native = "product_image" in native_payload_names
+        if product_image_is_native:
+            caption = _without_native_media_urls(caption, result, {"product_image"})
         _append_customer_part(customer_parts, caption)
-        if not native_media and _is_public_url(product_image.get("image_url")):
+        if not product_image_is_native and _is_public_url(product_image.get("image_url")):
             _append_customer_part(customer_parts, product_image["image_url"])
 
     catalog_pdf = result.get("catalog_pdf") or {}
-    if native_media and catalog_pdf.get("type") == "catalog_pdf":
+    if "catalog_pdf" in native_payload_names and catalog_pdf.get("type") == "catalog_pdf":
         caption = _without_native_media_urls(
             _clean_text(catalog_pdf.get("caption") or "Aqui tienes el catalogo:"),
             result,
+            {"catalog_pdf"},
         )
         _append_customer_part(customer_parts, caption)
 
     customer_text = "\n".join(part for part in customer_parts if part).strip()
     if native_media:
-        customer_text = _without_native_media_urls(customer_text, result)
+        customer_text = _without_native_media_urls(customer_text, result, native_payload_names)
     if not customer_text:
         return NormalizedResponseOutput(discarded=True, reason="empty_response")
 

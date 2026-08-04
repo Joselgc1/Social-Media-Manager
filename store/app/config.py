@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     kommo_ai_paused_enum_id: int | None = None
     kommo_default_responsible_user_id: int | None = None
     kommo_chats_media_enabled: bool = False
+    kommo_chats_product_images_enabled: bool = False
+    kommo_chats_catalog_pdf_enabled: bool = False
+    kommo_chats_api_monthly_limit: int | None = Field(default=None, ge=1)
     kommo_chats_pdf_attachment_type: Literal["file"] | None = None
 
     # --- LLM Providers (at least one is required) ---
@@ -118,6 +121,7 @@ class Settings(BaseSettings):
         "kommo_ai_human_enum_id",
         "kommo_ai_paused_enum_id",
         "kommo_default_responsible_user_id",
+        "kommo_chats_api_monthly_limit",
         "kommo_chats_pdf_attachment_type",
         mode="before",
     )

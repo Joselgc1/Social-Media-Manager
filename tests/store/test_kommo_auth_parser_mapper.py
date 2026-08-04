@@ -493,6 +493,27 @@ def test_native_pdf_mapping_uses_caption_when_reply_text_is_empty():
     assert output.customer_text == "Aqui tienes el catalogo."
 
 
+def test_mixed_media_mapping_keeps_disabled_image_url_with_native_pdf():
+    image_url = "https://googleusercontent.com/product.jpg"
+    output = map_ai_response_to_salesbot(
+        {
+            "text": "Contenido disponible",
+            "product_image": {
+                "type": "product_image",
+                "caption": "Foto del producto",
+                "image_url": image_url,
+            },
+            "catalog_pdf": {"type": "catalog_pdf", "caption": "Catalogo completo"},
+        },
+        native_media=True,
+        native_media_types={"catalog_pdf"},
+    )
+
+    assert image_url in output.customer_text
+    assert "Foto del producto" in output.customer_text
+    assert "Catalogo completo" in output.customer_text
+
+
 def test_catalog_pdf_payload_is_ignored_for_kommo_when_text_exists():
     reply = (
         "Tenemos pijamas, sets y lencería con encaje.\n"

@@ -21,9 +21,11 @@ PDF_FILE_UUID = "89a61e7b-ba30-476f-b2f6-705a964e85c6"
 PDF_VERSION_UUID = "eb21a232-7ba4-4224-bd48-ee39c3da44ef"
 
 
-def _config(*, enabled=True, pdf_type="file"):
+def _config(*, enabled=True, images_enabled=True, pdf_enabled=True, pdf_type="file"):
     return SimpleNamespace(
         kommo_chats_media_enabled=enabled,
+        kommo_chats_product_images_enabled=images_enabled,
+        kommo_chats_catalog_pdf_enabled=pdf_enabled,
         kommo_chats_pdf_attachment_type=pdf_type,
     )
 
@@ -191,6 +193,8 @@ async def test_image_pdf_and_text_send_sequentially_with_text_only_first(monkeyp
     )
 
     assert result.provider_message_ids == ["message-image", "message-pdf"]
+    assert client.send_talk_message.await_count == 2
+    assert delivery._get_or_upload_media.await_count == 2
     assert client.send_talk_message.await_args_list[0].kwargs["text"] == "Mira el producto y el catalogo"
     assert client.send_talk_message.await_args_list[1].kwargs["text"] is None
     assert client.send_talk_message.await_args_list[0].kwargs["attachment"]["type"] == "picture"
@@ -238,6 +242,66 @@ async def test_disabled_media_feature_stays_on_salesbot(monkeypatch):
 
     assert result.transport == "salesbot"
     client.send_talk_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "config"),
+    [
+        (_image_result(), _config(images_enabled=False)),
+        (_pdf_result(), _config(pdf_enabled=False)),
+    ],
+)
+async def test_disabled_media_specific_flag_keeps_response_on_salesbot(monkeypatch, result, config):
+    monkeypatch.setattr(delivery, "get_config", lambda: config)
+    upload = AsyncMock()
+    claim = AsyncMock()
+    monkeypatch.setattr(delivery, "_get_or_upload_media", upload)
+    monkeypatch.setattr(delivery, "_claim_delivery", claim)
+    client = SimpleNamespace(send_talk_message=AsyncMock())
+
+    delivered = await deliver_response(
+        job=JOB,
+        result=result,
+        customer_text="Respuesta segura",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+
+    assert delivered.transport == "salesbot"
+    upload.assert_not_awaited()
+    claim.assert_not_awaited()
+    client.send_talk_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "expected_attachment_type"),
+    [
+        (_config(images_enabled=True, pdf_enabled=False), "picture"),
+        (_config(images_enabled=False, pdf_enabled=True), "file"),
+    ],
+)
+async def test_combined_response_sends_only_independently_enabled_media(
+    monkeypatch,
+    config,
+    expected_attachment_type,
+):
+    _install_chats_dependencies(monkeypatch)
+    monkeypatch.setattr(delivery, "get_config", lambda: config)
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "message-1"}))
+
+    result = await deliver_response(
+        job=JOB,
+        result={**_image_result(), **_pdf_result()},
+        customer_text="Contenido disponible",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+
+    assert result.transport == "chats_api"
+    client.send_talk_message.assert_awaited_once()
+    assert client.send_talk_message.await_args.kwargs["attachment"]["type"] == expected_attachment_type
 
 
 @pytest.mark.asyncio
@@ -426,6 +490,69 @@ async def test_duplicate_accepted_fingerprint_never_resends(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retry_reuses_accepted_delivery_without_another_paid_send(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    delivery._claim_delivery.side_effect = [
+        delivery._DeliveryClaim(status="sending", provider_message_id=None, send_allowed=True),
+        delivery._DeliveryClaim(
+            status="accepted", provider_message_id="message-image", send_allowed=False
+        ),
+    ]
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "message-image"}))
+
+    first = await deliver_response(
+        job=JOB,
+        result=_image_result(),
+        customer_text="Foto",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+    second = await deliver_response(
+        job=JOB,
+        result=_image_result(),
+        customer_text="Foto",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+
+    assert first.provider_message_ids == second.provider_message_ids == ["message-image"]
+    client.send_talk_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_ambiguous_send_never_repeats_paid_request(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    delivery._claim_delivery.side_effect = [
+        delivery._DeliveryClaim(status="sending", provider_message_id=None, send_allowed=True),
+        delivery._DeliveryClaim(
+            status="delivery_unknown", provider_message_id=None, send_allowed=False
+        ),
+    ]
+    client = SimpleNamespace(
+        send_talk_message=AsyncMock(side_effect=KommoAPIError("connection lost"))
+    )
+
+    with pytest.raises(delivery.KommoDeliveryUnknownError):
+        await deliver_response(
+            job=JOB,
+            result=_image_result(),
+            customer_text="Foto",
+            client=client,
+            files=SimpleNamespace(client=client),
+        )
+    with pytest.raises(KommoDeliveryStateError, match="unsafe resend"):
+        await deliver_response(
+            job=JOB,
+            result=_image_result(),
+            customer_text="Foto",
+            client=client,
+            files=SimpleNamespace(client=client),
+        )
+
+    client.send_talk_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["sending", "delivery_unknown"])
 async def test_in_flight_or_unknown_fingerprint_never_resends(monkeypatch, status):
     _install_chats_dependencies(monkeypatch, claim_status=status)
@@ -469,6 +596,9 @@ async def test_claim_retries_prepared_and_definitive_failed_only(monkeypatch):
     update_query = fetch_one.await_args_list[0].args[0]
     assert "status IN ('prepared', 'failed')" in update_query
     assert "delivery_unknown" not in update_query
+    assert "send_attempt_count" in update_query
+    assert "send_attempt_month" in update_query
+    assert "WHEN status = 'failed'" in update_query
 
 
 @pytest.mark.asyncio
@@ -557,6 +687,49 @@ async def test_second_media_failure_after_first_acceptance_is_quarantined(monkey
         {"type": "product_image", "product_name": "Pijama Satin", "sku": "PJ-1"}
     ]
     assert exc_info.value.provider_message_ids == ["message-image"]
+
+
+@pytest.mark.asyncio
+async def test_partial_delivery_retry_reuses_successful_prefix(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    delivery._claim_delivery.side_effect = [
+        delivery._DeliveryClaim(status="sending", provider_message_id=None, send_allowed=True),
+        delivery._DeliveryClaim(status="sending", provider_message_id=None, send_allowed=True),
+        delivery._DeliveryClaim(
+            status="accepted", provider_message_id="message-image", send_allowed=False
+        ),
+        delivery._DeliveryClaim(status="sending", provider_message_id=None, send_allowed=True),
+    ]
+    client = SimpleNamespace(
+        send_talk_message=AsyncMock(
+            side_effect=[
+                {"id": "message-image"},
+                KommoAPIError("bad PDF request", status_code=400),
+                {"id": "message-pdf"},
+            ]
+        )
+    )
+    result = {**_image_result(), **_pdf_result()}
+
+    with pytest.raises(delivery.KommoPartialDeliveryError):
+        await deliver_response(
+            job=JOB,
+            result=result,
+            customer_text="Imagen y catalogo",
+            client=client,
+            files=SimpleNamespace(client=client),
+        )
+    retried = await deliver_response(
+        job=JOB,
+        result=result,
+        customer_text="Imagen y catalogo",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+
+    attachment_types = [call.kwargs["attachment"]["type"] for call in client.send_talk_message.await_args_list]
+    assert attachment_types == ["picture", "file", "file"]
+    assert retried.provider_message_ids == ["message-image", "message-pdf"]
 
 
 @pytest.mark.asyncio
@@ -663,3 +836,99 @@ async def test_unknown_outgoing_confirmation_is_harmless(monkeypatch):
 
     assert await delivery.confirm_outbound_delivery("unknown-message") is False
     assert await delivery.confirm_outbound_delivery(None) is False
+
+
+@pytest.mark.asyncio
+async def test_monthly_usage_counts_possible_sends_conservatively(monkeypatch):
+    fetch_one = AsyncMock(
+        return_value={
+            "attempted_requests": 9,
+            "product_image_requests": 6,
+            "catalog_pdf_requests": 3,
+            "accepted_or_confirmed_deliveries": 5,
+            "failed_deliveries": 2,
+            "delivery_unknown_deliveries": 2,
+        }
+    )
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    summary = await delivery.monthly_usage_summary(10)
+
+    assert summary == {
+        "attempted_requests": 9,
+        "product_image_requests": 6,
+        "catalog_pdf_requests": 3,
+        "accepted_or_confirmed_deliveries": 5,
+        "failed_deliveries": 2,
+        "delivery_unknown_deliveries": 2,
+        "configured_monthly_limit": 10,
+        "estimated_remaining_requests": 1,
+        "utilization_percent": 90.0,
+        "warning_level": "90_percent",
+    }
+    query = fetch_one.await_args.args[0]
+    assert "SUM(send_attempt_count)" in query
+    assert "attachment_metadata->>'send_attempt_count'" in query
+    assert "attachment_metadata->>'send_attempt_month'" in query
+    assert "status IN ('sending', 'accepted', 'confirmed', 'failed', 'delivery_unknown')" in query
+    assert "CURRENT_TIMESTAMP AT TIME ZONE 'UTC'" in query
+
+
+@pytest.mark.parametrize(
+    ("utilization", "expected"),
+    [
+        (None, "normal"),
+        (49.9, "normal"),
+        (50, "50_percent"),
+        (75, "75_percent"),
+        (90, "90_percent"),
+        (100, "exhausted"),
+    ],
+)
+def test_monthly_usage_warning_thresholds(utilization, expected):
+    assert delivery._usage_warning_level(utilization) == expected
+
+
+@pytest.mark.asyncio
+async def test_kommo_status_exposes_safe_media_flags_and_usage(monkeypatch):
+    from app.admin import settings as admin_settings
+    from app.config import Settings
+    from app.integrations.kommo import jobs
+
+    config = Settings(
+        database_url="postgresql://test:test@localhost:5432/test",
+        google_sheets_credentials_b64="e30=",
+        product_sheet_id="sheet",
+        kommo_access_token="super-secret-token-value",
+        kommo_chats_media_enabled=True,
+        kommo_chats_product_images_enabled=True,
+        kommo_chats_catalog_pdf_enabled=False,
+        kommo_chats_api_monthly_limit=100,
+        kommo_chats_pdf_attachment_type="file",
+        _env_file=None,
+    )
+    usage = {
+        "attempted_requests": 25,
+        "product_image_requests": 25,
+        "catalog_pdf_requests": 0,
+        "accepted_or_confirmed_deliveries": 24,
+        "failed_deliveries": 0,
+        "delivery_unknown_deliveries": 1,
+        "configured_monthly_limit": 100,
+        "estimated_remaining_requests": 75,
+        "utilization_percent": 25.0,
+        "warning_level": "normal",
+    }
+    monkeypatch.setattr(admin_settings, "get_config", lambda: config)
+    monkeypatch.setattr(jobs, "diagnostics_summary", AsyncMock(return_value={}))
+    monkeypatch.setattr(delivery, "monthly_usage_summary", AsyncMock(return_value=usage))
+
+    status = await admin_settings.kommo_status()
+
+    assert status["kommo_chats_media_enabled"] is True
+    assert status["kommo_chats_product_images_enabled"] is True
+    assert status["kommo_chats_catalog_pdf_enabled"] is False
+    assert status["kommo_chats_pdf_attachment_type_configured"] is True
+    assert status["kommo_chats_api_monthly_usage"] == usage
+    assert "super-secret-token-value" not in str(status)
+    delivery.monthly_usage_summary.assert_awaited_once_with(100)
