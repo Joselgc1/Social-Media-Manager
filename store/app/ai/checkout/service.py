@@ -137,7 +137,11 @@ async def finalize_checkout(
     if draft.payment_method:
         await customers.add_tags(customer_id, [f"payment:{payment_method_tag_value(draft.payment_method)}"])
 
-    await sessions.set_current_order(customer_id, order.get("order_id") or order.get("id"), workflow_stage="waiting_for_payment")
+    await sessions.set_current_order(
+        customer_id,
+        order.get("order_id") or order.get("id"),
+        workflow_stage="waiting_for_payment",
+    )
     return _finalized_response(order, payment_methods, already_finalized=not order.get("created_new", True))
 
 
@@ -209,7 +213,11 @@ def _normalize_update(customer: dict, update: dict[str, Any], payment_methods: l
         normalized["payment_method"] = method or normalized.get("payment_method")
 
     if isinstance(normalized.get("items"), list):
-        normalized["items"] = [_normalize_item_patch(item) for item in normalized["items"] if isinstance(item, dict)]
+        normalized["items"] = [
+            _normalize_item_patch(item)
+            for item in normalized["items"]
+            if isinstance(item, dict)
+        ]
     else:
         normalized.update(_normalize_item_patch(normalized))
     return normalized
@@ -353,6 +361,7 @@ def _public_quote(quote: dict) -> dict:
 
 
 def _resolve_catalog_item(item: sessions.CheckoutDraftItem, *, allow_missing_size: bool = False) -> dict:
+    del allow_missing_size  # Kept for call-site compatibility; missing size is resolved catalog-aware below.
     query = item.canonical_sku or item.sku or item.product_query or item.product_name or ""
     size = _normalize_variant_value(item.size)
     if not query:
@@ -362,8 +371,11 @@ def _resolve_catalog_item(item: sessions.CheckoutDraftItem, *, allow_missing_siz
     if not matches:
         matches = _direct_catalog_matches(query, size)
     if not matches:
-        message = "No se encontró ese producto o presentación en el catálogo actual."
-        return {"ok": False, "message": message, "field": "items"}
+        return {
+            "ok": False,
+            "message": "No se encontró ese producto o presentación en el catálogo actual.",
+            "field": "items",
+        }
 
     if size:
         sized_matches = [product for product in matches if size in get_product_sizes(product)]
@@ -381,8 +393,14 @@ def _resolve_catalog_item(item: sessions.CheckoutDraftItem, *, allow_missing_siz
         return {"ok": False, "message": "Ese producto está agotado en este momento.", "field": "items"}
 
     if not size and len(in_stock_matches) > 1:
-        presentations = sorted({value for product in in_stock_matches for value in get_product_sizes(product) if value})
-        if len(presentations) > 1 or len({str(product.get("sku") or "") for product in in_stock_matches}) > 1:
+        presentations = sorted({
+            value
+            for product in in_stock_matches
+            for value in get_product_sizes(product)
+            if value
+        })
+        distinct_skus = {str(product.get("sku") or "") for product in in_stock_matches}
+        if len(presentations) > 1 or len(distinct_skus) > 1:
             return {
                 "ok": False,
                 "needs_presentation": True,
@@ -409,7 +427,8 @@ def _direct_catalog_matches(query: str, size: str) -> list[dict]:
         parent_sku = normalize_catalog_text(product.get("parent_sku", ""))
         name = normalize_catalog_text(product.get("product_name", ""))
         brand = normalize_catalog_text(product.get("brand", ""))
-        if normalized_query not in {sku, parent_sku, name, " ".join(part for part in (brand, name) if part)}:
+        brand_name = " ".join(part for part in (brand, name) if part)
+        if normalized_query not in {sku, parent_sku, name, brand_name}:
             continue
         if size and size not in get_product_sizes(product):
             continue
@@ -419,7 +438,9 @@ def _direct_catalog_matches(query: str, size: str) -> list[dict]:
 
 def _canonical_order_item(item: sessions.CheckoutDraftItem, product: dict) -> dict:
     product_sizes = get_product_sizes(product)
-    presentation = _normalize_variant_value(item.size) or (product_sizes[0] if len(product_sizes) == 1 else "")
+    presentation = _normalize_variant_value(item.size) or (
+        product_sizes[0] if len(product_sizes) == 1 else ""
+    )
     return {
         "product_name": product.get("product_name", ""),
         "sku": product.get("sku", ""),
@@ -504,7 +525,7 @@ def _pending_order_limit_response(pending_order_count: int) -> dict:
 
 async def _notify_checkout_order(customer: dict, order: dict, items: list[dict]) -> None:
     items_summary = ", ".join(
-        f"{item['product_name']}{f' ({item.get("size")})' if item.get('size') else ''}"
+        f"{item['product_name']} ({item['size']})" if item.get("size") else item["product_name"]
         for item in items
     )
     await notify_new_order(
@@ -519,7 +540,11 @@ async def _notify_checkout_order(customer: dict, order: dict, items: list[dict])
 def _delivery_summary(order: dict) -> str:
     fee = float(order.get("shipping_fee") or 0)
     if order.get("fulfillment_type") == "home_delivery":
-        location = ", ".join(value for value in (order.get("shipping_city"), order.get("shipping_zone")) if value)
+        location = ", ".join(
+            value
+            for value in (order.get("shipping_city"), order.get("shipping_zone"))
+            if value
+        )
         return f"Domicilio {location or 'Metro Valencia'} (${fee:.2f})"
     agency = order.get("pickup_agency") or "agencia por confirmar"
     courier = str(order.get("shipping_method") or "").upper()
@@ -527,16 +552,14 @@ def _delivery_summary(order: dict) -> str:
 
 
 async def _save_shipping_address(customer_id: str, draft: sessions.CheckoutDraft, quote: dict) -> None:
-    from app import db
-
     await db.execute(
         """UPDATE customers
            SET last_shipping_address = :addr,
                last_shipping_city = :city,
-                last_shipping_method = :method,
-                last_fulfillment_type = :fulfillment_type,
-                last_shipping_zone = :zone,
-                last_pickup_agency = :pickup_agency
+               last_shipping_method = :method,
+               last_fulfillment_type = :fulfillment_type,
+               last_shipping_zone = :zone,
+               last_pickup_agency = :pickup_agency
            WHERE id = :id""",
         {
             "addr": draft.shipping_address if quote.get("fulfillment_type") == "home_delivery" else None,
@@ -544,7 +567,11 @@ async def _save_shipping_address(customer_id: str, draft: sessions.CheckoutDraft
             "method": quote.get("shipping_method") or "",
             "fulfillment_type": quote.get("fulfillment_type"),
             "zone": quote.get("shipping_zone"),
-            "pickup_agency": draft.pickup_agency if quote.get("fulfillment_type") == "courier_agency_pickup" else None,
+            "pickup_agency": (
+                draft.pickup_agency
+                if quote.get("fulfillment_type") == "courier_agency_pickup"
+                else None
+            ),
             "id": customer_id,
         },
     )
