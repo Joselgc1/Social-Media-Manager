@@ -1,10 +1,10 @@
-# Meta Instagram Comment Context + Kommo
+# Meta Instagram Comment/Story Context + Kommo
 
 ## Complete Deployment and Testing Guide
 
 ## 1. What this integration does
 
-The application continues using **Kommo as the communication backend**. Meta is added only as a source of reliable Instagram comment and post context.
+The application continues using **Kommo as the communication backend**. Meta is an optional source of reliable public-comment/post context and private Story-reply context. Kommo remains responsible for every customer-visible response.
 
 ```text
 Customer comments on Instagram
@@ -34,7 +34,7 @@ Meta must **not** send the final reply. The production configuration remains:
 CHANNEL_BACKEND=kommo
 ```
 
-The Meta endpoint is specifically a signed, context-only webhook. It stores Meta comment events, enriches their media information and correlates them with waiting Kommo jobs.
+The Meta endpoint is specifically a signed, context-only webhook. It stores comment and Story-reply context, enriches media information, and correlates events with waiting Kommo jobs. Enable comment and Story context independently with `META_INSTAGRAM_CONTEXT_ENABLED` and `META_STORY_CONTEXT_ENABLED`.
 
 This implementation uses:
 
@@ -42,7 +42,7 @@ This implementation uses:
 Instagram API with Facebook Login
 API host: graph.facebook.com
 Credential: Facebook Page access token
-Webhook field: comments
+Webhook fields: comments, plus messages when Story context is enabled
 ```
 
 It does not use the newer Instagram Login integration based on `graph.instagram.com` and `instagram_business_*` permissions. Meta officially treats those as separate login and credential models.
@@ -430,7 +430,7 @@ business_management
 
 This was required in your actual setup: without it, `/me/accounts` returned an empty list; after adding it, Meta returned the managed Page. Treat it as a practical requirement for this portfolio.
 
-You do not need:
+For comment-only context you do not need:
 
 ```text
 instagram_content_publish
@@ -438,7 +438,7 @@ instagram_manage_messages
 pages_messaging
 ```
 
-for this context-only comment integration.
+for the comment-only integration. Story context is a separate private-message subscription: the application parses Story replies from Meta's `messaging` payload, so verify the current Meta `messages` subscription and permission requirements before enabling `META_STORY_CONTEXT_ENABLED=true`.
 
 Generate a completely new token after selecting the permissions. During the Facebook authorization flow:
 
@@ -511,15 +511,14 @@ A successful response should resemble:
 
 That response structure is normal. `instagram_business_account` returning only an `id` is expected; you query that Instagram object separately afterward.
 
-Record:
+Record these application settings, keeping `FACEBOOK_PAGE_ID` only as a shell/Graph API diagnostic placeholder:
 
 ```env
-FACEBOOK_PAGE_ID=...
 INSTAGRAM_ACCESS_TOKEN=PAGE_ACCESS_TOKEN
 INSTAGRAM_ACCOUNT_ID=INSTAGRAM_BUSINESS_ACCOUNT_ID
 ```
 
-`FACEBOOK_PAGE_ID` is useful for diagnostics but is not required by the current Meta context configuration.
+`FACEBOOK_PAGE_ID` is useful in the Graph API commands in this guide but is not an application config variable; do not add it to `store/.env`.
 
 The application variable named `INSTAGRAM_ACCESS_TOKEN` must contain the **Facebook Page access token**, not the temporary User token.
 
@@ -637,6 +636,11 @@ META_INSTAGRAM_CONTEXT_ENABLED=
 META_CONTEXT_WAIT_SECONDS=
 META_CONTEXT_MATCH_WINDOW_SECONDS=
 META_CONTEXT_EVENT_RETENTION_HOURS=
+META_STORY_CONTEXT_ENABLED=
+META_STORY_CONTEXT_WAIT_SECONDS=
+META_STORY_CONTEXT_MATCH_WINDOW_SECONDS=
+INSTAGRAM_STORY_MAPPING_TTL_HOURS=
+INSTAGRAM_STORY_CONTEXT_TTL_HOURS=
 ```
 
 Use:
@@ -654,6 +658,11 @@ META_GRAPH_API_VERSION=vXX.X
 META_CONTEXT_WAIT_SECONDS=10
 META_CONTEXT_MATCH_WINDOW_SECONDS=45
 META_CONTEXT_EVENT_RETENTION_HOURS=24
+META_STORY_CONTEXT_ENABLED=false
+META_STORY_CONTEXT_WAIT_SECONDS=3
+META_STORY_CONTEXT_MATCH_WINDOW_SECONDS=45
+INSTAGRAM_STORY_MAPPING_TTL_HOURS=24
+INSTAGRAM_STORY_CONTEXT_TTL_HOURS=24
 
 APP_BASE_URL=https://YOUR-PUBLIC-DOMAIN
 DEBUG=false
@@ -677,6 +686,11 @@ KOMMO_AI_MODE_FIELD_ID=
 KOMMO_AI_ACTIVE_ENUM_ID=
 KOMMO_AI_HUMAN_ENUM_ID=
 KOMMO_AI_PAUSED_ENUM_ID=
+KOMMO_CHATS_MEDIA_ENABLED=false
+KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false
+KOMMO_CHATS_CATALOG_PDF_ENABLED=false
+KOMMO_CHATS_API_MONTHLY_LIMIT=
+KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 ```
 
 When Meta context is enabled, application startup validates that:
@@ -690,11 +704,12 @@ INSTAGRAM_ACCOUNT_ID is present
 META_GRAPH_API_VERSION is present
 ```
 
-The Meta route is registered only when both of these are true:
+The Meta route is registered when Kommo mode is active and at least one context listener is enabled:
 
 ```env
 CHANNEL_BACKEND=kommo
-META_INSTAGRAM_CONTEXT_ENABLED=true
+META_INSTAGRAM_CONTEXT_ENABLED=true  # comments
+# or META_STORY_CONTEXT_ENABLED=true # Story replies
 ```
 
 ---
@@ -914,16 +929,15 @@ Subscribe
 Suscribirse
 ```
 
-Subscribe only to:
+For comment-only context, subscribe to:
 
 ```text
 comments
 ```
 
-Do not enable these for the current phase:
+Do not enable unrelated fields for a comment-only rollout:
 
 ```text
-messages
 messaging_postbacks
 messaging_seen
 live_comments
@@ -943,7 +957,7 @@ Instagram media ID
 Media product type/location
 ```
 
-The application parser supports the Instagram `comments` event and extracts the account, sender, comment, text and media identifiers.
+The application parser supports Instagram `comments` events and Story replies from the `messaging` payload. If `META_STORY_CONTEXT_ENABLED=true`, also subscribe to the appropriate `messages` field and satisfy Meta's current permission/access requirements; do not enable Story context with a comment-only subscription.
 
 ## 10.4 Enable webhook notifications for the Instagram account
 
@@ -1068,17 +1082,17 @@ Log in with the staging `ADMIN_PASSWORD`.
 
 Open the Instagram content mapping section.
 
-For the first test:
+For the first, simplest test:
 
-1. Choose a normal non-Reel Zona Pink feed post. Step 4 intentionally accepts only `/p/` feed-post URLs; Reel mapping is outside the current application scope.
+1. Choose a normal Zona Pink post or Reel. Manual mappings accept public `/p/` and `/reel/` URLs; discovered Stories use their stable media ID and do not require a public permalink.
 2. Use a post advertising exactly one product.
 3. Copy its public Instagram URL.
 4. Paste the URL into the mapping form.
-5. Select exactly one catalog product.
+5. Select one catalog product for this first test.
 6. Save the mapping.
 7. Confirm the mapping is active.
 
-The mapping API normalizes the Instagram URL, validates catalog SKUs and stores the post-to-product relation.
+The mapping API normalizes post/Reel URLs, validates catalog SKUs, preserves display order, and stores one or more product relations. Story rows are discovered automatically and can then be assigned products from the dashboard. Multiple-product public comments request clarification for generic price/availability questions and can answer when an explicit reference resolves one mapped product.
 
 Start with:
 
@@ -1165,7 +1179,7 @@ Expected flow:
 
 8. The Graph API returns the post permalink and media metadata.
 
-9. The post mapping resolves one product SKU.
+9. The content mapping resolves the mapped SKU set and, when necessary, the referenced product.
 
 10. The product SKU is added to the waiting Kommo job.
 
@@ -1663,11 +1677,11 @@ Username values do not conflict
 Confirm:
 
 ```text
-Exact public non-Reel post URL was entered
+Exact public post or Reel URL was entered, or the Story row was discovered
 Mapping status is active
 Selected SKU exists in the catalog
 Meta permalink normalizes to the same URL
-Exactly one product is mapped for the first test
+At least one valid product is mapped; use exactly one for the first test
 ```
 
 ---
@@ -1686,6 +1700,11 @@ Exactly one product is mapped for the first test
 | `META_CONTEXT_WAIT_SECONDS`          | `10`                                              |
 | `META_CONTEXT_MATCH_WINDOW_SECONDS`  | `45`                                              |
 | `META_CONTEXT_EVENT_RETENTION_HOURS` | `24`                                              |
+| `META_STORY_CONTEXT_ENABLED`         | `false` for comments-only; `true` for Story context |
+| `META_STORY_CONTEXT_WAIT_SECONDS`    | `3`                                               |
+| `META_STORY_CONTEXT_MATCH_WINDOW_SECONDS` | `45`                                        |
+| `INSTAGRAM_STORY_MAPPING_TTL_HOURS`  | `24`                                              |
+| `INSTAGRAM_STORY_CONTEXT_TTL_HOURS`  | `24`                                              |
 
 ## Final Meta checklist
 
@@ -1708,12 +1727,13 @@ Exactly one product is mapped for the first test
 [ ] Application variables deployed
 [ ] Verification curl returns 200
 [ ] Webhooks object is Instagram
-[ ] comments field is subscribed
-[ ] Instagram account subscription lists the app and comments field
+[ ] comments field is subscribed for public-comment context
+[ ] messages field and current Meta permissions are enabled if Story context is active
+[ ] Instagram account subscription lists every enabled context field
 [ ] Required permissions have the access level shown by Meta
 [ ] Business verification and App Review are complete if required
 [ ] No Facebook Messenger subscription was added
-[ ] One Instagram post is mapped to one product
+[ ] At least one post, Reel, or discovered Story is mapped to a catalog product
 [ ] Meta and Kommo point to the same backend
 [ ] Real-comment test succeeds
 ```

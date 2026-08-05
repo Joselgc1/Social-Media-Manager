@@ -50,7 +50,7 @@ Master pre-deploy: python scripts/migrate.py
 Master start:      uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-The runners use `asyncpg`, take a PostgreSQL advisory lock, execute the service's idempotent consolidated `001` migration, and exit non-zero on failure. Railway does not activate a deployment when its pre-deploy command fails. They never print database URLs or credentials.
+The runners use `asyncpg`, take a PostgreSQL advisory lock, and exit non-zero on failure without printing database URLs or credentials. The Store runner applies its normal sequence through schema version `14`; the Master runner applies its `001_master_schema.sql` baseline. Railway does not activate a deployment when its pre-deploy command fails.
 
 Run the same command locally after exporting the relevant `DATABASE_URL`:
 
@@ -59,7 +59,7 @@ python store/scripts/migrate.py
 python master/scripts/migrate.py
 ```
 
-For a legacy pre-consolidation database, take a backup and use the appropriate `002_consolidated_upgrade.sql` recovery migration only when required by the application's schema-version error. Do not use the obsolete `002_existing_database_upgrade.sql` filename.
+For a legacy pre-consolidation database, take a backup and use the appropriate `002_consolidated_upgrade.sql` recovery migration only when required by the application's schema-version error, then run the normal service migration runner again. Do not use the obsolete `002_existing_database_upgrade.sql` filename. For normal fresh installs and upgrades, run only the service migration runner rather than individual SQL files.
 
 ## Register StorePostgres In Master
 
@@ -128,4 +128,4 @@ pg_restore \
   master.dump
 ```
 
-After each restore, run the appropriate migration runner, compare source and target row counts, verify `schema_migrations`, and check `/health`. Preserve the existing Master `ENCRYPTION_KEY`; changing it makes encrypted Store URLs and credentials unrecoverable. Update the registered Store URL in Master before retiring the prior database.
+After each restore, run the appropriate migration runner, compare source and target row counts, let the application validate the complete `schema_migrations` set, and check `/health`. Preserve the existing Master `ENCRYPTION_KEY`; changing it makes encrypted Store URLs and credentials unrecoverable. Update the registered Store URL in Master before retiring the prior database.

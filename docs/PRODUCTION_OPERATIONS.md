@@ -17,14 +17,15 @@ The store scheduler runs `sensitive_data_retention` daily at 03:30 UTC. Cleanup 
 | --- | ---: | --- |
 | Conversation media URLs | 30 days | Set `media_url` to null |
 | Conversation text and tool metadata | 180 days | Delete conversation rows |
-| Order payment proof and raw transaction details | 90 days after a terminal payment update | Clear URL, raw reference, amount, currency, and timestamps; retain anti-replay hashes |
-| Terminal order shipping addresses | 365 days | Clear address and city |
+| Order payment proof and raw transaction details | 90 days after the order's last update when payment is terminal | Clear URL, raw reference, amount, currency, and timestamps; retain anti-replay hashes |
+| Terminal order shipping addresses | 365 days after order creation | Clear address and city |
 | Inactive customer saved addresses | 365 days | Clear unless the customer has a pending order |
 | Meta completed/failed jobs and receipts | 7 days | Delete through the existing Meta queue cleanup |
-| Kommo sent/discarded/failed payloads and callback claims | 7 days | Redact message, media, return URL, claims, contexts, and continuation payloads |
+| Expired Meta Instagram context events | At event expiry | Redact message text, sender ID, and username |
+| Kommo sent/discarded/failed payloads and callback claims | 7 days | Redact message, primary media URL, return URL, claims, contexts, and continuation payloads; ordered `inbound_attachments` remain until job deletion |
 | Kommo sent/discarded/failed jobs | 30 days | Delete |
 | Kommo receipts | 30 days | Delete |
-| Kommo `delivery_unknown` payloads | 90 days | Redact payload; retain minimal job status for manual reconciliation |
+| Kommo `delivery_unknown` payloads | 90 days | Redact the implemented payload fields and retain minimal job status for manual reconciliation; ordered `inbound_attachments` are not currently cleared |
 | Broadcast recipient delivery rows | 90 days | Delete sent/failed rows; retain ambiguous `sending` rows for reconciliation |
 
 Retention is irreversible in the live database. Do not restore expired personal data into production except for a documented incident response with an approved deletion plan.
@@ -65,8 +66,8 @@ Back up these secrets separately:
 1. Confirm the backup checksums and record the current commit SHA.
 2. Confirm no broadcast is `sending` and reconcile Kommo `delivery_unknown` jobs.
 3. Pause deploys and scheduled traffic. Keep the store single-instance.
-4. Run the service migration runner for the normal deployment path. It reapplies the idempotent `001` baseline; use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case.
-5. Query `schema_migrations` and verify the exact version expected by `app/db.py`.
+4. Run the service migration runner for the normal deployment path. The Store runner applies its sequence through version 14; the Master runner applies its baseline. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal runner.
+5. Query `schema_migrations` and let the matching application revision validate the complete accepted version set; do not rely only on `MAX(version)`.
 6. Deploy the matching application revision.
 7. Verify `/health`, login, a read-only dashboard query, catalog loading, and one test conversation.
 8. Re-enable traffic and monitor errors, job queues, database connections, and delivery reconciliation rows.
@@ -76,6 +77,7 @@ Current store upgrade sequence for an existing pre-consolidation database:
 ```bash
 psql "$STORE_DATABASE_URL" -v ON_ERROR_STOP=1 \
    -f store/migrations/002_consolidated_upgrade.sql
+DATABASE_URL="$STORE_DATABASE_URL" python store/scripts/migrate.py
 ```
 
 ## Restore Procedure

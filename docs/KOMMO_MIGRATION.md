@@ -62,10 +62,10 @@ Connect the Instagram Business account inside Kommo using Kommo's official Insta
 
 ## Instagram Comment Setup
 
-Public Instagram comments use the same durable path as private messages:
+Public Instagram comments use the same durable job system as private messages:
 
 ```text
-Kommo native comment trigger -> widget callback -> create ready kommo_message_job -> AI response -> continue Salesbot with json.message
+Kommo native comment trigger -> widget callback -> create ready or context-waiting kommo_message_job -> AI response -> continue Salesbot with json.message
 ```
 
 Private messages use channel-specific backend-created job paths:
@@ -81,11 +81,11 @@ Create three Salesbot flows that use the installed Social Media Manager widget:
 2. WhatsApp Salesbot: add `Ask Eva AI for WhatsApp`, followed by a Kommo Message step using `{{json.message}}` restricted to the WhatsApp channel. Do not add a native incoming-message trigger. Set its ID as `KOMMO_WHATSAPP_SALESBOT_ID`.
 3. Instagram comment Salesbot: keep Kommo's native `When a comment is received` trigger, add `Ask Eva AI for Instagram comments`, followed by a Kommo Comment step using `{{json.message}}`. Do not configure this Salesbot's ID in the backend.
 
-The backend never launches the comment Salesbot through `/api/v4/bots/{id}/run`. Authenticated Instagram-comment widget callbacks create durable `ready` jobs directly. Private-message callbacks must still match an existing `waiting_for_salesbot` job.
+The backend never launches the comment Salesbot through `/api/v4/bots/{id}/run`. Authenticated Instagram-comment widget callbacks create durable `ready` jobs, or `waiting_for_context` jobs when supplemental Meta context is enabled. Private-message callbacks must still match an existing `waiting_for_salesbot` job.
 
 Kommo may also mirror a native Instagram comment through the general webhook as `origin=instagram_business` with `message_type=text`. That event is intentionally treated as a normal Instagram private-message job first. The authenticated native comment-triggered Salesbot callback creates the durable `instagram_comment` job, then reconciliation discards any recent matching private-message mirror before the Instagram DM Salesbot can launch.
 
-Public-comment replies are deterministic. Eva answers only price or availability, and only when the widget callback provides post/product context that maps confidently to one catalog product. Greetings, sizing, recommendations, payment, delivery, ordering, comparisons, complaints, unknown products, and ambiguous post context return `Para más información escríbenos al DM o por WhatsApp al {store_phone_number}!`; if `store_phone_number` is empty, the reply is `Para más información escríbenos al DM!`.
+Public-comment replies are deterministic. Eva answers only price or availability. A single mapped product can be answered directly; with multiple mapped products, a generic question requests clarification and a confident explicit product reference can select one product. Greetings, sizing, recommendations, payment, delivery, ordering, comparisons, complaints, unknown products, and unresolved context return `Para más información escríbenos al DM o por WhatsApp al {store_phone_number}!`; if `store_phone_number` is empty, the reply is `Para más información escríbenos al DM!`.
 
 ## Private Integration Creation
 
@@ -164,11 +164,11 @@ KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 
 `KOMMO_INSTAGRAM_DM_SALESBOT_ID` and `KOMMO_WHATSAPP_SALESBOT_ID` are optional while migrating. For each missing dedicated ID, the backend temporarily falls back to `KOMMO_SALESBOT_ID`. New installations should configure both dedicated IDs; remove the legacy fallback only after both channels have been tested. `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` is optional. Do not add `KOMMO_ACCOUNT_ID`, `KOMMO_RETURN_URL_ALLOWLIST`, `KOMMO_AUTO_TAKEOVER_ON_HUMAN_REPLY`, or `KOMMO_REQUEST_TIMEOUT_SECONDS`.
 
-`KOMMO_CHATS_MEDIA_ENABLED` is the global kill switch. Product images additionally require `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=true`; PDFs additionally require `KOMMO_CHATS_CATALOG_PDF_ENABLED=true` and the live-validated `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file`. If a response contains both media types, only the independently enabled types are sent. All media flags default to `false`. `KOMMO_CHATS_API_MONTHLY_LIMIT` is an optional positive integer used only for local monitoring; Kommo remains authoritative for billing and quota.
+`KOMMO_CHATS_MEDIA_ENABLED` is the global kill switch. Product images additionally require `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=true`; PDFs additionally require `KOMMO_CHATS_CATALOG_PDF_ENABLED=true` and the code-accepted `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file`. Verify PDF delivery in the development account before production. If a response contains both media types, only the independently enabled types are sent. All media flags default to `false`. `KOMMO_CHATS_API_MONTHLY_LIMIT` is an optional positive integer used only for local monitoring; Kommo remains authoritative for billing and quota.
 
 ## Database Migration
 
-Run `python3 store/scripts/migrate.py` through the Railway pre-deploy command or against the intended database before enabling media. The current Store schema version is 12; migrations 009 through 012 add semantic conversation attachments, idempotent outbound delivery state, the upload cache, and content hashes. Confirm `schema_migrations` includes every applicable version through `12`. Never rerun `001_schema.sql` manually as an upgrade.
+Run `python3 store/scripts/migrate.py` through Railway pre-deploy or against the intended database. The current Store schema version is `14`. The runner applies the fresh baseline and every normal numbered migration through `014_kommo_inbound_attachments.sql`; `002_consolidated_upgrade.sql` is a manual pre-consolidation recovery migration and is not part of the normal runner. Migrations 009-012 add outbound media history, uniqueness, cache, and content hashes; 013-014 add inbound voice type and ordered inbound attachment metadata. Let `store/app/db.py` validate the complete migration set rather than checking only `MAX(version)`.
 
 ## Widget Build
 
@@ -181,7 +181,7 @@ python3 build_widget.py --widget-code YOUR_WIDGET_CODE
 
 Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, widget version, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
 
-The widget version must be incremented on every upload. Current version: `1.2.10`.
+The widget version must be incremented on every upload. [`store/kommo-widget/manifest.json`](../store/kommo-widget/manifest.json) is authoritative and currently specifies `1.2.12`.
 
 ## Widget Installation
 
@@ -213,7 +213,7 @@ Create separate private-message Salesbots containing `Ask Eva AI for Instagram D
 https://<store-domain>/webhooks/kommo/salesbot
 ```
 
-The private-message blocks send `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, `{{origin}}`, `interaction_type`, and a fixed `expected_channel` (`instagram` or `whatsapp`). The backend will not let one channel's callback consume the other channel's waiting job. Each saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes `success` and `fail` branches; use `success` for normal AI completion and `fail` for fallback/human handling. The continuation response remains `{"data":{"status":"success","message":"..."}}`.
+The private-message blocks send `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, `{{origin}}`, `interaction_type`, and a fixed `expected_channel` (`instagram` or `whatsapp`). The backend will not let one channel's callback consume the other channel's waiting job. Each saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes three exits: route `success` to the channel-restricted Message/Comment step, route `media` to a silent end because Chats API already delivered the response, and route `fail` to a silent end or explicit human handling without a customer-visible `{{json.message}}` step.
 
 For public comments, create a separate Kommo Salesbot using the native `When a comment is received` trigger and the installed `Ask Eva AI for Instagram comments` widget block. End that flow with a Kommo Comment step using `{{json.message}}`. The backend validates the widget JWT and creates the durable comment job from the callback, so no comment Salesbot ID is configured in this app.
 
@@ -247,7 +247,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ## Kommo Mode Activation
 
-1. Apply the correct migration: `001_schema.sql` for a fresh database, or `002_consolidated_upgrade.sql` for an existing database.
+1. Run `python3 store/scripts/migrate.py`. Use `002_consolidated_upgrade.sql` only when a documented pre-consolidation schema error requires recovery, then run the normal migration runner again.
 2. Upload the widget.
 3. Create and test the Instagram DM Salesbot, WhatsApp Salesbot, and native comment-triggered Salesbot.
 4. Register the general webhook.
@@ -259,7 +259,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ```text
 [ ] Store Railway root directory is store/
-[ ] schema_migrations contains every version through the app's EXPECTED_SCHEMA_VERSION
+[ ] python3 store/scripts/migrate.py completed and store/app/db.py accepts the complete migration set through version 14
 [ ] CHANNEL_BACKEND=kommo is set in the store environment
 [ ] All required KOMMO_* variables are set
 [ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL
@@ -268,11 +268,12 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 [ ] Social Media Manager AI appears in Salesbot as an installed widget
 [ ] Instagram DM Salesbot has no native trigger and ends with an Instagram-only Message step using {{json.message}}
 [ ] WhatsApp Salesbot has no native trigger and ends with a WhatsApp-only Message step using {{json.message}}
+[ ] Both private-message Salesbots route the widget media exit to a silent end
 [ ] Comment Salesbot ends with a Comment step using {{json.message}}
 [ ] General webhook points to https://<store-domain>/webhooks/kommo/events/<secret>
 [ ] /admin/settings/kommo/test passes with admin auth
 [ ] A real WhatsApp or Instagram DM produces one customer reply through Kommo
-[ ] A real Instagram comment triggers only the native comment Salesbot flow; the general webhook logs it as ignored
+[ ] A real Instagram comment creates the authoritative native-comment job; any general-webhook private-message mirror is discarded as superseded before the Instagram DM Salesbot launches
 [ ] AI Mode=Human suppresses future AI replies
 ```
 
@@ -288,6 +289,12 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 1. Send an Instagram DM to the connected account.
 2. Confirm origin maps to `instagram`.
 3. Confirm AI response appears through Kommo, not Meta sender modules.
+
+## Inbound Voice Notes
+
+Kommo private WhatsApp and Instagram DM `voice`/`audio` attachments are persisted in arrival order, safely downloaded, and transcribed before the AI turn. Multiple debounced notes are transcribed in order. Mixed image/audio batches keep the latest image for vision while preserving the ordered audio transcriptions.
+
+Transcription always uses OpenAI `gpt-4o-mini-transcribe`, so `OPENAI_API_KEY` is required even if Anthropic is the active chat provider. There is no separate voice feature flag. Downloads are HTTPS-only, DNS/IP validated, limited to three redirects and 20 MiB, and accept supported OGG/Opus, MP3, MP4/M4A, WAV, and WebM audio. Retryable failures remain in the durable job retry path; terminal failures continue through the widget `fail` exit without an AI reply. Direct Meta audio is not transcribed.
 
 ## Instagram Comment Test Procedure
 
@@ -329,9 +336,9 @@ The Files API upload/cache lifecycle is separate from outgoing Chats API message
 
 Only incoming external Kommo messages create AI jobs. Outgoing `add_outgoing_message` webhooks only reconcile an existing outbound delivery when the provider message ID matches; they never trigger Eva or create another `kommo_message_job`.
 
-Conversation history stores one logical assistant turn regardless of transport. `conversations.attachments` contains only semantic product-image or catalog-PDF context. Kommo Drive UUIDs, provider message IDs, request fingerprints, signed URLs, and raw provider payloads stay in Kommo delivery/cache tables and are never supplied to the LLM.
+Conversation history stores one logical assistant turn regardless of transport. `conversations.attachments` contains only semantic product-image or catalog-PDF context. Kommo Drive UUIDs, provider message IDs, request fingerprints, and raw provider payloads stay in Kommo delivery/cache records and are never supplied to the LLM. Signed inbound attachment URLs are stored temporarily in the durable job's `inbound_attachments` metadata so audio/images survive debounce and retries.
 
-Kommo Salesbot continuations are data-only payloads shaped as `{"data":{"status":"success","message":"..."}}` or `{"data":{"status":"fail","message":""}}`. They do not include `execute_handlers`, `attachment_type`, or public catalog PDF URLs.
+Kommo Salesbot continuations are data-only payloads. Salesbot delivery uses `{"data":{"status":"success","delivery_mode":"salesbot","message":"..."}}`; Chats API delivery uses `{"data":{"status":"success","delivery_mode":"chats_api","message":""}}`; failures use `{"data":{"status":"fail","message":""}}`. They do not include `execute_handlers`, `attachment_type`, or public catalog PDF URLs.
 
 Emoji and markdown formatting are normalized before Kommo continuation. Per-channel settings `kommo_emoji_mode_whatsapp` and `kommo_emoji_mode_instagram` accept `preserve`, `safe`, or `strip`; the default is `safe`. The legacy `kommo_strip_emoji=true` setting still forces stripping.
 
@@ -346,14 +353,14 @@ The Kommo private integration requires these additional scopes before the transp
 - `Access to files` for the Files API.
 - `Sending to external chats` for the Chats API add-on.
 
-Enable the global flag and each media-specific flag only after development-account validation. `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` defaults to empty; PDF sending remains blocked until it is explicitly configured with the live-tested value `file`. Do not introduce or configure undocumented attachment types.
+Enable the global flag and each media-specific flag only after development-account validation. `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` defaults to empty; PDF sending remains blocked until it is explicitly configured as `file`. The code and automated tests accept only `file`; verify a real PDF in the development account before production. Do not introduce undocumented attachment types.
 
 The base flow follows Kommo's Files and Chats APIs:
 
 1. Request `GET /api/v4/account?with=drive_url` and cache the returned Drive URL in memory.
 2. Create a session with `POST {drive_url}/v1.0/sessions`, including file name, byte size, and MIME type.
 3. Respect the returned `max_file_size` and `max_part_size`, then upload each chunk through the exact `upload_url` or `next_url` returned by Kommo.
-4. Map the final response's `uuid` to Chats `drive_uuid` and `version_uuid` to `drive_version_uuid`. Both identifiers must be valid and distinct. `_links.self`, when present, is checked for consistency with `uuid`.
+4. Resolve the parent file UUID as Chats `drive_uuid` and the uploaded version UUID as `drive_version_uuid`. They must be valid and distinct. Depending on the response shape, the implementation resolves them from `file_uuid`/`uuid`, `_links.self`, and validated file metadata rather than assuming one fixed field layout.
 5. Send an attachment, optionally with text, through `POST /api/v4/talks/{talk_id}/send_message`; `202 Accepted` is success.
 
 ### Live-Verified Contract (2026-08-04)
@@ -363,8 +370,7 @@ The following details were learned from successful manual tests against the Komm
 - Session creation returned `200 OK` with `max_file_size`, `max_part_size`, `session_id`, and an upload URL shaped as `https://drive-c.kommo.com/upload/<signed-token>`.
 - File chunks were accepted as the raw binary request body with bearer authorization, `Accept: application/json`, and the original file MIME type as `Content-Type`. Multipart form data was not used.
 - Every non-final chunk returned `202 Accepted` with `session_id` and a signed `next_url`.
-- The final chunk returned `200 OK` with file metadata, including distinct `uuid`, `version_uuid`, `size`, `type`, and `_links.self`.
-- Final `uuid` is the Chats attachment `drive_uuid`; final `version_uuid` is `drive_version_uuid`.
+- The final chunk returned `200 OK` with file metadata and distinct parent-file and uploaded-version identifiers. Field names vary across response shapes, so the implementation resolves their semantic roles before building the Chats attachment.
 - Chats image attachment type `picture` delivered a native image successfully.
 - One `POST /api/v4/talks/{talk_id}/send_message` request successfully carried both text and the image attachment and returned `202 Accepted` with a message `id`.
 
@@ -411,7 +417,7 @@ They return booleans, timestamps, counts, and sanitized errors only. They do not
 
 ## Staged Media Rollout
 
-1. Apply all Store migrations through schema version 12.
+1. Run `python3 store/scripts/migrate.py` and confirm Store schema version 14 is accepted.
 2. Deploy with `KOMMO_CHATS_MEDIA_ENABLED=false`, `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false`, and `KOMMO_CHATS_CATALOG_PDF_ENABLED=false`.
 3. Verify `POST /admin/settings/kommo/test` succeeds.
 4. Run `KOMMO_CHATS_MEDIA_ENABLED=true python3 store/scripts/verify_kommo_media.py --talk-id DEVELOPMENT_TALK_ID --send` against a development talk. The command-scoped global override enables the low-level diagnostic while the deployed media-specific flags remain false; `--send` makes one real metered Chats API request.
@@ -429,7 +435,7 @@ Jobs or outbound deliveries marked `delivery_unknown` mean the backend started a
 
 ## Media Rollback
 
-Set `KOMMO_CHATS_MEDIA_ENABLED=false` and redeploy. Ordinary Salesbot text processing continues without reverting migrations. Leave migrations 009 through 012 and existing delivery/cache records in place for auditability and safe future re-enablement.
+Set `KOMMO_CHATS_MEDIA_ENABLED=false` and redeploy. Ordinary Salesbot text processing continues without reverting migrations. Leave all migrations through 14 and existing delivery/cache/job records in place for auditability and safe future re-enablement.
 
 ## Troubleshooting
 

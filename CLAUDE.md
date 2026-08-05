@@ -199,7 +199,7 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - **Store admin auth:** All `/admin/settings/`, `/admin/broadcasts/`, and `/admin/analytics/` API routes require authentication via `ADMIN_PASSWORD` (Bearer header or `admin_session` HTTP-only cookie). Browser sessions are created via `GET/POST /admin/login` and cleared via `POST /admin/logout`.
 - **Master auth:** All `/api/stores/` routes require Bearer token (`MASTER_SECRET_KEY`) or the `master_session` cookie. Browser sessions are created via `GET/POST /login` and cleared via `POST /logout`.
 - **Cookie-based sessions:** Both dashboards now use normal login forms. Secrets are no longer accepted in query params.
-- **Test endpoints:** Store test routes (`/test/`) are only available when `DEBUG=true`. Master test routes are only available when the required `APP_BASE_URL` has an exact loopback hostname (`localhost` or a loopback IP).
+- **Test endpoints:** Store test routes require `DEBUG=true`, a direct loopback client, and no forwarding headers. Master test routes require `ENABLE_TEST_ENDPOINTS=true` plus an exact loopback hostname in `APP_BASE_URL`.
 - **Request protection:** Both apps install SlowAPI middleware with per-IP defaults (store: 60 req/min, master: 30 req/min) and reject HTTP request bodies larger than 1 MiB before route parsing, including chunked bodies without `Content-Length`.
 - **CORS:** Restricted to the app's own origin (`APP_BASE_URL`). Only `GET/POST/PUT/DELETE` with `Authorization` and `Content-Type` headers.
 - **Security headers:** Both apps set `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `X-XSS-Protection`, `Referrer-Policy`. In production, also `Strict-Transport-Security` and `Content-Security-Policy`.
@@ -212,7 +212,7 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - With <200 products, the entire catalog is stuffed into the system prompt — no RAG or vector database needed.
 - Dashboard-managed AI runtime settings (provider, model, temperature, max tokens, conversation history, fallback, ai_enabled, ai_orchestration_mode) are stored in the store DB `settings` table. Scheduler settings (`catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, `token_reminder_*`, `daily_analytics_*`) live there too. The store app uses version-aware cache invalidation, and `master/` reads/writes those rows through `GET/PUT /api/stores/{id}/settings`, so AI settings stay in sync after refresh or save and scheduler timings are applied automatically by the store within about a minute.
 - Store payment methods are persisted separately in the same `settings` table under `payment_methods`. They are edited only from the store dashboard via `GET/PUT /admin/settings/payment-methods`, not from `master/`.
-- Store contact and commerce settings also live in the store `settings` table. `store_phone_number` is used only in public Instagram comment fallback replies; exchange-rate settings answer rate questions like `¿a qué tasa recibes?`; the prompt and order backend use `order_discount_percent` and `order_discount_threshold_usd` for automatic subtotal-based discounts.
+- Store contact and commerce settings also live in the store `settings` table. `store_phone_number` is used for public Instagram comment fallbacks and private transactional WhatsApp handoffs; exchange-rate settings answer rate questions like `¿a qué tasa recibes?`; the prompt and order backend use `order_discount_percent` and `order_discount_threshold_usd` for automatic subtotal-based discounts.
 - Order creation normalizes item prices from the catalog and applies the configured discount automatically only when subtotal is strictly greater than the threshold. Do not make the LLM alter item unit prices to simulate a discount.
 - New orders reserve Google Sheets inventory before the database transaction commits. Inventory mutations are serialized with a PostgreSQL advisory lock, validate all SKUs/quantities before one Sheets batch update, and persist `inventory_status='reserved'`. Failed database writes compensate the Sheets deduction; deletion restores only confirmed reservations. Unpaid reservations are released after 48 hours and rejected/failed reservations are released by the scheduler.
 - Tool calls are provider-agnostic: schemas live in `store/app/ai/tools/definitions.py`, handlers live under `store/app/ai/tools/`, and the executor dispatches them with per-agent allowlists from `store/app/ai/agents/`. Adding a new tool means adding schema, handler, executor dispatch, allowlist membership, and authorization tests.
@@ -226,9 +226,10 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - Global AI pause (`ai_enabled` setting) and per-customer escalation (`conversation_state = 'escalated'`) both suppress auto-replies. Messages are stored and the owner is notified via Telegram only once (first unanswered message), not on every subsequent message.
 - In Kommo mode, per-conversation automation source of truth is the Kommo lead `AI Mode` field. `AI Active` maps to local `active`; `Human` and `Paused` map to local `escalated`. Empty AI Mode must be initialized to `AI Active` successfully before automatic replies are sent. Never overwrite existing Human/Paused automatically.
 - Store-dashboard manual reactivation in Kommo mode must sync Kommo first: set lead `AI Mode` to `AI Active`, re-read and verify the enum, then set local `conversation_state='active'` and clear local history. Single-customer failures return sanitized `502`; resolve-all reports per-customer `activated`, `local_only`, or `failed`.
-- Kommo Salesbot callbacks include a JWT and `return_url`. Validate HS256 with `KOMMO_INTEGRATION_SECRET`, expiration, issuer/subdomain, and `client_uid`/`client_uuid` when present. Validate `return_url` strictly against `https://{KOMMO_SUBDOMAIN}.kommo.com` with no userinfo, IPs, localhost, deceptive suffixes, redirects, or unexpected ports before posting the Salesbot continuation.
+- Kommo Salesbot callbacks include a JWT and `return_url`. Validate HS256 or HS512 with `KOMMO_INTEGRATION_SECRET`, expiration, issuer/subdomain, and `client_uid`/`client_uuid` when present. Validate `return_url` strictly against `https://{KOMMO_SUBDOMAIN}.kommo.com` with no userinfo, IPs, localhost, deceptive suffixes, redirects, or unexpected ports before posting the Salesbot continuation.
 - Kommo jobs are durable in `kommo_message_jobs`. Do not depend only on `BackgroundTasks`, `asyncio.create_task`, or in-memory buffers. The in-process task may accelerate handling after DB commit, but PostgreSQL is the source of truth. Ready jobs should attempt a Salesbot continuation even on discard/error paths; `delivery_unknown` means a continuation was attempted but Kommo acceptance could not be confirmed and must be manually reconciled before retrying.
-- Kommo jobs carry `interaction_type`: `private_message` for WhatsApp/Instagram DMs and `instagram_comment` for public comment replies. Kommo can mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, so do not rely on parser inference to identify comments. The native comment Salesbot callback is the source of truth; durable reconciliation discards recent matching Instagram private-message mirror jobs with `superseded_by_instagram_comment` before `KOMMO_SALESBOT_ID` launches. Public comment replies are deterministic: only price/stock are answered from resolved post/product context that maps to exactly one catalog product; all other public comments return the DM/WhatsApp fallback based on `store_phone_number`.
+- Kommo private WhatsApp and Instagram DM `voice`/`audio` attachments are persisted in arrival order and transcribed with OpenAI `gpt-4o-mini-transcribe` before AI execution. This requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio remains placeholder-only.
+- Kommo jobs carry `interaction_type`: `private_message` for WhatsApp/Instagram DMs and `instagram_comment` for public comment replies. Kommo can mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, so do not rely on parser inference to identify comments. The native comment Salesbot callback is the source of truth; durable reconciliation discards recent matching Instagram private-message mirror jobs with `superseded_by_instagram_comment` before the selected Instagram DM Salesbot launches. Public comment replies are deterministic: only price/availability are answered from resolved content mappings. A single mapped product can be answered directly; multiple mappings require clarification or a confident explicit product reference. Other public comments return the DM/WhatsApp fallback based on `store_phone_number`.
 - Customer shipping addresses are saved on the customer record after order creation (`last_shipping_address`, `last_shipping_city`, `last_shipping_method`). The AI offers to reuse the saved address for returning customers.
 - OpenAI newer models require `max_completion_tokens` instead of `max_tokens` (changed in `openai_provider.py`).
 - Dashboard dark mode uses Tailwind CDN with `darkMode: 'class'` config. The `tailwind.config` must be set after the CDN `<script>` loads (not before, or `tailwind` is undefined). Custom component dark styles (`.dark .card`, etc.) live in `store/app/static/css/dashboard.css`. The `dark` class is toggled on `<html>` via `toggleDarkMode()` in `store/app/static/js/dashboard.js`.
@@ -239,7 +240,7 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - JSONB queries with the `databases` library must use `CAST(:param AS jsonb)` instead of `:param::jsonb` because the `::` cast syntax conflicts with SQLAlchemy's `:param` bind parameter syntax.
 - **Multi-store: separate deployments, not multi-tenant.** Each store is a full independent deployment of this app with its own `.env` and database. The master service is a separate FastAPI app (not a router on the store app). This gives true data isolation and means a bug in one store doesn't affect others.
 - **System prompt override:** If the `SYSTEM_PROMPT_OVERRIDE` env var is set, `store/app/ai/prompts.py` uses its value instead of reading `store/prompts/system_prompt.md`. The override must use the same placeholders as the default template, including `{payment_method_names_text}`, `{payment_methods_block}`, `{exchange_rate_block}`, and `{order_discount_block}`.
-- **Centralized runtime settings:** `master/` reads/writes shared AI settings and scheduler timings directly in each store DB via `GET/PUT /api/stores/{id}/settings`. That includes AI config plus the store's APScheduler timings, but not payment methods, accepted exchange rate, or order discount settings. When `LLM_MANAGED_EXTERNALLY=true` is set on a store, the store dashboard hides LLM-only controls and rejects writes to those keys (403), but payment methods and other non-LLM store settings remain editable locally.
+- **Centralized runtime settings:** `master/` reads/writes shared AI settings, scheduler timings, `exchange_rate_reference`, and `manual_exchange_rate` directly in each store DB via `GET/PUT /api/stores/{id}/settings`. Payment methods and order-discount settings remain Store-only. When `LLM_MANAGED_EXTERNALLY=true` is set on a store, the store dashboard hides LLM-only controls and rejects writes to those keys (403), but payment methods and other non-LLM Store settings remain editable locally.
 - **AI run observability:** `ai_run_logs` stores non-sensitive metadata only: orchestration mode, selected agent, route intent/source/confidence, provider/model, token counts, response time, tool names, tool rounds, and boolean flags for handoff/fallback/escalation/shadow/legacy fallback. Do not log payment credentials, raw image contents, full addresses, customer message text, tool arguments, or raw tool results.
 - **Deployment shape:** Keep the store service single-instance/single-worker in this phase because broadcasts and scheduled jobs run in-process.
 
@@ -250,16 +251,21 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 ```text
 Webhooks:       Meta mode: GET/POST /webhooks/whatsapp, /webhooks/instagram
                 Kommo mode: POST /webhooks/kommo/events/{webhook_secret}, POST /webhooks/kommo/salesbot
+                Optional Kommo context: GET/POST /webhooks/meta/instagram-context
                 Telegram: POST /webhooks/telegram
 Health:         GET /, GET /health
 Settings:       GET /admin/settings/, GET /admin/settings/providers, PUT /admin/settings/{key}
                 GET /admin/settings/payment-methods, PUT /admin/settings/payment-methods
+                GET/PUT /admin/settings/shipping-policy, PUT /admin/settings/batch
                 GET /admin/settings/kommo/status, POST /admin/settings/kommo/test
+                GET /admin/settings/meta-instagram-context/status
                 POST /admin/settings/switch-provider, GET /admin/settings/usage-summary
                 GET /admin/settings/stats/conversations, POST /admin/settings/telegram/setup-webhook
                 POST /admin/settings/instagram/setup-ice-breakers, POST /admin/settings/instagram/subscribe-page
                 POST /admin/settings/catalog/generate-pdf, GET /admin/settings/catalog/pdf-status
                 GET /admin/settings/catalog/download-pdf
+Instagram:      GET /admin/instagram-content/products, GET/POST /admin/instagram-content
+                PUT/DELETE /admin/instagram-content/{id}
 Customers:      GET /admin/settings/customers, PUT /admin/settings/customers/{id}
                 DELETE /admin/settings/customers/{id}
                 POST /admin/settings/customers/{id}/resolve, POST /admin/settings/customers/resolve-all
@@ -270,6 +276,7 @@ Orders:         GET /admin/settings/orders, GET /admin/settings/orders/{id}
 Dashboard:      GET /admin/login, POST /admin/login, POST /admin/logout, GET /admin/dashboard
                 GET /admin/orders/{order_id}
 Broadcasts:     POST /admin/broadcasts/create, /preview, GET /list, POST /{id}/send, POST /{id}/reset
+                GET /{id}/deliveries, POST /{id}/deliveries/{delivery_id}/retry
 Analytics:      GET /admin/analytics/conversion, /response-times, /popular-products, /daily
                 POST /admin/analytics/build-daily
 Testing:        GET /test/ui, POST /test/chat, GET /test/catalog
@@ -288,6 +295,8 @@ Runtime:        GET/PUT /api/stores/{id}/settings, GET /api/stores/{id}/llm-usag
                 GET/PUT /api/stores/{id}/llm-settings, GET /api/stores/{id}/conversations
                 GET /api/stores/llm-costs/aggregate?days=N
 Conversations:  GET /api/stores/{id}/conversations
+Exchange rates: GET /api/stores/exchange-rates/current, POST /api/stores/exchange-rates/refresh
+                POST /api/stores/{id}/exchange-rates/refresh
 Railway:        GET /api/stores/{id}/railway/status, POST /api/stores/{id}/deploy
 Audit:          GET /api/stores/audit/log
 Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/seed
@@ -317,7 +326,7 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 - **Orchestration rollout:** Keep production stores on `legacy` until transcript regressions and `shadow` logs look clean. Roll back by setting `ai_orchestration_mode=legacy` in the store DB from either dashboard.
 - **Telegram webhook:** Must be registered once via `POST /admin/settings/telegram/setup-webhook` before the Telegram bot responds. This sets the webhook URL using `APP_BASE_URL` and registers `TELEGRAM_WEBHOOK_SECRET` as Telegram's `secret_token`; inbound updates are rejected unless their secret header matches.
 - **Catalog refresh:** The Google Sheets catalog is loaded into memory at startup and refreshed periodically by APScheduler. A stale catalog won't update until the next refresh cycle or a server restart.
-- **Migrations are explicit and versioned:** Railway pre-deploy runs `store/scripts/migrate.py` and `master/scripts/migrate.py`. Both execute their idempotent `001` baseline. Use `002_consolidated_upgrade.sql` only for a pre-consolidation recovery case. Startup requires a supported `schema_migrations` version.
+- **Migrations are explicit and versioned:** Railway pre-deploy runs `store/scripts/migrate.py` and `master/scripts/migrate.py`. The Store runner applies its normal sequence through `014_kommo_inbound_attachments.sql` and requires schema version 14; the Master runner applies its `001` baseline. Use `002_consolidated_upgrade.sql` only for a pre-consolidation recovery case, then rerun the normal migration runner. Startup validates the complete supported `schema_migrations` set.
 - **Database connection:** Use Railway service reference variables for each service's own `DATABASE_URL`. Master stores a resolved Store PostgreSQL URL, not a literal Railway reference expression.
 - **OpenAI max_tokens:** Newer OpenAI models (gpt-5.x) require `max_completion_tokens` instead of `max_tokens`. This is already handled in `openai_provider.py`.
 - **Master background jobs use asyncio, not APScheduler.** The master runs health checks and idle store DB pool cleanup with `asyncio.create_task` and `asyncio.sleep`, unlike the store app which uses APScheduler.

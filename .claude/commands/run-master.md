@@ -11,6 +11,8 @@ cd /home/joselgc/projects/Social-Media-Manager/master && uvicorn app.main:app --
 
 After it starts, remind me of the test URLs:
 
+The `/test/*` routes require `ENABLE_TEST_ENDPOINTS=true` and a loopback `APP_BASE_URL` in `master/.env`.
+
 - Test UI: `http://localhost:9000/test/ui`
 - DB check: `http://localhost:9000/test/db-check`
-- Dashboard: `http://localhost:9000/dashboard?token=SECRET` (replace SECRET with MASTER_SECRET_KEY)
+- Dashboard login: `http://localhost:9000/login` (sign in with `MASTER_SECRET_KEY`)

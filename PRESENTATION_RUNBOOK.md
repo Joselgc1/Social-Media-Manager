@@ -47,8 +47,8 @@ Use this rule:
 
 Important:
 
-- `store/test/*` endpoints only work when `DEBUG=true`
-- `master/test/*` endpoints only work when `APP_BASE_URL` is localhost
+- `store/test/*` endpoints require `DEBUG=true`, a direct loopback request, and no forwarding headers
+- `master/test/*` endpoints require `ENABLE_TEST_ENDPOINTS=true` and a loopback `APP_BASE_URL`
 - For the local demo, keep `store` in `DEBUG=true`
 - Still set `ADMIN_PASSWORD` and `MASTER_SECRET_KEY` so you can test the login flows
 
@@ -84,7 +84,7 @@ Notes:
 - At least one LLM key is required. `OPENAI_API_KEY` alone is enough.
 - Google Sheets credentials and sheet ID must be valid if you want the catalog to load correctly.
 - Meta, Instagram, and Telegram values can stay empty for the local demo.
-- Kommo values can stay empty for the local test UI demo. If you set `CHANNEL_BACKEND=kommo`, you need real Kommo credentials, the consolidated `001_schema.sql`, a Salesbot widget, and public HTTPS webhooks.
+- Kommo values can stay empty for the local test UI demo. If you set `CHANNEL_BACKEND=kommo`, you need real Kommo credentials, the current Store migrations from `python store/scripts/migrate.py`, channel-specific Salesbots, the widget, and public HTTPS webhooks.
 
 Optional store env vars you may add manually if needed:
 
@@ -99,15 +99,16 @@ Open `master/.env` and verify at least these values:
 
 ```env
 DATABASE_URL=...
-MASTER_SECRET_KEY=demo-master-secret
+MASTER_SECRET_KEY=replace-with-a-generated-32-character-or-longer-secret
 ENCRYPTION_KEY=your-generated-fernet-key
 APP_BASE_URL=http://localhost:9000
+ENABLE_TEST_ENDPOINTS=true
 STORE_STATS_MAX_CONCURRENT=1
 ```
 
 Notes:
 
-- `MASTER_SECRET_KEY` is required for login
+- `MASTER_SECRET_KEY` is required for login and must be at least 32 characters; generate it with `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 - `ENCRYPTION_KEY` is required because master stores credentials encrypted
 - `RAILWAY_API_TOKEN` can stay empty unless you want to demo Railway integration
 
@@ -150,7 +151,8 @@ After that, verify the `settings` table contains at least:
 - `kommo_emoji_mode_whatsapp`
 - `kommo_emoji_mode_instagram`
 - `payment_methods`
-- `accepted_exchange_rate`
+- `exchange_rate_reference`
+- `manual_exchange_rate`
 
 ### 4.2. Master database
 
@@ -380,7 +382,7 @@ Open:
 Use:
 
 - Channel: `whatsapp`
-- Sender: `demo_customer_1`
+- Sender: `test_demo_customer_1`
 
 ### 11.2. Start with a natural greeting
 
@@ -449,7 +451,7 @@ If using `curl`:
 ```bash
 curl -X POST http://localhost:8000/test/chat \
   -H "Content-Type: application/json" \
-  -d '{"message":"Ya pagué, te envié el comprobante","sender":"demo_customer_1","channel":"whatsapp","has_image":true}'
+  -d '{"message":"Ya pagué, te envié el comprobante","sender":"test_demo_customer_1","channel":"whatsapp","has_image":true}'
 ```
 
 Expected result:
@@ -461,7 +463,7 @@ Expected result:
 
 Open:
 
-- `http://localhost:8000/test/history?sender=demo_customer_1&channel=whatsapp`
+- `http://localhost:8000/test/history?sender=test_demo_customer_1&channel=whatsapp`
 
 Expected result:
 
@@ -478,7 +480,7 @@ Return to the store dashboard.
 
 Expected result:
 
-- `demo_customer_1` appears as a customer
+- `test_demo_customer_1` appears as a customer
 - Tags may exist depending on the conversation
 - Conversation state should make sense
 
@@ -576,7 +578,7 @@ This is optional in the presentation, but useful if you want to show a non-chat 
 
 This is the correct way to test real store <-> master sync.
 
-Do not use `/test/seed` for this specific sync test unless you intentionally made both apps share the same database.
+Do not use `/test/seed` for this sync test. Store and Master must use separate databases; register the real Store database URL in Master instead.
 
 ### 15.1. Preferred method: Add the store from the master dashboard
 
@@ -626,7 +628,7 @@ You need to prove that store and master are looking at the same runtime settings
 
 From the store dashboard:
 
-1. Change `accepted_exchange_rate`
+1. Change `exchange_rate_reference` or `manual_exchange_rate`
 2. Change a shared AI setting like `llm_temperature`
 3. Save
 
@@ -635,7 +637,7 @@ Then go to the same store in the master dashboard and refresh the detail view.
 Expected result:
 
 - The shared AI setting appears updated in master
-- The exchange-rate value remains store-only in the store dashboard
+- The selected/manual exchange-rate value appears updated because Master can manage those shared rows
 
 ### 16.2. Master -> Store sync
 
@@ -651,7 +653,7 @@ Expected result:
 
 - The changed shared AI values appear in the store dashboard
 - If you changed `ai_enabled`, the store dashboard should reflect the new AI state
-- Payment methods and exchange rate remain store-managed in the store dashboard
+- Payment methods remain Store-only; selected/manual exchange-rate settings can be managed from either dashboard
 
 ### 16.3. Prove store-only payment settings affect the AI immediately
 
@@ -729,7 +731,7 @@ Use this only if you want the master dashboard to look populated for a visual de
 Important warning:
 
 - This is useful for showing the master overview
-- It is not the preferred method for proving real sync with the live `store/` app unless both apps intentionally share the same DB
+- It does not prove sync with the live `store/` app; never point Store and Master at the same database
 
 ---
 
@@ -740,7 +742,7 @@ If the conversation history gets messy, reset only the test customer.
 ### 19.1. Reset the fake customer
 
 ```bash
-curl -X DELETE "http://localhost:8000/test/reset?sender=demo_customer_1&channel=whatsapp"
+curl -X DELETE "http://localhost:8000/test/reset?sender=test_demo_customer_1&channel=whatsapp"
 ```
 
 Expected result:
@@ -930,6 +932,6 @@ Do these tonight, not tomorrow:
 - Verify store -> master sync
 - Verify master -> store sync
 - Decide whether you will demo broadcasts or skip them
-- Keep one clean test sender ready for the actual presentation, for example `demo_customer_1`
+- Keep one clean test sender ready for the actual presentation, for example `test_demo_customer_1`
 
 If all of the above works tonight, tomorrow's demo should be straightforward.

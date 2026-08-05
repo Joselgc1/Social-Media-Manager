@@ -2,7 +2,7 @@
 
 This widget must be installed at the Kommo account level before it appears as an installed widget inside Salesbot.
 
-The widget version is currently `1.2.11`. Increment `widget.version` in `manifest.json` every time a new archive is uploaded so Kommo refreshes the widget files.
+The authoritative widget version is `widget.version` in [`manifest.json`](manifest.json) (currently `1.2.12`). Increment it every time a new archive is uploaded so Kommo refreshes the widget files.
 
 Build:
 
@@ -39,7 +39,7 @@ The same installed widget is used by all three Kommo Salesbot flows. The Instagr
 
 The Instagram DM Salesbot must reach the backend widget callback before any customer-visible Message step. This ordering is required because suppressed Story replies launch the Salesbot only to correlate Meta context, then resume through the widget's `fail` exit with an empty message. Put the Instagram Message step only on the widget's `success` exit; the `fail` exit must terminate without sending anything.
 
-The Instagram-comment widget block sends optional post/product placeholders such as post caption, product SKU, product name, and media URL. The backend ignores unresolved placeholders and only answers price/availability when those resolved fields identify exactly one catalog product.
+The Instagram-comment widget block sends optional post/product placeholders such as post caption, product SKU, product name, and media URL. The backend ignores unresolved placeholders and answers only price/availability. A mapping may contain multiple products: generic questions request clarification, while a confident explicit reference can select one mapped product.
 
 If invalid manifests were previously uploaded first and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive, following Kommo's widget update behavior.
 

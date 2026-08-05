@@ -61,6 +61,7 @@ MASTER_SECRET_KEY=your-generated-secret-key
 ENCRYPTION_KEY=your-generated-fernet-key
 RAILWAY_API_TOKEN=             # Optional unless using Railway deploys from master
 APP_BASE_URL=http://localhost:9000
+ENABLE_TEST_ENDPOINTS=true       # Local only; leave false in production
 HEALTH_CHECK_INTERVAL_SECONDS=300
 ```
 
@@ -143,7 +144,7 @@ Verify:
 
 ### 2.4 Test endpoints reference
 
-> **Note:** Test endpoints (`/test/`) are only available when the required `APP_BASE_URL` uses an exact loopback hostname. They return 404 in production.
+> **Note:** Test endpoints (`/test/`) require both `ENABLE_TEST_ENDPOINTS=true` and an exact loopback hostname in `APP_BASE_URL`. Leave the flag false in production.
 
 ```bash
 # Quick checks (no auth required — localhost only)
@@ -205,7 +206,7 @@ git push origin main
 
 ### 3.2 Create a Railway project for the master
 
-Go to railway.app. Create a **new project** (separate from any store project).
+Go to railway.app. Create or select the Railway project/environment that contains `MasterPostgres`. The documented reference-variable topology places Store, StorePostgres, Master, and MasterPostgres in one project/environment; a separate Master project also works only when its database and registered Store URLs are reachable from Master.
 
 Click "Deploy from GitHub Repo" and select your repo. Under **Settings > General**, set the **Root Directory** to `master/`.
 
@@ -317,13 +318,18 @@ Click **"+ Add Credential"** and add each one:
 | `KOMMO_AI_HUMAN_ENUM_ID` | Kommo mode only |
 | `KOMMO_AI_PAUSED_ENUM_ID` | Kommo mode only |
 | `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` | Optional Kommo escalation assignee |
+| `KOMMO_CHATS_MEDIA_ENABLED` | Global Kommo WhatsApp media kill switch |
+| `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED` | Independent product-image rollout flag |
+| `KOMMO_CHATS_CATALOG_PDF_ENABLED` | Independent WhatsApp PDF rollout flag |
+| `KOMMO_CHATS_API_MONTHLY_LIMIT` | Optional local monitoring value |
+| `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` | Set to `file` only after development validation |
 
 
 All values are encrypted with Fernet before storage. The dashboard only shows masked values (e.g., `sk-p`**).
 
 ### 4.4 Add admin password to the store (required)
 
-`ADMIN_PASSWORD` is **required** in production. Without it, all admin routes return 403. Add it to the store's Railway deployment:
+`ADMIN_PASSWORD` is **required** in production. Without a valid non-placeholder value of at least 12 characters, Store startup fails. Add it to the store's Railway deployment:
 
 ```ini
 ADMIN_PASSWORD=some-strong-password-for-carlos
@@ -343,7 +349,7 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), plus either the Meta section 1.7 or the Kommo migration guide, but for the new store's accounts:
 
-1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `store/migrations/001_schema.sql`. Use `002_consolidated_upgrade.sql` only for a pre-consolidation recovery case.
+1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `python scripts/migrate.py` through schema version 14. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal migration runner.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
 4. **Channel backend:** choose either direct Meta credentials or Kommo channel/private integration credentials for this store.
@@ -635,6 +641,11 @@ Runtime Settings:
   GET    /api/stores/{id}/conversations         -> Recent store conversations from the store DB
   GET    /api/stores/llm-costs/aggregate?days=N -> Platform-wide costs (default: today)
 
+Exchange Rates:
+  GET    /api/stores/exchange-rates/current              -> Current provider rates
+  POST   /api/stores/exchange-rates/refresh              -> Refresh provider rates
+  POST   /api/stores/{id}/exchange-rates/refresh         -> Refresh and apply rates for one Store
+
 Railway Deployment:
   GET    /api/stores/{id}/railway/status        -> Railway service + deploy status
   POST   /api/stores/{id}/deploy                -> Push credentials + redeploy
@@ -642,7 +653,7 @@ Railway Deployment:
 Audit Log:
   GET    /api/stores/audit/log?limit=50         -> Recent audit entries
 
-Testing (localhost only — returns 404 in production):
+Testing (ENABLE_TEST_ENDPOINTS=true plus exact loopback APP_BASE_URL):
   GET    /test/ui                               -> Browser-based test UI
   GET    /test/db-check                         -> Database connectivity check
   GET    /test/crypto?value=hello               -> Encryption round-trip test
@@ -695,7 +706,7 @@ Store A (1 deployment)                   Store B (1 deployment)
 - **"Cannot decrypt store database URL"**: The `ENCRYPTION_KEY` in the master `.env` has changed since the store was registered. If you rotated the key, you need to re-register all stores with the new key.
 - **Store dashboard returns 401**: `ADMIN_PASSWORD` is set but you don't have a valid session cookie. Visit `/admin/login` and sign in. For API calls, use `Authorization: Bearer YOUR_PASSWORD`.
 - **Store admin API returns 403**: `ADMIN_PASSWORD` is not set and `DEBUG=false`. Set `ADMIN_PASSWORD` in the store's Railway variables and redeploy.
-- **Test endpoints return 404**: This is expected in production. Test endpoints are only available when `DEBUG=true` (store app) or when `APP_BASE_URL` uses an exact loopback hostname (master).
+- **Test endpoints return 404**: This is expected in production. Store test routes require `DEBUG=true` and direct loopback access; Master test routes require `ENABLE_TEST_ENDPOINTS=true` plus an exact loopback `APP_BASE_URL`.
 - **AI responds with wrong persona**: Check if `SYSTEM_PROMPT_OVERRIDE` is set for that store. If it is, verify the content is correct and uses the right placeholders.
 - **Health checks not updating**: The background task runs every `HEALTH_CHECK_INTERVAL_SECONDS` (default 300 = 5 minutes). Wait for the next cycle or restart the master service. Stores with status "paused" are skipped.
 - **"Deploy Changes" button not visible"**: The button only appears when a store has both credentials and a Railway Service ID configured. Add the service ID via the Edit button on the store detail page.

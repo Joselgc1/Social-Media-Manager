@@ -1,12 +1,46 @@
 # VS Chatbot - AI Sales Assistant
 
-AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, dynamic store-defined payment methods, a store-managed daily exchange-rate setting, sortable dashboard tables, and a dark mode admin dashboard. Channel transport can run in direct Meta mode or Kommo mode.
+AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, dynamic store-defined payment methods, database-backed exchange-rate settings, sortable dashboard tables, and a dark mode admin dashboard. Channel transport can run in direct Meta mode or Kommo mode.
 
 The sales flow is tuned for Venezuelan operations: shipments are offered through `MRW` or `Zoom` with `cobro a destino`, owners can update the daily accepted exchange rate from the store dashboard, and the customer-facing catalog PDF does not expose internal SKU or stock columns.
 
 Dashboard-managed runtime settings live in each store's `settings` table. That includes shared AI configuration, `ai_orchestration_mode`, and master-managed scheduler timings such as `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, and the daily cron times. Store payment methods are persisted separately in the same table under `payment_methods` and are managed only from the store dashboard. When a store is connected to `master/`, both dashboards read and write the shared AI rows, and the master dashboard manages the scheduler rows.
 
 **Multi-store support:** A Master Control Plane (`master/`) lets you manage multiple independent store deployments from a single dashboard — each with its own database, API keys, channel backend, and Telegram bot. See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the multi-store setup guide.
+
+## Documentation Index
+
+| Topic | Authoritative guide |
+| :--- | :--- |
+| Quick start and project overview | [Quick Start](#quick-start) and [Architecture](#architecture) below |
+| Store deployment | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) |
+| Kommo setup and migration | [`docs/KOMMO_MIGRATION.md`](docs/KOMMO_MIGRATION.md) |
+| Instagram comments, Stories, and content mappings | [`store/INSTAGRAM DEPLOY.md`](store/INSTAGRAM%20DEPLOY.md) |
+| Product images, media, and WhatsApp PDF delivery | [Message Types Handled](#message-types-handled) and [Kommo media guide](docs/KOMMO_MIGRATION.md#hybrid-media-delivery) |
+| Voice notes | [Message Types Handled](#message-types-handled) and [Kommo voice notes](docs/KOMMO_MIGRATION.md#inbound-voice-notes) |
+| Railway and PostgreSQL | [`docs/RAILWAY_POSTGRES.md`](docs/RAILWAY_POSTGRES.md) |
+| Production backup, restore, and rollback | [`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md) |
+| Multi-store Master deployment | [`master/DEPLOYMENT.md`](master/DEPLOYMENT.md) |
+| Kommo widget | [`store/kommo-widget/README.md`](store/kommo-widget/README.md) |
+| AI and multi-agent architecture | [Multi-Agent Rollout](#multi-agent-rollout) |
+| Security | [Security](#security) |
+| Testing | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md#part-10-complete-testing-checklist) and [`PRESENTATION_RUNBOOK.md`](PRESENTATION_RUNBOOK.md) |
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Deployment Guides](#deployment-guides)
+- [Railway PostgreSQL](#railway-postgresql)
+- [Architecture](#architecture)
+- [Webhook Endpoints](#webhook-endpoints)
+- [Admin Endpoints](#admin-endpoints)
+- [Instagram Setup](#instagram-setup-after-meta-app-review-approval)
+- [Message Types Handled](#message-types-handled)
+- [Admin Dashboard Features](#admin-dashboard-features)
+- [Shared Runtime Settings](#shared-runtime-settings)
+- [Multi-Agent Rollout](#multi-agent-rollout)
+- [Security](#security)
+- [Multi-store Architecture](#multi-store-architecture)
 
 ## Quick Start
 
@@ -76,7 +110,7 @@ Customer (WhatsApp or Instagram DM)
             -> Response
         -> Send reply via Meta API or Kommo Salesbot
             -> WhatsApp: text, interactive buttons, templates
-            -> Instagram: text, quick replies, images, carousels
+            -> Instagram DM: text, quick replies, and a product image when available
 
 Store DB settings (source of truth for runtime settings)
     -> Store dashboard reads/writes locally
@@ -104,9 +138,17 @@ Kommo mode:
 | POST   | `/webhooks/kommo/events/{webhook_secret}` | Receive Kommo general webhook events     |
 | POST   | `/webhooks/kommo/salesbot`                | Receive Salesbot `widget_request` calls  |
 
+Optional signed Meta context alongside Kommo:
+
+| Method   | Path                                  | Purpose                                      |
+| :------- | :------------------------------------ | :------------------------------------------- |
+| GET/POST | `/webhooks/meta/instagram-context`    | Verify/receive comment or Story context only |
+
+This supplemental route is registered only in Kommo mode when `META_INSTAGRAM_CONTEXT_ENABLED=true` or `META_STORY_CONTEXT_ENABLED=true`. Kommo still sends every reply.
+
 ## Admin Endpoints
 
-> All `/admin/` endpoints require authentication via `Authorization: Bearer ADMIN_PASSWORD` header or session cookie. See **Security** section below.
+> Underlying `/admin/` APIs require authentication via `Authorization: Bearer ADMIN_PASSWORD` or the login-created session cookie. Dashboard pages use the session cookie. See **Security** below.
 
 | Method | Path                                              | Purpose                                         |
 | :----- | :------------------------------------------------ | :-----------------------------------------------|
@@ -183,7 +225,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 - Interactive button replies
 - List replies
 - Images (with captions)
-- Audio, video, documents, stickers (acknowledged)
+- Direct Meta audio, video, documents, and stickers (represented as attachment placeholders; no transcription)
 - Reactions (ignored)
 
 ### Instagram
@@ -200,13 +242,14 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 
 ### Kommo Mode
 
-- WhatsApp and Instagram DM text handling through the private-message Kommo Salesbot.
+- WhatsApp and Instagram DM text handling through channel-specific Kommo Salesbots.
 - Public Instagram comment replies use Kommo's native comment-triggered Salesbot flow; the authenticated widget callback creates a durable `instagram_comment` job directly.
-- Salesbot buttons when supported, otherwise numbered text choices.
+- Interactive choices become numbered text; URL actions become text plus URLs.
 - Opted-in WhatsApp product images and catalog PDFs use Kommo Files API/cache plus Chats API; disabled media safely falls back to Salesbot behavior.
 - Product images and PDFs have independent rollout flags under a global media kill switch. PDF delivery remains WhatsApp-only.
+- Incoming Kommo `voice` and `audio` attachments in private WhatsApp and Instagram DMs are downloaded safely and transcribed before the AI turn. This path requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio is not transcribed.
 - Durable jobs and outbound records track `delivery_unknown` when Salesbot or Chats API acceptance cannot be confirmed; inspect Kommo before manual retry.
-- Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable job reconciliation discards the mirrored private-message job before `KOMMO_SALESBOT_ID` can launch.
+- Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable job reconciliation discards the mirrored private-message job before the selected Instagram DM Salesbot can launch.
 
 ## Telegram Admin Commands
 
@@ -239,12 +282,13 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 
 ## Admin Dashboard Features
 
-Open `/admin/login` in a browser, sign in with `ADMIN_PASSWORD`, and the app will set an HTTP-only session cookie before redirecting to `/admin/dashboard`. Five tabs:
+Open `/admin/login` in a browser, sign in with `ADMIN_PASSWORD`, and the app will set an HTTP-only session cookie before redirecting to `/admin/dashboard`. Six tabs:
 
 - **Resumen**: Stats cards, per-channel breakdown, LLM usage by provider, AI on/off toggle
 - **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once. In Kommo mode, manual reactivation first sets the Kommo lead `AI Mode` to `AI Active` and verifies it before clearing local history.
 - **Pedidos**: Sortable order table with status badges
 - **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset stuck broadcasts
+- **Instagram**: Map posts, Reels, carousels, and discovered Stories to one or more catalog products
 - **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, orchestration mode, fallback settings, daily exchange rate, dynamic payment methods, and catalog PDF generation/download
 
 Dark mode toggle in the header (persists via localStorage, auto-detects OS preference).
@@ -263,7 +307,7 @@ These values are stored in the store database and can be changed without redeplo
 
 Store-only payment methods are persisted separately under `payment_methods` in the same `settings` table. They are edited only from the store dashboard through `GET/PUT /admin/settings/payment-methods`, and the bot uses the configured method names plus their stored instructions at checkout. Scheduler timings are edited only from the master dashboard.
 
-Exchange-rate settings are stored in the same `settings` table and are used when customers ask things like `¿a qué tasa recibes?`. Instagram is informational: Eva answers product questions and sends product images there, while orders, checkout, payments, delivery details, and inventory PDF delivery continue through WhatsApp. For transactional Instagram DMs, trusted backend code builds a clickable `wa.me` handoff from the database-backed `store_phone_number`; configure that setting with the full international country code. It also controls public Instagram comment fallback replies; when empty, those comments invite only to DM and private handoffs use the profile/store-contact fallback without generating a broken URL.
+Exchange-rate settings are stored in the same `settings` table and are used when customers ask things like `¿a qué tasa recibes?`. Instagram is informational: Eva can answer product, general shipping/payment-option, and read-only support questions and can send product images there. Buying, payment, checkout-specific delivery details, checkout continuation, and PDF delivery hand off to WhatsApp. Trusted backend code builds a clickable `wa.me` handoff from the database-backed `store_phone_number`; configure that setting with the full international country code. It also controls public Instagram comment fallback replies; when empty, those comments invite only to DM and private handoffs use the profile/store-contact fallback without generating a broken URL.
 
 The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information. The `send_catalog_pdf` AI tool remains available only on supported WhatsApp delivery; Instagram requests for the PDF receive the WhatsApp handoff instead. The Google Sheets catalog can be modeled as one row per size variant with `SKU`, `Parent SKU`, and a singular `Size` column; see [store/DEPLOYMENT.md](store/DEPLOYMENT.md) for the exact sheet format.
 
@@ -307,14 +351,14 @@ Transcript regression tests live in `tests/store/test_ai_transcript_regressions.
 
 ## Security
 
-- **Admin authentication:** All `/admin/` API endpoints (settings, broadcasts, analytics, customers, orders) require `ADMIN_PASSWORD` via `Authorization: Bearer <password>` header or HTTP-only session cookie. Without `ADMIN_PASSWORD` set in production (`DEBUG=false`), all admin routes return 403.
+- **Admin authentication:** Protected `/admin/` APIs (settings, broadcasts, analytics, customers, orders, and Instagram mappings) require `ADMIN_PASSWORD` via `Authorization: Bearer <password>` or an HTTP-only session cookie. Without a valid production password, Store startup fails before serving requests.
 - **Dashboard sessions:** Both the store and master dashboards use dedicated login forms (`/admin/login` and `/login`), then set HTTP-only session cookies after successful authentication.
 - **Webhook verification:** WhatsApp and Instagram webhooks verify `X-Hub-Signature-256` using HMAC-SHA256 with timing-safe comparison.
-- **Kommo webhook verification:** General Kommo webhooks use a path secret with timing-safe comparison. Salesbot callbacks validate the Kommo JWT with HS256, the private integration secret, expiration, issuer/subdomain, Integration ID when present, and a strict `return_url` host check.
+- **Kommo webhook verification:** General Kommo webhooks use a path secret with timing-safe comparison. Salesbot callbacks validate Kommo JWTs using HS256 or HS512, the private integration secret, expiration, issuer/subdomain, Integration ID when present, and a strict `return_url` host check.
 - **Direct media download safety:** Payment-image downloads from direct URLs are limited to HTTPS URLs on trusted Meta/Instagram/Kommo host suffixes, with userinfo/custom ports rejected, redirects disabled, content-type checks, and a 5 MB size limit.
 - **Master auth:** All `/api/stores/` endpoints require Bearer token (`MASTER_SECRET_KEY`) or the `master_session` cookie. All token comparisons use `hmac.compare_digest`.
 - **Credentials at rest:** Store credentials in the master DB are Fernet-encrypted. API responses only return masked values.
-- **Test endpoints:** `/test/` routes are disabled in production (`DEBUG=false` for store, non-localhost for master).
+- **Test endpoints:** Store `/test/` routes require `DEBUG=true` and a direct loopback request with no forwarding headers. Master `/test/` routes require `ENABLE_TEST_ENDPOINTS=true` and an exact loopback `APP_BASE_URL`; production leaves them disabled.
 - **Rate limiting:** Both apps use `slowapi` (store: 60 req/min, master: 30 req/min per IP).
 - **CORS:** Restricted to the app's own origin (`APP_BASE_URL`).
 - **Security headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Strict-Transport-Security` (production), `Content-Security-Policy` (production).
@@ -367,6 +411,7 @@ pip install -r master/requirements.txt
 cd master
 cp .env.example .env
 # Edit .env: DATABASE_URL, MASTER_SECRET_KEY, ENCRYPTION_KEY
+# For /test/* locally also set ENABLE_TEST_ENDPOINTS=true
 uvicorn app.main:app --reload --port 9000
 
 # Open test UI
@@ -392,6 +437,8 @@ KOMMO_SUBDOMAIN=
 KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
 KOMMO_INTEGRATION_SECRET=
+KOMMO_INSTAGRAM_DM_SALESBOT_ID=
+KOMMO_WHATSAPP_SALESBOT_ID=
 KOMMO_SALESBOT_ID=
 KOMMO_WEBHOOK_SECRET=
 KOMMO_AI_MODE_FIELD_ID=
@@ -399,6 +446,11 @@ KOMMO_AI_ACTIVE_ENUM_ID=
 KOMMO_AI_HUMAN_ENUM_ID=
 KOMMO_AI_PAUSED_ENUM_ID=
 KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
+KOMMO_CHATS_MEDIA_ENABLED=false
+KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false
+KOMMO_CHATS_CATALOG_PDF_ENABLED=false
+KOMMO_CHATS_API_MONTHLY_LIMIT=
+KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 ```
 
 See [docs/KOMMO_MIGRATION.md](docs/KOMMO_MIGRATION.md) for the full Kommo setup, widget build, Salesbot configuration, diagnostics, limitations, and rollback procedure.
