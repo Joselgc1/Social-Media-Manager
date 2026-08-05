@@ -43,6 +43,7 @@ _SIZE_SUFFIX_RE = re.compile(
     r"^(?P<base>.+)[-_](?P<size>xxs|xs|s|m|l|xl|xxl|xxxl)$",
     re.IGNORECASE,
 )
+_QUANTITY_VARIANT_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[A-Z]+)?$")
 _INVENTORY_LEDGER_TITLE = "_inventory_mutations"
 _INVENTORY_LEDGER_HEADERS = [
     "Operation ID",
@@ -94,8 +95,9 @@ def refresh_catalog(*, force: bool = False) -> bool:
 
             # Expected columns (legacy): SKU, Product name, Category, Description,
             #                            Sizes, Price USD, Stock, Active, Image URL
-            # Expected columns (variant-aware): SKU, Parent SKU, Product name, Category,
-            #                                   Description, Size, Price USD, Stock, Active, Image URL
+            # Expected columns (variant-aware): SKU, Parent SKU, Product Name, Brand,
+            #                                   Category, Description, Size, Price USD,
+            #                                   Stock, Active, Image URL
             records = sheet.get_all_records()
             try:
                 formula_records = sheet.get_all_records(value_render_option="FORMULA")
@@ -109,27 +111,7 @@ def refresh_catalog(*, force: bool = False) -> bool:
                     continue
 
                 formula_row = formula_records[idx] if idx < len(formula_records) else {}
-                raw_image_value = (
-                    formula_row.get("Image URL")
-                    if isinstance(formula_row, dict)
-                    else None
-                )
-                image_url = normalize_sheet_image_url(raw_image_value or row.get("Image URL", ""))
-                size_value = str(row.get("Size", "")).strip().upper()
-                sizes_value = str(row.get("Sizes", "")).strip()
-
-                reference_products.append({
-                    "sku": str(row.get("SKU", "")).strip(),
-                    "parent_sku": str(row.get("Parent SKU", "")).strip(),
-                    "product_name": str(row.get("Product name", "")).strip(),
-                    "category": str(row.get("Category", "")).strip(),
-                    "description": str(row.get("Description", "")).strip(),
-                    "size": size_value,
-                    "sizes": size_value or sizes_value,
-                    "price_usd": float(row.get("Price USD", 0)),
-                    "stock": int(row.get("Stock", 0)),
-                    "image_url": image_url,
-                })
+                reference_products.append(_parse_catalog_row(row, formula_row))
 
             products = [product for product in reference_products if product["stock"] > 0]
             _catalog_cache = products
@@ -157,6 +139,29 @@ def refresh_catalog(*, force: bool = False) -> bool:
             _last_refresh_succeeded = False
             logger.error("Failed to refresh catalog from Google Sheets: %s; retry in %ss", e, backoff)
             return False
+
+
+def _parse_catalog_row(row: dict, formula_row: dict | None = None) -> dict:
+    """Normalize one Google Sheets catalog row while preserving legacy headers."""
+    formula_row = formula_row if isinstance(formula_row, dict) else {}
+    raw_image_value = formula_row.get("Image URL") or row.get("Image URL", "")
+    size_value = _normalize_variant_value(row.get("Size", ""))
+    sizes_value = str(row.get("Sizes", "")).strip()
+    product_name = str(row.get("Product Name", row.get("Product name", ""))).strip()
+
+    return {
+        "sku": str(row.get("SKU", "")).strip(),
+        "parent_sku": str(row.get("Parent SKU", "")).strip(),
+        "product_name": product_name,
+        "brand": str(row.get("Brand", "")).strip(),
+        "category": str(row.get("Category", "")).strip(),
+        "description": str(row.get("Description", "")).strip(),
+        "size": size_value,
+        "sizes": size_value or sizes_value,
+        "price_usd": float(row.get("Price USD", 0)),
+        "stock": int(row.get("Stock", 0)),
+        "image_url": normalize_sheet_image_url(raw_image_value),
+    }
 
 
 async def refresh_catalog_async(*, force: bool = False) -> bool:
@@ -240,8 +245,8 @@ def normalize_sheet_image_url(value: str) -> str:
 
 
 def get_product_sizes(product: dict) -> list[str]:
-    """Return normalized sizes for a catalog row in either schema."""
-    explicit_size = str(product.get("size", "")).strip().upper()
+    """Return normalized sellable variant/presentation values for a catalog row."""
+    explicit_size = _normalize_variant_value(product.get("size", ""))
     if explicit_size:
         return [explicit_size]
 
@@ -249,18 +254,16 @@ def get_product_sizes(product: dict) -> list[str]:
     if not raw_sizes:
         return []
 
-    sizes = [size.strip().upper() for size in raw_sizes.split(",") if size.strip()]
-    return _dedupe_sizes(sizes)
+    sizes = [_normalize_variant_value(size) for size in raw_sizes.split(",")]
+    return _dedupe_sizes([size for size in sizes if size])
 
 
 def group_catalog_products(products: list[dict]) -> list[dict]:
     """
     Group variant rows into customer-facing products.
 
-    Each grouped product contains:
-    - sizes: comma-separated available sizes
-    - variants: size-specific entries
-    - size_skus: mapping of size -> exact sellable SKU
+    The historical `size`/`sizes` field names are retained for compatibility, but
+    values represent any sellable presentation such as M, 100 ML, 38, or 256 GB.
     """
     products = products or []
     derived_product_skus = get_confirmed_derived_product_skus(products)
@@ -273,22 +276,27 @@ def group_catalog_products(products: list[dict]) -> list[dict]:
         explicit_parent_sku = str(product.get("parent_sku", "")).strip()
         parent_sku = explicit_parent_sku or derived_product_skus.get(product_sku) or product_sku
         key = _catalog_group_key(product, derived_product_skus)
+        product_price = float(product.get("price_usd", 0) or 0)
 
         entry = grouped.setdefault(key, {
             "sku": parent_sku or product_sku,
             "parent_sku": parent_sku or product_sku,
             "product_name": str(product.get("product_name", "")).strip(),
+            "brand": str(product.get("brand", "")).strip(),
             "category": str(product.get("category", "")).strip(),
             "description": str(product.get("description", "")).strip(),
-            "price_usd": float(product.get("price_usd", 0) or 0),
             "stock": 0,
             "image_url": str(product.get("image_url", "")).strip(),
             "variants": [],
             "size_skus": {},
             "_size_set": set(),
+            "_price_set": set(),
         })
 
         entry["stock"] += max(product_stock, 0)
+        entry["_price_set"].add(product_price)
+        if not entry.get("brand") and product.get("brand"):
+            entry["brand"] = str(product.get("brand", "")).strip()
         if not entry.get("image_url") and product.get("image_url"):
             entry["image_url"] = str(product.get("image_url", "")).strip()
 
@@ -298,9 +306,11 @@ def group_catalog_products(products: list[dict]) -> list[dict]:
         variant = {
             "sku": product_sku,
             "parent_sku": parent_sku,
+            "product_name": str(product.get("product_name", "")).strip(),
+            "brand": str(product.get("brand", "")).strip(),
             "size": sizes[0] if len(sizes) == 1 else "",
             "sizes": sizes,
-            "price_usd": float(product.get("price_usd", 0) or 0),
+            "price_usd": product_price,
             "stock": product_stock,
             "in_stock": product_stock > 0,
             "image_url": str(product.get("image_url", "")).strip(),
@@ -314,7 +324,13 @@ def group_catalog_products(products: list[dict]) -> list[dict]:
     result = []
     for entry in grouped.values():
         size_list = sorted(entry.pop("_size_set"), key=_size_sort_key)
+        prices = sorted(entry.pop("_price_set"))
         entry["sizes"] = ",".join(size_list)
+        entry["presentations"] = entry["sizes"]
+        entry["price_usd"] = prices[0] if len(prices) == 1 else None
+        entry["price_min_usd"] = prices[0] if prices else None
+        entry["price_max_usd"] = prices[-1] if prices else None
+        entry["has_variant_prices"] = len(prices) > 1
         entry["variants"] = sorted(
             entry["variants"],
             key=lambda variant: _size_sort_key(variant.get("size") or ""),
@@ -325,6 +341,7 @@ def group_catalog_products(products: list[dict]) -> list[dict]:
         result,
         key=lambda item: (
             str(item.get("category", "")).lower(),
+            str(item.get("brand", "")).lower(),
             str(item.get("product_name", "")).lower(),
         ),
     )
@@ -352,13 +369,14 @@ def _catalog_group_key(product: dict, derived_product_skus: dict[str, str]) -> s
     if sku:
         return derived_product_skus.get(sku, sku).lower()
     return "|".join([
+        str(product.get("brand", "")).strip().lower(),
         str(product.get("product_name", "")).strip().lower(),
         str(product.get("category", "")).strip().lower(),
     ])
 
 
 def get_confirmed_derived_product_skus(products: list[dict]) -> dict[str, str]:
-    """Map exact SKUs to a derived base only for confirmed parentless size groups."""
+    """Map exact SKUs to a derived base only for confirmed parentless clothing-size groups."""
     candidates: dict[str, list[tuple[str, str, str]]] = {}
     for product in products or []:
         if str(product.get("parent_sku", "")).strip():
@@ -394,19 +412,26 @@ def _safe_float(value) -> float | None:
         return None
 
 
-def _size_sort_key(size: str) -> tuple[int, str]:
-    normalized = str(size or "").strip().upper()
+def _normalize_variant_value(value) -> str:
+    return " ".join(str(value or "").strip().upper().split())
+
+
+def _size_sort_key(size: str) -> tuple[int, float, str]:
+    normalized = _normalize_variant_value(size)
     try:
-        return (_SIZE_ORDER.index(normalized), normalized)
+        return (0, float(_SIZE_ORDER.index(normalized)), normalized)
     except ValueError:
-        return (len(_SIZE_ORDER), normalized)
+        match = _QUANTITY_VARIANT_RE.fullmatch(normalized)
+        if match:
+            return (1, float(match.group("value")), match.group("unit") or "")
+        return (2, 0.0, normalized)
 
 
 def _dedupe_sizes(sizes: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for size in sizes:
-        normalized = str(size or "").strip().upper()
+        normalized = _normalize_variant_value(size)
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
