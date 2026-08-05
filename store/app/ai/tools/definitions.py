@@ -30,21 +30,24 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         schema={
             "name": "check_inventory",
             "description": (
-                "Check if a specific product is available and in what sizes. "
+                "Check if a specific product is available and in what presentations or options. "
                 "Call this BEFORE confirming any product's availability to the customer. "
-                "Search by product name, category, or keyword."
+                "Search by product name, brand, category, or keyword."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "product_query": {
                         "type": "string",
-                        "description": "Product name, keyword, or category the customer is asking about",
+                        "description": "Product name, brand, keyword, or category the customer is asking about",
                     },
                     "size": {
                         "type": "string",
-                        "description": "Specific size to check, if the customer mentioned one",
-                        "enum": ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"],
+                        "pattern": "\\S",
+                        "description": (
+                            "Specific sellable presentation/option if the customer mentioned one, "
+                            "for example M, 100 ml, 38, or 256 GB"
+                        ),
                     },
                 },
                 "required": ["product_query"],
@@ -62,7 +65,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Add one or more tags to the current customer's profile for segmentation. "
                 "Call this whenever you learn something useful about the customer: "
-                "their interests, size, city, or buying behavior. "
+                "their interests, product preferences, city, or buying behavior. "
                 "This is a silent action; do NOT mention tagging to the customer."
             ),
             "parameters": {
@@ -72,12 +75,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Tags to add. Formats: "
-                            "'interested:pajamas', 'interested:underwear', 'interested:sets', "
-                            "'size:S' through 'size:XL', "
-                            "'city:caracas', 'city:maracaibo', etc., "
-                            "'payment:<payment_method_name>', "
-                            "'repeat_buyer', 'vip', 'new_lead'"
+                            "Tags to add. Formats include 'interested:<category-or-product>', "
+                            "'size:S' when a clothing size is useful, 'city:caracas', "
+                            "'payment:<payment_method_name>', 'repeat_buyer', 'vip', or 'new_lead'."
                         ),
                     },
                 },
@@ -95,17 +95,15 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "create_order",
             "description": (
                 "Create a new order when the customer CONFIRMS they want to purchase. "
-                "Only call this AFTER you have collected and confirmed ALL of these: "
-                "the specific product(s), size(s), quantity, city, and either the home-delivery "
-                "zone/address or the MRW/Zoom pickup agency, plus payment method. "
+                "Only call this AFTER you have collected and confirmed the specific product(s), "
+                "the presentation/option when the product has more than one, quantity, city, and either the "
+                "home-delivery zone/address or the MRW/Zoom pickup agency, plus payment method. "
                 "The chosen payment method is the final checkout step. As soon as the customer chooses it "
                 "and the other checkout information is already complete, create the order immediately BEFORE "
-                "sending the payment details. "
-                "The new order should remain pending until a payment screenshot is validated. "
+                "sending the payment details. The new order should remain pending until a payment screenshot is validated. "
                 "If the order qualifies for the store's configured automatic discount, the backend applies it automatically. "
-                "Do NOT modify item unit prices to simulate that discount. "
-                "Do NOT call this from a payment-proof message or screenshot. "
-                "The order must already exist before payment is validated."
+                "Do NOT modify item unit prices to simulate that discount. Do NOT call this from a payment-proof "
+                "message or screenshot. The order must already exist before payment is validated."
             ),
             "parameters": {
                 "type": "object",
@@ -118,11 +116,17 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                             "properties": {
                                 "product_name": {"type": "string", "pattern": "\\S"},
                                 "sku": {"type": "string", "pattern": "\\S"},
-                                "size": {"type": "string", "pattern": "\\S"},
+                                "size": {
+                                    "type": "string",
+                                    "pattern": "\\S",
+                                    "description": (
+                                        "Selected presentation/option when applicable, such as M, 100 ml, 38, or 256 GB"
+                                    ),
+                                },
                                 "quantity": {"type": "integer", "minimum": 1},
                                 "unit_price": {"type": "number", "minimum": 0},
                             },
-                            "required": ["product_name", "sku", "size", "quantity", "unit_price"],
+                            "required": ["product_name", "sku", "quantity", "unit_price"],
                         },
                         "description": "List of items the customer wants to buy",
                     },
@@ -191,18 +195,14 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         schema={
             "name": "escalate_to_human",
             "description": (
-                "Transfer the conversation to the store owner. Call this for: "
-                "complaints, refund requests, questions you cannot answer, "
-                "angry or insulting customers, threats, payment disputes, or when the customer "
-                "explicitly asks to speak with a human."
+                "Transfer the conversation to the store owner. Call this for: complaints, refund requests, "
+                "questions you cannot answer, angry or insulting customers, threats, payment disputes, "
+                "or when the customer explicitly asks to speak with a human."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Brief summary of why escalation is needed",
-                    },
+                    "reason": {"type": "string", "description": "Brief summary of why escalation is needed"},
                     "urgency": {
                         "type": "string",
                         "enum": ["low", "medium", "high"],
@@ -224,16 +224,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Send the product catalog as a PDF document to the customer on WhatsApp. "
                 "Use this when the customer asks to see all products, wants a catalog, "
-                "or asks 'que tienen?' / 'muestrame todo' / 'catalogo'. "
-                "Only works on WhatsApp."
+                "or asks 'que tienen?' / 'muestrame todo' / 'catalogo'. Only works on WhatsApp."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "caption": {
-                        "type": "string",
-                        "description": "Short caption to send with the PDF (1 sentence max)",
-                    },
+                    "caption": {"type": "string", "description": "Short caption to send with the PDF (1 sentence max)"},
                 },
                 "required": ["caption"],
             },
@@ -250,9 +246,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Create the WhatsApp handoff when an Instagram customer clearly wants to buy, place or confirm "
                 "an order, pay, provide delivery details, continue checkout, or receive the PDF catalog. "
-                "Do not use for browsing, prices, sizes, availability, recommendations, comparisons, or photos. "
-                "Pass only customer-visible product context already established in the conversation; never pass SKUs, "
-                "addresses, payment credentials, or technical metadata."
+                "Do not use for browsing, prices, presentations/options, availability, recommendations, comparisons, "
+                "or photos. Pass only customer-visible product context already established in the conversation; "
+                "never pass SKUs, addresses, payment credentials, or technical metadata."
             ),
             "parameters": {
                 "type": "object",
@@ -268,8 +264,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "size": {
                         "type": "string",
-                        "enum": ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"],
-                        "description": "Confirmed size, if already known.",
+                        "pattern": "\\S",
+                        "description": "Confirmed product presentation/option, if already known.",
                     },
                     "quantity": {
                         "type": "integer",
@@ -300,12 +296,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "properties": {
                     "product_query": {
                         "type": "string",
-                        "description": "Specific product name, SKU, or clear keyword for the product image to send",
+                        "description": "Specific product name, SKU, brand, or clear keyword for the product image to send",
                     },
-                    "caption": {
-                        "type": "string",
-                        "description": "Optional short caption for the image",
-                    },
+                    "caption": {"type": "string", "description": "Optional short caption for the image"},
                 },
                 "required": ["product_query"],
             },
@@ -320,19 +313,14 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         schema={
             "name": "send_interactive_buttons",
             "description": (
-                "Send a message with clickable reply buttons to the customer. "
-                "Only works on WhatsApp. Use for presenting 2-3 clear choices "
-                "like payment methods or shipping options ONLY when the customer "
-                "has not already answered in plain text. Do NOT use buttons to "
-                "re-confirm a choice the customer already made."
+                "Send a message with clickable reply buttons to the customer. Only works on WhatsApp. "
+                "Use for presenting 2-3 clear choices like payment methods or shipping options ONLY when the customer "
+                "has not already answered in plain text. Do NOT use buttons to re-confirm a choice the customer already made."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "body_text": {
-                        "type": "string",
-                        "description": "The message text shown above the buttons",
-                    },
+                    "body_text": {"type": "string", "description": "The message text shown above the buttons"},
                     "buttons": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -354,8 +342,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "request_agent_handoff",
             "description": (
                 "Request an internal handoff to another agent. Use this when the customer clearly wants to buy "
-                "and the checkout agent should collect the remaining checkout fields. This is internal only; do not "
-                "show raw handoff metadata to the customer."
+                "and the checkout agent should collect the remaining checkout fields. This is internal only; "
+                "do not show raw handoff metadata to the customer."
             ),
             "parameters": {
                 "type": "object",
@@ -365,14 +353,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "enum": ["checkout"],
                         "description": "Specialist agent that should continue the workflow",
                     },
-                    "intent": {
-                        "type": "string",
-                        "description": "Short intent label such as purchase_intent",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Brief internal reason for the handoff",
-                    },
+                    "intent": {"type": "string", "description": "Short intent label such as purchase_intent"},
+                    "reason": {"type": "string", "description": "Brief internal reason for the handoff"},
                 },
                 "required": ["target_agent", "intent"],
             },
@@ -388,7 +370,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "update_checkout_draft",
             "description": (
                 "Update the server-side checkout draft with only fields the customer has provided. "
-                "Do not include prices. This validates products and sizes against the catalog and returns missing fields."
+                "Do not include prices. This validates products and any required presentation/option against "
+                "the catalog and returns missing fields."
             ),
             "parameters": {
                 "type": "object",
@@ -400,7 +383,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                             "properties": {
                                 "product_query": {"type": "string"},
                                 "sku": {"type": "string"},
-                                "size": {"type": "string"},
+                                "size": {
+                                    "type": "string",
+                                    "description": "Presentation/option when the selected product has more than one",
+                                },
                                 "quantity": {"type": "integer", "minimum": 1},
                             },
                         },
@@ -408,7 +394,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "product_query": {"type": "string"},
                     "sku": {"type": "string"},
-                    "size": {"type": "string"},
+                    "size": {
+                        "type": "string",
+                        "description": "Presentation/option when the selected product has more than one",
+                    },
                     "quantity": {"type": "integer", "minimum": 1},
                     "shipping_method": {"type": "string", "enum": ["mrw", "zoom"]},
                     "shipping_city": {"type": "string"},
@@ -459,12 +448,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         schema={
             "name": "cancel_checkout",
             "description": "Cancel the active checkout flow when the customer clearly asks to cancel or stop the purchase.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {"type": "string"},
-                },
-            },
+            "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}},
         },
     ),
     ToolSpec(
@@ -479,10 +463,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "Read safe profile context for the current customer only. "
                 "Do not pass or request a customer_id; the backend scopes this automatically."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
+            "parameters": {"type": "object", "properties": {}},
         },
     ),
     ToolSpec(

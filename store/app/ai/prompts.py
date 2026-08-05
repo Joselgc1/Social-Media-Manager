@@ -116,6 +116,7 @@ def _load_template() -> str:
     global _template
     if _template is None:
         from app.config import get_config
+
         config = get_config()
         _template = config.system_prompt_override or load_prompt_file("system_prompt.md")
     return _template
@@ -138,11 +139,7 @@ def build_legacy_prompt(context: PromptContext) -> str:
     if channel_note:
         prompt += f"\n\n# Canal actual\n\n{channel_note}"
 
-    customer_note = _build_customer_context(
-        context.customer,
-        open_order=context.open_order,
-        channel=context.channel,
-    )
+    customer_note = _build_customer_context(context.customer, open_order=context.open_order, channel=context.channel)
     if customer_note:
         prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
 
@@ -172,11 +169,7 @@ def build_agent_prompt(prompt_name: str, context: PromptContext) -> str:
     if channel_note:
         prompt += f"\n\n# Canal actual\n\n{channel_note}"
 
-    customer_note = _build_customer_context(
-        context.customer,
-        open_order=context.open_order,
-        channel=context.channel,
-    )
+    customer_note = _build_customer_context(context.customer, open_order=context.open_order, channel=context.channel)
     if customer_note:
         prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
 
@@ -205,10 +198,7 @@ def build_system_prompt(
     workflow_state: dict[str, Any] | str | None = None,
     catalog_pdf_supported: bool | None = None,
 ) -> str:
-    """
-    Assemble the final system prompt by injecting the live product catalog,
-    payment details, channel info, and customer context into the template.
-    """
+    """Assemble the final system prompt with live store context."""
     return build_legacy_prompt(
         PromptContext(
             catalog_markdown=catalog_markdown,
@@ -235,10 +225,7 @@ def _build_template_values(context: PromptContext) -> dict[str, Any]:
     else:
         payment_methods_block = payment_method_information_block(context.payment_methods)
         payment_method_names = payment_method_names_text(context.payment_methods)
-    exchange_rate_block = _build_exchange_rate_block(
-        context.exchange_rate_settings,
-        context.accepted_exchange_rate,
-    )
+    exchange_rate_block = _build_exchange_rate_block(context.exchange_rate_settings, context.accepted_exchange_rate)
     order_discount_block = _build_order_discount_block(
         order_discount_percent=context.order_discount_percent,
         order_discount_threshold_usd=context.order_discount_threshold_usd,
@@ -252,6 +239,7 @@ def _build_template_values(context: PromptContext) -> dict[str, Any]:
         "exchange_rate_block": exchange_rate_block,
         "order_discount_block": order_discount_block,
     }
+
 
 def _render_template(template: str, values: dict[str, Any], *, template_name: str) -> str:
     try:
@@ -269,10 +257,7 @@ def _build_exchange_rate_block(
 ) -> str:
     settings = exchange_rate_settings
     if settings is None and accepted_exchange_rate:
-        settings = {
-            "exchange_rate_reference": "manual",
-            "manual_exchange_rate": accepted_exchange_rate,
-        }
+        settings = {"exchange_rate_reference": "manual", "manual_exchange_rate": accepted_exchange_rate}
     return build_exchange_rate_prompt_block(settings, accepted_exchange_rate)
 
 
@@ -289,9 +274,7 @@ def _build_order_discount_block(
         percent = default_percent
     try:
         threshold = float(
-            order_discount_threshold_usd
-            if order_discount_threshold_usd is not None
-            else default_threshold
+            order_discount_threshold_usd if order_discount_threshold_usd is not None else default_threshold
         )
     except (TypeError, ValueError):
         threshold = default_threshold
@@ -325,46 +308,32 @@ def _build_channel_context(channel: str, catalog_pdf_supported: bool | None = No
     )
     if channel == "whatsapp":
         return (
-            "Estás hablando por WhatsApp. "
-            "Puedes usar send_interactive_buttons para mostrar opciones con botones. "
+            "Estás hablando por WhatsApp. Puedes usar send_interactive_buttons para mostrar opciones con botones. "
             "Úsalos solo cuando el cliente todavía no haya escogido una opción por texto. "
-            "Los mensajes pueden ser más largos que en Instagram. "
-            f"{pdf_note}"
+            f"Los mensajes pueden ser más largos que en Instagram. {pdf_note}"
         )
-    elif channel == "instagram":
+    if channel == "instagram":
         return (
-            "Estás hablando por Instagram DM. "
-            "No puedes enviar botones interactivos (usa send_interactive_buttons igual, "
-            "se convertirá automáticamente a Quick Replies). "
-            "Mantén los mensajes más cortos (máximo 1000 bytes). "
-            "NO puedes enviar mensajes proactivos: solo puedes responder dentro de "
-            "las 24 horas después del último mensaje del cliente. "
-            "Instagram es un canal exclusivamente informativo: responde normalmente preguntas de productos, "
-            "recomendaciones, precios, disponibilidad, tallas, comparaciones e imágenes. "
-            "No inicies ni continúes checkout, no crees, modifiques, confirmes o canceles pedidos, y no solicites "
-            "direcciones, agencias de entrega ni métodos de pago para un pedido. "
-            "No proceses comprobantes, no proporciones datos o instrucciones de pago y no hagas handoff interno "
-            "a Checkout ni Payment. Cuando la cliente claramente quiera comprar, pagar, hacer un pedido o recibir "
-            "el catálogo PDF, llama send_whatsapp_handoff. Para compras, usa lenguaje de servicio como: "
-            "'Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp.' "
-            "Si pide el PDF, llama send_whatsapp_handoff con handoff_reason='catalog_pdf' y explica que se entrega "
-            "por WhatsApp; nunca llames send_catalog_pdf en Instagram. Puedes responder primero cualquier pregunta "
-            "informativa útil y luego hacer el handoff. "
-            "No redirijas a WhatsApp a quien solo esté explorando o haciendo preguntas sobre productos. "
-            "No vuelvas a insistir con WhatsApp si la cliente rechaza el cambio de canal o cierra la conversación. "
+            "Estás hablando por Instagram DM. No puedes enviar botones interactivos (usa send_interactive_buttons igual, "
+            "se convertirá automáticamente a Quick Replies). Mantén los mensajes más cortos (máximo 1000 bytes). "
+            "NO puedes enviar mensajes proactivos: solo puedes responder dentro de las 24 horas después del último mensaje del cliente. "
+            "Instagram es un canal exclusivamente informativo: responde normalmente preguntas de productos, recomendaciones, "
+            "precios, disponibilidad, presentaciones/opciones, comparaciones e imágenes. No inicies ni continúes checkout, "
+            "no crees, modifiques, confirmes o canceles pedidos, y no solicites direcciones, agencias de entrega ni métodos de pago "
+            "para un pedido. No proceses comprobantes, no proporciones datos o instrucciones de pago y no hagas handoff interno "
+            "a Checkout ni Payment. Cuando la cliente claramente quiera comprar, pagar, hacer un pedido o recibir el catálogo PDF, "
+            "llama send_whatsapp_handoff. Para compras, usa lenguaje de servicio como: 'Para ayudarte mejor con el pedido, el pago "
+            "y el envío, continuamos las compras por WhatsApp.' Si pide el PDF, llama send_whatsapp_handoff con "
+            "handoff_reason='catalog_pdf' y explica que se entrega por WhatsApp; nunca llames send_catalog_pdf en Instagram. "
+            "Puedes responder primero cualquier pregunta informativa útil y luego hacer el handoff. No redirijas a WhatsApp a quien "
+            "solo esté explorando o haciendo preguntas sobre productos. No vuelvas a insistir con WhatsApp si la cliente rechaza el "
+            "cambio de canal o cierra la conversación."
         )
     return ""
 
 
-def _build_customer_context(
-    customer: dict | None,
-    open_order: dict | None = None,
-    channel: str = "whatsapp",
-) -> str:
-    """
-    Build a brief context summary about the customer for the AI.
-    Helps the AI personalize its responses without loading full history.
-    """
+def _build_customer_context(customer: dict | None, open_order: dict | None = None, channel: str = "whatsapp") -> str:
+    """Build a brief safe context summary about the customer."""
     if not customer:
         return ""
 
@@ -385,22 +354,22 @@ def _build_customer_context(
     if isinstance(tags, str):
         tags = json.loads(tags)
 
-    # Extract useful info from tags
-    interests = [t.split(":")[1] for t in tags if t.startswith("interested:")]
-    sizes = [t.split(":")[1] for t in tags if t.startswith("size:")]
-    city = next((t.split(":")[1] for t in tags if t.startswith("city:")), None)
+    interests = [tag.split(":")[1] for tag in tags if tag.startswith("interested:")]
+    sizes = [tag.split(":")[1] for tag in tags if tag.startswith("size:")]
+    city = next((tag.split(":")[1] for tag in tags if tag.startswith("city:")), None)
 
     if interests:
         parts.append(f"Intereses: {', '.join(interests)}")
     if sizes:
-        parts.append(f"Tallas: {', '.join(sizes)}")
+        parts.append(f"Tallas de ropa conocidas: {', '.join(sizes)}")
     if city:
         parts.append(f"Ciudad: {city}")
 
     if not informational_only:
-        parts.append("Importante: no asumas el método de pago por tags o compras anteriores; debes preguntarlo en la compra actual si el cliente aún no lo dijo.")
-
-    if not informational_only:
+        parts.append(
+            "Importante: no asumas el método de pago por tags o compras anteriores; "
+            "debes preguntarlo en la compra actual si el cliente aún no lo dijo."
+        )
         last_addr = customer.get("last_shipping_address")
         last_city = customer.get("last_shipping_city")
         last_fulfillment_type = customer.get("last_fulfillment_type")
@@ -412,17 +381,14 @@ def _build_customer_context(
         elif last_fulfillment_type == "courier_agency_pickup" and customer.get("last_pickup_agency"):
             parts.append(f"Última entrega: retiro en agencia en {last_city or 'ciudad no registrada'}")
             parts.append(f"Última agencia: {customer['last_pickup_agency']}")
-            last_method = customer.get("last_shipping_method")
-            if last_method:
-                parts.append(f"Último courier: {last_method}")
+            if customer.get("last_shipping_method"):
+                parts.append(f"Último courier: {customer['last_shipping_method']}")
         elif last_addr:
-            # Legacy customer records have no fulfillment type yet.
             parts.append(f"Última dirección de envío: {last_addr}")
             if last_city:
                 parts.append(f"Última ciudad: {last_city}")
-            last_method = customer.get("last_shipping_method")
-            if last_method:
-                parts.append(f"Último método de envío: {last_method}")
+            if customer.get("last_shipping_method"):
+                parts.append(f"Último método de envío: {customer['last_shipping_method']}")
 
         total_orders = customer.get("total_orders", 0)
         if total_orders > 0:
@@ -433,10 +399,8 @@ def _build_customer_context(
             open_items = open_order.get("items") or []
             if isinstance(open_items, str):
                 open_items = json.loads(open_items or "[]")
-
             items_summary = ", ".join(
-                f"{item.get('product_name', 'Producto')} x{item.get('quantity', 1)}"
-                for item in open_items[:3]
+                f"{item.get('product_name', 'Producto')} x{item.get('quantity', 1)}" for item in open_items[:3]
             )
             parts.append(
                 "Pedido pendiente abierto: "
@@ -447,9 +411,8 @@ def _build_customer_context(
             if items_summary:
                 parts.append(f"Resumen pedido pendiente: {items_summary}")
             parts.append(
-                "Importante: este pedido pendiente NO es motivo para escalar. "
-                "Si la cliente quiere retomarlo, ayúdala con ese pago. "
-                "Si quiere comprar algo nuevo, maneja el nuevo flujo con claridad en el chat sin escalar."
+                "Importante: este pedido pendiente NO es motivo para escalar. Si la cliente quiere retomarlo, "
+                "ayúdala con ese pago. Si quiere comprar algo nuevo, maneja el nuevo flujo con claridad en el chat sin escalar."
             )
 
     if "vip" in tags:
@@ -480,7 +443,7 @@ def _build_instagram_content_context(context: dict[str, Any] | None) -> str:
     selected = context.get("selected_product_sku")
     lines = [
         "La cliente respondió en privado a una Historia de Instagram asociada a los productos siguientes.",
-        "Los precios, tallas y disponibilidad indicados aquí vienen del catálogo en vivo.",
+        "Los precios, presentaciones/opciones y disponibilidad indicados aquí vienen del catálogo en vivo.",
     ]
     for product in products:
         if not isinstance(product, dict):
@@ -489,13 +452,13 @@ def _build_instagram_content_context(context: dict[str, Any] | None) -> str:
             "- "
             + str(product.get("name") or "Producto")
             + f" [SKU interno {product.get('sku')}]: precio {product.get('price_text')}, "
-            + f"tallas {product.get('sizes') or 'por confirmar'}, "
+            + f"presentaciones {product.get('sizes') or 'por confirmar'}, "
             + f"disponibilidad {product.get('availability')}"
         )
     if selected:
         lines.append(
             f"Producto seleccionado para esta conversación: SKU interno {selected}. "
-            "Interpreta preguntas breves como precio, talla o disponibilidad sobre ese producto."
+            "Interpreta preguntas breves como precio, presentación o disponibilidad sobre ese producto."
         )
     elif len(products) > 1:
         lines.append(
@@ -510,35 +473,48 @@ def _build_instagram_content_context(context: dict[str, Any] | None) -> str:
 
 
 def format_catalog_as_markdown(products: list[dict]) -> str:
-    """
-    Convert a list of product dicts (from Google Sheets) into a markdown table
-    for injection into the system prompt.
-
-    Each product dict should have keys:
-        sku, product_name, category, description, sizes, price_usd, stock, image_url
-    """
+    """Convert live catalog data into a generic retail markdown table for the LLM."""
     if not products:
         return "No hay productos disponibles en este momento."
 
     lines = [
-        "| Producto | Categoría | Tallas disponibles | Precio (USD) | Disponibilidad |",
-        "|----------|-----------|-------------------|--------------|----------------|",
+        "| Producto | Marca | Categoría | Presentaciones/opciones | Precio (USD) | Disponibilidad |",
+        "|----------|-------|-----------|-------------------------|--------------|----------------|",
     ]
 
-    grouped_products = group_catalog_products(products)
-
-    for p in grouped_products:
+    for product in group_catalog_products(products):
         try:
-            in_stock = float(p.get("stock", 0) or 0) > 0
+            in_stock = float(product.get("stock", 0) or 0) > 0
         except (TypeError, ValueError):
             in_stock = False
         availability = "Disponible" if in_stock else "Agotado"
         lines.append(
-            f"| {p.get('product_name', '')} "
-            f"| {p.get('category', '')} "
-            f"| {p.get('sizes', '')} "
-            f"| ${p.get('price_usd', 0):.2f} "
+            f"| {product.get('product_name', '')} "
+            f"| {product.get('brand', '')} "
+            f"| {product.get('category', '')} "
+            f"| {product.get('presentations', '') or 'Única'} "
+            f"| {_catalog_price_text(product)} "
             f"| {availability} |"
         )
 
     return "\n".join(lines)
+
+
+def _catalog_price_text(product: dict) -> str:
+    """Expose exact variant prices when a grouped product has different prices."""
+    if product.get("has_variant_prices"):
+        parts = []
+        for variant in product.get("variants", []):
+            if not variant.get("in_stock"):
+                continue
+            try:
+                price = f"${float(variant.get('price_usd', 0)):.2f}"
+            except (TypeError, ValueError):
+                continue
+            presentation = str(variant.get("size") or "").strip()
+            parts.append(f"{presentation}: {price}" if presentation else price)
+        return "; ".join(parts) or "Por confirmar"
+    try:
+        return f"${float(product.get('price_usd', 0)):.2f}"
+    except (TypeError, ValueError):
+        return "Por confirmar"

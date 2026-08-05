@@ -4,7 +4,7 @@ Everything you need to go from a fresh laptop to a fully operational AI chatbot 
 
 Important business behavior baked into the current system:
 
-- Instagram is informational for product discovery, prices, sizes, availability, recommendations, comparisons, general shipping/payment-option questions, read-only support, and product images; buying, payment, checkout-specific delivery details, checkout continuation, and PDF delivery hand off to WhatsApp through a backend-generated `wa.me` link
+- Instagram is informational for product discovery, prices, presentations/options (including clothing sizes), availability, recommendations, comparisons, general shipping/payment-option questions, read-only support, and product images; buying, payment, checkout-specific delivery details, checkout continuation, and PDF delivery hand off to WhatsApp through a backend-generated `wa.me` link
 - shipping is offered through `MRW` or `Zoom` with `cobro a destino`
 - payment methods are store-defined and managed only from the store dashboard
 - the owner or Master can update the selected/manual exchange-rate settings used for `¿a qué tasa recibes?`
@@ -59,7 +59,7 @@ Add $10 of credit under Plans & Billing.
 
 ### 1.4 Google Sheets (Product Catalog)
 
-You need a Google Cloud service account so the bot can read the product catalog.
+You need a Google Cloud service account so the bot can read the product catalog and update inventory after checkout.
 
 Go to [console.cloud.google.com](https://console.cloud.google.com). Create a new project called "vs-chatbot." Then:
 
@@ -72,21 +72,49 @@ Go to [console.cloud.google.com](https://console.cloud.google.com). Create a new
    - Linux: `base64 -w 0 your-downloaded-file.json`
    - Copy the output. This goes in `.env` as `GOOGLE_SHEETS_CREDENTIALS_B64`.
 
-Now create the product catalog spreadsheet. Open Google Sheets, create a new sheet, and set up these **exact column headers in row 1**:
+Now create the product catalog spreadsheet. Open Google Sheets, create a new sheet, and use these headers:
 
 ```text
-SKU | Parent SKU | Product name | Category | Description | Size | Price USD | Stock | Active | Image URL
+SKU | Parent SKU | Product Name | Brand | Category | Description | Size | Price USD | Stock | Active | Image URL
 ```
 
-Use **one row per size variant**. That means every sellable `product + size` combination gets its own row and its own unique `SKU`.
+`Brand` is optional for backward compatibility. Existing sheets without the column still load correctly.
+
+Use **one row per sellable SKU/variant**. `Parent SKU` groups variants that belong to the same customer-facing product. The historical column name `Size` is intentionally kept, but it now means the product's sellable **presentation/option**, not only a clothing size.
+
+Examples of valid `Size` values include:
+
+- clothing: `S`, `M`, `L`
+- perfume: `30 ml`, `50 ml`, `100 ml`
+- shoes: `38`, `39`, `40`
+- electronics/storage: `128 GB`, `256 GB`
+- standalone products with no meaningful variant: leave `Size` blank
 
 Rules:
 
-- `SKU` must be unique for each row, for example `SET-001-S` and `SET-001-M`
-- `Parent SKU` must be shared by all size variants of the same product, for example `SET-001`
-- `Size` must contain a single size only, such as `S`, `M`, `L`, `XL`, or `XXL`
-- `Stock` must be the stock for that exact size row only
-- Use the same `Product name`, `Category`, `Description`, and `Image URL` across rows that belong to the same product unless you intentionally want them to differ
+- `SKU` must be unique for each sellable row, for example `PJ-001-M` or `DIOR-SAV-100`
+- `Parent SKU` should be shared by all variants of the same product, for example `PJ-001` or `DIOR-SAV`
+- `Brand` is optional and participates in catalog search
+- `Size` may contain any single presentation/option value; matching is case-insensitive
+- `Price USD` and `Stock` belong to that exact SKU/variant, so variants may have different prices
+- if a product has no meaningful presentation and only one sellable SKU, `Size` may be blank and checkout will not ask for it
+- if a product has multiple sellable variants, the customer must select the desired presentation before checkout can finalize
+- use the same `Product Name`, `Brand`, `Category`, `Description`, and `Image URL` across related rows unless they intentionally differ
+
+Clothing example:
+
+```text
+PJ-001-S | PJ-001 | Pijama rayas rosa | Victoria's Secret | Pajamas | Pijama de algodón con rayas rosas | S | 28.00 | 5 | Yes |
+PJ-001-M | PJ-001 | Pijama rayas rosa | Victoria's Secret | Pajamas | Pijama de algodón con rayas rosas | M | 28.00 | 8 | Yes |
+PJ-001-L | PJ-001 | Pijama rayas rosa | Victoria's Secret | Pajamas | Pijama de algodón con rayas rosas | L | 28.00 | 3 | Yes |
+```
+
+Perfume example with variant-specific prices:
+
+```text
+DIOR-SAV-50 | DIOR-SAV | Sauvage EDT | Dior | Perfumes | Fragancia fresca amaderada | 50 ml | 85.00 | 3 | Yes |
+DIOR-SAV-100 | DIOR-SAV | Sauvage EDT | Dior | Perfumes | Fragancia fresca amaderada | 100 ml | 125.00 | 2 | Yes |
+```
 
 If you want the bot to be able to send product photos, use the `Image URL` column. Supported formats:
 
@@ -96,23 +124,9 @@ If you want the bot to be able to send product photos, use the `Image URL` colum
 
 If the customer asks to see a specific product and that row has a usable image, the bot can send it directly in chat.
 
-Add a few test products:
+For the complete field rules and additional examples, see [Product Catalog Schema](../docs/CATALOG_SCHEMA.md).
 
-```text
-PJ-001-S | PJ-001 | Pijama rayas rosa | Pajamas | Pijama de algodón con rayas rosas | S | 28.00 | 5 | Yes |
-PJ-001-M | PJ-001 | Pijama rayas rosa | Pajamas | Pijama de algodón con rayas rosas | M | 28.00 | 8 | Yes |
-PJ-001-L | PJ-001 | Pijama rayas rosa | Pajamas | Pijama de algodón con rayas rosas | L | 28.00 | 3 | Yes |
-UN-001-S | UN-001 | Conjunto encaje negro | Underwear | Conjunto de encaje negro Victoria's Secret | S | 22.00 | 2 | Yes |
-UN-001-M | UN-001 | Conjunto encaje negro | Underwear | Conjunto de encaje negro Victoria's Secret | M | 22.00 | 1 | Yes |
-PJ-002-M | PJ-002 | Pijama satén azul | Pajamas | Pijama de satén azul marino | M | 32.00 | 2 | Yes |
-PJ-002-L | PJ-002 | Pijama satén azul | Pajamas | Pijama de satén azul marino | L | 32.00 | 2 | Yes |
-PJ-002-XL | PJ-002 | Pijama satén azul | Pajamas | Pijama de satén azul marino | XL | 32.00 | 1 | Yes |
-SET-001-S | SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | S | 35.00 | 4 | Yes |
-SET-001-M | SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | M | 35.00 | 7 | Yes |
-SET-001-L | SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | L | 35.00 | 2 | Yes |
-```
-
-Share the sheet with the service account email (looks like `vs-chatbot-reader@your-project.iam.gserviceaccount.com`). Give it **Editor** access (write permission). Read-only **Viewer** access is not enough: the checkout flow writes back to this sheet (decrements the `Stock` column on confirmed orders), and the inventory mutation ledger lives in the hidden `_inventory_mutations` worksheet, so the service account must be able to write to the sheet.
+Share the sheet with the service account email (looks like `vs-chatbot-reader@your-project.iam.gserviceaccount.com`). Give it **Editor** access (write permission). Read-only Viewer access is not enough: checkout decrements the `Stock` column and writes the hidden `_inventory_mutations` worksheet, so the service account must be able to write to the sheet.
 
 Copy the sheet ID from the URL (the long string between `/d/` and `/edit`). This goes in `.env` as `PRODUCT_SHEET_ID`.
 
@@ -760,7 +774,7 @@ Agent and tool locations:
 [ ] Kommo WhatsApp or Instagram DM voice note -> transcribed before the AI turn when OPENAI_API_KEY is configured
 [ ] Repeat order -> AI offers saved address: "¿misma dirección de la última vez?"
 [ ] Set product Stock=0 in Sheets, ask for it -> "Out of stock" + alternatives
-[ ] "Tienen zapatos?" -> Politely declines, only sells underwear/pajamas
+[ ] Ask for a product or category not present in the Sheet -> Politely declines and suggests the closest available catalog alternatives
 [ ] Payment flow -> Interactive buttons appear for payment method choice
 [ ] Set ai_orchestration_mode=shadow -> Legacy response is served and route metadata is logged
 [ ] Set ai_orchestration_mode=multi_agent -> Sales, checkout, and support routes respond correctly
@@ -1015,7 +1029,7 @@ Testing (DEBUG=true, direct loopback only, forwarding headers rejected):
 - **Bot reveals stock numbers ("stock: 4")**  
   `_tool_check_inventory` in `engine.py` should not include a `"stock"` key in its return dict — only `"in_stock": true/false`. Check that key isn't present. Also verify system prompt rule 2 contains the "NEVER reveal stock quantities" clause.
 - **"Could not load catalog"**  
-  Service account email needs Viewer access to the sheet.
+  Service account email needs **Editor** access to the sheet because checkout and the inventory ledger write to it.
 - **Telegram notifications not arriving**  
   Must have sent bot `/start` first. Check `TELEGRAM_ADMIN_CHAT_ID` is your ID, not the bot's.
 - **Telegram bot not responding**  
