@@ -18,10 +18,11 @@ async def create_order(args: dict, context: ToolExecutionContext) -> dict:
     if delivery["status"] != "ok":
         return delivery
     quote = delivery["quote"]
+    canonical_items = delivery.get("items") or args.get("items", [])
     try:
         order = await orders.create_order(
             customer_id=customer_id,
-            items=args.get("items", []),
+            items=canonical_items,
             payment_method=args.get("payment_method", ""),
             shipping_city=quote.get("shipping_city") or args.get("shipping_city"),
             shipping_address=args.get("shipping_address") if quote.get("fulfillment_type") == "home_delivery" else None,
@@ -36,7 +37,8 @@ async def create_order(args: dict, context: ToolExecutionContext) -> dict:
         return {"status": "error", "message": str(exc)}
     if order.get("created_new", True):
         items_summary = ", ".join(
-            f"{i['product_name']} ({i['size']})" for i in args.get("items", [])
+            f"{item['product_name']} ({item['size']})" if item.get("size") else item["product_name"]
+            for item in canonical_items
         )
         await notify_new_order(
             customer_name=customer.get("display_name"),
