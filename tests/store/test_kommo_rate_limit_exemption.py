@@ -6,7 +6,6 @@ from httpx import ASGITransport, AsyncClient
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-
 from app.request_limits import limiter
 from app.webhooks.kommo import router as kommo_router
 
