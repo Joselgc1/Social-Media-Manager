@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from app import db
 from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
 from app.admin.notify import notify_owner
+from app.admin.telegram_sender import escape_markdown
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs
 from app.analytics import get_conversion_funnel, get_popular_products, get_response_time_stats
 from app.broadcast.sender import execute_broadcast, list_broadcasts, preview_broadcast
@@ -36,6 +37,7 @@ from app.catalog.sheets import get_cached_catalog
 from app.config import get_config
 from app.crm import orders
 from app.crm.customers import add_tags, remove_tag
+from app.exchange_rates import format_rate_for_customer, selected_exchange_rate
 from app.log_redaction import install_secret_redaction_filter
 
 logger = logging.getLogger(__name__)
@@ -238,17 +240,17 @@ async def _cmd_customers(args: str) -> str:
             SELECT id, display_name, channel, platform_id, tags, total_orders, last_active
             FROM customers
             WHERE tags @> CAST(:tag AS jsonb)
-            ORDER BY COALESCE(display_name, platform_id) ASC LIMIT 10
+            ORDER BY last_active DESC NULLS LAST LIMIT 10
             """,
             {"tag": json.dumps([tag_filter])},
         )
-        header = f"👥 *Clientes con tag '{tag_filter}':*\n\n"
+        header = f"👥 *Clientes con tag '{escape_markdown(tag_filter)}':*\n\n"
     else:
         rows = await db.fetch_all(
             """
             SELECT id, display_name, channel, platform_id, tags, total_orders, last_active
             FROM customers
-            ORDER BY COALESCE(display_name, platform_id) ASC LIMIT 10
+            ORDER BY last_active DESC NULLS LAST LIMIT 10
             """
         )
         header = "👥 *Clientes recientes:*\n\n"
@@ -258,11 +260,11 @@ async def _cmd_customers(args: str) -> str:
 
     lines = []
     for r in rows:
-        name = r["display_name"] or r["platform_id"][:12]
-        short_id = str(r["id"])[:8]
+        name = escape_markdown(r["display_name"] or r["platform_id"][:12])
+        short_id = escape_markdown(str(r["id"])[:8])
         tags = r["tags"] if isinstance(r["tags"], list) else json.loads(r["tags"] or "[]")
-        tag_str = ", ".join(tags[:4])
-        lines.append(f"• `{short_id}` *{name}* ({r['channel']})\n  Pedidos: {r['total_orders']} | Tags: {tag_str}")
+        tag_str = escape_markdown(", ".join(tags[:4]))
+        lines.append(f"• `{short_id}` *{name}* ({escape_markdown(r['channel'])})\n  Pedidos: {r['total_orders']} | Tags: {tag_str}")
 
     return header + "\n".join(lines)
 
@@ -283,32 +285,35 @@ async def _cmd_orders() -> str:
 
     lines = ["📦 *Pedidos recientes:*\n"]
     for r in rows:
-        name = r["display_name"] or "Desconocido"
-        short_id = str(r["id"])[:8]
+        name = escape_markdown(r["display_name"] or "Desconocido")
+        short_id = escape_markdown(str(r["id"])[:8])
         lines.append(
             f"• `{short_id}` - *{name}*\n"
-            f"  ${float(r['total']):.2f} via {r['payment_method']}\n"
-            f"  Pago: {r['payment_status']} | Envío: {r['shipping_status']}"
+            f"  ${float(r['total']):.2f} via {escape_markdown(r['payment_method'] or '')}\n"
+            f"  Pago: {escape_markdown(r['payment_status'] or '')} | Envío: {escape_markdown(r['shipping_status'] or '')}"
         )
 
     return "\n".join(lines)
 
 
+_VALID_ORDER_STATUSES = orders.VALID_PAYMENT_STATUSES | orders.VALID_SHIPPING_STATUSES
+
+
 async def _cmd_update_order(args: str) -> str:
     parts = args.strip().split()
     if len(parts) < 2:
-        return "Uso: /order ID STATUS\nEjemplo: /order abc123 confirmed\nEstados: pending, confirmed, shipped, delivered"
+        options = ", ".join(sorted(_VALID_ORDER_STATUSES))
+        return (
+            "Uso: /order ID STATUS\n"
+            "Ejemplo: /order abc123 confirmed\n"
+            f"Estados: {options}"
+        )
 
     order_id_prefix = parts[0]
     new_status = parts[1].lower()
 
-    valid_statuses = {
-        "pending", "confirmed", "proof_received", "failed",
-        "shipped", "delivered",
-    }
-
-    if new_status not in valid_statuses:
-        return f"Estado inválido. Opciones: {', '.join(sorted(valid_statuses))}"
+    if new_status not in _VALID_ORDER_STATUSES:
+        return f"Estado inválido. Opciones: {', '.join(sorted(_VALID_ORDER_STATUSES))}"
 
     # Find order by ID prefix
     row = await db.fetch_one(
@@ -317,18 +322,17 @@ async def _cmd_update_order(args: str) -> str:
     )
 
     if not row:
-        return f"No se encontró un pedido con ID que empiece con '{order_id_prefix}'"
+        return f"No se encontró un pedido con ID que empiece con '{escape_markdown(order_id_prefix)}'"
 
-    # Determine which column to update
-    if new_status in ("pending", "confirmed", "proof_received", "failed"):
-        await orders.update_order_payment_status(str(row["id"]), status=new_status)
-    elif new_status in ("shipped", "delivered"):
-        await db.execute(
-            "UPDATE orders SET shipping_status = :s, updated_at = NOW() WHERE id = :id",
-            {"s": new_status, "id": row["id"]},
-        )
+    order_id = str(row["id"])
 
-    return f"✅ Pedido `{str(row['id'])[:8]}` actualizado a *{new_status}*"
+    # Route to the authoritative order service based on the status type
+    if new_status in orders.VALID_PAYMENT_STATUSES:
+        await orders.update_order_payment_status(order_id, status=new_status)
+    elif new_status in orders.VALID_SHIPPING_STATUSES:
+        await orders.update_order_shipping(order_id, shipping_status=new_status)
+
+    return f"✅ Pedido `{escape_markdown(order_id[:8])}` actualizado a *{escape_markdown(new_status)}*"
 
 
 async def _cmd_resolve(args: str) -> str:
@@ -342,8 +346,8 @@ async def _cmd_resolve(args: str) -> str:
             return "✅ No hay clientes escalados."
         lines = ["🔴 *Clientes escalados:*\n"]
         for r in rows:
-            name = r["display_name"] or r["platform_id"]
-            lines.append(f"• `{str(r['id'])[:8]}` {name} ({r['channel']})")
+            name = escape_markdown(r["display_name"] or r["platform_id"])
+            lines.append(f"• `{escape_markdown(str(r['id'])[:8])}` {name} ({escape_markdown(r['channel'])})")
         lines.append("\nUsa /resolve ID o /resolve all")
         return "\n".join(lines)
 
@@ -372,13 +376,13 @@ async def _cmd_resolve(args: str) -> str:
     )
 
     if not row:
-        return f"No se encontró cliente escalado con ID que empiece con '{arg}'"
+        return f"No se encontró cliente escalado con ID que empiece con '{escape_markdown(arg)}'"
 
     try:
         await activate_customer_for_admin(dict(row))
     except ManualActivationError as e:
         return f"⚠️ No pude reactivar este cliente: {e.safe_detail}"
-    name = row["display_name"] or str(row["id"])[:8]
+    name = escape_markdown(row["display_name"] or str(row["id"])[:8])
     return f"✅ Escalación resuelta para *{name}*. El bot volverá a atenderle con un chat nuevo."
 
 
@@ -417,13 +421,13 @@ async def _cmd_list_broadcasts() -> str:
 
     lines = ["📢 *Broadcasts recientes:*\n"]
     for b in broadcasts:
-        short_id = str(b["id"])[:8]
+        short_id = escape_markdown(str(b["id"])[:8])
         tags = b["target_tags"] if isinstance(b["target_tags"], list) else json.loads(b["target_tags"] or "[]")
         lines.append(
-            f"• `{short_id}` - *{b['name']}*\n"
-            f"  Plantilla: {b['template_name']}\n"
-            f"  Tags: {', '.join(tags)}\n"
-            f"  Estado: {b['status']} | Enviados: {b.get('recipients', 0)}"
+            f"• `{short_id}` - *{escape_markdown(b['name'])}*\n"
+            f"  Plantilla: {escape_markdown(b['template_name'])}\n"
+            f"  Tags: {escape_markdown(', '.join(tags))}\n"
+            f"  Estado: {escape_markdown(b['status'])} | Enviados: {b.get('recipients', 0)}"
         )
 
     return "\n".join(lines)
@@ -440,10 +444,10 @@ async def _cmd_send_broadcast(args: str) -> str:
     )
 
     if not row:
-        return f"No se encontró broadcast pendiente con ID que empiece con '{broadcast_id_prefix}'"
+        return f"No se encontró broadcast pendiente con ID que empiece con '{escape_markdown(broadcast_id_prefix)}'"
 
     result = await execute_broadcast(str(row["id"]))
-    return f"📢 Broadcast *{row['name']}* ejecutado: {result.get('recipients', 0)} enviados, {result.get('errors', 0)} errores"
+    return f"📢 Broadcast *{escape_markdown(row['name'])}* ejecutado: {result.get('recipients', 0)} enviados, {result.get('errors', 0)} errores"
 
 
 async def _cmd_preview(args: str) -> str:
@@ -454,7 +458,7 @@ async def _cmd_preview(args: str) -> str:
     result = await preview_broadcast(tags)
     return (
         f"📋 *Vista previa de broadcast*\n\n"
-        f"Tags: {', '.join(tags)}\n"
+        f"Tags: {escape_markdown(', '.join(tags))}\n"
         f"Clientes que coinciden: *{result['matching_customers']}*\n"
         f"Costo estimado: *${result['estimated_cost_usd']:.2f}*"
     )
@@ -462,9 +466,76 @@ async def _cmd_preview(args: str) -> str:
 
 async def _cmd_settings() -> str:
     settings = await db.get_settings()
-    lines = ["⚙️ *Configuración actual:*\n"]
-    for key, value in sorted(settings.items()):
-        lines.append(f"  `{key}`: {value}")
+    config = get_config()
+
+    ai_status = "activado ✅" if bool(settings.get("ai_enabled", True)) else "pausado ⏸️"
+    orchestration = settings.get("ai_orchestration_mode", "legacy")
+    provider = settings.get("llm_provider", "")
+    model = settings.get("llm_model", "")
+
+    lines = [
+        "⚙️ *Configuración actual:*\n",
+        f"🤖 *AI:* {escape_markdown(ai_status)}",
+        f"• Orquestación: {escape_markdown(orchestration)}",
+        f"• Proveedor: {escape_markdown(provider)} / {escape_markdown(model)}",
+    ]
+
+    fallback_provider = settings.get("fallback_provider", "")
+    if fallback_provider:
+        fallback_model = settings.get("fallback_model", "")
+        auto_fallback = bool(settings.get("auto_fallback", True))
+        lines.append(
+            f"• Fallback: {escape_markdown(fallback_provider)} / {escape_markdown(fallback_model)} "
+            f"(auto: {'sí' if auto_fallback else 'no'})"
+        )
+
+    selected = selected_exchange_rate(settings)
+    rate = selected["rate"]
+    rate_text = format_rate_for_customer(rate) if rate is not None else "no disponible"
+    lines.extend([
+        "\n💱 *Tasa de cambio*",
+        f"• Referencia: {escape_markdown(selected['reference'].label)}",
+        f"• Valor: {rate_text} Bs por {escape_markdown(selected['reference'].unit)}",
+    ])
+
+    commerce_lines = []
+    store_phone = settings.get("store_phone_number")
+    if store_phone:
+        commerce_lines.append(f"• Teléfono de la tienda: {escape_markdown(store_phone)}")
+    discount_percent = settings.get("order_discount_percent") or 0
+    discount_threshold = settings.get("order_discount_threshold_usd") or 0
+    try:
+        if float(discount_percent) > 0 and float(discount_threshold) > 0:
+            commerce_lines.append(
+                f"• Descuento: {discount_percent}% en pedidos > ${float(discount_threshold):.2f}"
+            )
+    except (TypeError, ValueError):
+        pass
+    if commerce_lines:
+        lines.append("\n🤝 *Comercio*")
+        lines.extend(commerce_lines)
+
+    escalation_telegram = bool(settings.get("escalation_telegram_enabled", True))
+    lines.extend([
+        "\n🔔 *Telegram*",
+        f"• Escalaciones por Telegram: {'activadas' if escalation_telegram else 'desactivadas'}",
+    ])
+
+    backend = getattr(config, "channel_backend", "meta")
+    lines.append("\n⚙️ *Canal*")
+    if backend == "kommo":
+        kommo_notes = []
+        if getattr(config, "kommo_chats_media_enabled", False):
+            kommo_notes.append("media en chats")
+        if getattr(config, "kommo_chats_product_images_enabled", False):
+            kommo_notes.append("imágenes de productos")
+        if getattr(config, "kommo_chats_catalog_pdf_enabled", False):
+            kommo_notes.append("PDF de catálogo")
+        suffix = f" ({', '.join(kommo_notes)})" if kommo_notes else ""
+        lines.append(f"• Backend: kommo{escape_markdown(suffix)}")
+    else:
+        lines.append("• Backend: meta")
+
     return "\n".join(lines)
 
 
@@ -595,8 +666,8 @@ async def _cmd_popular_products() -> str:
 
     lines = ["📦 *Productos más buscados (30 días)*\n"]
     for i, p in enumerate(products[:10], 1):
-        size_note = f" (talla {p['size_filter']})" if p.get("size_filter") else ""
-        lines.append(f"  {i}. *{p['query']}*{size_note} - {p['times_asked']} consultas")
+        size_note = f" (talla {escape_markdown(p['size_filter'])})" if p.get("size_filter") else ""
+        lines.append(f"  {i}. *{escape_markdown(p['query'])}*{size_note} - {p['times_asked']} consultas")
 
     return "\n".join(lines)
 
@@ -612,15 +683,15 @@ async def _cmd_tags(args: str) -> str:
         {"prefix": f"{prefix}%"},
     )
     if not row:
-        return f"No se encontró cliente con ID que empiece con '{prefix}'"
+        return f"No se encontró cliente con ID que empiece con '{escape_markdown(prefix)}'"
 
-    name = row["display_name"] or row["platform_id"]
+    name = escape_markdown(row["display_name"] or row["platform_id"])
     tags = row["tags"] if isinstance(row["tags"], list) else json.loads(row["tags"] or "[]")
 
     if not tags:
         return f"🏷️ *{name}* no tiene tags."
 
-    tag_list = "\n".join(f"• `{t}`" for t in tags)
+    tag_list = "\n".join(f"• `{escape_markdown(t)}`" for t in tags)
     return f"🏷️ *Tags de {name}:*\n\n{tag_list}\n\nUsa /tag ID add tag1,tag2 o /tag ID del tag1"
 
 
@@ -642,9 +713,9 @@ async def _cmd_tag_edit(args: str) -> str:
         {"prefix": f"{prefix}%"},
     )
     if not row:
-        return f"No se encontró cliente con ID que empiece con '{prefix}'"
+        return f"No se encontró cliente con ID que empiece con '{escape_markdown(prefix)}'"
 
-    name = row["display_name"] or row["platform_id"]
+    name = escape_markdown(row["display_name"] or row["platform_id"])
     cid = str(row["id"])
 
     if action == "add":
@@ -652,14 +723,14 @@ async def _cmd_tag_edit(args: str) -> str:
         if not new_tags:
             return "Especifica al menos un tag."
         await add_tags(cid, new_tags)
-        return f"✅ Tags agregados a *{name}*: {', '.join(new_tags)}"
+        return f"✅ Tags agregados a *{name}*: {escape_markdown(', '.join(new_tags))}"
 
     elif action in ("del", "remove", "rm"):
         tag = tag_str.strip()
         if not tag:
             return "Especifica el tag a eliminar."
         await remove_tag(cid, tag)
-        return f"✅ Tag `{tag}` eliminado de *{name}*"
+        return f"✅ Tag `{escape_markdown(tag)}` eliminado de *{name}*"
 
     else:
         return "Acción no reconocida. Usa `add` o `del`."

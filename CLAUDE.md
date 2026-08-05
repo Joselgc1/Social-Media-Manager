@@ -76,7 +76,7 @@ For local debug, either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` plus `DATABASE_U
 ### Deploying
 
 - `/deploy store`, `/deploy master`, or `/deploy both`
-- Push to main triggers Railway auto-deploy
+- Pushing to each service's Railway-configured deployment branch triggers auto-deploy (the branch is set per service in Railway, not in `railway.toml`)
 
 ### Available skills and commands
 
@@ -133,7 +133,7 @@ When adding new models, update BOTH files:
 
 **Webhook channels:** WhatsApp (`store/app/webhooks/whatsapp.py`), Instagram (`store/app/webhooks/instagram.py`), Kommo (`store/app/webhooks/kommo.py` when `CHANNEL_BACKEND=kommo`), Telegram admin bot (`store/app/admin/telegram_bot.py` at `/webhooks/telegram`).
 
-**Channel backend switch:** `CHANNEL_BACKEND=meta` registers direct Meta WhatsApp/Instagram webhooks and uses Meta sender modules. `CHANNEL_BACKEND=kommo` registers `/webhooks/kommo/events/{webhook_secret}` and `/webhooks/kommo/salesbot`, does not require Meta credentials, does not register Meta webhooks, and sends customer replies by launching/resuming Kommo Salesbot. Keep Meta modules for rollback.
+**Channel backend switch:** `CHANNEL_BACKEND=meta` registers direct Meta WhatsApp/Instagram webhooks and uses Meta sender modules. `CHANNEL_BACKEND=kommo` registers `/webhooks/kommo/events/{webhook_secret}` and `/webhooks/kommo/salesbot`, does not require Meta credentials, does not register the direct Meta channel-delivery webhooks (`/webhooks/whatsapp`, `/webhooks/instagram`), may optionally register `/webhooks/meta/instagram-context` when `META_INSTAGRAM_CONTEXT_ENABLED=true` or `META_STORY_CONTEXT_ENABLED=true`, and sends customer replies by launching/resuming Kommo Salesbot. Kommo remains responsible for all customer-visible delivery. Keep Meta modules for rollback.
 
 **Request flow (WhatsApp/Instagram):**
 
