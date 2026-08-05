@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -5,6 +6,7 @@ from app.ai.checkout import service as checkout_service
 from app.ai.prompts import format_catalog_as_markdown
 from app.ai.tools import catalog as catalog_tools
 from app.ai.tools.registry import get_tool_spec
+from app.catalog import pdf_generator
 from app.catalog.pdf_generator import _build_public_catalog_rows, catalog_fingerprint
 from app.catalog.sheets import _parse_catalog_row, get_product_sizes, group_catalog_products
 from app.crm.sessions import CheckoutDraft, CheckoutDraftItem
@@ -277,3 +279,13 @@ def test_pdf_fingerprint_changes_when_brand_changes():
     changed = [{**item, "brand": "Different Brand"} for item in catalog]
 
     assert catalog_fingerprint(changed) != original
+
+
+def test_pdf_fingerprint_changes_when_configured_store_name_changes(monkeypatch):
+    monkeypatch.setattr(pdf_generator, "get_config", lambda: SimpleNamespace(store_name="Store A"))
+    first = pdf_generator.catalog_fingerprint(_perfume_catalog())
+
+    monkeypatch.setattr(pdf_generator, "get_config", lambda: SimpleNamespace(store_name="Store B"))
+    second = pdf_generator.catalog_fingerprint(_perfume_catalog())
+
+    assert first != second
