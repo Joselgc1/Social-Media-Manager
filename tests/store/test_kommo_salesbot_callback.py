@@ -175,7 +175,8 @@ async def test_mirrored_comment_general_webhook_creates_private_message_job_for_
     assert event.talk_id == "105"
     assert event.interaction_type == "private_message"
     assert "Kommo native Instagram comment ignored by private-message webhook path" not in caplog.text
-    assert "interaction_type': 'private_message'" in caplog.text
+    assert "Kommo webhook completed" in caplog.text
+    assert "statuses={'created': 1}" in caplog.text
     assert "Precio?" not in caplog.text
 
 

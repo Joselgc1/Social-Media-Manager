@@ -60,6 +60,12 @@ class Settings(BaseSettings):
 
     # --- Database ---
     database_url: str  # postgresql://user:pass@host:port/dbname
+    # A single Store process owns both webhook ingress and background jobs. Keep
+    # the pool bounded so burst capacity does not consume the whole PostgreSQL
+    # connection budget. These defaults reserve substantial headroom on the
+    # production database while removing asyncpg's 10-connection bottleneck.
+    database_pool_min_size: int = Field(default=5, ge=1, le=50)
+    database_pool_max_size: int = Field(default=30, ge=1, le=80)
 
     # --- Google Sheets ---
     google_sheets_credentials_b64: str  # Base64-encoded service account JSON

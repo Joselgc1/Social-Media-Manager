@@ -1,11 +1,15 @@
 """
 Async database connection pool using the databases library.
-Provides a thin wrapper for common queries.
+Provides a thin wrapper for common queries and lightweight DB timing telemetry.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import databases
 
@@ -21,17 +25,146 @@ from app.payment_methods import (
 )
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
-_db: databases.Database | None = None
 logger = logging.getLogger(__name__)
 EXPECTED_SCHEMA_VERSION = 14
+SLOW_DB_OPERATION_MS = 500.0
+
+_db: _InstrumentedDatabase | None = None
+_db_timings: ContextVar[dict[str, float] | None] = ContextVar("db_timings", default=None)
+
+
+class _TimedTransaction:
+    """Delegate a databases transaction while recording acquire/finish latency."""
+
+    def __init__(self, transaction):
+        self._transaction = transaction
+
+    async def __aenter__(self):
+        started = time.perf_counter()
+        try:
+            return await self._transaction.__aenter__()
+        finally:
+            _record_db_timing("transaction_acquire_ms", _elapsed_ms(started))
+
+    async def __aexit__(self, exc_type, exc, tb):
+        started = time.perf_counter()
+        try:
+            return await self._transaction.__aexit__(exc_type, exc, tb)
+        finally:
+            stage = "transaction_rollback_ms" if exc_type is not None else "transaction_commit_ms"
+            _record_db_timing(stage, _elapsed_ms(started))
+
+    def __getattr__(self, name):
+        return getattr(self._transaction, name)
+
+
+class _InstrumentedDatabase:
+    """Transparent databases.Database wrapper with bounded timing instrumentation."""
+
+    def __init__(self, database):
+        self._database = database
+
+    async def connect(self):
+        return await self._database.connect()
+
+    async def disconnect(self):
+        return await self._database.disconnect()
+
+    def transaction(self, *args, **kwargs):
+        return _TimedTransaction(self._database.transaction(*args, **kwargs))
+
+    async def fetch_one(self, *args, **kwargs):
+        return await self._timed_call("fetch_one", self._database.fetch_one, *args, **kwargs)
+
+    async def fetch_all(self, *args, **kwargs):
+        return await self._timed_call("fetch_all", self._database.fetch_all, *args, **kwargs)
+
+    async def execute(self, *args, **kwargs):
+        return await self._timed_call("execute", self._database.execute, *args, **kwargs)
+
+    async def execute_many(self, *args, **kwargs):
+        return await self._timed_call("execute_many", self._database.execute_many, *args, **kwargs)
+
+    async def _timed_call(self, operation: str, call, *args, **kwargs):
+        query = kwargs.get("query")
+        if query is None and args:
+            query = args[0]
+        stage = _query_timing_stage(operation, str(query or ""))
+        started = time.perf_counter()
+        try:
+            return await call(*args, **kwargs)
+        finally:
+            elapsed_ms = _elapsed_ms(started)
+            _record_db_timing(stage, elapsed_ms)
+            if elapsed_ms >= SLOW_DB_OPERATION_MS:
+                logger.warning(
+                    "Slow database operation: stage=%s elapsed_ms=%.1f",
+                    stage,
+                    elapsed_ms,
+                )
+
+    def __getattr__(self, name):
+        return getattr(self._database, name)
+
+
+@contextmanager
+def collect_query_timings():
+    """Collect DB timing totals for the current async context only."""
+    timings: dict[str, float] = {}
+    token = _db_timings.set(timings)
+    try:
+        yield timings
+    finally:
+        _db_timings.reset(token)
+
+
+def _record_db_timing(stage: str, elapsed_ms: float) -> None:
+    timings = _db_timings.get()
+    if timings is not None:
+        timings[stage] = timings.get(stage, 0.0) + elapsed_ms
+
+
+def _elapsed_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1000.0
+
+
+def _query_timing_stage(operation: str, query: str) -> str:
+    compact = " ".join(query.upper().split())
+    if "PG_ADVISORY_XACT_LOCK" in compact:
+        return "advisory_lock_ms"
+    if "FROM KOMMO_MESSAGE_RECEIPTS" in compact and "EXTERNAL_MESSAGE_ID" in compact:
+        return "duplicate_lookup_ms"
+    if (
+        "FROM KOMMO_MESSAGE_JOBS" in compact
+        and "STATUS = 'PENDING'" in compact
+        and "FOR UPDATE" in compact
+    ):
+        return "pending_lookup_ms"
+    if "INSERT INTO KOMMO_MESSAGE_RECEIPTS" in compact:
+        return "receipt_insert_ms"
+    if "INSERT INTO KOMMO_MESSAGE_JOBS" in compact or "UPDATE KOMMO_MESSAGE_JOBS" in compact:
+        return "job_mutation_ms"
+    return f"db_{operation}_ms"
 
 
 async def connect():
-    """Initialize the connection pool. Called once at app startup."""
+    """Initialize the bounded connection pool. Called once at app startup."""
     global _db
     config = get_config()
-    _db = databases.Database(config.database_url)
+    min_size = int(config.database_pool_min_size)
+    max_size = int(config.database_pool_max_size)
+    if min_size > max_size:
+        raise RuntimeError(
+            "DATABASE_POOL_MIN_SIZE cannot be greater than DATABASE_POOL_MAX_SIZE"
+        )
+    raw_db = databases.Database(
+        config.database_url,
+        min_size=min_size,
+        max_size=max_size,
+    )
+    _db = _InstrumentedDatabase(raw_db)
     await _db.connect()
+    logger.info("Database pool connected: min_size=%s max_size=%s", min_size, max_size)
 
 
 async def disconnect():
@@ -40,7 +173,7 @@ async def disconnect():
         await _db.disconnect()
 
 
-def get_db() -> databases.Database:
+def get_db() -> _InstrumentedDatabase:
     """Return the active database instance."""
     if _db is None:
         raise RuntimeError("Database not connected. Call connect() first.")

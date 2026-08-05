@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from pydantic import ValidationError
 
+from app import db
 from app.config import get_config
 from app.crm.channel_mappings import lookup_by_lead_id
 from app.integrations.kommo.auth import (
@@ -35,6 +37,7 @@ from app.request_limits import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks/kommo", tags=["kommo"])
+SLOW_WEBHOOK_MS = 1500.0
 
 
 class SalesbotCallbackParseError(ValueError):
@@ -44,6 +47,7 @@ class SalesbotCallbackParseError(ValueError):
 @router.post("/events/{webhook_secret}")
 @limiter.exempt
 async def handle_kommo_events(webhook_secret: str, request: Request):
+    webhook_started = time.perf_counter()
     config = get_config()
     if not validate_webhook_secret(webhook_secret, config.kommo_webhook_secret):
         raise HTTPException(status_code=404, detail="Not found")
@@ -56,30 +60,53 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
         form = await request.form()
         payload = {key: value for key, value in form.items() if isinstance(value, str)}
     events = normalize_kommo_webhook(payload)
-    logger.info(
+    logger.debug(
         "Kommo webhook normalized %s event(s) from top-level keys: %s",
         len(events),
         sorted(map(str, payload.keys()))[:8],
     )
 
     launched_processing_task = False
+    persistence_statuses: dict[str, int] = {}
+    persistence_timings: dict[str, float] = {}
+    incoming_count = 0
     for event in events:
-        logger.info("Kommo event received: %s", _event_log_context(event))
+        logger.debug("Kommo event received: %s", _event_log_context(event))
         if event.event_type == "incoming_message":
             if event.interaction_type == "instagram_comment":
-                logger.info(
+                logger.debug(
                     "Kommo native Instagram comment ignored by private-message webhook path: %s",
                     _event_log_context(event),
                 )
                 continue
             if event.author_type and event.author_type != "external":
-                logger.info("Kommo incoming message ignored because author is not external: %s", _event_log_context(event))
+                logger.debug(
+                    "Kommo incoming message ignored because author is not external: %s",
+                    _event_log_context(event),
+                )
                 continue
             if event.channel not in {"whatsapp", "instagram"}:
-                logger.info("Kommo incoming message ignored for unsupported origin: %s", event.origin or "unknown")
+                logger.debug(
+                    "Kommo incoming message ignored for unsupported origin: %s",
+                    event.origin or "unknown",
+                )
                 continue
-            result = await record_incoming_event(event)
-            logger.info("Kommo incoming message persisted result: %s", _safe_job_result(result))
+
+            incoming_count += 1
+            persistence_started = time.perf_counter()
+            with db.collect_query_timings() as event_timings:
+                result = await record_incoming_event(event)
+            event_timings["persistence_total_ms"] = (
+                time.perf_counter() - persistence_started
+            ) * 1000.0
+            _merge_timings(persistence_timings, event_timings)
+            status = str(result.get("status") or "unknown")
+            persistence_statuses[status] = persistence_statuses.get(status, 0) + 1
+            logger.debug(
+                "Kommo incoming message persisted result: result=%s timings=%s",
+                _safe_job_result(result),
+                _rounded_timings(event_timings),
+            )
             if (
                 getattr(config, "outbound_processing_enabled", True)
                 and result.get("status") in {"created", "merged"}
@@ -95,13 +122,23 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
 
         if event.event_type == "outgoing_message":
             confirmed = await confirm_outbound_delivery(event.message_id)
-            logger.info(
+            logger.debug(
                 "Kommo outgoing message reconciled without auto-reply: matched=%s context=%s",
                 confirmed,
                 _event_log_context(event),
             )
             continue
 
+    total_ms = (time.perf_counter() - webhook_started) * 1000.0
+    log = logger.warning if total_ms >= SLOW_WEBHOOK_MS else logger.info
+    log(
+        "Kommo webhook completed: events=%s incoming=%s statuses=%s total_ms=%.1f db_timings=%s",
+        len(events),
+        incoming_count,
+        persistence_statuses,
+        total_ms,
+        _rounded_timings(persistence_timings),
+    )
     return Response(content="OK", status_code=200)
 
 
@@ -179,7 +216,9 @@ async def _read_salesbot_callback_payload(request: Request, content_type: str) -
             form = await request.form()
         except Exception as e:
             raise SalesbotCallbackParseError("Invalid multipart callback body") from e
-        return _normalize_callback_mapping({key: value for key, value in form.multi_items() if isinstance(value, str)})
+        return _normalize_callback_mapping(
+            {key: value for key, value in form.multi_items() if isinstance(value, str)}
+        )
 
     body = await request.body()
     if not body:
@@ -240,7 +279,11 @@ async def _sync_lead_ai_mode(lead_id: str, enum_id: int) -> None:
     mapping = await lookup_by_lead_id("kommo", lead_id)
     if not mapping:
         return
-    if enum_id in {config.kommo_ai_active_enum_id, config.kommo_ai_human_enum_id, config.kommo_ai_paused_enum_id}:
+    if enum_id in {
+        config.kommo_ai_active_enum_id,
+        config.kommo_ai_human_enum_id,
+        config.kommo_ai_paused_enum_id,
+    }:
         await sync_local_state_from_ai_mode(str(mapping["customer_id"]), enum_id)
 
 
@@ -287,3 +330,12 @@ def _safe_job_result(result: dict) -> dict:
         "job_id": result.get("job_id"),
         "reason": result.get("reason"),
     }
+
+
+def _merge_timings(target: dict[str, float], source: dict[str, float]) -> None:
+    for key, value in source.items():
+        target[key] = target.get(key, 0.0) + float(value)
+
+
+def _rounded_timings(timings: dict[str, float]) -> dict[str, float]:
+    return {key: round(float(value), 1) for key, value in sorted(timings.items())}
