@@ -45,9 +45,12 @@ def get_pdf_metadata() -> dict:
 
 
 def catalog_fingerprint(catalog: list[dict]) -> str:
-    """Return a deterministic fingerprint of customer-visible catalog content."""
-    public_rows = _build_public_catalog_rows(catalog)
-    serialized = json.dumps(public_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Return a deterministic fingerprint of customer-visible PDF content."""
+    payload = {
+        "store_name": _configured_store_name(),
+        "rows": _build_public_catalog_rows(catalog),
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
@@ -131,6 +134,10 @@ def _generate_catalog_pdf(catalog: list[dict]) -> Path:
     return PDF_PATH
 
 
+def _configured_store_name() -> str:
+    return str(get_config().store_name or "Tienda").strip() or "Tienda"
+
+
 def _render_header(pdf: FPDF) -> None:
     """Render the configured store name in the catalog banner."""
     pdf.set_fill_color(*_PINK)
@@ -139,8 +146,7 @@ def _render_header(pdf: FPDF) -> None:
     pdf.set_y(9)
     pdf.set_text_color(*_WHITE)
     pdf.set_font("Helvetica", "B", 20)
-    store_name = str(get_config().store_name or "Tienda").strip() or "Tienda"
-    pdf.cell(0, 11, store_name[:60], align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 11, _configured_store_name()[:60], align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 7, "Catalogo de Productos Disponibles", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
