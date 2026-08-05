@@ -14,7 +14,17 @@ class ChannelCapabilities:
     blocked_agent_routes: frozenset[str] = frozenset()
     forbidden_tool_names: frozenset[str] = frozenset()
     forbidden_handoff_targets: frozenset[str] = frozenset()
+    forbidden_customer_tag_prefixes: frozenset[str] = frozenset()
     payment_proof_processing: bool = True
+
+
+@dataclass(frozen=True)
+class ToolArgumentPolicyResult:
+    """Sanitized tool arguments and an optional channel-policy rejection."""
+
+    arguments: dict
+    rejected: bool = False
+    reason: str | None = None
 
 
 _DEFAULT_CAPABILITIES = ChannelCapabilities()
@@ -30,6 +40,7 @@ _INSTAGRAM_CAPABILITIES = ChannelCapabilities(
         "send_catalog_pdf",
     }),
     forbidden_handoff_targets=frozenset({"checkout", "payment"}),
+    forbidden_customer_tag_prefixes=frozenset({"payment:"}),
     payment_proof_processing=False,
 )
 
@@ -73,3 +84,41 @@ def is_tool_call_allowed(channel: str | None, tool_name: str, arguments: dict | 
         target = str((arguments or {}).get("target_agent") or "").strip().lower()
         return target not in capabilities.forbidden_handoff_targets
     return True
+
+
+def apply_tool_argument_policy(
+    channel: str | None,
+    tool_name: str,
+    arguments: dict,
+) -> ToolArgumentPolicyResult:
+    """Filter channel-forbidden values from an otherwise allowed tool call."""
+    capabilities = get_channel_capabilities(channel)
+    if tool_name != "tag_customer" or not capabilities.forbidden_customer_tag_prefixes:
+        return ToolArgumentPolicyResult(arguments=arguments)
+
+    tags = arguments.get("tags")
+    if not isinstance(tags, list):
+        return ToolArgumentPolicyResult(arguments=arguments)
+
+    allowed_tags = [
+        tag
+        for tag in tags
+        if not (
+            isinstance(tag, str)
+            and any(
+                tag.strip().lower().startswith(prefix)
+                for prefix in capabilities.forbidden_customer_tag_prefixes
+            )
+        )
+    ]
+    if len(allowed_tags) == len(tags):
+        return ToolArgumentPolicyResult(arguments=arguments)
+
+    filtered_arguments = {**arguments, "tags": allowed_tags}
+    if allowed_tags:
+        return ToolArgumentPolicyResult(arguments=filtered_arguments)
+    return ToolArgumentPolicyResult(
+        arguments=filtered_arguments,
+        rejected=True,
+        reason="Customer tags are not allowed for this channel.",
+    )

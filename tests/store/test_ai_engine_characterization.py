@@ -313,9 +313,14 @@ def test_prompt_includes_dynamic_store_catalog_channel_customer_order_payment_an
     assert "Intereses: pajamas" in prompt
     assert "Tallas: M" in prompt
     assert "Ciudad: caracas" in prompt
-    assert "Última dirección de envío: Av Principal, Casa 8" in prompt
-    assert "Pedido pendiente abierto" in prompt
-    assert "Resumen pedido pendiente: Pijama satén azul x2" in prompt
+    assert "Cliente VIP" in prompt
+    assert "Última dirección de envío: Av Principal, Casa 8" not in prompt
+    assert "Pedido pendiente abierto" not in prompt
+    assert "Resumen pedido pendiente: Pijama satén azul x2" not in prompt
+    assert "estado de pago pending" not in prompt
+    assert "método de pago Zelle" not in prompt
+    assert "debes preguntarlo en la compra actual" not in prompt
+    assert "ayúdala con ese pago" not in prompt
     assert "pagos@example.com" not in prompt
     assert "No proporciones datos ni instrucciones de pago" in prompt
     assert "40,25 Bs por USD" in prompt

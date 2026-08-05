@@ -89,6 +89,10 @@ def test_dynamic_context_injection():
             customer={
                 "display_name": "Luisana Perez",
                 "tags": ["interested:pajamas", "size:M", "city:caracas"],
+                "last_fulfillment_type": "courier_agency_pickup",
+                "last_shipping_city": "Caracas",
+                "last_shipping_method": "mrw",
+                "last_pickup_agency": "MRW Chacao",
                 "total_orders": 1,
                 "total_spent": 28,
             },
@@ -108,7 +112,13 @@ def test_dynamic_context_injection():
     assert "40,25 Bs por USD" in prompt
     assert "10%" in prompt
     assert "Nombre confirmado para saludar: Luisana" in prompt
+    assert "Última agencia: MRW Chacao" in prompt
+    assert "Último courier: mrw" in prompt
     assert "Pedido pendiente abierto" in prompt
+    assert "estado de pago pending" in prompt
+    assert "método de pago Zelle" in prompt
+    assert "debes preguntarlo en la compra actual" in prompt
+    assert "ayúdala con ese pago" in prompt
     assert "# Estado del flujo" in prompt
     assert '"phase": "legacy"' in prompt
 
@@ -130,7 +140,46 @@ def test_legacy_override_behavior(monkeypatch):
 
 @pytest.mark.parametrize("prompt_name", ["legacy", "sales", "support"])
 def test_instagram_prompts_enforce_informational_channel_policy(prompt_name):
-    prompt = prompts.build_agent_prompt(prompt_name, _context(channel="instagram"))
+    common_customer = {
+        "display_name": "Luisana Perez",
+        "tags": ["interested:pajamas", "size:M", "city:caracas", "vip"],
+        "last_shipping_city": "Caracas",
+        "last_shipping_method": "mrw",
+        "total_orders": 2,
+        "total_spent": 120,
+    }
+    open_order = {
+        "items": [{"product_name": "Pijama satén azul", "quantity": 1}],
+        "payment_status": "pending",
+        "payment_method": "Zelle",
+        "total": 28,
+    }
+    home_prompt = prompts.build_agent_prompt(
+        prompt_name,
+        _context(
+            channel="instagram",
+            customer={
+                **common_customer,
+                "last_fulfillment_type": "home_delivery",
+                "last_shipping_address": "Av Vieja, Casa 8",
+                "last_shipping_zone": "Norte",
+            },
+            open_order=open_order,
+        ),
+    )
+    pickup_prompt = prompts.build_agent_prompt(
+        prompt_name,
+        _context(
+            channel="instagram",
+            customer={
+                **common_customer,
+                "last_fulfillment_type": "courier_agency_pickup",
+                "last_pickup_agency": "MRW Chacao",
+            },
+            open_order=open_order,
+        ),
+    )
+    prompt = home_prompt + pickup_prompt
 
     assert "Instagram es un canal exclusivamente informativo" in prompt
     assert "No inicies ni continúes checkout" in prompt
@@ -138,6 +187,20 @@ def test_instagram_prompts_enforce_informational_channel_policy(prompt_name):
     assert "los pedidos se completan por WhatsApp" in prompt
     assert "No redirijas a WhatsApp" in prompt
     assert "pagos@example.com" not in prompt
+    assert "Nombre confirmado para saludar: Luisana" in prompt
+    assert "Intereses: pajamas" in prompt
+    assert "Tallas: M" in prompt
+    assert "Ciudad: caracas" in prompt
+    assert "Cliente VIP" in prompt
+    assert "Av Vieja, Casa 8" not in prompt
+    assert "Última zona: Norte" not in prompt
+    assert "MRW Chacao" not in prompt
+    assert "Último courier: mrw" not in prompt
+    assert "Pedido pendiente abierto" not in prompt
+    assert "estado de pago pending" not in prompt
+    assert "método de pago Zelle" not in prompt
+    assert "debes preguntarlo en la compra actual" not in prompt
+    assert "ayúdala con ese pago" not in prompt
 
 
 def test_cache_reload(monkeypatch, tmp_path):

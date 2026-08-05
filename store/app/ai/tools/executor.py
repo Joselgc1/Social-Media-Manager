@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
-from app.ai.policies.channel_capabilities import is_tool_call_allowed
+from app.ai.policies.channel_capabilities import apply_tool_argument_policy, is_tool_call_allowed
 from app.ai.tools import catalog, checkout, customers, messaging, orders, payments, support
 from app.ai.tools.context import ToolExecutionContext
 from app.ai.tools.registry import get_tool_specs
@@ -81,6 +81,15 @@ async def execute_tool(name: str, arguments: dict, context: ToolExecutionContext
             "status": "error",
             "message": f"Tool not allowed on channel '{context.channel}': {name}",
         }
+
+    argument_policy = apply_tool_argument_policy(context.channel, name, arguments)
+    if argument_policy.rejected:
+        logger.warning("Rejected arguments for tool %s on channel %s", name, context.channel)
+        return {
+            "status": "error",
+            "message": argument_policy.reason or "Tool arguments are not allowed for this channel.",
+        }
+    arguments = argument_policy.arguments
 
     validator = _VALIDATORS[name]
     errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.absolute_path))

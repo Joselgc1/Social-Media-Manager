@@ -91,6 +91,57 @@ async def test_executor_dispatches_customer_tag_tool_with_context(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_executor_rejects_instagram_payment_only_tag_call(monkeypatch):
+    add_tags = AsyncMock(return_value=None)
+    monkeypatch.setattr(tool_customers.customers, "add_tags", add_tags)
+
+    result = await execute_tool(
+        "tag_customer",
+        {"tags": ["payment:Zelle"]},
+        _context(channel="instagram"),
+    )
+
+    assert result == {
+        "status": "error",
+        "message": "Customer tags are not allowed for this channel.",
+    }
+    add_tags.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_filters_instagram_payment_tag_and_persists_safe_tags(monkeypatch):
+    add_tags = AsyncMock(return_value=None)
+    monkeypatch.setattr(tool_customers.customers, "add_tags", add_tags)
+
+    result = await execute_tool(
+        "tag_customer",
+        {"tags": ["interested:pajamas", "size:M", "city:caracas", " PAYMENT:Zelle "]},
+        _context(channel="instagram"),
+    )
+
+    assert result == {"status": "ok", "message": "Tags added silently."}
+    add_tags.assert_awaited_once_with(
+        "customer-1",
+        ["interested:pajamas", "size:M", "city:caracas"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_keeps_whatsapp_payment_tags(monkeypatch):
+    add_tags = AsyncMock(return_value=None)
+    monkeypatch.setattr(tool_customers.customers, "add_tags", add_tags)
+
+    result = await execute_tool(
+        "tag_customer",
+        {"tags": ["payment:Zelle"]},
+        _context(channel="whatsapp"),
+    )
+
+    assert result == {"status": "ok", "message": "Tags added silently."}
+    add_tags.assert_awaited_once_with("customer-1", ["payment:Zelle"])
+
+
+@pytest.mark.asyncio
 async def test_executor_unknown_tool_returns_legacy_error_shape():
     result = await execute_tool("missing_tool", {}, _context())
 

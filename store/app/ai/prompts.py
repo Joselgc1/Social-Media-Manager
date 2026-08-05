@@ -138,7 +138,11 @@ def build_legacy_prompt(context: PromptContext) -> str:
     if channel_note:
         prompt += f"\n\n# Canal actual\n\n{channel_note}"
 
-    customer_note = _build_customer_context(context.customer, open_order=context.open_order)
+    customer_note = _build_customer_context(
+        context.customer,
+        open_order=context.open_order,
+        channel=context.channel,
+    )
     if customer_note:
         prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
 
@@ -168,7 +172,11 @@ def build_agent_prompt(prompt_name: str, context: PromptContext) -> str:
     if channel_note:
         prompt += f"\n\n# Canal actual\n\n{channel_note}"
 
-    customer_note = _build_customer_context(context.customer, open_order=context.open_order)
+    customer_note = _build_customer_context(
+        context.customer,
+        open_order=context.open_order,
+        channel=context.channel,
+    )
     if customer_note:
         prompt += f"\n\n# Contexto del cliente\n\n{customer_note}"
 
@@ -344,7 +352,11 @@ def _build_channel_context(channel: str, catalog_pdf_supported: bool | None = No
     return ""
 
 
-def _build_customer_context(customer: dict | None, open_order: dict | None = None) -> str:
+def _build_customer_context(
+    customer: dict | None,
+    open_order: dict | None = None,
+    channel: str = "whatsapp",
+) -> str:
     """
     Build a brief context summary about the customer for the AI.
     Helps the AI personalize its responses without loading full history.
@@ -352,6 +364,7 @@ def _build_customer_context(customer: dict | None, open_order: dict | None = Non
     if not customer:
         return ""
 
+    informational_only = get_channel_capabilities(channel).informational_only
     parts = []
 
     name = customer.get("display_name")
@@ -380,58 +393,60 @@ def _build_customer_context(customer: dict | None, open_order: dict | None = Non
     if city:
         parts.append(f"Ciudad: {city}")
 
-    parts.append("Importante: no asumas el método de pago por tags o compras anteriores; debes preguntarlo en la compra actual si el cliente aún no lo dijo.")
+    if not informational_only:
+        parts.append("Importante: no asumas el método de pago por tags o compras anteriores; debes preguntarlo en la compra actual si el cliente aún no lo dijo.")
 
-    last_addr = customer.get("last_shipping_address")
-    last_city = customer.get("last_shipping_city")
-    last_fulfillment_type = customer.get("last_fulfillment_type")
-    if last_fulfillment_type == "home_delivery" and last_addr:
-        parts.append(f"Última entrega: domicilio en {last_city or 'ciudad no registrada'}")
-        parts.append(f"Última dirección de envío: {last_addr}")
-        if customer.get("last_shipping_zone"):
-            parts.append(f"Última zona: {customer['last_shipping_zone']}")
-    elif last_fulfillment_type == "courier_agency_pickup" and customer.get("last_pickup_agency"):
-        parts.append(f"Última entrega: retiro en agencia en {last_city or 'ciudad no registrada'}")
-        parts.append(f"Última agencia: {customer['last_pickup_agency']}")
-        last_method = customer.get("last_shipping_method")
-        if last_method:
-            parts.append(f"Último courier: {last_method}")
-    elif last_addr:
-        # Legacy customer records have no fulfillment type yet.
-        parts.append(f"Última dirección de envío: {last_addr}")
-        if last_city:
-            parts.append(f"Última ciudad: {last_city}")
-        last_method = customer.get("last_shipping_method")
-        if last_method:
-            parts.append(f"Último método de envío: {last_method}")
+    if not informational_only:
+        last_addr = customer.get("last_shipping_address")
+        last_city = customer.get("last_shipping_city")
+        last_fulfillment_type = customer.get("last_fulfillment_type")
+        if last_fulfillment_type == "home_delivery" and last_addr:
+            parts.append(f"Última entrega: domicilio en {last_city or 'ciudad no registrada'}")
+            parts.append(f"Última dirección de envío: {last_addr}")
+            if customer.get("last_shipping_zone"):
+                parts.append(f"Última zona: {customer['last_shipping_zone']}")
+        elif last_fulfillment_type == "courier_agency_pickup" and customer.get("last_pickup_agency"):
+            parts.append(f"Última entrega: retiro en agencia en {last_city or 'ciudad no registrada'}")
+            parts.append(f"Última agencia: {customer['last_pickup_agency']}")
+            last_method = customer.get("last_shipping_method")
+            if last_method:
+                parts.append(f"Último courier: {last_method}")
+        elif last_addr:
+            # Legacy customer records have no fulfillment type yet.
+            parts.append(f"Última dirección de envío: {last_addr}")
+            if last_city:
+                parts.append(f"Última ciudad: {last_city}")
+            last_method = customer.get("last_shipping_method")
+            if last_method:
+                parts.append(f"Último método de envío: {last_method}")
 
-    total_orders = customer.get("total_orders", 0)
-    if total_orders > 0:
-        parts.append(f"Pedidos anteriores: {total_orders}")
-        parts.append(f"Total gastado: ${customer.get('total_spent', 0):.2f}")
+        total_orders = customer.get("total_orders", 0)
+        if total_orders > 0:
+            parts.append(f"Pedidos anteriores: {total_orders}")
+            parts.append(f"Total gastado: ${customer.get('total_spent', 0):.2f}")
 
-    if open_order:
-        open_items = open_order.get("items") or []
-        if isinstance(open_items, str):
-            open_items = json.loads(open_items or "[]")
+        if open_order:
+            open_items = open_order.get("items") or []
+            if isinstance(open_items, str):
+                open_items = json.loads(open_items or "[]")
 
-        items_summary = ", ".join(
-            f"{item.get('product_name', 'Producto')} x{item.get('quantity', 1)}"
-            for item in open_items[:3]
-        )
-        parts.append(
-            "Pedido pendiente abierto: "
-            f"estado de pago {open_order.get('payment_status', 'pending')}, "
-            f"método de pago {open_order.get('payment_method') or 'sin definir'}, "
-            f"total ${float(open_order.get('total') or 0):.2f}."
-        )
-        if items_summary:
-            parts.append(f"Resumen pedido pendiente: {items_summary}")
-        parts.append(
-            "Importante: este pedido pendiente NO es motivo para escalar. "
-            "Si la cliente quiere retomarlo, ayúdala con ese pago. "
-            "Si quiere comprar algo nuevo, maneja el nuevo flujo con claridad en el chat sin escalar."
-        )
+            items_summary = ", ".join(
+                f"{item.get('product_name', 'Producto')} x{item.get('quantity', 1)}"
+                for item in open_items[:3]
+            )
+            parts.append(
+                "Pedido pendiente abierto: "
+                f"estado de pago {open_order.get('payment_status', 'pending')}, "
+                f"método de pago {open_order.get('payment_method') or 'sin definir'}, "
+                f"total ${float(open_order.get('total') or 0):.2f}."
+            )
+            if items_summary:
+                parts.append(f"Resumen pedido pendiente: {items_summary}")
+            parts.append(
+                "Importante: este pedido pendiente NO es motivo para escalar. "
+                "Si la cliente quiere retomarlo, ayúdala con ese pago. "
+                "Si quiere comprar algo nuevo, maneja el nuevo flujo con claridad en el chat sin escalar."
+            )
 
     if "vip" in tags:
         parts.append("⭐ Cliente VIP - trato especial")
