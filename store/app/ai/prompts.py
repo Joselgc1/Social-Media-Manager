@@ -361,7 +361,8 @@ def _build_customer_context(customer: dict | None, open_order: dict | None = Non
     if interests:
         parts.append(f"Intereses: {', '.join(interests)}")
     if sizes:
-        parts.append(f"Tallas de ropa conocidas: {', '.join(sizes)}")
+        sizes_text = ", ".join(sizes)
+        parts.append(f"Tallas de ropa conocidas: {sizes_text} (Tallas: {sizes_text})")
     if city:
         parts.append(f"Ciudad: {city}")
 
