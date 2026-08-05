@@ -175,6 +175,20 @@ async def test_provider_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_unavailable_fallback_provider_re_raises_primary_error(monkeypatch):
+    primary = _provider()
+    primary.chat.side_effect = RuntimeError("primary boom")
+    fallback = _provider(LLMResponse(text="Fallback", usage={"input_tokens": 1, "output_tokens": 1}))
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: primary if name == "openai" else fallback)
+
+    with pytest.raises(RuntimeError, match="primary boom"):
+        await AgentRunner().run(LEGACY_AGENT, "prompt", [], _settings(), _context())
+
+    fallback.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_provider_fallback_continues_after_committed_tool_without_reexecution(monkeypatch):
     primary = _provider(LLMResponse(tool_calls=[_tool_call("create_order", {"items": []})]))
     primary.continue_after_tool.side_effect = RuntimeError("continuation failed")

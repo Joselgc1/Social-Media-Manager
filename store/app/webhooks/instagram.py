@@ -33,6 +33,7 @@ from app.channels.instagram_sender import (
 )
 from app.config import get_config
 from app.crm import conversations
+from app.request_limits import limiter
 from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
 from app.webhooks.meta_security import verify_meta_signature
 
@@ -67,6 +68,7 @@ ICE_BREAKER_CONTEXT = {
 # ── Webhook verification (GET) ───────────────────────────────
 
 @router.get("/webhooks/instagram")
+@limiter.exempt
 async def verify_instagram(request: Request):
     """
     Meta sends a GET request to verify your webhook URL.
@@ -88,6 +90,7 @@ async def verify_instagram(request: Request):
 # ── Incoming messages (POST) ─────────────────────────────────
 
 @router.post("/webhooks/instagram")
+@limiter.exempt
 async def handle_instagram(request: Request):
     """
     Receive and process incoming Instagram DM events.

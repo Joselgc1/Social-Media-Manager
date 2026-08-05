@@ -1,8 +1,18 @@
-"""Request body size enforcement for the store service."""
+"""Request body size and rate limiting enforcement for the store service."""
 
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from starlette.responses import JSONResponse
 
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
+# Generic per-IP limit applied to every route except trusted provider webhooks.
+# Provider webhook endpoints (Kommo, Meta, Telegram) are marked @limiter.exempt
+# because they already authenticate via signatures/secrets/JWTs and arrive in
+# bursts from shared provider IPs, so a per-IP cap causes false positive 429s.
+GENERIC_RATE_LIMIT = "60/minute"
+
+limiter = Limiter(key_func=get_remote_address, default_limits=[GENERIC_RATE_LIMIT])
 
 
 class RequestBodyLimitMiddleware:

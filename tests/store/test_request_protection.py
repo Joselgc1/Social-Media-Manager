@@ -31,6 +31,40 @@ async def test_store_global_rate_limit_is_enforced_at_runtime():
 
 
 @pytest.mark.asyncio
+async def test_trusted_webhooks_are_exempt_from_generic_ip_limit():
+    """Provider webhooks authenticate via secrets/JWTs and must not 429 on bursts."""
+    from app.main import app, limiter
+
+    limiter.reset()
+    try:
+        transport = ASGITransport(app=app, client=("store-webhook-test", 123))
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            responses = [await client.get("/webhooks/whatsapp") for _ in range(70)]
+
+        assert all(response.status_code != 429 for response in responses)
+    finally:
+        limiter.reset()
+
+
+@pytest.mark.asyncio
+async def test_trusted_whatsapp_post_webhook_is_exempt_from_generic_ip_limit():
+    """Meta WhatsApp POST webhooks are signature-verified and arrive in bursts."""
+    from app.main import app, limiter
+
+    limiter.reset()
+    try:
+        transport = ASGITransport(app=app, client=("store-webhook-post-test", 123))
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            responses = [
+                await client.post("/webhooks/whatsapp", content=b"{}") for _ in range(70)
+            ]
+
+        assert all(response.status_code != 429 for response in responses)
+    finally:
+        limiter.reset()
+
+
+@pytest.mark.asyncio
 async def test_store_rejects_oversized_login_body():
     from app.main import app
     from app.request_limits import MAX_REQUEST_BODY_BYTES

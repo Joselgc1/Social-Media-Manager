@@ -112,7 +112,7 @@ SET-001-M | SET-001 | Set completo rojo | Sets | Set de ropa interior completo r
 SET-001-L | SET-001 | Set completo rojo | Sets | Set de ropa interior completo rojo | L | 35.00 | 2 | Yes |
 ```
 
-Share the sheet with the service account email (looks like `vs-chatbot-reader@your-project.iam.gserviceaccount.com`). Give it **Viewer** access.
+Share the sheet with the service account email (looks like `vs-chatbot-reader@your-project.iam.gserviceaccount.com`). Give it **Editor** access (write permission). Read-only **Viewer** access is not enough: the checkout flow writes back to this sheet (decrements the `Stock` column on confirmed orders), and the inventory mutation ledger lives in the hidden `_inventory_mutations` worksheet, so the service account must be able to write to the sheet.
 
 Copy the sheet ID from the URL (the long string between `/d/` and `/edit`). This goes in `.env` as `PRODUCT_SHEET_ID`.
 

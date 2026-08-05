@@ -399,6 +399,24 @@ AVAILABLE_MODELS = {
 VALID_ORCHESTRATION_MODES = {"legacy", "shadow", "multi_agent"}
 VALID_EXCHANGE_RATE_REFERENCES = {"usd_bcv", "eur_bcv", "usdt_binance", "manual"}
 
+FALLBACK_KEYS = {"auto_fallback", "fallback_provider", "fallback_model"}
+_LLM_PROVIDER_CREDENTIAL_KEYS = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+_DOCUMENTED_PLACEHOLDERS = {
+    "change-me",
+    "any_random_string_you_choose",
+}
+
+
+def _credential_value_is_available(value) -> bool:
+    value = (value or "").strip()
+    if not value:
+        return False
+    text = value.lower()
+    return text not in _DOCUMENTED_PLACEHOLDERS and not text.endswith("...")
+
 
 def _decode_setting_value(value):
     if isinstance(value, str):
@@ -619,6 +637,47 @@ def _normalize_runtime_fields(fields: dict, current_settings: dict) -> dict:
     return normalized
 
 
+async def _enforce_fallback_provider_availability(
+    store_id: str,
+    normalized: dict,
+    current_settings: dict,
+) -> None:
+    """Reject auto_fallback config that references a provider with no API key.
+
+    Mirrors the store-side check in store/app/admin/settings.py. Only triggers when
+    the batch actually modifies fallback configuration.
+    """
+    if not FALLBACK_KEYS.intersection(normalized):
+        return
+    auto_fallback = normalized.get("auto_fallback", current_settings.get("auto_fallback", True))
+    if not auto_fallback:
+        return
+    fallback_provider = normalized.get(
+        "fallback_provider", current_settings.get("fallback_provider", "anthropic")
+    )
+    credential_key = _LLM_PROVIDER_CREDENTIAL_KEYS.get(fallback_provider)
+    if credential_key is None:
+        return
+    rows = await db.fetch_all(
+        "SELECT key, value_encrypted FROM store_credentials WHERE store_id = :sid AND key = :key",
+        {"sid": store_id, "key": credential_key},
+    )
+    value = ""
+    if rows:
+        try:
+            value = decrypt(rows[0]["value_encrypted"])
+        except Exception as exc:
+            logger.warning("Could not decrypt credential %s for store %s: %s", credential_key, store_id, exc)
+    if not _credential_value_is_available(value):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Fallback provider '{fallback_provider}' has no configured API key "
+                f"({credential_key}). Disable auto_fallback or add the key first."
+            ),
+        )
+
+
 async def _write_store_runtime_settings(store_db: db_lib.Database, fields: dict):
     async with store_db.transaction():
         for key, value in fields.items():
@@ -836,6 +895,7 @@ async def update_store_settings(store_id: str, update: RuntimeSettingsUpdate, re
             store, store_db = await _get_store_connection(store_id)
             current_settings = await _read_store_runtime_settings(store_db)
             normalized = _normalize_runtime_fields(fields, current_settings)
+            await _enforce_fallback_provider_availability(store_id, normalized, current_settings)
             await _write_store_runtime_settings(store_db, normalized)
             await _audit("update_runtime_settings", store_id, f"Updated: {sorted(normalized.keys())}")
             return {"ok": True, "store": store["name"], "updated": sorted(normalized.keys())}

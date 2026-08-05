@@ -31,6 +31,7 @@ from app.integrations.kommo.models import SalesbotWidgetRequest
 from app.integrations.kommo.state import sync_local_state_from_ai_mode
 from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, parse_nested_form
 from app.integrations.meta_context.correlation import schedule_context_job_processing
+from app.request_limits import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks/kommo", tags=["kommo"])
@@ -41,6 +42,7 @@ class SalesbotCallbackParseError(ValueError):
 
 
 @router.post("/events/{webhook_secret}")
+@limiter.exempt
 async def handle_kommo_events(webhook_secret: str, request: Request):
     config = get_config()
     if not validate_webhook_secret(webhook_secret, config.kommo_webhook_secret):
@@ -104,6 +106,7 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
 
 
 @router.post("/salesbot")
+@limiter.exempt
 async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTasks):
     config = get_config()
     try:

@@ -16,6 +16,7 @@ from app.ai.engine import generate_response
 from app.channels.whatsapp_sender import mark_as_read, send_document, send_image, send_interactive_buttons, send_text
 from app.config import get_config
 from app.crm import conversations
+from app.request_limits import limiter
 from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
 from app.webhooks.meta_security import verify_meta_signature
 
@@ -41,6 +42,7 @@ async def _notify_delivery_failure(sender: str, detail: str):
 # ── Webhook verification (GET) ───────────────────────────────
 
 @router.get("/webhooks/whatsapp")
+@limiter.exempt
 async def verify_whatsapp(request: Request):
     """
     Meta sends a GET request to verify your webhook URL.
@@ -62,6 +64,7 @@ async def verify_whatsapp(request: Request):
 # ── Incoming messages (POST) ─────────────────────────────────
 
 @router.post("/webhooks/whatsapp")
+@limiter.exempt
 async def handle_whatsapp(request: Request):
     """
     Receive and process incoming WhatsApp messages.

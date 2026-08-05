@@ -340,20 +340,28 @@ class AgentRunner:
             logger.error(f"Primary provider ({provider_name}) failed: {e}")
             if not settings.get("auto_fallback", True):
                 raise
-
-        fallback_name = settings.get("fallback_provider", "anthropic")
-        fallback_model = settings.get("fallback_model", "claude-haiku-4-5")
-        logger.info(f"Falling back to {fallback_name}/{fallback_model}")
-        fallback_provider = self._get_provider(fallback_name)
-        response = await fallback_provider.chat(
-            model=fallback_model,
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=tool_schemas,
-            temperature=_temperature(settings, agent),
-            max_tokens=settings.get("llm_max_tokens", 500),
-        )
-        return fallback_name, fallback_model, fallback_provider, True, response
+            fallback_name = settings.get("fallback_provider", "anthropic")
+            fallback_model = settings.get("fallback_model", "claude-haiku-4-5")
+            if fallback_name not in available:
+                logger.error(
+                    f"Fallback provider '{fallback_name}' is not available; re-raising primary error"
+                )
+                raise
+            logger.info(f"Falling back to {fallback_name}/{fallback_model}")
+            fallback_provider = self._get_provider(fallback_name)
+            try:
+                response = await fallback_provider.chat(
+                    model=fallback_model,
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=tool_schemas,
+                    temperature=_temperature(settings, agent),
+                    max_tokens=settings.get("llm_max_tokens", 500),
+                )
+            except Exception as ex:
+                logger.error(f"Fallback provider ({fallback_name}) failed: {ex}")
+                raise
+            return fallback_name, fallback_model, fallback_provider, True, response
 
 
 def format_tool_result_for_model(tool_name: str, result: dict) -> str:

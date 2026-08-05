@@ -11,6 +11,7 @@ from app.integrations.meta_context.service import (
     process_context_event,
     store_context_event,
 )
+from app.request_limits import limiter
 from app.webhooks.meta_security import verify_meta_signature
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ router = APIRouter(prefix="/webhooks/meta", tags=["meta-instagram-context"])
 
 
 @router.get("/instagram-context")
+@limiter.exempt
 async def verify_instagram_context(request: Request):
     config = get_config()
     mode = request.query_params.get("hub.mode")
@@ -34,6 +36,7 @@ async def verify_instagram_context(request: Request):
 
 
 @router.post("/instagram-context")
+@limiter.exempt
 async def handle_instagram_context(request: Request, background_tasks: BackgroundTasks):
     config = get_config()
     body = await request.body()

@@ -16,7 +16,7 @@ from app import db
 from app.admin.auth import require_admin
 from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
 from app.admin.telegram_bot import setup_telegram_webhook
-from app.ai.providers import AVAILABLE_MODELS, get_model_costs
+from app.ai.providers import AVAILABLE_MODELS, get_model_costs, list_providers
 from app.catalog.pdf_generator import (
     PDF_PATH,
     ensure_catalog_pdf,
@@ -255,6 +255,31 @@ def _validate_setting_value(key: str, value, current_settings: dict):
     return value
 
 
+FALLBACK_KEYS = {"auto_fallback", "fallback_provider", "fallback_model"}
+
+
+def _validate_auto_fallback_configuration(current_settings: dict) -> None:
+    """Reject auto_fallback=True that silently references a provider without an API key.
+
+    Availability reflects the runtime-initialized provider instances. When none are
+    initialized yet (e.g. unit tests that never called init_providers) the check is
+    skipped so local/test flows are not spuriously rejected.
+    """
+    if not current_settings.get("auto_fallback"):
+        return
+    fallback_provider = current_settings.get("fallback_provider", "anthropic")
+    available = set(list_providers())
+    if available and fallback_provider not in available:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Fallback provider '{fallback_provider}' is not available "
+                f"(no API key configured). Available providers: {sorted(available)}. "
+                "Disable auto_fallback or pick an available fallback provider."
+            ),
+        )
+
+
 # ── Endpoints ────────────────────────────────────────────────
 
 async def _apply_settings_batch(raw_settings: dict) -> dict:
@@ -285,6 +310,9 @@ async def _apply_settings_batch(raw_settings: dict) -> dict:
             raise HTTPException(status_code=400, detail=f"Invalid value for setting '{key}'.") from e
         validated[key] = value
         current_settings[key] = value
+
+    if FALLBACK_KEYS.intersection(raw_settings):
+        _validate_auto_fallback_configuration(current_settings)
 
     async with db.get_db().transaction():
         await db.execute(

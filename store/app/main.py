@@ -13,10 +13,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import db
@@ -38,7 +37,7 @@ from app.catalog.sheets import (
 )
 from app.config import get_config
 from app.log_redaction import install_secret_redaction_filter
-from app.request_limits import RequestBodyLimitMiddleware
+from app.request_limits import RequestBodyLimitMiddleware, limiter
 from app.test_endpoint import router as test_router
 
 # ── Logging ──────────────────────────────────────────────────
@@ -52,7 +51,8 @@ logger = logging.getLogger(__name__)
 
 # ── Rate limiter ─────────────────────────────────────────────
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+# Shared limiter used by middleware and webhook @limiter.exempt decorators.
+# See app/request_limits.py for details.
 
 _DOCUMENTED_PLACEHOLDERS = {
     "change-me",

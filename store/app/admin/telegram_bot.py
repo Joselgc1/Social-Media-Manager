@@ -39,6 +39,7 @@ from app.crm import orders
 from app.crm.customers import add_tags, remove_tag
 from app.exchange_rates import format_rate_for_customer, selected_exchange_rate
 from app.log_redaction import install_secret_redaction_filter
+from app.request_limits import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -47,6 +48,7 @@ router = APIRouter()
 # -- Webhook endpoint ------------------------------------------------
 
 @router.post("/webhooks/telegram")
+@limiter.exempt
 async def handle_telegram(request: Request):
     """
     Receive Telegram updates via webhook.
