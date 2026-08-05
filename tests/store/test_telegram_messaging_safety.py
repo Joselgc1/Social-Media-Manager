@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from app.crm import orders
 
 
 @pytest.fixture
@@ -95,6 +96,116 @@ def test_split_message_returns_empty_for_blank_text():
 
     assert split_message("") == []
     assert split_message("   \n ") == []
+
+
+def _assert_safe_chunks(chunks, text):
+    """Every chunk is non-empty, <=4096 chars, content-preserving,
+    and never ends directly after a dangling Markdown escape character."""
+    assert chunks
+    assert all(chunk for chunk in chunks)
+    assert all(len(chunk) <= 4096 for chunk in chunks)
+    assert "".join(chunks) == text
+    assert all(not chunk.endswith("\\") for chunk in chunks)
+
+
+def test_split_message_never_cuts_after_dangling_escape():
+    from app.admin.telegram_sender import split_message
+
+    # The escape character lands exactly on the 4096 boundary; the safe cut
+    # must move before it so no chunk ends with a dangling backslash.
+    text = ("a" * 4095) + "\\*" + ("b" * 100)
+    chunks = split_message(text)
+
+    _assert_safe_chunks(chunks, text)
+    assert chunks[0] == "a" * 4095
+    assert chunks[1].startswith("\\*")
+
+
+def test_split_message_avoids_cut_inside_bold_span():
+    from app.admin.telegram_sender import split_message
+
+    # Bold opener is inside the window but its closer falls after the limit.
+    text = ("a" * 4090) + "*negrita*" + ("b" * 50)
+    chunks = split_message(text)
+
+    _assert_safe_chunks(chunks, text)
+    assert chunks[0] == "a" * 4090
+    assert chunks[0].count("*") == 0
+    assert chunks[1].count("*") == 2
+
+
+def test_split_message_avoids_cut_inside_code_span():
+    from app.admin.telegram_sender import split_message
+
+    text = ("a" * 4090) + "`codigo`" + ("b" * 50)
+    chunks = split_message(text)
+
+    _assert_safe_chunks(chunks, text)
+    assert chunks[0] == "a" * 4090
+    assert chunks[1].startswith("`codigo`")
+
+
+def test_split_message_avoids_cut_inside_link():
+    from app.admin.telegram_sender import split_message
+
+    # The closing paren of the link falls after the limit, so the cut must
+    # move back to a position with balanced brackets/parens.
+    text = ("a" * 4000) + "[t](https://example.com/" + ("x" * 90) + ")"
+    chunks = split_message(text)
+
+    _assert_safe_chunks(chunks, text)
+    assert chunks[0] == "a" * 4000 + "[t]"
+    assert chunks[1].startswith("(https://example.com/")
+
+
+def test_split_message_ignores_escaped_markers_when_checking_balance():
+    from app.admin.telegram_sender import split_message
+
+    # Escaped markers (from escape_markdown) are literal text; cutting inside
+    # them is safe, so the cut must NOT retreat before the escape pair.
+    text = ("a" * 4090) + "\\*literal\\*" + ("b" * 100)
+    chunks = split_message(text)
+
+    _assert_safe_chunks(chunks, text)
+    assert chunks[0].startswith("a" * 4090)
+    assert "\\*" in chunks[0]
+    assert len(chunks[0]) == 4096
+
+
+def test_split_message_moves_cut_before_unbalanced_newline():
+    from app.admin.telegram_sender import split_message
+
+    # A newline sits inside a bold span; the preferred newline cut would
+    # split the span, so the cut must move before its opener.
+    text = ("a" * 4000) + "*n\n e*" + ("b" * 4000)
+    chunks = split_message(text)
+
+    assert chunks[0] == "a" * 4000
+    assert chunks[1].startswith("*n")
+    _assert_safe_chunks(chunks, text)
+
+
+def test_split_message_keeps_exact_4096_chunks_for_plain_text():
+    from app.admin.telegram_sender import split_message
+
+    text = "x" * 8692
+    chunks = split_message(text)
+
+    assert [len(chunk) for chunk in chunks] == [4096, 4096, 500]
+    _assert_safe_chunks(chunks, text)
+
+
+def test_split_message_forced_cut_pathological_span_still_progresses():
+    from app.admin.telegram_sender import split_message
+
+    # A single bold span longer than the whole window cannot be balanced
+    # without a parser; it must still make progress with valid chunk sizes
+    # and no empty chunks (protected against infinite loops).
+    text = "*" + ("y" * 5000) + "*"
+    chunks = split_message(text)
+
+    _assert_safe_chunks(chunks, text)
+    assert chunks[0] == "*" + ("y" * 4095)
 
 
 # -- Central sender ------------------------------------------------------
@@ -312,6 +423,72 @@ async def test_cmd_update_order_usage_lists_all_valid_statuses():
     assert "Uso: /order ID STATUS" in result
     for status in telegram_bot._VALID_ORDER_STATUSES:
         assert status in result
+
+
+def test_cmd_update_order_statuses_match_authoritative_order_service():
+    from app.admin import telegram_bot
+    from app.crm import orders
+
+    expected = orders.VALID_PAYMENT_STATUSES | orders.VALID_SHIPPING_STATUSES
+    assert expected == telegram_bot._VALID_ORDER_STATUSES
+    assert {"pending", "proof_received", "confirmed", "failed", "rejected"} <= expected
+    assert {"pending", "shipped", "delivered"} <= expected
+    assert "rejected" in expected
+
+
+_ORDER_ID = "abc12345-1111-2222-3333-444444444444"
+
+
+@pytest.mark.parametrize("status", sorted(orders.VALID_PAYMENT_STATUSES))
+@pytest.mark.asyncio
+async def test_cmd_update_order_routes_each_authoritative_payment_status(status):
+    from app.admin import telegram_bot
+
+    update_payment = AsyncMock()
+    with (
+        patch.object(telegram_bot.db, "fetch_one", AsyncMock(return_value={"id": _ORDER_ID})),
+        patch.object(telegram_bot.orders, "update_order_payment_status", update_payment),
+    ):
+        result = await telegram_bot._cmd_update_order(f"abc1 {status}")
+
+    # The status is Markdown-escaped in the reply, so underscores are doubled.
+    assert f"actualizado a *{status.replace('_', '\\_')}*" in result
+    update_payment.assert_awaited_once_with(_ORDER_ID, status=status)
+
+
+@pytest.mark.asyncio
+async def test_cmd_update_order_pending_routes_to_payment_status():
+    from app.admin import telegram_bot
+
+    # "pending" belongs to both authoritative sets; the command resolves the
+    # ambiguity toward payment status (pre-existing /order semantics).
+    update_payment = AsyncMock()
+    update_shipping = AsyncMock()
+    with (
+        patch.object(telegram_bot.db, "fetch_one", AsyncMock(return_value={"id": _ORDER_ID})),
+        patch.object(telegram_bot.orders, "update_order_payment_status", update_payment),
+        patch.object(telegram_bot.orders, "update_order_shipping", update_shipping),
+    ):
+        await telegram_bot._cmd_update_order("abc1 pending")
+
+    update_payment.assert_awaited_once_with(_ORDER_ID, status="pending")
+    update_shipping.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", sorted(orders.VALID_SHIPPING_STATUSES - orders.VALID_PAYMENT_STATUSES))
+@pytest.mark.asyncio
+async def test_cmd_update_order_routes_each_authoritative_shipping_status(status):
+    from app.admin import telegram_bot
+
+    update_shipping = AsyncMock()
+    with (
+        patch.object(telegram_bot.db, "fetch_one", AsyncMock(return_value={"id": _ORDER_ID})),
+        patch.object(telegram_bot.orders, "update_order_shipping", update_shipping),
+    ):
+        result = await telegram_bot._cmd_update_order(f"abc1 {status}")
+
+    assert f"actualizado a *{status.replace('_', '\\_')}*" in result
+    update_shipping.assert_awaited_once_with(_ORDER_ID, shipping_status=status)
 
 
 # -- /customers handler --------------------------------------------------

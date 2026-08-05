@@ -38,8 +38,13 @@ def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
     """
     Split a message into chunks no longer than `max_length`.
 
-    Prefers to break on newlines so paragraph formatting survives. Returns an
-    empty list for empty/whitespace-only input.
+    Prefers to break on newlines so paragraph formatting survives. Cut points
+    are additionally checked for Markdown balance (unescaped `*`, `_`, `` ` ``
+    markers in pairs, and `[`/`]`, `(`/`)` pairs) and for dangling escape
+    characters, so a chunk never opens bold/code/link syntax that it cannot
+    close. Messages shorter than `max_length` are returned untouched, so
+    normal short messages keep their formatting exactly. Returns an empty
+    list for empty/whitespace-only input.
     """
     text = str(text or "")
     if not text.strip():
@@ -50,14 +55,55 @@ def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
     chunks: list[str] = []
     remaining = text
     while len(remaining) > max_length:
-        cut = remaining.rfind("\n", 0, max_length + 1)
-        if cut <= 0:
-            cut = max_length
+        cut = _safe_cut_point(remaining, max_length)
         chunks.append(remaining[:cut].rstrip("\n"))
         remaining = remaining[cut:].lstrip("\n")
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def _safe_cut_point(text: str, max_length: int) -> int:
+    """
+    Return a Markdown-safe cut position within `text` (1..max_length).
+
+    Prefers the last newline inside the window, then walks to the last
+    position whose prefix is Markdown-balanced: every unescaped `*`, `_`,
+    and `` ` `` occurs in pairs and `[`/`]` plus `(`/`)` counts match.
+    Escaped characters are skipped so cuts directly after a dangling escape
+    are never produced. Falls back to `max_length` when the whole window is
+    unbalanced (a single span longer than the window cannot be balanced
+    without a parser; this cannot occur with the bot's template messages).
+    """
+    preferred = text.rfind("\n", 0, max_length + 1)
+    if preferred <= 0:
+        preferred = max_length
+
+    counts = {"*": 0, "_": 0, "`": 0, "[": 0, "]": 0, "(": 0, ")": 0}
+    last_balanced = 0
+    i = 0
+    while i < preferred:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            if i > preferred:
+                break
+            continue
+        if ch in counts:
+            counts[ch] += 1
+        i += 1
+        if (
+            i <= preferred
+            and text[i - 1] != "\\"
+            and counts["*"] % 2 == 0
+            and counts["_"] % 2 == 0
+            and counts["`"] % 2 == 0
+            and counts["["] == counts["]"]
+            and counts["("] == counts[")"]
+        ):
+            last_balanced = i
+
+    return last_balanced if last_balanced > 0 else preferred
 
 
 async def send_message(text: str, parse_mode: str = "Markdown") -> bool:
