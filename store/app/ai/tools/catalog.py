@@ -26,15 +26,21 @@ async def check_inventory(args: dict) -> dict:
             "sku": product.get("sku"),
             "parent_sku": product.get("parent_sku"),
             "product_name": product.get("product_name"),
+            "brand": product.get("brand"),
             "category": product.get("category"),
             "sizes": product.get("sizes"),
+            "presentations": product.get("presentations"),
             "price_usd": product.get("price_usd"),
+            "price_min_usd": product.get("price_min_usd"),
+            "price_max_usd": product.get("price_max_usd"),
+            "has_variant_prices": bool(product.get("has_variant_prices")),
             "in_stock": int(product.get("stock", 0)) > 0,
             "has_image": bool(product.get("image_url")),
             "size_skus": product.get("size_skus", {}),
             "variants": [
                 {
                     "sku": variant.get("sku"),
+                    "brand": variant.get("brand"),
                     "size": variant.get("size"),
                     "price_usd": variant.get("price_usd"),
                     "in_stock": bool(variant.get("in_stock")),
@@ -76,16 +82,20 @@ async def send_product_image(args: dict) -> dict:
             "message": "No image is available for that product in the catalog.",
         }
 
-    return {
+    payload = {
         "type": "product_image",
         "image_url": product_with_image["image_url"],
         "caption": args.get("caption", "").strip(),
         "product_name": product_with_image.get("product_name", ""),
     }
+    brand = str(product_with_image.get("brand", "") or "").strip()
+    if brand:
+        payload["brand"] = brand
+    return payload
 
 
 def find_catalog_matches(product_query: str, size_filter: str | None = None) -> list[dict]:
-    """Find catalog rows matching a product query and optional size."""
+    """Find catalog rows matching a product query and optional presentation/size."""
     query = normalize_catalog_text(product_query)
     if not query:
         return []
@@ -94,6 +104,7 @@ def find_catalog_matches(product_query: str, size_filter: str | None = None) -> 
         term for term in query.split()
         if len(term) > 1 and term not in {"de", "la", "el", "los", "las", "un", "una", "del"}
     ]
+    normalized_size = " ".join(str(size_filter or "").strip().upper().split())
 
     matches = []
     for product in get_cached_catalog():
@@ -101,6 +112,7 @@ def find_catalog_matches(product_query: str, size_filter: str | None = None) -> 
             str(product.get("sku", "")),
             str(product.get("parent_sku", "")),
             str(product.get("product_name", "")),
+            str(product.get("brand", "")),
             str(product.get("category", "")),
             str(product.get("description", "")),
             str(product.get("size", "")),
@@ -110,9 +122,9 @@ def find_catalog_matches(product_query: str, size_filter: str | None = None) -> 
         if query not in searchable and (not query_terms or not all(term in searchable for term in query_terms)):
             continue
 
-        if size_filter:
+        if normalized_size:
             available_sizes = get_product_sizes(product)
-            if size_filter.upper() not in available_sizes:
+            if normalized_size not in available_sizes:
                 continue
 
         matches.append(product)
