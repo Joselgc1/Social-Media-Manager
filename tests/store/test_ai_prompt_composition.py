@@ -6,7 +6,7 @@ from app.ai import prompts
 
 def _context(**overrides) -> prompts.PromptContext:
     values = {
-        "catalog_markdown": "| Producto | Categoría | Tallas disponibles | Precio (USD) | Disponibilidad |\n| Pijama satén azul | Pijamas | S,M | $28.00 | Disponible |",
+        "catalog_markdown": "| Producto | Marca | Categoría | Presentaciones/opciones | Precio (USD) | Disponibilidad |\n| Pijama satén azul | Victoria's Secret | Pijamas | S,M | $28.00 | Disponible |",
         "store_name": "Tienda Rosa",
         "channel": "whatsapp",
         "customer": None,
@@ -190,7 +190,7 @@ def test_instagram_prompts_enforce_informational_channel_policy(prompt_name):
     assert "pagos@example.com" not in prompt
     assert "Nombre confirmado para saludar: Luisana" in prompt
     assert "Intereses: pajamas" in prompt
-    assert "Tallas: M" in prompt
+    assert "Tallas de ropa conocidas: M" in prompt
     assert "Ciudad: caracas" in prompt
     assert "Cliente VIP" in prompt
     assert "Av Vieja, Casa 8" not in prompt
