@@ -26,7 +26,6 @@ PDF_PATH = _CATALOG_DIR / "catalog.pdf"
 META_PATH = _CATALOG_DIR / "catalog_meta.json"
 _GENERATION_LOCK = Lock()
 
-# Brand palette (RGB)
 _PINK = (208, 93, 140)
 _PINK_LIGHT = (245, 220, 235)
 _DARK = (40, 40, 40)
@@ -168,7 +167,7 @@ def _render_category(pdf: FPDF, category: str, products: list[dict]) -> None:
         price_str = _price_text(product.get("price_usd"))
         name = str(product.get("product_name", ""))[:40]
         brand = str(product.get("brand", ""))[:24]
-        presentation = str(product.get("presentation", ""))[:26]
+        presentation = str(product.get("presentation") or product.get("sizes", ""))[:26]
         pdf.set_font("Helvetica", "", 7)
         _row(pdf, name, brand, presentation, price_str, fill=True)
         pdf.set_text_color(*_DARK)
@@ -214,24 +213,27 @@ def _build_public_catalog_rows(catalog: list[dict]) -> list[dict]:
     for product in group_catalog_products(catalog):
         base = {
             "product_name": product.get("product_name", ""),
-            "brand": product.get("brand", ""),
             "category": product.get("category", ""),
             "description": product.get("description", ""),
             "image_url": product.get("image_url", ""),
         }
+        brand = str(product.get("brand", "") or "").strip()
+        if brand:
+            base["brand"] = brand
+
         if product.get("has_variant_prices"):
             for variant in product.get("variants", []):
                 if not variant.get("in_stock"):
                     continue
                 public_rows.append({
                     **base,
-                    "presentation": variant.get("size", ""),
+                    "sizes": variant.get("size", ""),
                     "price_usd": variant.get("price_usd", 0),
                 })
         else:
             public_rows.append({
                 **base,
-                "presentation": product.get("presentations", ""),
+                "sizes": product.get("presentations", ""),
                 "price_usd": product.get("price_usd", 0),
             })
     return public_rows
