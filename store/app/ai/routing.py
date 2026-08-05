@@ -4,6 +4,7 @@ Deterministic routing contract for future multi-agent orchestration.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -98,6 +99,14 @@ def decide_route(
                 confidence=0.9,
                 source="channel_policy",
                 reason="La cliente rechazó el cambio de canal o cerró la conversación.",
+            )
+        if _looks_like_instagram_transaction_decline(normalized):
+            return RouteDecision(
+                route="sales",
+                intent="product_decline",
+                confidence=0.9,
+                source="channel_policy",
+                reason="La cliente rechazó la compra o el producto actual.",
             )
         if active_agent == "checkout":
             return RouteDecision(
@@ -230,54 +239,87 @@ def _looks_like_purchase_intent(normalized: str) -> bool:
 
 
 def _looks_like_transaction_intent(normalized: str) -> bool:
-    if _looks_like_purchase_intent(normalized):
-        return True
-    transaction_markers = (
-        "finalizar compra",
-        "completar compra",
-        "confirmar compra",
-        "confirmar pedido",
-        "hacer checkout",
-        "datos para pagar",
-        "datos de pago",
-        "como pago",
-        "como puedo pagar",
-        "pasame el zelle",
-        "pago movil",
-        "pago con",
-        "te paso la direccion",
-        "enviar a mi direccion",
-        "mandalo por mrw",
-        "mandalo por zoom",
-        "retiro en agencia",
-        "mi agencia es",
+    positive_patterns = (
+        r"\bquiero\s+comprar(?:lo|la)?\b",
+        r"\bquiero\s+pedir\b",
+        r"\bquiero\s+llevar\b",
+        r"\bquiero\s+(?:ese|esa)\b",
+        r"\b(?:lo|la)\s+quiero\b",
+        r"\bme\s+(?:(?:lo|la)\s+)?llevo\b",
+        r"\b(?:lo|la)\s+compro\b",
+        r"\bcomprame\b",
+        r"\barmame\s+el\s+pedido\b",
+        r"\b(?:hacer|crear|confirmar)\s+(?:el\s+)?pedido\b",
+        r"\bconfirm(?:o|ar)\s+(?:la\s+)?compra\b",
+        r"\b(?:finalizar|completar)\s+(?:la\s+)?compra\b",
+        r"\bhacer\s+checkout\b",
+        r"\bte\s+paso\s+(?:mi|la)\s+direccion\b",
+        r"\bmi\s+direccion\s+es\b",
+        r"\benviar\s+a\s+mi\s+direccion\b",
+        r"\b(?:voy\s+a|quiero|para)\s+pagar\b",
+        r"\bcomo\s+(?:puedo\s+)?pago\b",
+        r"\bcomo\s+(?:puedo\s+)?pagar\b",
+        r"\bdatos\s+(?:para\s+pagar|de\s+pago)\b",
+        r"\bpasame\s+el\s+zelle\b",
+        r"\bpago\s+(?:movil|con)\b",
+        r"\bmandalo\s+por\s+(?:mrw|zoom)\b",
+        r"\bretiro\s+en\s+agencia\b",
+        r"\bmi\s+agencia\s+es\b",
     )
-    return any(marker in normalized for marker in transaction_markers)
+    return _has_unnegated_phrase(normalized, positive_patterns)
 
 
 def _looks_like_pdf_catalog_request(normalized: str) -> bool:
-    if "catalogo" not in normalized and "pdf" not in normalized:
+    words = _routing_words(normalized)
+    if "catalogo" not in words and "pdf" not in words:
         return False
-    request_markers = (
-        "mandame",
-        "me mandas",
-        "pasame",
-        "me pasas",
-        "enviame",
-        "me envias",
-        "quiero ver",
-        "quiero recibir",
-        "quiero el",
-        "quiero la",
-        "muestrame",
-        "dame",
+    delivery_patterns = (
+        r"\b(?:mandame|pasame|enviame|muestrame|dame)\s+(?:(?:el|la)\s+)?(?:catalogo|pdf|inventario\s+pdf)\b",
+        r"\bme\s+(?:mandas|pasas|envias)\s+(?:(?:el|la)\s+)?(?:catalogo|pdf|inventario\s+pdf)\b",
+        r"\bquiero\s+(?:ver|recibir)\s+(?:(?:el|la)\s+)?(?:catalogo|pdf|inventario\s+pdf)\b",
+        r"\bquiero\s+(?:(?:el|la)\s+)(?:catalogo|pdf)\b",
     )
-    return any(marker in normalized for marker in request_markers)
+    return any(re.search(pattern, words) for pattern in delivery_patterns)
 
 
 def _looks_like_handoff_decline_or_close(normalized: str) -> bool:
-    close_markers = ("no gracias", "ya no", "no quiero", "dejalo", "olvida", "tranqui", "gracias")
-    return any(marker in normalized for marker in close_markers)
+    words = _routing_words(normalized)
+    standalone_patterns = (
+        r"(?:no\s+)?gracias",
+        r"tranqui(?:\s+gracias)?",
+        r"ya\s+no(?:\s+gracias)?",
+        r"dejalo(?:\s+gracias)?",
+        r"olvida(?:lo)?(?:\s+gracias)?",
+        r"(?:ya\s+)?no\s+quiero\s+comprar(?:lo|la)?(?:\s+gracias)?",
+        r"no\s+(?:lo|la)\s+quiero(?:\s+gracias)?",
+        r"no\s+quiero\s+(?:ese|esa)(?:\s+gracias)?",
+    )
+    return any(re.fullmatch(pattern, words) for pattern in standalone_patterns)
+
+
+def _looks_like_instagram_transaction_decline(normalized: str) -> bool:
+    words = _routing_words(normalized)
+    decline_patterns = (
+        r"\b(?:ya\s+)?no\s+quiero\s+comprar(?:lo|la)?\b",
+        r"\bno\s+quiero\s+(?:ese|esa)\b",
+        r"\bno\s+(?:lo|la)\s+quiero\b",
+    )
+    return any(re.search(pattern, words) for pattern in decline_patterns)
+
+
+def _has_unnegated_phrase(normalized: str, patterns: tuple[str, ...]) -> bool:
+    words = _routing_words(normalized)
+    for pattern in patterns:
+        for match in re.finditer(pattern, words):
+            prefix = words[:match.start()]
+            if re.search(r"(?:^|\s)(?:ya\s+)?no\s*$", prefix):
+                continue
+            return True
+    return False
+
+
+def _routing_words(normalized: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
 
 
 def _looks_like_support_followup(normalized: str) -> bool:

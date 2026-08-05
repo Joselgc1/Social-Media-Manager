@@ -265,7 +265,7 @@ async def test_informational_catalog_question_on_instagram_does_not_handoff(monk
     )
     h = TranscriptHarness(monkeypatch, provider=provider)
 
-    response = await h.run("¿Qué productos hay en el catálogo?", channel="instagram")
+    response = await h.run("Quiero ver qué productos hay en el catálogo", channel="instagram")
 
     assert h.selected_agent() == "sales"
     assert response["whatsapp_handoff"] is None

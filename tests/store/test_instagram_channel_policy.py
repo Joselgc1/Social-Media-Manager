@@ -118,6 +118,23 @@ def test_instagram_transactional_intent_overrides_courtesy_or_decline_words(mess
 
 
 @pytest.mark.parametrize(
+    ("message", "expected_route"),
+    [
+        ("Gracias, ¿qué tallas tienen?", "sales"),
+        ("Gracias, ¿cuánto cuesta?", "sales"),
+        ("Gracias, ¿tienes foto?", "sales"),
+        ("Gracias, ¿cuál es el estado de mi pedido?", "support"),
+    ],
+)
+def test_instagram_courtesy_does_not_override_informational_or_support_intent(message, expected_route):
+    decision = decide_route(message, channel="instagram")
+
+    assert decision.route == expected_route
+    assert decision.intent != "conversation_close"
+    assert decision.intent != "instagram_whatsapp_handoff"
+
+
+@pytest.mark.parametrize(
     "message",
     ["No gracias", "Gracias", "Tranqui, gracias", "Ya no, gracias", "Déjalo"],
 )
@@ -130,6 +147,24 @@ def test_instagram_standalone_decline_or_close_does_not_handoff(message):
 
     assert decision.route == "sales"
     assert decision.intent == "conversation_close"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "No quiero comprar, gracias",
+        "Ya no quiero comprar",
+        "No quiero ese, ¿qué otro tienes?",
+        "No quiero esa, muéstrame otra",
+        "No lo quiero",
+        "No la quiero",
+    ],
+)
+def test_instagram_negated_purchase_intent_does_not_handoff(message):
+    decision = decide_route(message, channel="instagram")
+
+    assert decision.route == "sales"
+    assert decision.intent != "instagram_whatsapp_handoff"
 
 
 @pytest.mark.parametrize(
@@ -154,6 +189,8 @@ def test_instagram_catalog_delivery_requests_select_handoff(message):
     "message",
     [
         "¿Qué productos hay en el catálogo?",
+        "Quiero ver qué productos hay en el catálogo",
+        "Quiero ver qué tallas tienen en el catálogo",
         "¿Qué categorías tiene el catálogo?",
         "¿Tienen pijamas en el catálogo?",
         "¿Qué tallas aparecen en el catálogo?",
