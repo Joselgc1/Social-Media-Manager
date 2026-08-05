@@ -18,5 +18,6 @@ class ToolExecutionContext:
     vision_result: dict[str, Any] | None = None
     payment_proof_attempt: bool = False
     latest_user_message: str = ""
+    store_phone_number: str = ""
     session: Any | None = None
     integration_context: dict[str, Any] | None = None

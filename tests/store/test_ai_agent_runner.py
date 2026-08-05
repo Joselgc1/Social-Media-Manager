@@ -9,12 +9,16 @@ from app.ai.registry import AgentRegistry, get_agent_registry
 from app.ai.runner import AgentRunContext, AgentRunner
 
 
-def _context() -> AgentRunContext:
+def _context(**overrides) -> AgentRunContext:
+    values = {
+        "customer": {"id": "customer-1", "display_name": "Luisana Perez"},
+        "channel": "whatsapp",
+        "payment_methods": [],
+        "latest_user_message": "Hola",
+    }
+    values.update(overrides)
     return AgentRunContext(
-        customer={"id": "customer-1", "display_name": "Luisana Perez"},
-        channel="whatsapp",
-        payment_methods=[],
-        latest_user_message="Hola",
+        **values,
     )
 
 
@@ -236,3 +240,102 @@ async def test_escalation_tool_sets_result_flags(monkeypatch):
 
     assert result.requested_handoff is True
     assert result.escalated is True
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_handoff_payload_removes_duplicate_model_url(monkeypatch):
+    url = "https://wa.me/584121234567?text=Hola%20Instagram"
+    customer_text = f"Continuamos las compras por WhatsApp:\n{url}"
+    provider = _provider(LLMResponse(tool_calls=[_tool_call(
+        "send_whatsapp_handoff",
+        {"handoff_reason": "purchase"},
+    )]))
+    provider.continue_after_tool.return_value = LLMResponse(text=f"Claro. {customer_text} {url}")
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: provider)
+    monkeypatch.setattr("app.ai.runner.execute_tool", AsyncMock(return_value={
+        "type": "whatsapp_handoff",
+        "url": url,
+        "customer_text": customer_text,
+        "prefilled_message": "Hola Instagram",
+    }))
+
+    result = await AgentRunner().run(
+        LEGACY_AGENT,
+        "prompt",
+        [],
+        _settings(),
+        _context(channel="instagram", store_phone_number="+58 412 1234567"),
+    )
+
+    assert result.whatsapp_handoff["url"] == url
+    assert result.text.count(url) == 1
+    assert result.text.count(customer_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_handoff_executes_backend_tool_when_model_omits_it(monkeypatch):
+    url = "https://wa.me/584121234567?text=Hola%20Instagram"
+    provider = _provider(LLMResponse(text="Claro, te ayudo con eso."))
+    execute_tool = AsyncMock(return_value={
+        "type": "whatsapp_handoff",
+        "url": url,
+        "customer_text": f"Continuamos las compras por WhatsApp:\n{url}",
+        "prefilled_message": "Hola Instagram",
+    })
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: provider)
+    monkeypatch.setattr("app.ai.runner.execute_tool", execute_tool)
+
+    result = await AgentRunner().run(
+        LEGACY_AGENT,
+        "prompt",
+        [],
+        _settings(),
+        _context(
+            channel="instagram",
+            store_phone_number="+58 412 1234567",
+            required_whatsapp_handoff_reason="purchase",
+        ),
+    )
+
+    execute_tool.assert_awaited_once_with(
+        "send_whatsapp_handoff",
+        {"handoff_reason": "purchase"},
+        execute_tool.await_args.args[2],
+    )
+    assert result.text.count(url) == 1
+    assert result.tool_log[-1]["name"] == "send_whatsapp_handoff"
+
+
+@pytest.mark.asyncio
+async def test_required_handoff_prefers_url_text_over_interactive_payload(monkeypatch):
+    url = "https://wa.me/584121234567?text=Hola%20Instagram"
+    provider = _provider(LLMResponse(tool_calls=[_tool_call(
+        "send_interactive_buttons",
+        {"body_text": "¿Quieres continuar?", "buttons": ["Sí", "No"]},
+    )]))
+    provider.continue_after_tool.return_value = LLMResponse(text="Claro.")
+    execute_tool = AsyncMock(side_effect=[
+        {"type": "interactive_buttons", "body_text": "¿Quieres continuar?", "buttons": ["Sí", "No"]},
+        {
+            "type": "whatsapp_handoff",
+            "url": url,
+            "customer_text": f"Continuamos las compras por WhatsApp:\n{url}",
+            "prefilled_message": "Hola Instagram",
+        },
+    ])
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: provider)
+    monkeypatch.setattr("app.ai.runner.execute_tool", execute_tool)
+
+    result = await AgentRunner().run(
+        LEGACY_AGENT,
+        "prompt",
+        [],
+        _settings(),
+        _context(channel="instagram", required_whatsapp_handoff_reason="purchase"),
+    )
+
+    assert result.interactive is None
+    assert result.text.count(url) == 1

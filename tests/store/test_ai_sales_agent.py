@@ -68,6 +68,7 @@ def test_sales_tool_allowlist_is_smaller_than_legacy_checkout_tools():
         "check_inventory",
         "tag_customer",
         "send_catalog_pdf",
+        "send_whatsapp_handoff",
         "send_product_image",
         "send_interactive_buttons",
         "request_agent_handoff",

@@ -36,6 +36,7 @@ _HANDLERS: dict[str, ToolHandler] = {
     "escalate_to_human": messaging.escalate_to_human,
     "send_interactive_buttons": messaging.send_interactive_buttons,
     "send_catalog_pdf": messaging.send_catalog_pdf,
+    "send_whatsapp_handoff": messaging.send_whatsapp_handoff,
     "send_product_image": _send_product_image,
     "request_agent_handoff": messaging.request_agent_handoff,
     "update_checkout_draft": checkout.update_checkout_draft,

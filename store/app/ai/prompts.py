@@ -345,9 +345,13 @@ def _build_channel_context(channel: str, catalog_pdf_supported: bool | None = No
             "direcciones, agencias de entrega ni métodos de pago para un pedido. "
             "No proceses comprobantes, no proporciones datos o instrucciones de pago y no hagas handoff interno "
             "a Checkout ni Payment. Cuando la cliente claramente quiera comprar, pagar, hacer un pedido o recibir "
-            "el catálogo PDF, explica brevemente que los pedidos se completan por WhatsApp. "
+            "el catálogo PDF, llama send_whatsapp_handoff. Para compras, usa lenguaje de servicio como: "
+            "'Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp.' "
+            "Si pide el PDF, llama send_whatsapp_handoff con handoff_reason='catalog_pdf' y explica que se entrega "
+            "por WhatsApp; nunca llames send_catalog_pdf en Instagram. Puedes responder primero cualquier pregunta "
+            "informativa útil y luego hacer el handoff. "
             "No redirijas a WhatsApp a quien solo esté explorando o haciendo preguntas sobre productos. "
-            f"{pdf_note}"
+            "No vuelvas a insistir con WhatsApp si la cliente rechaza el cambio de canal o cierra la conversación. "
         )
     return ""
 

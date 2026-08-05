@@ -38,6 +38,8 @@ class AgentRunContext:
     vision_result: dict[str, Any] | None = None
     payment_proof_attempt: bool = False
     latest_user_message: str = ""
+    store_phone_number: str = ""
+    required_whatsapp_handoff_reason: str | None = None
     session: Any | None = None
     integration_context: dict[str, Any] | None = None
 
@@ -50,6 +52,7 @@ class AgentRunResult:
     interactive: dict[str, Any] | None
     catalog_pdf: dict[str, Any] | None
     product_image: dict[str, Any] | None
+    whatsapp_handoff: dict[str, Any] | None
     tool_log: list[dict[str, Any]]
     provider: str
     model: str
@@ -102,6 +105,7 @@ class AgentRunner:
         interactive_payload = None
         catalog_pdf_payload = None
         product_image_payload = None
+        whatsapp_handoff_payload = None
         tool_log: list[dict[str, Any]] = []
         rounds = 0
         requested_handoff = False
@@ -116,6 +120,7 @@ class AgentRunner:
             vision_result=context.vision_result,
             payment_proof_attempt=context.payment_proof_attempt,
             latest_user_message=context.latest_user_message,
+            store_phone_number=context.store_phone_number,
             session=context.session,
             integration_context=context.integration_context,
         )
@@ -154,7 +159,7 @@ class AgentRunner:
                 }
             else:
                 result = await execute_tool(name, args, tool_context)
-                if name in {"create_order", "update_payment_status", "finalize_checkout", "escalate_to_human", "request_agent_handoff"} and result.get("status") != "error":
+                if name in {"create_order", "update_payment_status", "finalize_checkout", "escalate_to_human", "request_agent_handoff", "send_whatsapp_handoff"} and result.get("status") != "error":
                     single_use_tool_results[name] = result
             if name == "escalate_to_human":
                 requested_handoff = True
@@ -166,6 +171,9 @@ class AgentRunner:
                     "AI handoff requested",
                     extra={"agent": agent.name, "target_agent": handoff_target, "tool_round": rounds},
                 )
+            if name == "send_whatsapp_handoff" and result.get("type") == "whatsapp_handoff":
+                requested_handoff = True
+                handoff_target = "whatsapp"
             tool_log.append({"name": name, "args": args, "result": result})
             formatted_result = format_tool_result_for_model(name, result)
             tool_history.append({
@@ -181,6 +189,8 @@ class AgentRunner:
                 catalog_pdf_payload = result
             if authorized and name == "send_product_image" and result.get("type") == "product_image":
                 product_image_payload = result
+            if authorized and name == "send_whatsapp_handoff" and result.get("type") == "whatsapp_handoff":
+                whatsapp_handoff_payload = result
 
             tools_this_round = tool_schemas if rounds < agent.max_tool_rounds else None
             provider_name, model, provider, continued_with_fallback, response = await self._continue_response(
@@ -199,6 +209,19 @@ class AgentRunner:
             was_fallback = was_fallback or continued_with_fallback
             _add_usage(usage, response.usage)
 
+        if (
+            context.required_whatsapp_handoff_reason
+            and not whatsapp_handoff_payload
+            and "send_whatsapp_handoff" in allowed_tool_names
+        ):
+            handoff_args = {"handoff_reason": context.required_whatsapp_handoff_reason}
+            handoff_result = await execute_tool("send_whatsapp_handoff", handoff_args, tool_context)
+            tool_log.append({"name": "send_whatsapp_handoff", "args": handoff_args, "result": handoff_result})
+            if handoff_result.get("type") == "whatsapp_handoff":
+                whatsapp_handoff_payload = handoff_result
+                requested_handoff = True
+                handoff_target = "whatsapp"
+
         if interactive_payload:
             interactive_payload["body_text"] = clean_assistant_reply_text(interactive_payload.get("body_text", ""))
         if catalog_pdf_payload:
@@ -207,12 +230,16 @@ class AgentRunner:
             product_image_payload["caption"] = clean_assistant_reply_text(product_image_payload.get("caption", ""))
 
         reply_text = _resolve_reply_text(response.text, interactive_payload, product_image_payload)
+        if whatsapp_handoff_payload:
+            interactive_payload = None
+            reply_text = _ensure_whatsapp_handoff_text(reply_text, whatsapp_handoff_payload)
 
         return AgentRunResult(
             text=reply_text,
             interactive=interactive_payload,
             catalog_pdf=catalog_pdf_payload,
             product_image=product_image_payload,
+            whatsapp_handoff=whatsapp_handoff_payload,
             tool_log=tool_log,
             provider=provider_name,
             model=model,
@@ -408,6 +435,20 @@ def _resolve_reply_text(
     else:
         reply_text = response_text or DEFAULT_FALLBACK_TEXT
     return clean_assistant_reply_text(reply_text) or DEFAULT_FALLBACK_TEXT
+
+
+def _ensure_whatsapp_handoff_text(reply_text: str, payload: dict) -> str:
+    """Append the trusted backend CTA once and remove model-generated wa.me URLs."""
+    customer_text = str(payload.get("customer_text") or "").strip()
+    if not customer_text:
+        return reply_text
+
+    base_text = (reply_text or "").replace(customer_text, " ")
+    base_text = re.sub(r"https?://wa\.me/[^\s]+", " ", base_text, flags=re.IGNORECASE)
+    base_text = clean_assistant_reply_text(base_text)
+    if base_text == DEFAULT_FALLBACK_TEXT:
+        base_text = ""
+    return "\n\n".join(part for part in (base_text, customer_text) if part).strip()
 
 
 def _empty_usage() -> dict[str, int]:

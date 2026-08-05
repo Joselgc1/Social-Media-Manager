@@ -182,6 +182,7 @@ async def generate_response(
         "text": str             - The reply text to send back
         "interactive": dict|None - If the AI wants to send buttons (WhatsApp only)
         "product_image": dict|None - If the AI wants to send a product image
+        "whatsapp_handoff": dict|None - Trusted Instagram-to-WhatsApp handoff payload
         "customer_id": str      - For reference
     """
     # ── 1. Load settings ─────────────────────────────────────
@@ -248,6 +249,7 @@ async def generate_response(
             "interactive": None,
             "catalog_pdf": None,
             "product_image": None,
+            "whatsapp_handoff": None,
             "customer_id": customer["id"],
             "escalated": is_escalated,
             "paused": not ai_enabled,
@@ -345,6 +347,7 @@ async def generate_response(
             "interactive": None,
             "catalog_pdf": None,
             "product_image": None,
+            "whatsapp_handoff": None,
             "customer_id": customer["id"],
             "escalated": True,
             "paused": False,
@@ -426,6 +429,7 @@ async def generate_response(
             "interactive": None,
             "catalog_pdf": None,
             "product_image": None,
+            "whatsapp_handoff": None,
             "customer_id": customer["id"],
             "escalated": True,
             "paused": False,
@@ -613,6 +617,7 @@ async def generate_response(
         },
     )
     agent_for_delivery = _agent_with_delivery_tools(orchestration.agent, channel, integration_context, config)
+    required_whatsapp_handoff_reason = _required_whatsapp_handoff_reason(orchestration.route_decision.intent)
     agent_result = await AgentRunner(provider_getter=get_provider, provider_lister=_list_providers).run(
         agent=agent_for_delivery,
         system_prompt=system_prompt,
@@ -625,6 +630,8 @@ async def generate_response(
             vision_result=vision_result,
             payment_proof_attempt=payment_proof_attempt,
             latest_user_message=message_text,
+            store_phone_number=str(settings.get("store_phone_number") or ""),
+            required_whatsapp_handoff_reason=required_whatsapp_handoff_reason,
             session=session,
             integration_context=integration_context,
         ),
@@ -725,6 +732,7 @@ async def generate_response(
         "interactive": agent_result.interactive,
         "catalog_pdf": agent_result.catalog_pdf,
         "product_image": agent_result.product_image,
+        "whatsapp_handoff": agent_result.whatsapp_handoff,
         "customer_id": customer["id"],
         "escalated": agent_result.escalated,
     }
@@ -809,6 +817,7 @@ async def _handle_payment_proof_attempt(
         "interactive": None,
         "catalog_pdf": None,
         "product_image": None,
+        "whatsapp_handoff": None,
         "customer_id": customer["id"],
         "escalated": False,
     }
@@ -875,6 +884,7 @@ async def _handle_exchange_rate_question(
         "interactive": None,
         "catalog_pdf": None,
         "product_image": None,
+        "whatsapp_handoff": None,
         "customer_id": customer["id"],
         "escalated": False,
     }
@@ -937,6 +947,7 @@ async def _handle_public_comment_private_invite(
         "interactive": None,
         "catalog_pdf": None,
         "product_image": None,
+        "whatsapp_handoff": None,
         "customer_id": customer["id"],
         "escalated": False,
     }
@@ -1041,6 +1052,7 @@ async def _handle_public_instagram_comment(
         "interactive": None,
         "catalog_pdf": None,
         "product_image": None,
+        "whatsapp_handoff": None,
         "customer_id": customer["id"],
         "escalated": False,
     }
@@ -1641,6 +1653,14 @@ def _catalog_pdf_supported(channel: str, integration_context: dict | None, confi
         and bool(getattr(config, "kommo_chats_catalog_pdf_enabled", False))
         and getattr(config, "kommo_chats_pdf_attachment_type", None) == "file"
     )
+
+
+def _required_whatsapp_handoff_reason(route_intent: str) -> str | None:
+    if route_intent == "instagram_catalog_pdf_handoff":
+        return "catalog_pdf"
+    if route_intent == "instagram_whatsapp_handoff":
+        return "purchase"
+    return None
 
 
 def _tools_for_delivery(channel: str, integration_context: dict | None, config=None) -> list[dict]:

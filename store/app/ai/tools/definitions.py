@@ -240,6 +240,49 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
+        name="send_whatsapp_handoff",
+        category="messaging",
+        creates_side_effects=False,
+        safe_for_shadow=True,
+        description="Builds a trusted WhatsApp handoff for transactional Instagram requests.",
+        schema={
+            "name": "send_whatsapp_handoff",
+            "description": (
+                "Create the WhatsApp handoff when an Instagram customer clearly wants to buy, place or confirm "
+                "an order, pay, provide delivery details, continue checkout, or receive the PDF catalog. "
+                "Do not use for browsing, prices, sizes, availability, recommendations, comparisons, or photos. "
+                "Pass only customer-visible product context already established in the conversation; never pass SKUs, "
+                "addresses, payment credentials, or technical metadata."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "handoff_reason": {
+                        "type": "string",
+                        "enum": ["purchase", "payment", "delivery", "checkout", "catalog_pdf"],
+                        "description": "Why the customer needs to continue through WhatsApp.",
+                    },
+                    "product_name": {
+                        "type": "string",
+                        "description": "Customer-visible product name already identified in the conversation.",
+                    },
+                    "size": {
+                        "type": "string",
+                        "enum": ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"],
+                        "description": "Confirmed size, if already known.",
+                    },
+                    "quantity": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 99,
+                        "description": "Confirmed quantity, if already known.",
+                    },
+                },
+                "required": ["handoff_reason"],
+            },
+        },
+    ),
+    ToolSpec(
         name="send_product_image",
         category="messaging",
         creates_side_effects=True,

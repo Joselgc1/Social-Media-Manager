@@ -11,6 +11,7 @@ LEGACY_TOOL_NAMES = (
     "update_payment_status",
     "escalate_to_human",
     "send_catalog_pdf",
+    "send_whatsapp_handoff",
     "send_product_image",
     "send_interactive_buttons",
     "update_checkout_draft",

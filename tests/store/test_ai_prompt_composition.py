@@ -184,7 +184,8 @@ def test_instagram_prompts_enforce_informational_channel_policy(prompt_name):
     assert "Instagram es un canal exclusivamente informativo" in prompt
     assert "No inicies ni continúes checkout" in prompt
     assert "no proporciones datos o instrucciones de pago" in prompt
-    assert "los pedidos se completan por WhatsApp" in prompt
+    assert "continuamos las compras por WhatsApp" in prompt
+    assert "llama send_whatsapp_handoff" in prompt
     assert "No redirijas a WhatsApp" in prompt
     assert "pagos@example.com" not in prompt
     assert "Nombre confirmado para saludar: Luisana" in prompt

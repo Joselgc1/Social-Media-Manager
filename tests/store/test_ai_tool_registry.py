@@ -10,6 +10,7 @@ EXPECTED_TOOL_ORDER = [
     "update_payment_status",
     "escalate_to_human",
     "send_catalog_pdf",
+    "send_whatsapp_handoff",
     "send_product_image",
     "send_interactive_buttons",
     "request_agent_handoff",

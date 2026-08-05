@@ -66,6 +66,14 @@ def decide_route(
     workflow_stage = _session_value(session_state, "workflow_stage")
 
     if capabilities.informational_only:
+        if _looks_like_handoff_decline_or_close(normalized):
+            return RouteDecision(
+                route="sales",
+                intent="conversation_close",
+                confidence=0.9,
+                source="channel_policy",
+                reason="La cliente rechazó el cambio de canal o cerró la conversación.",
+            )
         support_intent = _detect_support_intent(normalized)
         if support_intent in {"complaint_or_refund", "payment_dispute", "delivery_issue", "tracking_question"}:
             return RouteDecision(
@@ -74,6 +82,14 @@ def decide_route(
                 confidence=0.8,
                 source="deterministic_keyword",
                 reason="La conversación parece una consulta de soporte, pedido existente o reclamo.",
+            )
+        if _looks_like_pdf_catalog_request(normalized):
+            return RouteDecision(
+                route="sales",
+                intent="instagram_catalog_pdf_handoff",
+                confidence=0.9,
+                source="channel_policy",
+                reason="El catálogo PDF se entrega mediante el canal transaccional de WhatsApp.",
             )
         if (
             payment_proof_attempt
@@ -231,6 +247,15 @@ def _looks_like_transaction_intent(normalized: str) -> bool:
         "mi agencia es",
     )
     return any(marker in normalized for marker in transaction_markers)
+
+
+def _looks_like_pdf_catalog_request(normalized: str) -> bool:
+    return "catalogo" in normalized or ("pdf" in normalized and "inventario" in normalized)
+
+
+def _looks_like_handoff_decline_or_close(normalized: str) -> bool:
+    close_markers = ("no gracias", "ya no", "no quiero", "dejalo", "olvida", "tranqui", "gracias")
+    return any(marker in normalized for marker in close_markers)
 
 
 def _looks_like_support_followup(normalized: str) -> bool:

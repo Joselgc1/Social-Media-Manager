@@ -28,6 +28,9 @@ class ToolArgumentPolicyResult:
 
 
 _DEFAULT_CAPABILITIES = ChannelCapabilities()
+_TOOL_CHANNEL_ALLOWLISTS = {
+    "send_whatsapp_handoff": frozenset({"instagram"}),
+}
 _INSTAGRAM_CAPABILITIES = ChannelCapabilities(
     informational_only=True,
     blocked_agent_routes=frozenset({"checkout", "payment"}),
@@ -52,6 +55,10 @@ def get_channel_capabilities(channel: str | None) -> ChannelCapabilities:
     return _DEFAULT_CAPABILITIES
 
 
+def _normalize_channel(channel: str | None) -> str:
+    return str(channel or "").strip().lower()
+
+
 def is_agent_route_allowed(channel: str | None, route: str) -> bool:
     return route not in get_channel_capabilities(channel).blocked_agent_routes
 
@@ -62,6 +69,9 @@ def can_process_payment_proof(channel: str | None) -> bool:
 
 def is_tool_schema_allowed(channel: str | None, tool_name: str) -> bool:
     """Return whether a tool may be advertised to the model on this channel."""
+    allowed_channels = _TOOL_CHANNEL_ALLOWLISTS.get(tool_name)
+    if allowed_channels is not None and _normalize_channel(channel) not in allowed_channels:
+        return False
     capabilities = get_channel_capabilities(channel)
     if tool_name in capabilities.forbidden_tool_names:
         return False
@@ -77,6 +87,9 @@ def filter_tool_names(channel: str | None, tool_names: Iterable[str]) -> tuple[s
 
 def is_tool_call_allowed(channel: str | None, tool_name: str, arguments: dict | None = None) -> bool:
     """Defensively authorize a concrete tool call from a provider."""
+    allowed_channels = _TOOL_CHANNEL_ALLOWLISTS.get(tool_name)
+    if allowed_channels is not None and _normalize_channel(channel) not in allowed_channels:
+        return False
     capabilities = get_channel_capabilities(channel)
     if tool_name in capabilities.forbidden_tool_names:
         return False

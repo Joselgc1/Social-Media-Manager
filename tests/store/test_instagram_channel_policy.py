@@ -2,7 +2,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from app.ai.agents.checkout import CHECKOUT_AGENT
 from app.ai.agents.legacy import LEGACY_AGENT
+from app.ai.agents.sales import SALES_AGENT
 from app.ai.orchestrator import decide_orchestration
 from app.ai.providers.base import LLMResponse
 from app.ai.routing import decide_route
@@ -81,6 +83,24 @@ def test_instagram_sticky_checkout_session_cannot_select_checkout():
     assert decision.source == "channel_policy"
 
 
+def test_instagram_pdf_catalog_request_selects_handoff_route():
+    decision = decide_route("¿Me mandas el catálogo PDF?", channel="instagram")
+
+    assert decision.route == "sales"
+    assert decision.intent == "instagram_catalog_pdf_handoff"
+
+
+def test_instagram_handoff_is_not_repeated_after_customer_declines():
+    decision = decide_route(
+        "No gracias",
+        channel="instagram",
+        session_state={"active_agent": "checkout", "workflow_stage": "checkout_collecting"},
+    )
+
+    assert decision.route == "sales"
+    assert decision.intent == "conversation_close"
+
+
 @pytest.mark.parametrize(
     ("message", "intent"),
     [
@@ -118,7 +138,13 @@ async def test_instagram_legacy_mode_filters_transactional_tool_schemas(monkeypa
     tool_names = {tool["name"] for tool in provider.chat.await_args.kwargs["tools"]}
     assert not tool_names & INSTAGRAM_FORBIDDEN_TOOLS
     assert "request_agent_handoff" not in tool_names
-    assert {"check_inventory", "send_product_image", "escalate_to_human"} <= tool_names
+    assert {"check_inventory", "send_product_image", "send_whatsapp_handoff", "escalate_to_human"} <= tool_names
+
+
+def test_whatsapp_handoff_tool_is_registered_only_for_sales_and_legacy_agents():
+    assert "send_whatsapp_handoff" in LEGACY_AGENT.tool_names
+    assert "send_whatsapp_handoff" in SALES_AGENT.tool_names
+    assert "send_whatsapp_handoff" not in CHECKOUT_AGENT.tool_names
 
 
 @pytest.mark.asyncio
@@ -132,7 +158,8 @@ async def test_whatsapp_legacy_tool_schemas_are_unchanged(monkeypatch):
 
     await AgentRunner().run(LEGACY_AGENT, "prompt", [], _settings(), _run_context("whatsapp"))
 
-    assert [tool["name"] for tool in provider.chat.await_args.kwargs["tools"]] == list(LEGACY_AGENT.tool_names)
+    expected_names = [name for name in LEGACY_AGENT.tool_names if name != "send_whatsapp_handoff"]
+    assert [tool["name"] for tool in provider.chat.await_args.kwargs["tools"]] == expected_names
 
 
 @pytest.mark.asyncio

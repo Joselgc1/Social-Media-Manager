@@ -4,6 +4,7 @@ Everything you need to go from a fresh laptop to a fully operational AI chatbot 
 
 Important business behavior baked into the current system:
 
+- Instagram is informational for product discovery, prices, sizes, availability, recommendations, comparisons, support, and product images; orders, checkout, payments, delivery details, and inventory PDF delivery continue through WhatsApp using a backend-generated `wa.me` handoff
 - shipping is offered through `MRW` or `Zoom` with `cobro a destino`
 - payment methods are store-defined and managed only from the store dashboard
 - the owner can update a store-only daily exchange-rate field used for `¿a qué tasa recibes?`
@@ -440,7 +441,7 @@ Before you go live, open the store dashboard login at:
 https://vs-chatbot-production.up.railway.app/admin/login
 ```
 
-After logging in, go to **Configuración** and add the payment methods you want this store to offer. Each method needs a **Nombre** and **Información**. These are stored in the store DB, not in `.env`, and the bot will list only the configured method names during checkout. Keep `ai_orchestration_mode` on `legacy` until you complete the rollout checklist in Part 9.
+After logging in, go to **Configuración** and add the payment methods you want this store to offer. Each method needs a **Nombre** and **Información**. These are stored in the store DB, not in `.env`, and the bot will list only the configured method names during checkout. Also set `store_phone_number` to the public WhatsApp number with its full international country code, for example `+58 412 1234567`. The backend strips formatting but never guesses a country code; a missing, local-only, or invalid number disables the clickable Instagram handoff URL and uses a profile/store-contact fallback instead. Keep `ai_orchestration_mode` on `legacy` until you complete the rollout checklist in Part 9.
 
 ### 5.3 Switch Channel Webhooks to Railway
 

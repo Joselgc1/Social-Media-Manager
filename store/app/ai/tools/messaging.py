@@ -7,8 +7,10 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from urllib.parse import quote
 
 from app.admin.notify import notify_escalation
+from app.ai.tools.catalog import find_catalog_matches
 from app.ai.tools.context import ToolExecutionContext
 from app.catalog.pdf_generator import ensure_catalog_pdf
 from app.catalog.sheets import get_cached_catalog
@@ -86,6 +88,111 @@ async def send_catalog_pdf(args: dict, context: ToolExecutionContext) -> dict:
         "type": "catalog_pdf",
         "caption": args.get("caption", "Aqui tienes nuestro catalogo de productos 📖"),
     }
+
+
+async def send_whatsapp_handoff(args: dict, context: ToolExecutionContext) -> dict:
+    """Build a trusted WhatsApp CTA for transactional Instagram requests only."""
+    if str(context.channel or "").strip().lower() != "instagram":
+        return {
+            "status": "error",
+            "message": "WhatsApp handoff is available only for Instagram conversations.",
+        }
+
+    reason = str(args.get("handoff_reason") or "purchase").strip().lower()
+    product_name, size, quantity = _validated_handoff_product_context(args)
+    prefilled_message = _build_whatsapp_prefilled_message(
+        reason=reason,
+        product_name=product_name,
+        size=size,
+        quantity=quantity,
+    )
+    phone_digits = normalize_whatsapp_phone_number(context.store_phone_number)
+    if not phone_digits:
+        logger.warning("WhatsApp handoff unavailable: store_phone_number is missing or invalid")
+        fallback = (
+            "Para enviarte el catálogo PDF, continuamos por WhatsApp. Escríbenos al contacto de WhatsApp "
+            "disponible en el perfil o en la información de la tienda."
+            if reason == "catalog_pdf"
+            else (
+                "Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp. "
+                "Escríbenos al contacto de WhatsApp disponible en el perfil o en la información de la tienda."
+            )
+        )
+        return {
+            "type": "whatsapp_handoff",
+            "url": None,
+            "customer_text": fallback,
+            "prefilled_message": prefilled_message,
+        }
+
+    url = f"https://wa.me/{phone_digits}?text={quote(prefilled_message, safe='')}"
+    cta = (
+        "Para enviarte el catálogo PDF y ayudarte mejor, continuamos por WhatsApp:"
+        if reason == "catalog_pdf"
+        else "Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp:"
+    )
+    return {
+        "type": "whatsapp_handoff",
+        "url": url,
+        "customer_text": f"{cta}\n{url}",
+        "prefilled_message": prefilled_message,
+    }
+
+
+def normalize_whatsapp_phone_number(value: str | None) -> str | None:
+    """Normalize an already international phone number without guessing a country code."""
+    text = str(value or "").strip()
+    if not text or len(text) > 40 or not re.fullmatch(r"[+0-9 ().-]+", text):
+        return None
+    if "+" in text and (text.count("+") != 1 or not text.startswith("+")):
+        return None
+
+    digits = re.sub(r"\D", "", text)
+    if text.startswith("00"):
+        digits = digits[2:]
+    if not 8 <= len(digits) <= 15 or digits.startswith("0"):
+        return None
+    return digits
+
+
+def _validated_handoff_product_context(args: dict) -> tuple[str | None, str | None, int | None]:
+    query = str(args.get("product_name") or "").strip()
+    requested_size = str(args.get("size") or "").strip().upper() or None
+    if not query:
+        return None, None, None
+
+    matches = find_catalog_matches(query, size_filter=requested_size)
+    product_names = {
+        str(product.get("product_name") or "").strip()
+        for product in matches
+        if str(product.get("product_name") or "").strip()
+    }
+    if len(product_names) != 1:
+        return None, None, None
+
+    quantity = args.get("quantity")
+    valid_quantity = quantity if isinstance(quantity, int) and 1 <= quantity <= 99 else None
+    return next(iter(product_names)), requested_size, valid_quantity
+
+
+def _build_whatsapp_prefilled_message(
+    *,
+    reason: str,
+    product_name: str | None,
+    size: str | None,
+    quantity: int | None,
+) -> str:
+    if reason == "catalog_pdf":
+        return "Hola, vengo de Instagram y quiero recibir el catálogo PDF. ¿Me pueden ayudar?"
+    if not product_name:
+        return "Hola, vengo de Instagram y quiero hacer una compra. ¿Me pueden ayudar con el pedido?"
+
+    details = [f"Hola, vengo de Instagram y quiero comprar {product_name}"]
+    if size:
+        details.append(f"talla {size}")
+    if quantity is not None:
+        details.append(f"cantidad {quantity}")
+    return ", ".join(details) + ". ¿Me pueden ayudar con el pedido?"
 
 
 async def request_agent_handoff(args: dict, context: ToolExecutionContext) -> dict:

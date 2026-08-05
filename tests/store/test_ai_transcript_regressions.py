@@ -8,7 +8,15 @@ from app.ai import runner as agent_runner
 from app.ai.providers.base import LLMResponse
 from app.crm import sessions
 
-ACTIVE_RESPONSE_KEYS = {"text", "interactive", "catalog_pdf", "product_image", "customer_id", "escalated"}
+ACTIVE_RESPONSE_KEYS = {
+    "text",
+    "interactive",
+    "catalog_pdf",
+    "product_image",
+    "whatsapp_handoff",
+    "customer_id",
+    "escalated",
+}
 
 
 def _settings(**overrides) -> dict:
@@ -24,6 +32,7 @@ def _settings(**overrides) -> dict:
         "fallback_provider": "anthropic",
         "fallback_model": "claude-haiku-4-5",
         "store_name": "Tienda Rosa",
+        "store_phone_number": "+58 412-1234567",
         "payment_methods": [{"id": "pm-zelle", "name": "Zelle", "information": "Correo: pagos@example.com"}],
         "accepted_exchange_rate": "40 Bs/USD",
         "exchange_rate_reference": "manual",
@@ -181,6 +190,7 @@ def _assert_response_contract(response: dict) -> None:
     assert response["interactive"] is None or isinstance(response["interactive"], dict)
     assert response["catalog_pdf"] is None or isinstance(response["catalog_pdf"], dict)
     assert response["product_image"] is None or isinstance(response["product_image"], dict)
+    assert response["whatsapp_handoff"] is None or isinstance(response["whatsapp_handoff"], dict)
     assert response["customer_id"] == "customer-1"
     assert isinstance(response["escalated"], bool)
 
@@ -190,6 +200,19 @@ def _provider_with_tool(tool_name: str, args: dict | None, final_text: str):
         chat=AsyncMock(return_value=LLMResponse(tool_calls=[_tool_call(tool_name, args)])),
         continue_after_tool=AsyncMock(return_value=LLMResponse(text=final_text)),
     )
+
+
+def _handoff_payload(message: str = "Hola Instagram") -> dict:
+    url = f"https://wa.me/584121234567?text={message.replace(' ', '%20')}"
+    return {
+        "type": "whatsapp_handoff",
+        "url": url,
+        "customer_text": (
+            "Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp:\n"
+            f"{url}"
+        ),
+        "prefilled_message": message,
+    }
 
 
 @pytest.mark.asyncio
@@ -220,17 +243,99 @@ async def test_catalog_request_on_whatsapp(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_catalog_request_on_instagram(monkeypatch):
+async def test_product_discovery_on_instagram_stays_in_channel(monkeypatch):
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=LLMResponse(text="Por aquí te cuento las categorías: pijamas y sets.")),
         continue_after_tool=AsyncMock(),
     )
     h = TranscriptHarness(monkeypatch, provider=provider)
 
-    response = await h.run("Quiero ver el catálogo", channel="instagram")
+    response = await h.run("¿Qué tienen disponible?", channel="instagram")
 
     assert h.selected_agent() == "sales"
     assert response["catalog_pdf"] is None
+    h.execute_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_instagram_catalog_request_uses_whatsapp_handoff(monkeypatch):
+    provider = _provider_with_tool(
+        "send_whatsapp_handoff",
+        {"handoff_reason": "catalog_pdf"},
+        "Claro, te lo enviamos por WhatsApp.",
+    )
+    h = TranscriptHarness(monkeypatch, provider=provider)
+    payload = _handoff_payload("Hola Instagram catalogo PDF")
+    h.execute_tool.return_value = payload
+
+    response = await h.run("Quiero ver el catálogo", channel="instagram")
+
+    assert h.selected_agent() == "sales"
+    assert h.tool_names() == ["send_whatsapp_handoff"]
+    assert response["catalog_pdf"] is None
+    assert response["whatsapp_handoff"] == payload
+    assert response["text"].count(payload["url"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_instagram_purchase_uses_handoff_in_multi_agent_mode(monkeypatch):
+    provider = _provider_with_tool(
+        "send_whatsapp_handoff",
+        {
+            "handoff_reason": "purchase",
+            "product_name": "Pijama satén azul",
+            "size": "S",
+            "quantity": 1,
+        },
+        "Claro, te ayudamos a continuar.",
+    )
+    h = TranscriptHarness(monkeypatch, provider=provider)
+    payload = _handoff_payload()
+    h.execute_tool.return_value = payload
+
+    response = await h.run("Quiero comprar la pijama azul talla S, una", channel="instagram")
+
+    assert h.selected_agent() == "sales"
+    assert response["whatsapp_handoff"] == payload
+    assert response["text"].count(payload["url"]) == 1
+    assert h.tool_names() == ["send_whatsapp_handoff"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_purchase_uses_backend_handoff_in_legacy_mode(monkeypatch):
+    provider = SimpleNamespace(
+        chat=AsyncMock(return_value=LLMResponse(text="Claro, te ayudamos a continuar.")),
+        continue_after_tool=AsyncMock(),
+    )
+    h = TranscriptHarness(
+        monkeypatch,
+        settings=_settings(ai_orchestration_mode="legacy"),
+        provider=provider,
+    )
+    payload = _handoff_payload()
+    h.execute_tool.return_value = payload
+
+    response = await h.run("Quiero comprar la pijama azul", channel="instagram")
+
+    assert h.selected_agent() == "legacy"
+    assert response["whatsapp_handoff"] == payload
+    assert response["text"].count(payload["url"]) == 1
+    assert h.tool_names() == ["send_whatsapp_handoff"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_informational_question_does_not_handoff(monkeypatch):
+    provider = SimpleNamespace(
+        chat=AsyncMock(return_value=LLMResponse(text="Cuesta $28 y está disponible en talla S.")),
+        continue_after_tool=AsyncMock(),
+    )
+    h = TranscriptHarness(monkeypatch, provider=provider)
+
+    response = await h.run("¿Cuánto cuesta y qué tallas hay?", channel="instagram")
+
+    assert h.selected_agent() == "sales"
+    assert response["whatsapp_handoff"] is None
+    assert "wa.me" not in response["text"]
     h.execute_tool.assert_not_awaited()
 
 
@@ -253,9 +358,10 @@ async def test_product_image_request(monkeypatch):
     h = TranscriptHarness(monkeypatch, provider=provider)
     h.execute_tool.return_value = {"type": "product_image", "image_url": "https://example.com/pijama.jpg", "caption": "Aquí tienes la foto."}
 
-    response = await h.run("Me muestras la foto del pijama azul?")
+    response = await h.run("Me muestras la foto del pijama azul?", channel="instagram")
     assert h.selected_agent() == "sales"
     assert response["product_image"]["image_url"] == "https://example.com/pijama.jpg"
+    assert response["whatsapp_handoff"] is None
 
 
 @pytest.mark.asyncio

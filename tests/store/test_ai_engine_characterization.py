@@ -18,6 +18,7 @@ EXPECTED_TOOL_ORDER = [
     "update_payment_status",
     "escalate_to_human",
     "send_catalog_pdf",
+    "send_whatsapp_handoff",
     "send_product_image",
     "send_interactive_buttons",
     "request_agent_handoff",
@@ -33,6 +34,7 @@ ACTIVE_RESPONSE_KEYS = {
     "interactive",
     "catalog_pdf",
     "product_image",
+    "whatsapp_handoff",
     "customer_id",
     "escalated",
 }
@@ -361,7 +363,9 @@ async def test_instagram_payment_proof_is_not_processed(engine_harness, monkeypa
         media_url="https://example.com/proof.jpg",
     )
 
-    assert response["text"] == "Los pedidos y pagos se completan por WhatsApp."
+    assert response["text"].startswith("Los pedidos y pagos se completan por WhatsApp.")
+    assert response["text"].count("https://wa.me/584121234567?") == 1
+    assert response["whatsapp_handoff"]["type"] == "whatsapp_handoff"
     engine.analyze_payment_screenshot.assert_not_awaited()
     verify_payment_proof.assert_not_awaited()
     assert engine.analytics.log_ai_run.await_args.kwargs["selected_agent"] == "sales"
