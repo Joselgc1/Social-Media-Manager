@@ -905,7 +905,7 @@ async def update_order_payment_status(
                 )
             replay = await db.fetch_one(
                 """
-                SELECT id FROM orders
+                SELECT id::text AS id FROM orders
                 WHERE id <> :oid
                   AND (payment_proof_hash = :proof_hash OR payment_reference_key = :reference_key)
                 UNION ALL
