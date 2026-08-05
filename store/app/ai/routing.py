@@ -66,14 +66,6 @@ def decide_route(
     workflow_stage = _session_value(session_state, "workflow_stage")
 
     if capabilities.informational_only:
-        if _looks_like_handoff_decline_or_close(normalized):
-            return RouteDecision(
-                route="sales",
-                intent="conversation_close",
-                confidence=0.9,
-                source="channel_policy",
-                reason="La cliente rechazó el cambio de canal o cerró la conversación.",
-            )
         support_intent = _detect_support_intent(normalized)
         if support_intent in {"complaint_or_refund", "payment_dispute", "delivery_issue", "tracking_question"}:
             return RouteDecision(
@@ -91,15 +83,27 @@ def decide_route(
                 source="channel_policy",
                 reason="El catálogo PDF se entrega mediante el canal transaccional de WhatsApp.",
             )
-        if (
-            payment_proof_attempt
-            or active_agent == "checkout"
-            or _looks_like_transaction_intent(normalized)
-        ):
+        if payment_proof_attempt or _looks_like_transaction_intent(normalized):
             return RouteDecision(
                 route="sales",
                 intent="instagram_whatsapp_handoff",
                 confidence=0.95 if payment_proof_attempt else 0.9,
+                source="channel_policy",
+                reason="Instagram permite información de productos, pero no flujos transaccionales.",
+            )
+        if _looks_like_handoff_decline_or_close(normalized):
+            return RouteDecision(
+                route="sales",
+                intent="conversation_close",
+                confidence=0.9,
+                source="channel_policy",
+                reason="La cliente rechazó el cambio de canal o cerró la conversación.",
+            )
+        if active_agent == "checkout":
+            return RouteDecision(
+                route="sales",
+                intent="instagram_whatsapp_handoff",
+                confidence=0.9,
                 source="channel_policy",
                 reason="Instagram permite información de productos, pero no flujos transaccionales.",
             )
@@ -236,6 +240,8 @@ def _looks_like_transaction_intent(normalized: str) -> bool:
         "hacer checkout",
         "datos para pagar",
         "datos de pago",
+        "como pago",
+        "como puedo pagar",
         "pasame el zelle",
         "pago movil",
         "pago con",
@@ -250,7 +256,23 @@ def _looks_like_transaction_intent(normalized: str) -> bool:
 
 
 def _looks_like_pdf_catalog_request(normalized: str) -> bool:
-    return "catalogo" in normalized or ("pdf" in normalized and "inventario" in normalized)
+    if "catalogo" not in normalized and "pdf" not in normalized:
+        return False
+    request_markers = (
+        "mandame",
+        "me mandas",
+        "pasame",
+        "me pasas",
+        "enviame",
+        "me envias",
+        "quiero ver",
+        "quiero recibir",
+        "quiero el",
+        "quiero la",
+        "muestrame",
+        "dame",
+    )
+    return any(marker in normalized for marker in request_markers)
 
 
 def _looks_like_handoff_decline_or_close(normalized: str) -> bool:

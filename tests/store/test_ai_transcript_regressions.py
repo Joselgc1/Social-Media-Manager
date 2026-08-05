@@ -258,6 +258,22 @@ async def test_product_discovery_on_instagram_stays_in_channel(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_informational_catalog_question_on_instagram_does_not_handoff(monkeypatch):
+    provider = SimpleNamespace(
+        chat=AsyncMock(return_value=LLMResponse(text="Hay pijamas y sets en varias tallas.")),
+        continue_after_tool=AsyncMock(),
+    )
+    h = TranscriptHarness(monkeypatch, provider=provider)
+
+    response = await h.run("¿Qué productos hay en el catálogo?", channel="instagram")
+
+    assert h.selected_agent() == "sales"
+    assert response["whatsapp_handoff"] is None
+    assert "wa.me" not in response["text"]
+    h.execute_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_instagram_catalog_request_uses_whatsapp_handoff(monkeypatch):
     provider = _provider_with_tool(
         "send_whatsapp_handoff",

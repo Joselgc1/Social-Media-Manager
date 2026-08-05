@@ -102,6 +102,72 @@ def test_instagram_handoff_is_not_repeated_after_customer_declines():
 
 
 @pytest.mark.parametrize(
+    "message",
+    [
+        "Gracias, lo quiero",
+        "Gracias, quiero comprarlo",
+        "Gracias, ¿cómo pago?",
+        "No quiero Zelle, quiero pagar por Binance",
+    ],
+)
+def test_instagram_transactional_intent_overrides_courtesy_or_decline_words(message):
+    decision = decide_route(message, channel="instagram")
+
+    assert decision.route == "sales"
+    assert decision.intent == "instagram_whatsapp_handoff"
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["No gracias", "Gracias", "Tranqui, gracias", "Ya no, gracias", "Déjalo"],
+)
+def test_instagram_standalone_decline_or_close_does_not_handoff(message):
+    decision = decide_route(
+        message,
+        channel="instagram",
+        session_state={"active_agent": "checkout", "workflow_stage": "checkout_collecting"},
+    )
+
+    assert decision.route == "sales"
+    assert decision.intent == "conversation_close"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Mándame el catálogo",
+        "Pásame el catálogo",
+        "Quiero ver el catálogo",
+        "¿Me envías el catálogo completo?",
+        "Quiero el PDF",
+        "Mándame el inventario PDF",
+    ],
+)
+def test_instagram_catalog_delivery_requests_select_handoff(message):
+    decision = decide_route(message, channel="instagram")
+
+    assert decision.route == "sales"
+    assert decision.intent == "instagram_catalog_pdf_handoff"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "¿Qué productos hay en el catálogo?",
+        "¿Qué categorías tiene el catálogo?",
+        "¿Tienen pijamas en el catálogo?",
+        "¿Qué tallas aparecen en el catálogo?",
+    ],
+)
+def test_instagram_informational_catalog_questions_stay_in_channel(message):
+    decision = decide_route(message, channel="instagram")
+
+    assert decision.route == "sales"
+    assert decision.intent != "instagram_catalog_pdf_handoff"
+    assert decision.intent != "instagram_whatsapp_handoff"
+
+
+@pytest.mark.parametrize(
     ("message", "intent"),
     [
         ("Quiero hablar con una persona real", "human_request"),
