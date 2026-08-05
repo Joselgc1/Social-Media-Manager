@@ -79,7 +79,7 @@ async def verify_schema_version() -> None:
         rows = await fetch_all("SELECT version FROM schema_migrations ORDER BY version")
     except Exception as e:
         raise RuntimeError(
-                "Store database schema is unversioned. Apply store/migrations/001_schema.sql to a fresh database."
+            "Store database schema is unversioned. Apply store/migrations/001_schema.sql to a fresh database."
         ) from e
 
     versions = {int(row["version"]) for row in rows}
@@ -234,6 +234,38 @@ def _decode_setting_value(value):
     return value
 
 
+def validate_runtime_provider_settings(
+    settings: dict,
+    available_providers: list[str] | set[str] | tuple[str, ...] | None = None,
+) -> None:
+    """Fail fast when stored fallback settings reference an unavailable provider.
+
+    During isolated unit tests provider initialization may intentionally not have run.
+    In that case an empty provider registry is ignored. Application startup calls
+    ``get_settings`` after ``init_providers``, so production configuration is validated.
+    """
+    if not settings.get("auto_fallback", True):
+        return
+
+    if available_providers is None:
+        from app.ai.providers import list_providers
+
+        available_providers = list_providers()
+
+    available = set(available_providers)
+    if not available:
+        return
+
+    fallback_provider = str(settings.get("fallback_provider") or "anthropic")
+    if fallback_provider not in available:
+        raise RuntimeError(
+            "Runtime LLM fallback configuration is invalid: "
+            f"auto_fallback is enabled but fallback provider '{fallback_provider}' is not initialized. "
+            f"Available providers: {sorted(available)}. "
+            "Configure the provider API key, select an available fallback provider, or disable auto_fallback."
+        )
+
+
 async def get_settings() -> dict:
     """
     Return all settings as a dict.
@@ -250,12 +282,14 @@ async def get_settings() -> dict:
         and _settings_version == current_version
         and (now - _settings_ts) < 60
     ):
+        validate_runtime_provider_settings(_settings_cache)
         return _settings_cache
 
     rows = await fetch_all("SELECT key, value FROM settings")
     _settings_cache = {row["key"]: _decode_setting_value(row["value"]) for row in rows}
     _settings_ts = now
     _settings_version = current_version
+    validate_runtime_provider_settings(_settings_cache)
     return _settings_cache
 
 
