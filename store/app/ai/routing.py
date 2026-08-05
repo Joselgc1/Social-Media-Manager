@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.ai.policies import guards
+from app.ai.policies.channel_capabilities import get_channel_capabilities
 
 AgentRoute = Literal[
     "legacy",
@@ -33,6 +34,7 @@ class RouteDecision:
 def decide_route(
     message_text: str,
     *,
+    channel: str = "whatsapp",
     payment_proof_attempt: bool = False,
     vision_result: dict | None = None,
     session_state: Any | None = None,
@@ -58,6 +60,42 @@ def decide_route(
             reason=human_reason,
         )
 
+    capabilities = get_channel_capabilities(channel)
+    normalized = guards.normalize_text_for_moderation(message_text)
+    active_agent = _session_value(session_state, "active_agent")
+    workflow_stage = _session_value(session_state, "workflow_stage")
+
+    if capabilities.informational_only:
+        support_intent = _detect_support_intent(normalized)
+        if support_intent in {"complaint_or_refund", "payment_dispute", "delivery_issue", "tracking_question"}:
+            return RouteDecision(
+                route="support",
+                intent=support_intent,
+                confidence=0.8,
+                source="deterministic_keyword",
+                reason="La conversación parece una consulta de soporte, pedido existente o reclamo.",
+            )
+        if (
+            payment_proof_attempt
+            or active_agent == "checkout"
+            or _looks_like_transaction_intent(normalized)
+        ):
+            return RouteDecision(
+                route="sales",
+                intent="instagram_whatsapp_handoff",
+                confidence=0.95 if payment_proof_attempt else 0.9,
+                source="channel_policy",
+                reason="Instagram permite información de productos, pero no flujos transaccionales.",
+            )
+        if support_intent:
+            return RouteDecision(
+                route="support",
+                intent=support_intent,
+                confidence=0.8,
+                source="deterministic_keyword",
+                reason="La conversación parece una consulta de soporte, pedido existente o reclamo.",
+            )
+
     if payment_proof_attempt:
         return RouteDecision(
             route="payment",
@@ -67,9 +105,6 @@ def decide_route(
             reason="Cliente parece haber enviado un comprobante de pago.",
         )
 
-    normalized = guards.normalize_text_for_moderation(message_text)
-    active_agent = _session_value(session_state, "active_agent")
-    workflow_stage = _session_value(session_state, "workflow_stage")
     if _looks_like_checkout_cancellation(normalized) and active_agent == "checkout":
         return RouteDecision(
             route="checkout",
@@ -172,6 +207,30 @@ def _looks_like_purchase_intent(normalized: str) -> bool:
         "para pagar",
     )
     return any(marker in normalized for marker in strong_markers)
+
+
+def _looks_like_transaction_intent(normalized: str) -> bool:
+    if _looks_like_purchase_intent(normalized):
+        return True
+    transaction_markers = (
+        "finalizar compra",
+        "completar compra",
+        "confirmar compra",
+        "confirmar pedido",
+        "hacer checkout",
+        "datos para pagar",
+        "datos de pago",
+        "pasame el zelle",
+        "pago movil",
+        "pago con",
+        "te paso la direccion",
+        "enviar a mi direccion",
+        "mandalo por mrw",
+        "mandalo por zoom",
+        "retiro en agencia",
+        "mi agencia es",
+    )
+    return any(marker in normalized for marker in transaction_markers)
 
 
 def _looks_like_support_followup(normalized: str) -> bool:

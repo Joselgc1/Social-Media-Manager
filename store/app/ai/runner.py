@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.ai.agents.base import AgentDefinition
+from app.ai.policies.channel_capabilities import filter_tool_names
 from app.ai.providers import AVAILABLE_MODELS, get_provider
 from app.ai.providers import list_providers as _list_providers
 from app.ai.providers.base import LLMResponse
@@ -86,11 +87,14 @@ class AgentRunner:
         settings: dict,
         context: AgentRunContext,
     ) -> AgentRunResult:
+        allowed_tool_names = set(filter_tool_names(context.channel, agent.tool_names))
+        tool_schemas = get_tool_schemas(tuple(name for name in agent.tool_names if name in allowed_tool_names))
         provider_name, model, provider, was_fallback, response = await self._initial_response(
             agent=agent,
             system_prompt=system_prompt,
             messages=messages,
             settings=settings,
+            tool_schemas=tool_schemas,
         )
         usage = _empty_usage()
         _add_usage(usage, response.usage)
@@ -105,8 +109,6 @@ class AgentRunner:
         escalated = False
         single_use_tool_results: dict[str, dict] = {}
         tool_history: list[dict[str, Any]] = []
-        allowed_tool_names = set(agent.tool_names)
-        tool_schemas = get_tool_schemas(agent.tool_names)
         tool_context = ToolExecutionContext(
             customer=context.customer,
             channel=context.channel,
@@ -279,6 +281,7 @@ class AgentRunner:
         system_prompt: str,
         messages: list[dict],
         settings: dict,
+        tool_schemas: list[dict],
     ):
         provider_name = settings.get("llm_provider", "openai")
         model = settings.get("llm_model", "gpt-5.6-luna")
@@ -296,8 +299,6 @@ class AgentRunner:
             )
 
         provider = self._get_provider(provider_name)
-        tool_schemas = get_tool_schemas(agent.tool_names)
-
         try:
             response = await provider.chat(
                 model=model,

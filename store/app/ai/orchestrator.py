@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from app.ai.agents.base import AgentDefinition
 from app.ai.llm_router import refine_route_if_ambiguous
+from app.ai.policies.channel_capabilities import is_agent_route_allowed
 from app.ai.registry import AgentRegistry, get_agent_registry
 from app.ai.routing import RouteDecision, decide_route
 
@@ -84,6 +85,7 @@ def decide_orchestration(
     *,
     mode: str | None,
     message_text: str,
+    channel: str = "whatsapp",
     payment_proof_attempt: bool = False,
     vision_result: dict | None = None,
     session_state: Any | None = None,
@@ -94,10 +96,12 @@ def decide_orchestration(
     routing_session_state = None if resolved_mode == "legacy" else session_state
     route_decision = decide_route(
         message_text,
+        channel=channel,
         payment_proof_attempt=payment_proof_attempt,
         vision_result=vision_result,
         session_state=routing_session_state,
     )
+    route_decision = _enforce_channel_route(channel, route_decision)
     return _build_orchestration_decision(resolved_mode, route_decision, registry=registry)
 
 
@@ -106,6 +110,7 @@ async def decide_orchestration_with_router(
     mode: str | None,
     message_text: str,
     settings: dict,
+    channel: str = "whatsapp",
     history: list[dict] | None = None,
     payment_proof_attempt: bool = False,
     vision_result: dict | None = None,
@@ -117,6 +122,7 @@ async def decide_orchestration_with_router(
     routing_session_state = None if resolved_mode == "legacy" else session_state
     route_decision = decide_route(
         message_text,
+        channel=channel,
         payment_proof_attempt=payment_proof_attempt,
         vision_result=vision_result,
         session_state=routing_session_state,
@@ -128,7 +134,21 @@ async def decide_orchestration_with_router(
             history=history,
             settings=settings,
         )
+    route_decision = _enforce_channel_route(channel, route_decision)
     return _build_orchestration_decision(resolved_mode, route_decision, registry=registry)
+
+
+def _enforce_channel_route(channel: str, route_decision: RouteDecision) -> RouteDecision:
+    """Fail closed if deterministic or LLM routing selects a blocked specialist."""
+    if is_agent_route_allowed(channel, route_decision.route):
+        return route_decision
+    return RouteDecision(
+        route="sales",
+        intent="instagram_whatsapp_handoff",
+        confidence=max(route_decision.confidence, 0.9),
+        source="channel_policy",
+        reason="Channel policy redirected a transactional route to Sales.",
+    )
 
 
 def _build_orchestration_decision(

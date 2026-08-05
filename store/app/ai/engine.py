@@ -20,6 +20,11 @@ from app.ai.orchestrator import decide_orchestration_with_router, resolve_effect
 from app.ai.payment.responder import render_payment_response
 from app.ai.payment.verifier import verify_payment_proof
 from app.ai.policies import guards
+from app.ai.policies.channel_capabilities import (
+    can_process_payment_proof,
+    filter_tool_names,
+    is_agent_route_allowed,
+)
 from app.ai.prompts import PromptContext, build_agent_prompt, format_catalog_as_markdown
 from app.ai.runner import (
     AgentRunContext,
@@ -461,20 +466,23 @@ async def generate_response(
     vision_result = None
     payment_proof_attempt = False
     if media_url and not is_public_comment:
-        direct_media_url = bool((integration_context or {}).get("media_url_is_direct"))
-        vision_channel = "instagram" if direct_media_url else channel
-        vision_result = await analyze_payment_screenshot(
-            media_id=media_url if vision_channel == "whatsapp" else None,
-            media_url=media_url if vision_channel != "whatsapp" else None,
-            channel=vision_channel,
-        )
-        payment_proof_attempt = guards.looks_like_payment_proof_message(message_text, vision_result or {})
-        if (vision_result or {}).get("analyzed") and not payment_proof_attempt:
-            summary = vision_result.get("summary", "Imagen analizada")
-            message_text = f"{message_text}\n\n[Análisis de imagen: {summary}]"
-            history = conversations.prepare_history_for_generation(stored_history, latest_user_message=message_text)
+        if can_process_payment_proof(channel):
+            direct_media_url = bool((integration_context or {}).get("media_url_is_direct"))
+            vision_channel = "instagram" if direct_media_url else channel
+            vision_result = await analyze_payment_screenshot(
+                media_id=media_url if vision_channel == "whatsapp" else None,
+                media_url=media_url if vision_channel != "whatsapp" else None,
+                channel=vision_channel,
+            )
+            payment_proof_attempt = guards.looks_like_payment_proof_message(message_text, vision_result or {})
+            if (vision_result or {}).get("analyzed") and not payment_proof_attempt:
+                summary = vision_result.get("summary", "Imagen analizada")
+                message_text = f"{message_text}\n\n[Análisis de imagen: {summary}]"
+                history = conversations.prepare_history_for_generation(stored_history, latest_user_message=message_text)
+        else:
+            payment_proof_attempt = guards.looks_like_payment_proof_message(message_text, {})
 
-    if payment_proof_attempt:
+    if payment_proof_attempt and can_process_payment_proof(channel):
         logger.info(
             "AI route decision",
             extra={
@@ -532,6 +540,7 @@ async def generate_response(
     orchestration = await decide_orchestration_with_router(
         mode=orchestration_mode,
         message_text=message_text,
+        channel=channel,
         settings=settings,
         history=history,
         payment_proof_attempt=payment_proof_attempt,
@@ -640,7 +649,11 @@ async def generate_response(
         channel=channel,
     )
 
-    if orchestration.mode == "multi_agent" and agent_result.handoff_target == "checkout":
+    if (
+        orchestration.mode == "multi_agent"
+        and agent_result.handoff_target == "checkout"
+        and is_agent_route_allowed(channel, "checkout")
+    ):
         await sessions.set_active_agent(
             str(customer["id"]),
             "checkout",
@@ -1648,6 +1661,7 @@ def _tool_names_for_delivery(
     integration_context: dict | None,
     config=None,
 ) -> tuple[str, ...]:
+    tool_names = filter_tool_names(channel, tool_names)
     if _is_public_instagram_comment(integration_context):
         return tuple(name for name in tool_names if name == "check_inventory")
     if _catalog_pdf_supported(channel, integration_context, config):

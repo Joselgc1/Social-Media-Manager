@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.ai.policies.channel_capabilities import get_channel_capabilities
 from app.catalog.sheets import group_catalog_products
 from app.customer_identity import extract_safe_first_name
 from app.exchange_rates import build_exchange_rate_prompt_block
@@ -219,8 +220,13 @@ def build_system_prompt(
 
 
 def _build_template_values(context: PromptContext) -> dict[str, Any]:
-    payment_methods_block = payment_method_information_block(context.payment_methods)
-    payment_method_names = payment_method_names_text(context.payment_methods)
+    capabilities = get_channel_capabilities(context.channel)
+    if capabilities.informational_only:
+        payment_methods_block = "No proporciones datos ni instrucciones de pago en este canal."
+        payment_method_names = "no disponibles para checkout en este canal"
+    else:
+        payment_methods_block = payment_method_information_block(context.payment_methods)
+        payment_method_names = payment_method_names_text(context.payment_methods)
     exchange_rate_block = _build_exchange_rate_block(
         context.exchange_rate_settings,
         context.accepted_exchange_rate,
@@ -325,6 +331,14 @@ def _build_channel_context(channel: str, catalog_pdf_supported: bool | None = No
             "Mantén los mensajes más cortos (máximo 1000 bytes). "
             "NO puedes enviar mensajes proactivos: solo puedes responder dentro de "
             "las 24 horas después del último mensaje del cliente. "
+            "Instagram es un canal exclusivamente informativo: responde normalmente preguntas de productos, "
+            "recomendaciones, precios, disponibilidad, tallas, comparaciones e imágenes. "
+            "No inicies ni continúes checkout, no crees, modifiques, confirmes o canceles pedidos, y no solicites "
+            "direcciones, agencias de entrega ni métodos de pago para un pedido. "
+            "No proceses comprobantes, no proporciones datos o instrucciones de pago y no hagas handoff interno "
+            "a Checkout ni Payment. Cuando la cliente claramente quiera comprar, pagar, hacer un pedido o recibir "
+            "el catálogo PDF, explica brevemente que los pedidos se completan por WhatsApp. "
+            "No redirijas a WhatsApp a quien solo esté explorando o haciendo preguntas sobre productos. "
             f"{pdf_note}"
         )
     return ""

@@ -121,10 +121,23 @@ def test_legacy_override_behavior(monkeypatch):
     prompt = prompts.build_legacy_prompt(_context(channel="instagram"))
 
     assert prompt.startswith("OVERRIDE Tienda Rosa | Producto")
-    assert "Correo: pagos@example.com" in prompt
+    assert "Correo: pagos@example.com" not in prompt
+    assert "No proporciones datos ni instrucciones de pago" in prompt
     assert "40,25 Bs por USD" in prompt
     assert "# Canal actual" in prompt
     assert "Instagram DM" in prompt
+
+
+@pytest.mark.parametrize("prompt_name", ["legacy", "sales", "support"])
+def test_instagram_prompts_enforce_informational_channel_policy(prompt_name):
+    prompt = prompts.build_agent_prompt(prompt_name, _context(channel="instagram"))
+
+    assert "Instagram es un canal exclusivamente informativo" in prompt
+    assert "No inicies ni continúes checkout" in prompt
+    assert "no proporciones datos o instrucciones de pago" in prompt
+    assert "los pedidos se completan por WhatsApp" in prompt
+    assert "No redirijas a WhatsApp" in prompt
+    assert "pagos@example.com" not in prompt
 
 
 def test_cache_reload(monkeypatch, tmp_path):

@@ -316,11 +316,51 @@ def test_prompt_includes_dynamic_store_catalog_channel_customer_order_payment_an
     assert "Última dirección de envío: Av Principal, Casa 8" in prompt
     assert "Pedido pendiente abierto" in prompt
     assert "Resumen pedido pendiente: Pijama satén azul x2" in prompt
-    assert "**Zelle**: Correo: pagos@example.com" in prompt
-    assert "Zelle" in prompt
+    assert "pagos@example.com" not in prompt
+    assert "No proporciones datos ni instrucciones de pago" in prompt
     assert "40,25 Bs por USD" in prompt
     assert "10%" in prompt
     assert "$350" in prompt
+
+
+@pytest.mark.asyncio
+async def test_instagram_payment_proof_is_not_processed(engine_harness, monkeypatch):
+    engine_harness.settings["ai_orchestration_mode"] = "multi_agent"
+    engine_harness.provider.chat.return_value = LLMResponse(
+        text="Los pedidos y pagos se completan por WhatsApp."
+    )
+    engine.analyze_payment_screenshot.return_value = {
+        "analyzed": True,
+        "payment_method": "zelle",
+        "amount": "28.00",
+        "status": "completed",
+        "confidence": "high",
+    }
+    verify_payment_proof = AsyncMock()
+    monkeypatch.setattr(engine, "verify_payment_proof", verify_payment_proof)
+    monkeypatch.setattr(
+        engine.sessions,
+        "get_or_create_session",
+        AsyncMock(return_value=SimpleNamespace(
+            active_agent="checkout",
+            workflow_stage="checkout_collecting",
+            workflow_context=lambda: {"workflow_stage": "checkout_collecting"},
+        )),
+    )
+    monkeypatch.setattr(engine, "_record_active_route", AsyncMock(return_value=None))
+
+    response = await engine.generate_response(
+        "instagram",
+        "ig-user",
+        "Te envío el comprobante",
+        media_url="https://example.com/proof.jpg",
+    )
+
+    assert response["text"] == "Los pedidos y pagos se completan por WhatsApp."
+    engine.analyze_payment_screenshot.assert_not_awaited()
+    verify_payment_proof.assert_not_awaited()
+    assert engine.analytics.log_ai_run.await_args.kwargs["selected_agent"] == "sales"
+    assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "instagram_whatsapp_handoff"
 
 
 @pytest.mark.asyncio
@@ -360,20 +400,20 @@ async def test_delivery_aware_user_history_survives_provider_failure(engine_harn
 
 
 @pytest.mark.asyncio
-async def test_delivery_aware_user_history_precedes_vision_failure(engine_harness):
+async def test_instagram_delivery_aware_history_skips_payment_vision(engine_harness):
     engine.analyze_payment_screenshot.side_effect = RuntimeError("vision unavailable")
 
-    with pytest.raises(RuntimeError, match="vision unavailable"):
-        await engine.generate_response(
-            "instagram",
-            "ig-user",
-            "Te envío el comprobante",
-            media_url="https://cdn.test/proof.jpg",
-            persist_assistant_message=False,
-            persist_user_before_response=True,
-            message_source_id="meta-job-vision",
-        )
+    await engine.generate_response(
+        "instagram",
+        "ig-user",
+        "Te envío el comprobante",
+        media_url="https://cdn.test/proof.jpg",
+        persist_assistant_message=False,
+        persist_user_before_response=True,
+        message_source_id="meta-job-vision",
+    )
 
+    engine.analyze_payment_screenshot.assert_not_awaited()
     engine.conversations.store_message.assert_awaited_once()
     persisted = engine.conversations.store_message.await_args.kwargs
     assert persisted["role"] == "user"

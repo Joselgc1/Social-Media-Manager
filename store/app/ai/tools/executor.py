@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
+from app.ai.policies.channel_capabilities import is_tool_call_allowed
 from app.ai.tools import catalog, checkout, customers, messaging, orders, payments, support
 from app.ai.tools.context import ToolExecutionContext
 from app.ai.tools.registry import get_tool_specs
@@ -73,6 +74,13 @@ async def execute_tool(name: str, arguments: dict, context: ToolExecutionContext
     if not handler:
         logger.warning(f"Unknown tool: {name}")
         return {"status": "error", "message": f"Unknown tool: {name}"}
+
+    if not is_tool_call_allowed(context.channel, name, arguments):
+        logger.warning("Rejected tool %s for channel %s", name, context.channel)
+        return {
+            "status": "error",
+            "message": f"Tool not allowed on channel '{context.channel}': {name}",
+        }
 
     validator = _VALIDATORS[name]
     errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.absolute_path))
