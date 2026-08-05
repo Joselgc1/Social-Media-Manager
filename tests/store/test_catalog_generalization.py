@@ -7,7 +7,7 @@ from app.ai.tools import catalog as catalog_tools
 from app.ai.tools.registry import get_tool_spec
 from app.catalog.pdf_generator import _build_public_catalog_rows, catalog_fingerprint
 from app.catalog.sheets import _parse_catalog_row, get_product_sizes, group_catalog_products
-from app.crm.sessions import CheckoutDraftItem
+from app.crm.sessions import CheckoutDraft, CheckoutDraftItem
 
 
 def _perfume_catalog() -> list[dict]:
@@ -39,6 +39,21 @@ def _perfume_catalog() -> list[dict]:
             "image_url": "https://example.com/sauvage.jpg",
         },
     ]
+
+
+def _standalone_catalog() -> list[dict]:
+    return [{
+        "sku": "CANDLE-001",
+        "parent_sku": "CANDLE-001",
+        "product_name": "Vela aromática",
+        "brand": "Casa",
+        "category": "Hogar",
+        "description": "Vela de vainilla",
+        "size": "",
+        "sizes": "",
+        "price_usd": 18,
+        "stock": 4,
+    }]
 
 
 def test_sheet_row_parses_optional_brand_and_generic_presentation():
@@ -164,18 +179,7 @@ def test_checkout_requires_presentation_for_ambiguous_multi_variant_product(monk
 
 
 def test_checkout_allows_product_with_no_presentation(monkeypatch):
-    standalone = [{
-        "sku": "CANDLE-001",
-        "parent_sku": "CANDLE-001",
-        "product_name": "Vela aromática",
-        "brand": "Casa",
-        "category": "Hogar",
-        "description": "Vela de vainilla",
-        "size": "",
-        "sizes": "",
-        "price_usd": 18,
-        "stock": 4,
-    }]
+    standalone = _standalone_catalog()
     monkeypatch.setattr(catalog_tools, "get_cached_catalog", lambda: standalone)
     monkeypatch.setattr(checkout_service, "get_cached_catalog", lambda: standalone)
 
@@ -187,6 +191,45 @@ def test_checkout_allows_product_with_no_presentation(monkeypatch):
     assert canonical["sku"] == "CANDLE-001"
     assert canonical["size"] == ""
     assert canonical["unit_price"] == 18.0
+
+
+def test_catalog_aware_missing_fields_skips_presentation_for_standalone_product(monkeypatch):
+    standalone = _standalone_catalog()
+    monkeypatch.setattr(catalog_tools, "get_cached_catalog", lambda: standalone)
+    monkeypatch.setattr(checkout_service, "get_cached_catalog", lambda: standalone)
+    draft = CheckoutDraft.model_validate({
+        "items": [{"product_query": "Vela aromática", "quantity": 1}],
+        "shipping_city": "Caracas",
+        "shipping_method": "mrw",
+        "pickup_agency": "MRW Chacao",
+        "payment_method": "Zelle",
+    })
+
+    missing = checkout_service._missing_fields(
+        draft,
+        {"fulfillment_type": "courier_agency_pickup"},
+    )
+
+    assert "items[0].size" not in missing
+
+
+def test_catalog_aware_missing_fields_requires_ambiguous_perfume_presentation(monkeypatch):
+    monkeypatch.setattr(catalog_tools, "get_cached_catalog", _perfume_catalog)
+    monkeypatch.setattr(checkout_service, "get_cached_catalog", _perfume_catalog)
+    draft = CheckoutDraft.model_validate({
+        "items": [{"product_query": "Sauvage", "quantity": 1}],
+        "shipping_city": "Caracas",
+        "shipping_method": "mrw",
+        "pickup_agency": "MRW Chacao",
+        "payment_method": "Zelle",
+    })
+
+    missing = checkout_service._missing_fields(
+        draft,
+        {"fulfillment_type": "courier_agency_pickup"},
+    )
+
+    assert "items[0].size" in missing
 
 
 def test_generic_variant_tool_schemas_have_no_clothing_enum_and_order_size_is_optional():
