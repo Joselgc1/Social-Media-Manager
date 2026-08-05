@@ -82,13 +82,16 @@ async def send_product_image(args: dict) -> dict:
             "message": "No image is available for that product in the catalog.",
         }
 
-    return {
+    payload = {
         "type": "product_image",
         "image_url": product_with_image["image_url"],
         "caption": args.get("caption", "").strip(),
         "product_name": product_with_image.get("product_name", ""),
-        "brand": product_with_image.get("brand", ""),
     }
+    brand = str(product_with_image.get("brand", "") or "").strip()
+    if brand:
+        payload["brand"] = brand
+    return payload
 
 
 def find_catalog_matches(product_query: str, size_filter: str | None = None) -> list[dict]:
