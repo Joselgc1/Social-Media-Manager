@@ -23,6 +23,7 @@ from app import db
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "").strip()
+_MIGRATED = False
 
 
 def _migration_runner():
@@ -34,45 +35,44 @@ def _migration_runner():
     return module
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(autouse=True)
 async def real_postgres_database():
+    """Give every test a real pool bound to that test's asyncio event loop."""
+    global _MIGRATED
+
     if not TEST_DATABASE_URL:
         pytest.skip("TEST_DATABASE_URL is required for PostgreSQL integration tests")
 
+    if not _MIGRATED:
+        await _migration_runner().run_migration(TEST_DATABASE_URL)
+        _MIGRATED = True
+
     previous_database = db._db
     database = databases.Database(TEST_DATABASE_URL, min_size=1, max_size=30)
-    await _migration_runner().run_migration(TEST_DATABASE_URL)
     await database.connect()
     db._db = database
     db.invalidate_settings_cache()
     try:
+        await db.execute(
+            """
+            TRUNCATE TABLE
+                payment_proof_replays,
+                kommo_message_receipts,
+                kommo_outbound_deliveries,
+                kommo_message_jobs,
+                customer_channel_mappings,
+                conversation_sessions,
+                conversations,
+                orders,
+                customers
+            RESTART IDENTITY CASCADE
+            """
+        )
         yield database
     finally:
         db.invalidate_settings_cache()
         db._db = previous_database
         await database.disconnect()
-
-
-@pytest.fixture(autouse=True)
-async def clean_concurrency_tables(real_postgres_database):
-    del real_postgres_database
-    await db.execute(
-        """
-        TRUNCATE TABLE
-            payment_proof_replays,
-            kommo_message_receipts,
-            kommo_outbound_deliveries,
-            kommo_message_jobs,
-            customer_channel_mappings,
-            conversation_sessions,
-            conversations,
-            orders,
-            customers
-        RESTART IDENTITY CASCADE
-        """
-    )
-    db.invalidate_settings_cache()
-    yield
 
 
 def _incoming_event(message_id: str, *, customer: int = 1, text: str | None = None) -> NormalizedKommoEvent:
