@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock
 
 import databases
 import pytest
-
 from app import db
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 
