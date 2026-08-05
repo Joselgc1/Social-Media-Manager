@@ -43,9 +43,9 @@ async def test_get_settings_rejects_invalid_stored_fallback_after_provider_init(
         db,
         "fetch_all",
         AsyncMock(return_value=[
-            {"key": "llm_provider", "value": "openai"},
+            {"key": "llm_provider", "value": '"openai"'},
             {"key": "auto_fallback", "value": True},
-            {"key": "fallback_provider", "value": "anthropic"},
+            {"key": "fallback_provider", "value": '"anthropic"'},
         ]),
     )
     monkeypatch.setattr(providers, "list_providers", lambda: ["openai"])
@@ -67,9 +67,9 @@ async def test_get_settings_accepts_valid_stored_fallback_after_provider_init(mo
         db,
         "fetch_all",
         AsyncMock(return_value=[
-            {"key": "llm_provider", "value": "openai"},
+            {"key": "llm_provider", "value": '"openai"'},
             {"key": "auto_fallback", "value": True},
-            {"key": "fallback_provider", "value": "anthropic"},
+            {"key": "fallback_provider", "value": '"anthropic"'},
         ]),
     )
     monkeypatch.setattr(providers, "list_providers", lambda: ["openai", "anthropic"])
