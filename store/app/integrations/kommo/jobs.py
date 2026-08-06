@@ -70,7 +70,9 @@ UNSUPPORTED_ATTACHMENT_MESSAGE = (
     "No pude identificar el archivo que me enviaste. "
     "Por favor envíame una imagen del comprobante o escríbeme qué necesitas."
 )
-COMMENT_MIRROR_RECONCILIATION_SECONDS = 90
+COMMENT_MIRROR_RECONCILIATION_SECONDS = 45
+COMMENT_MIRROR_AMBIGUITY_SECONDS = 1.0
+COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS = 5.0
 COMMENT_CALLBACK_DEDUP_SECONDS = 300
 COMMENT_PRIVATE_SUPERSEDED_REASON = "superseded_by_instagram_comment"
 _PUBLIC_COMMENT_CONTEXT_FIELDS = {
@@ -1413,56 +1415,142 @@ async def _discard_recent_private_jobs_superseded_by_comment_callback(
 ) -> int:
     if not normalized_message:
         return 0
+    window_seconds = _comment_mirror_window_seconds()
+    normalized_hash = normalized_text_hash(normalized_message)
     rows = await db.fetch_all(
         f"""
-        WITH candidates AS (
-            SELECT id
-            FROM kommo_message_jobs
-            WHERE interaction_type = 'private_message'
-              AND channel = 'instagram'
-              AND status IN (
-                  'pending', 'prepared', 'processing', 'waiting_for_salesbot',
-                  'waiting_for_context', 'ready'
-              )
-              AND continuation_payload IS NULL
-              AND assistant_message_persisted_at IS NULL
-              AND {_signed_entity_match_sql()}
-              AND ABS(EXTRACT(EPOCH FROM (created_at - to_timestamp(:comment_event_timestamp))))
-                    <= :window_seconds
-              AND {_normalized_message_sql('combined_message')} = :normalized_message
-            ORDER BY created_at DESC
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE kommo_message_jobs job
+        SELECT private_job.id,
+               ABS(EXTRACT(EPOCH FROM (
+                   COALESCE(receipt.received_at, receipt.created_at, private_job.created_at)
+                   - COALESCE(meta_event.event_timestamp, to_timestamp(:comment_event_timestamp))
+               ))) AS timestamp_delta_seconds,
+               CASE
+                   WHEN receipt.received_at IS NOT NULL THEN 'receipt_received_at'
+                   WHEN receipt.created_at IS NOT NULL THEN 'receipt_created_at'
+                   ELSE 'job_created_at'
+               END AS private_timestamp_source,
+               CASE
+                   WHEN meta_event.event_timestamp IS NOT NULL THEN 'meta_event_timestamp'
+                   ELSE 'salesbot_iat'
+               END AS comment_timestamp_source
+        FROM kommo_message_jobs private_job
+        LEFT JOIN LATERAL (
+            SELECT event.event_timestamp
+            FROM meta_instagram_context_events event
+            WHERE event.event_type = 'comment'
+              AND event.matched_kommo_job_id = private_job.id
+              AND event.normalized_text_hash = :normalized_text_hash
+            ORDER BY event.event_timestamp ASC, event.id ASC
+            LIMIT 1
+        ) meta_event ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT receipt_row.received_at, receipt_row.created_at
+            FROM kommo_message_receipts receipt_row
+            WHERE receipt_row.job_id = private_job.id
+              AND receipt_row.channel = 'instagram'
+              AND receipt_row.interaction_type = 'private_message'
+              AND receipt_row.normalized_text_hash = :normalized_text_hash
+            ORDER BY ABS(EXTRACT(EPOCH FROM (
+                         COALESCE(receipt_row.received_at, receipt_row.created_at)
+                         - COALESCE(meta_event.event_timestamp, to_timestamp(:comment_event_timestamp))
+                     ))) ASC,
+                     receipt_row.created_at ASC,
+                     receipt_row.id ASC
+            LIMIT 1
+        ) receipt ON TRUE
+        WHERE private_job.interaction_type = 'private_message'
+          AND private_job.channel = 'instagram'
+          AND private_job.status IN (
+              'pending', 'prepared', 'processing', 'waiting_for_salesbot',
+              'waiting_for_context', 'ready'
+          )
+          AND private_job.continuation_payload IS NULL
+          AND private_job.assistant_message_persisted_at IS NULL
+          AND {_signed_entity_match_sql('private_job')}
+          AND {_normalized_message_sql('private_job.combined_message')} = :normalized_message
+          AND ABS(EXTRACT(EPOCH FROM (
+              COALESCE(receipt.received_at, receipt.created_at, private_job.created_at)
+              - COALESCE(meta_event.event_timestamp, to_timestamp(:comment_event_timestamp))
+          ))) <= :window_seconds
+        ORDER BY timestamp_delta_seconds ASC, private_job.created_at ASC, private_job.id ASC
+        FOR UPDATE OF private_job SKIP LOCKED
+        """,
+        {
+            "entity_type": values["entity_type"],
+            "entity_id": values["entity_id"],
+            "normalized_message": normalized_message,
+            "normalized_text_hash": normalized_hash,
+            "comment_event_timestamp": comment_event_timestamp,
+            "window_seconds": window_seconds,
+        },
+    )
+    candidate = _unique_best_mirror_candidate(rows)
+    if not candidate:
+        if rows:
+            logger.info(
+                "Kommo private Instagram mirror reconciliation left ambiguous candidates untouched: count=%s entity_type=%s entity_id=%s",
+                len(rows),
+                values["entity_type"],
+                values["entity_id"],
+            )
+        return 0
+    discarded = await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs
         SET status = 'discarded',
             last_error = :reason,
             processing_started_at = NULL,
             processing_lease_id = NULL,
             completed_at = NOW(),
             updated_at = NOW()
-        FROM candidates
-        WHERE job.id = candidates.id
-        RETURNING job.id
+        WHERE id = CAST(:job_id AS uuid)
+          AND status IN (
+              'pending', 'prepared', 'processing', 'waiting_for_salesbot',
+              'waiting_for_context', 'ready'
+          )
+          AND continuation_payload IS NULL
+          AND assistant_message_persisted_at IS NULL
+        RETURNING id
         """,
-        {
-            "entity_type": values["entity_type"],
-            "entity_id": values["entity_id"],
-            "normalized_message": normalized_message,
-            "comment_event_timestamp": comment_event_timestamp,
-            "window_seconds": COMMENT_MIRROR_RECONCILIATION_SECONDS,
-            "reason": COMMENT_PRIVATE_SUPERSEDED_REASON,
-        },
+        {"job_id": str(candidate["id"]), "reason": COMMENT_PRIVATE_SUPERSEDED_REASON},
     )
-    count = len(rows or [])
-    if count:
+    if discarded:
         logger.info(
-            "Kommo private Instagram job(s) discarded after native comment callback: count=%s entity_type=%s entity_id=%s reason=%s",
-            count,
+            "Kommo private Instagram mirror discarded after native comment callback: job_id=%s entity_type=%s entity_id=%s timestamp_delta_seconds=%s reason=%s",
+            candidate["id"],
             values["entity_type"],
             values["entity_id"],
+            candidate["timestamp_delta_seconds"],
             COMMENT_PRIVATE_SUPERSEDED_REASON,
         )
-    return count
+        return 1
+    return 0
+
+
+def _unique_best_mirror_candidate(rows) -> dict | None:
+    candidates = [dict(row) for row in rows or []]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda candidate: (
+            float(candidate["timestamp_delta_seconds"]),
+            str(candidate["id"]),
+        )
+    )
+    best = candidates[0]
+    if best.get("comment_timestamp_source") == "meta_event_timestamp":
+        return best
+    if len(candidates) > 1:
+        best_delta = float(best["timestamp_delta_seconds"])
+        next_delta = float(candidates[1]["timestamp_delta_seconds"])
+        if next_delta - best_delta <= COMMENT_MIRROR_AMBIGUITY_SECONDS:
+            return None
+    if (
+        best.get("private_timestamp_source") == "job_created_at"
+        and float(best["timestamp_delta_seconds"]) > COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS
+    ):
+        return None
+    return best
 
 
 async def _find_duplicate_comment_callback_job(
@@ -1655,6 +1743,7 @@ async def _discard_private_job_if_superseded_by_recent_comment(job: dict) -> boo
         return False
     entity_sql, entity_values = _job_entity_match(job)
     message_hash = normalized_text_hash(normalized_message)
+    window_seconds = _comment_mirror_window_seconds()
     lock_values = _job_reconciliation_values(job, normalized_message)
     async with db.get_db().transaction():
         await db.execute(
@@ -1663,38 +1752,56 @@ async def _discard_private_job_if_superseded_by_recent_comment(job: dict) -> boo
         )
         match = await db.fetch_one(
             f"""
-            SELECT candidate.id
+            SELECT candidate.id,
+                   candidate.correlation_timestamp,
+                   candidate.timestamp_source,
+                   ABS(EXTRACT(EPOCH FROM (
+                       candidate.correlation_timestamp - CAST(:private_created_at AS timestamptz)
+                   ))) AS timestamp_delta_seconds
             FROM (
-                SELECT comment_job.id, comment_job.created_at
+                SELECT comment_job.id,
+                       COALESCE(
+                           matched_meta_event.event_timestamp,
+                           to_timestamp(
+                               CASE
+                                   WHEN comment_job.callback_claims ->> 'iat' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                   THEN CAST(comment_job.callback_claims ->> 'iat' AS double precision)
+                                   ELSE NULL
+                               END
+                           ),
+                           comment_job.created_at
+                       ) AS correlation_timestamp,
+                       CASE
+                           WHEN matched_meta_event.event_timestamp IS NOT NULL THEN 'meta_event_timestamp'
+                           WHEN comment_job.callback_claims ->> 'iat' ~ '^[0-9]+(\\.[0-9]+)?$' THEN 'salesbot_iat'
+                           ELSE 'comment_job_created_at'
+                       END AS timestamp_source
                 FROM kommo_message_jobs comment_job
+                LEFT JOIN LATERAL (
+                    SELECT event.event_timestamp
+                    FROM meta_instagram_context_events event
+                    WHERE event.event_type = 'comment'
+                      AND event.matched_kommo_job_id = comment_job.id
+                      AND event.normalized_text_hash = :normalized_text_hash
+                    ORDER BY event.event_timestamp ASC, event.id ASC
+                    LIMIT 1
+                ) matched_meta_event ON TRUE
                 WHERE comment_job.interaction_type = 'instagram_comment'
                   AND comment_job.channel = 'instagram'
                   AND comment_job.status NOT IN ('discarded', 'failed')
                   AND {entity_sql}
                   AND {_normalized_message_sql('comment_job.combined_message')} = :normalized_message
-                  AND ABS(EXTRACT(EPOCH FROM (
-                      COALESCE(
-                          to_timestamp(
-                              CASE
-                                  WHEN comment_job.callback_claims ->> 'iat' ~ '^[0-9]+(\\.[0-9]+)?$'
-                                  THEN CAST(comment_job.callback_claims ->> 'iat' AS double precision)
-                                  ELSE NULL
-                              END
-                          ),
-                          comment_job.created_at
-                      ) - CAST(:private_created_at AS timestamptz)
-                  ))) <= :window_seconds
                 UNION ALL
-                SELECT meta_event.id, meta_event.event_timestamp
+                SELECT meta_event.id, meta_event.event_timestamp, 'meta_event_timestamp'
                 FROM meta_instagram_context_events meta_event
                 WHERE meta_event.event_type = 'comment'
                   AND meta_event.matched_kommo_job_id = CAST(:job_id AS uuid)
                   AND meta_event.normalized_text_hash = :normalized_text_hash
-                  AND ABS(EXTRACT(EPOCH FROM (
-                      meta_event.event_timestamp - CAST(:private_created_at AS timestamptz)
-                  ))) <= :window_seconds
             ) candidate
-            ORDER BY candidate.created_at DESC
+            WHERE ABS(EXTRACT(EPOCH FROM (
+                candidate.correlation_timestamp - CAST(:private_created_at AS timestamptz)
+            ))) <= :window_seconds
+            ORDER BY timestamp_delta_seconds ASC, candidate.id ASC
             LIMIT 1
             """,
             entity_values
@@ -1703,7 +1810,7 @@ async def _discard_private_job_if_superseded_by_recent_comment(job: dict) -> boo
                 "private_created_at": job.get("created_at"),
                 "normalized_message": normalized_message,
                 "normalized_text_hash": message_hash,
-                "window_seconds": COMMENT_MIRROR_RECONCILIATION_SECONDS,
+                "window_seconds": window_seconds,
             },
         )
         if not match:
@@ -1770,11 +1877,12 @@ def _normalized_message_sql(column: str) -> str:
     return f"LOWER(REGEXP_REPLACE(BTRIM(COALESCE({column}, '')), '\\s+', ' ', 'g'))"
 
 
-def _signed_entity_match_sql() -> str:
-    return """
+def _signed_entity_match_sql(alias: str | None = None) -> str:
+    prefix = f"{alias}." if alias else ""
+    return f"""
     (
-        (:entity_type = 'leads' AND lead_id = :entity_id)
-        OR (:entity_type = 'contacts' AND contact_id = :entity_id)
+        (:entity_type = 'leads' AND {prefix}lead_id = :entity_id)
+        OR (:entity_type = 'contacts' AND {prefix}contact_id = :entity_id)
     )
     """
 
@@ -1803,6 +1911,14 @@ def _job_reconciliation_values(job: dict, normalized_message: str) -> dict:
         "entity_id": entity_id,
         "normalized_message": normalized_message,
     }
+
+
+def _comment_mirror_window_seconds() -> int:
+    configured = getattr(get_config(), "meta_context_match_window_seconds", None)
+    try:
+        return max(5, min(int(configured), 300))
+    except (TypeError, ValueError):
+        return COMMENT_MIRROR_RECONCILIATION_SECONDS
 
 
 def _instagram_callback_origin(origin: str | None) -> str:
