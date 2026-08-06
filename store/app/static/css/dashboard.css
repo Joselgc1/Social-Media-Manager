@@ -104,6 +104,9 @@ textarea { resize: vertical; min-height: 88px; }
 .orders-table th { padding-bottom: 12px; vertical-align: middle; }
 .orders-table .order-items-cell { max-width: 360px; }
 .orders-table .order-actions-cell { width: 170px; text-align: right; }
+.orders-table th:first-child,
+.orders-table td:first-child { width: 36px; }
+.orders-table:not(.customers-table) tbody td { padding-top: 14px; padding-bottom: 14px; }
 .orders-empty {
   padding: 24px 0;
   color: #6b7280;

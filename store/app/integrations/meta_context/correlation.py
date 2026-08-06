@@ -837,8 +837,12 @@ def _event_type_for_job(job: dict) -> str:
     return "story_reply" if _job_interaction_type(job) == "private_message" else "comment"
 
 
-def _job_interaction_type(job: dict) -> str:
-    return str(job.get("interaction_type") or "private_message").strip().lower()
+def _job_interaction_type(job) -> str:
+    try:
+        interaction_type = job["interaction_type"]
+    except KeyError:
+        interaction_type = None
+    return str(interaction_type or "private_message").strip().lower()
 
 
 def _match_window_seconds(event: dict, config) -> int:

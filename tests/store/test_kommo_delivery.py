@@ -599,6 +599,40 @@ async def test_claim_retries_prepared_and_definitive_failed_only(monkeypatch):
     assert "send_attempt_count" in update_query
     assert "send_attempt_month" in update_query
     assert "WHEN status = 'failed'" in update_query
+    assert set(fetch_one.await_args_list[0].args[1]) == {
+        "job_id",
+        "request_fingerprint",
+        "attachment_metadata",
+    }
+    assert "media_type" not in fetch_one.await_args_list[0].args[1]
+
+
+@pytest.mark.asyncio
+async def test_claim_existing_delivery_uses_only_query_specific_parameters(monkeypatch):
+    database = _TransactionDB()
+    execute = AsyncMock()
+    fetch_one = AsyncMock(
+        side_effect=[None, {"status": "accepted", "provider_message_id": "message-1"}]
+    )
+    monkeypatch.setattr(delivery.db, "get_db", lambda: database)
+    monkeypatch.setattr(delivery.db, "execute", execute)
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    claim = await delivery._claim_delivery(
+        job_id=JOB["id"],
+        media_type="product_image",
+        request_fingerprint="fingerprint",
+        attachment_metadata={"cache_key": "key"},
+    )
+
+    assert claim == delivery._DeliveryClaim("accepted", "message-1", False)
+    assert set(execute.await_args.args[1]) == {
+        "job_id",
+        "media_type",
+        "request_fingerprint",
+        "attachment_metadata",
+    }
+    assert set(fetch_one.await_args_list[1].args[1]) == {"job_id", "request_fingerprint"}
 
 
 @pytest.mark.asyncio

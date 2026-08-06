@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 MAX_JOB_ATTEMPTS = 3
 STALE_PROCESSING_MINUTES = 5
 STALE_WAITING_MINUTES = 3
+CUSTOMER_DELIVERY_FAILURE_MESSAGE = (
+    "Disculpa, tuve un problema al enviarte el archivo. "
+    "Por favor inténtalo de nuevo en unos minutos."
+)
 _TERMINAL_STATUSES = {"sent", "discarded", "failed", "delivery_unknown"}
 _ACTIVE_SALESBOT_STATUSES = {
     "prepared",
@@ -62,6 +66,10 @@ _ACTIVE_SALESBOT_STATUSES = {
 _TRANSIENT_CONTINUATION_STATUSES = {429, 500, 502, 503, 504}
 _AUDIO_MESSAGE_TYPES = {"voice", "audio"}
 _IMAGE_MESSAGE_TYPES = {"image", "picture"}
+UNSUPPORTED_ATTACHMENT_MESSAGE = (
+    "No pude identificar el archivo que me enviaste. "
+    "Por favor envíame una imagen del comprobante o escríbeme qué necesitas."
+)
 COMMENT_MIRROR_RECONCILIATION_SECONDS = 30
 COMMENT_CALLBACK_DEDUP_SECONDS = 300
 COMMENT_PRIVATE_SUPERSEDED_REASON = "superseded_by_instagram_comment"
@@ -849,6 +857,14 @@ async def _process_ready_job(job: dict) -> None:
         ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else None
         profile = build_kommo_customer_profile(job=job, contact=contact)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
+        if _has_unsupported_attachment(job):
+            await _continue_and_discard_job(
+                client,
+                job,
+                "unsupported_attachment",
+                customer_message=UNSUPPORTED_ATTACHMENT_MESSAGE,
+            )
+            return
         effective_message_text = await _effective_customer_message(job)
         job = {
             **job,
@@ -1170,7 +1186,12 @@ async def _process_ready_job(job: dict) -> None:
     except KommoAPIError as e:
         logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         if not continuation_started and not media_delivery_succeeded and job.get("return_url"):
-            await _continue_and_discard_job(client, job, sanitize_job_error(e))
+            await _continue_and_discard_job(
+                client,
+                job,
+                sanitize_job_error(e),
+                send_customer_fallback=True,
+            )
             return
         await _mark_job(
             job["id"],
@@ -1185,7 +1206,12 @@ async def _process_ready_job(job: dict) -> None:
     except Exception as e:
         logger.exception("Kommo ready job failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
         if not continuation_started and not media_delivery_succeeded and job.get("return_url"):
-            await _continue_and_discard_job(client, job, sanitize_job_error(e))
+            await _continue_and_discard_job(
+                client,
+                job,
+                sanitize_job_error(e),
+                send_customer_fallback=True,
+            )
             return
         await _mark_job(
             job["id"],
@@ -1713,10 +1739,45 @@ def _claim_as_str(claims: dict, key: str) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
-async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str | None) -> None:
+def _failure_continuation_data(job: dict) -> tuple[dict, dict]:
+    return _customer_message_continuation_data(job, CUSTOMER_DELIVERY_FAILURE_MESSAGE)
+
+
+def _customer_message_continuation_data(job: dict, customer_message: str) -> tuple[dict, dict]:
+    message, diagnostics = prepare_kommo_customer_message(
+        customer_message,
+        job.get("channel") or "whatsapp",
+        {},
+        interaction_type=_job_interaction_type(job),
+    )
+    return {"status": "fail", "message": message}, diagnostics
+
+
+async def _continue_and_discard_job(
+    client: KommoClient,
+    job: dict,
+    reason: str | None,
+    *,
+    send_customer_fallback: bool = False,
+    customer_message: str | None = None,
+) -> None:
     continuation_started = False
     try:
-        continuation_data = {"status": "fail", "message": ""}
+        if customer_message:
+            continuation_data, message_diagnostics = _customer_message_continuation_data(
+                job,
+                customer_message,
+            )
+        elif send_customer_fallback:
+            continuation_data, message_diagnostics = _failure_continuation_data(job)
+        else:
+            continuation_data = {"status": "fail", "message": ""}
+            message_diagnostics = build_kommo_message_diagnostics(
+                "",
+                job.get("channel") or "whatsapp",
+                "preserve",
+                interaction_type=_job_interaction_type(job),
+            )
         logger.info("Kommo continuing Salesbot with failure status: job_id=%s reason=%s", job["id"], reason)
         if not await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
             logger.warning("Kommo job lost its processing lease before failure continuation: job_id=%s", job["id"])
@@ -1725,12 +1786,7 @@ async def _continue_and_discard_job(client: KommoClient, job: dict, reason: str 
         _log_continuation_prepared(
             job["id"],
             continuation_data,
-            build_kommo_message_diagnostics(
-                "",
-                job.get("channel") or "whatsapp",
-                "preserve",
-                interaction_type=_job_interaction_type(job),
-            ),
+            message_diagnostics,
         )
         try:
             response_payload = await client.continue_salesbot(
@@ -1833,9 +1889,10 @@ async def _retry_ready_job(job: dict, error: str) -> None:
 
 async def _fail_ready_job(client: KommoClient, job: dict, error: str) -> None:
     if job.get("return_url"):
-        continuation_data = {"status": "fail", "message": ""}
+        continuation_data, message_diagnostics = _failure_continuation_data(job)
         if await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
             try:
+                _log_continuation_prepared(job["id"], continuation_data, message_diagnostics)
                 await client.continue_salesbot(job["return_url"], data=continuation_data)
             except Exception as continuation_error:
                 await _mark_job(
@@ -2170,6 +2227,11 @@ def _message_placeholder(event: NormalizedKommoEvent, external_message_id: str |
     if event.message_type:
         return f"[Mensaje de tipo no soportado por Kommo: {event.message_type}]"
     return "[Mensaje recibido sin texto por Kommo]"
+
+
+def _has_unsupported_attachment(job: dict) -> bool:
+    message_type = str(job.get("message_type") or "").strip().lower()
+    return bool(message_type) and message_type not in _AUDIO_MESSAGE_TYPES | _IMAGE_MESSAGE_TYPES | {"text"}
 
 
 async def _effective_customer_message(job: dict) -> str:

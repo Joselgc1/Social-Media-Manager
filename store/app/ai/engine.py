@@ -479,6 +479,14 @@ async def generate_response(
                 channel=vision_channel,
             )
             payment_proof_attempt = guards.looks_like_payment_proof_message(message_text, vision_result or {})
+            if not payment_proof_attempt and _is_kommo_payment_screenshot(
+                integration_context,
+                open_order,
+            ):
+                # Kommo sends image-only messages with a generic placeholder. Once an
+                # order is awaiting payment, route that screenshot to verification
+                # even when vision cannot extract fields from it.
+                payment_proof_attempt = True
             if (vision_result or {}).get("analyzed") and not payment_proof_attempt:
                 summary = vision_result.get("summary", "Imagen analizada")
                 message_text = f"{message_text}\n\n[Análisis de imagen: {summary}]"
@@ -739,6 +747,14 @@ async def generate_response(
     if not persist_assistant_message and safe_tool_log:
         response["function_calls"] = safe_tool_log
     return response
+
+
+def _is_kommo_payment_screenshot(integration_context: dict | None, open_order: dict | None) -> bool:
+    return (
+        str((integration_context or {}).get("provider") or "").strip().lower() == "kommo"
+        and bool((integration_context or {}).get("media_url_is_direct"))
+        and str((open_order or {}).get("payment_status") or "").strip().lower() == "pending"
+    )
 
 
 def _detect_hostile_customer_message(message_text: str) -> str | None:

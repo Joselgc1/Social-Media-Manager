@@ -70,6 +70,8 @@ async function logout() {
 // -- Sorting state --
 let _customersData = [];
 let _ordersData = [];
+let _selectedOrderIds = new Set();
+let _selectedCustomerIds = new Set();
 let _broadcastsData = [];
 let _instagramMappingsData = [];
 let _instagramProductsData = [];
@@ -139,12 +141,7 @@ function renderDeleteIcon(label) {
 }
 
 function renderCustomerTags(customerId, tags) {
-  const safeCustomerId = escapeHtml(customerId);
-  const chips = tags.map(tag => {
-    const safeTag = escapeHtml(tag);
-    return `<button type="button" class="badge badge-blue tag-chip tag-remove-chip" title="Click para eliminar" data-customer-id="${safeCustomerId}" data-tag="${safeTag}">${safeTag} ✕</button>`;
-  }).join('');
-  return `<div class="customer-tags">${chips}<button type="button" class="badge badge-gray tag-add-chip" data-customer-id="${safeCustomerId}" title="Agregar tag">+</button></div>`;
+  return `<div class="customer-tags">${tags.map(tag => `<span class="badge badge-blue">${escapeHtml(tag)}</span>`).join('')}</div>`;
 }
 
 // -- Dark Mode --
@@ -262,13 +259,23 @@ function renderInstagramProductOptions() {
   const select = document.getElementById('instagram-product-skus');
   if (!select) return;
   const selected = new Set([...select.selectedOptions].map(option => option.value));
-  select.innerHTML = (_instagramProductsAvailable ? '' : '<option value="" disabled>Catálogo temporalmente no disponible</option>') + _instagramProductsData.map(product => {
-    const stockLabel = product.total_stock > 0 ? `${product.total_stock} disponibles` : 'Sin stock';
-    const priceLabel = product.price === null ? 'Precio variable' : `$${Number(product.price).toFixed(2)}`;
-    return `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)} · ${priceLabel} · ${stockLabel}</option>`;
-  }).join('');
+  select.innerHTML = _instagramProductsData.map(product => `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)}</option>`).join('');
   [...select.options].forEach(option => { option.selected = selected.has(option.value); });
+  const picker = document.getElementById('instagram-product-picker');
+  if (picker) picker.innerHTML = _instagramProductsAvailable ? _instagramProductsData.map(product => `<label class="flex cursor-pointer items-center gap-2 rounded px-2 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"><input type="checkbox" value="${escapeHtml(product.sku)}" ${selected.has(product.sku) ? 'checked' : ''} onchange="toggleInstagramProduct(this.value, this.checked)"><span class="text-sm">${escapeHtml(product.name)} <span class="text-gray-500">· ${escapeHtml(product.sku)}</span></span></label>`).join('') : '<p class="p-2 text-sm text-gray-500">Catálogo temporalmente no disponible</p>';
   renderSelectedInstagramProducts();
+}
+
+function toggleInstagramProduct(sku, selected) {
+  const option = [...document.getElementById('instagram-product-skus').options].find(item => item.value === sku);
+  if (option) option.selected = selected;
+  renderSelectedInstagramProducts();
+}
+
+function showInstagramMappingForm() {
+  const form = document.getElementById('instagram-mapping-form');
+  if (form) form.style.display = '';
+  form?.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
 function renderSelectedInstagramProducts() {
@@ -286,6 +293,8 @@ function removeInstagramProduct(selectedIndex) {
   if (!select) return;
   const option = [...select.selectedOptions][selectedIndex];
   if (option) option.selected = false;
+  const checkbox = document.querySelector(`#instagram-product-picker input[value="${CSS.escape(option?.value || '')}"]`);
+  if (checkbox) checkbox.checked = false;
   renderSelectedInstagramProducts();
 }
 
@@ -294,11 +303,13 @@ function renderInstagramMappings() {
   const count = document.getElementById('instagram-mappings-count');
   if (!container || !count) return;
   count.textContent = `${_instagramMappingsData.length} contenido${_instagramMappingsData.length === 1 ? '' : 's'}`;
+  const unmappedStories = _instagramMappingsData.filter(mapping => mapping.content_type === 'story' && (mapping.mapping_status === 'assignment_required' || !(mapping.products || []).length));
+  const storyAlert = unmappedStories.length ? `<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Hay ${unmappedStories.length} Historia${unmappedStories.length === 1 ? '' : 's'} de Instagram sin productos asignados. <button class="font-semibold underline" onclick="editInstagramMapping('${escapeHtml(unmappedStories[0].id)}')">Mapear ahora</button></div>` : '';
   if (!_instagramMappingsData.length) {
     container.innerHTML = '<div class="text-gray-500 dark:text-gray-400 py-5 text-center">Aún no hay contenidos de Instagram.</div>';
     return;
   }
-  container.innerHTML = `<div class="grid gap-3">${_instagramMappingsData.map(mapping => {
+  container.innerHTML = `${storyAlert}<div class="grid gap-3">${_instagramMappingsData.map(mapping => {
     const products = mapping.products || [];
     const assignmentRequired = mapping.mapping_status === 'assignment_required' || !products.length;
     const productNames = products.map(product => product.name || 'Producto no disponible').join(', ') || 'Sin asignar';
@@ -390,6 +401,7 @@ async function saveInstagramMapping() {
 }
 
 function editInstagramMapping(contentId) {
+  showInstagramMappingForm();
   const mapping = _instagramMappingsData.find(item => item.id === contentId);
   if (!mapping) return;
   _instagramEditingId = contentId;
@@ -424,6 +436,7 @@ function cancelInstagramEdit() {
   document.getElementById('instagram-form-title').textContent = 'Mapear contenido de Instagram';
   document.getElementById('instagram-save-btn').textContent = 'Guardar mapeo';
   document.getElementById('instagram-cancel-btn').style.display = 'none';
+  document.getElementById('instagram-mapping-form').style.display = 'none';
 }
 
 async function archiveInstagramMapping(contentId) {
@@ -688,6 +701,7 @@ function renderCustomers(customers) {
   }
 
   const hasEscalated = _customersData.some(c => c.conversation_state === 'escalated');
+  renderBulkCustomerControls(customers);
   let html = '';
   if (hasEscalated) {
     html += '<div class="mb-3"><button class="btn btn-primary text-sm" onclick="resolveAllCustomers()">Resolver todas las escalaciones</button></div>';
@@ -715,6 +729,10 @@ function renderCustomers(customers) {
         <div class="card mobile-data-card">
           <div class="mobile-card-header">
             <div>
+              <label class="inline-flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-2">
+                <input type="checkbox" ${_selectedCustomerIds.has(c.id) ? 'checked' : ''} onchange="toggleCustomerSelection('${c.id}', this.checked)">
+                Seleccionar
+              </label>
               <div class="font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(primaryName)}</div>
               ${secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(secondaryLabel)}</div>` : ''}
               ${tertiaryLabel && tertiaryLabel !== secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(tertiaryLabel)}</div>` : ''}
@@ -758,10 +776,6 @@ function renderCustomers(customers) {
                 </div>
               </div>
             </div>
-            <div class="mobile-card-metric">
-              <span class="text-xs text-gray-500 dark:text-gray-400">Marketing</span>
-              ${c.channel === 'whatsapp' ? `<button type="button" class="badge ${c.marketing_opt_in ? 'badge-green' : 'badge-gray'} mt-1" onclick="changeCustomerMarketingConsent('${c.id}', ${!c.marketing_opt_in})">${c.marketing_opt_in ? 'Autorizado' : 'Sin permiso'}</button>` : '<span class="text-xs text-gray-400 mt-1">No aplica</span>'}
-            </div>
           </div>
           <div class="mt-4">
             <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Tags</div>
@@ -775,13 +789,13 @@ function renderCustomers(customers) {
   }
 
   html += `<table class="w-full orders-table customers-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
+    <th class="pb-2"><input type="checkbox" aria-label="Seleccionar clientes visibles" ${customers.length && customers.every(c => _selectedCustomerIds.has(c.id)) ? 'checked' : ''} onchange="toggleVisibleCustomerSelection(this.checked)"></th>
     <th class="pb-2 sortable" onclick="sortCustomers('name')">Cliente${sortArrow('customers','name')}</th>
     <th>Tags</th>
     <th class="sortable" onclick="sortCustomers('channel')">Canal${sortArrow('customers','channel')}</th>
     <th class="sortable" onclick="sortCustomers('orders')">Pedidos${sortArrow('customers','orders')}</th>
     <th class="sortable" onclick="sortCustomers('spent')">Gastado${sortArrow('customers','spent')}</th>
     <th class="sortable" onclick="sortCustomers('state')">Estado${sortArrow('customers','state')}</th>
-    <th>Marketing</th>
     <th></th></tr></thead><tbody>`;
   for (const c of customers) {
     const tags = (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) || [];
@@ -794,7 +808,8 @@ function renderCustomers(customers) {
     const statusLabel = CUSTOMER_STATE_LABELS[currentState] || currentState || 'Activo';
     const contactValue = getCustomerContactValue(c);
     html += `<tr class="border-t border-gray-100 dark:border-gray-700">
-      <td class="customer-name-cell">
+      <td><input type="checkbox" aria-label="Seleccionar cliente" ${_selectedCustomerIds.has(c.id) ? 'checked' : ''} onchange="toggleCustomerSelection('${c.id}', this.checked)"></td>
+      <td class="customer-name-cell cursor-pointer" onclick="openCustomerDetail('${c.id}')">
         <div class="font-medium text-gray-900 dark:text-gray-100">${escapeHtml(primaryName)}</div>
         ${secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(secondaryLabel)}</div>` : ''}
         ${tertiaryLabel && tertiaryLabel !== secondaryLabel ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${escapeHtml(tertiaryLabel)}</div>` : ''}
@@ -828,7 +843,6 @@ function renderCustomers(customers) {
           </div>
         </div>
       </td>
-      <td>${c.channel === 'whatsapp' ? `<button type="button" class="badge ${c.marketing_opt_in ? 'badge-green' : 'badge-gray'}" onclick="changeCustomerMarketingConsent('${c.id}', ${!c.marketing_opt_in})">${c.marketing_opt_in ? 'Autorizado' : 'Sin permiso'}</button>` : '<span class="text-xs text-gray-400">No aplica</span>'}</td>
       <td class="customer-actions-cell">
         <button class="btn btn-danger btn-icon text-xs" onclick="deleteCustomer('${c.id}')" title="Eliminar cliente" aria-label="Eliminar cliente">${renderDeleteIcon('Eliminar cliente')}</button>
       </td>
@@ -837,6 +851,81 @@ function renderCustomers(customers) {
   html += '</tbody></table>';
   document.getElementById('customers-list').innerHTML = html;
 }
+
+function openCustomerDetail(customerId) {
+  window.location.href = `/admin/customers/${encodeURIComponent(customerId)}`;
+}
+
+function toggleBulkCustomerState() {
+  const panel = document.getElementById('customers-bulk-controls');
+  const btn = document.getElementById('customers-bulk-toggle');
+  if (!panel || !btn) return;
+  const visible = panel.style.display !== 'none';
+  panel.style.display = visible ? 'none' : 'grid';
+  btn.innerHTML = visible ? 'Cambiar Estados &#x25BC;' : 'Cambiar Estados &#x25B2;';
+}
+
+function renderBulkCustomerControls(visibleCustomers) {
+  const container = document.getElementById('customers-bulk-controls');
+  if (!container) return;
+  const selectedCount = _selectedCustomerIds.size;
+  container.innerHTML = `
+    <div class="flex items-center justify-between gap-2"><span class="text-sm font-medium text-gray-700 dark:text-gray-200">${selectedCount} seleccionado${selectedCount === 1 ? '' : 's'}</span><button class="btn btn-secondary text-xs" type="button" onclick="clearCustomerSelection()" ${selectedCount ? '' : 'disabled'}>Limpiar</button></div>
+    <button class="btn btn-secondary text-xs" type="button" onclick="toggleVisibleCustomerSelection(true)" ${visibleCustomers.length ? '' : 'disabled'}>Seleccionar visibles</button>
+    <select id="bulk-customer-state" class="text-sm" ${selectedCount ? '' : 'disabled'}>
+      <option value="">Cambiar estado...</option>
+      <option value="active">Activo</option>
+      <option value="escalated">Escalado</option>
+      <option value="blocked">Bloqueado</option>
+    </select>
+    <button class="btn btn-primary text-xs" type="button" onclick="applyBulkCustomerState()" ${selectedCount ? '' : 'disabled'}>Aplicar</button><button class="btn btn-secondary text-xs" type="button" onclick="exportCustomers(true)" ${selectedCount ? '' : 'disabled'}>Exportar selección</button>`;
+}
+
+function toggleCustomerSelection(customerId, selected) {
+  if (selected) _selectedCustomerIds.add(customerId);
+  else _selectedCustomerIds.delete(customerId);
+  renderCustomers(getVisibleCustomers());
+}
+
+function toggleVisibleCustomerSelection(selected) {
+  getVisibleCustomers().forEach(customer => {
+    if (selected) _selectedCustomerIds.add(customer.id);
+    else _selectedCustomerIds.delete(customer.id);
+  });
+  renderCustomers(getVisibleCustomers());
+}
+
+function clearCustomerSelection() {
+  _selectedCustomerIds.clear();
+  renderCustomers(getVisibleCustomers());
+}
+
+async function applyBulkCustomerState() {
+  const conversationState = document.getElementById('bulk-customer-state')?.value;
+  const customerIds = [..._selectedCustomerIds];
+  if (!conversationState) { toast('Selecciona el nuevo estado', '#dc2626'); return; }
+  if (!customerIds.length) return;
+  if (!confirm(`¿Cambiar el estado de ${customerIds.length} cliente(s)?`)) return;
+  const response = await apiFetch(API + '/customers/bulk/state', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({customer_ids: customerIds, conversation_state: conversationState}),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    toast(data.detail || 'Error actualizando clientes', '#dc2626');
+    return;
+  }
+  const selected = new Set(customerIds);
+  _customersData.forEach(customer => {
+    if (selected.has(customer.id)) customer.conversation_state = conversationState;
+  });
+  _selectedCustomerIds.clear();
+  renderCustomers(getVisibleCustomers());
+  toast('Estados actualizados');
+}
+
+async function exportCustomers(selectedOnly = false) { await downloadExport(`${API}/customers/export`, selectedOnly ? [..._selectedCustomerIds] : []); }
 
 function getCustomerStateBadgeClass(state) {
   return {active:'badge-green', escalated:'badge-red', blocked:'badge-yellow'}[state || 'active'] || 'badge-gray';
@@ -1123,6 +1212,18 @@ function toggleOrdersFilters() {
   btn.innerHTML = visible ? 'Filtros &#x25BC;' : 'Filtros &#x25B2;';
 }
 
+function toggleBulkOrderStatus() {
+  const panel = document.getElementById('orders-bulk-controls');
+  const btn = document.getElementById('orders-bulk-toggle');
+  if (!panel || !btn) return;
+
+  const visible = panel.style.display !== 'none';
+  panel.style.display = visible ? 'none' : 'grid';
+  btn.innerHTML = visible
+    ? 'Cambiar Estados de Pago &#x25BC;'
+    : 'Cambiar Estados de Pago &#x25B2;';
+}
+
 function applyOrderFilters() {
   closeOrderStatusDropdowns();
   renderOrders(getVisibleOrders());
@@ -1171,6 +1272,8 @@ function renderOrders(orders) {
     return;
   }
 
+  renderBulkOrderControls(orders);
+
   if (isMobileViewport()) {
     let html = `<div class="mobile-card-list">`;
     for (const o of orders) {
@@ -1184,9 +1287,13 @@ function renderOrders(orders) {
       const date = new Date(o.created_at).toLocaleDateString();
       html += `
         <div class="card mobile-data-card order-clickable-card" onclick="openOrderDetail('${o.id}')">
-          <div class="mobile-card-header">
-            <div>
-              <div class="font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(o.display_name || o.platform_id)}</div>
+        <div class="mobile-card-header">
+          <div>
+            <label class="inline-flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-2" onclick="event.stopPropagation()">
+              <input type="checkbox" ${_selectedOrderIds.has(o.id) ? 'checked' : ''} onchange="toggleOrderSelection('${o.id}', this.checked)">
+              Seleccionar
+            </label>
+            <div class="font-semibold text-gray-900 dark:text-gray-100">${escapeHtml(o.display_name || o.platform_id)}</div>
               <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${date}</div>
             </div>
             <div class="flex gap-2">
@@ -1227,6 +1334,7 @@ function renderOrders(orders) {
   }
 
   let html = `<table class="w-full orders-table"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">
+    <th class="pb-2"><input type="checkbox" aria-label="Seleccionar pedidos visibles" ${orders.length && orders.every(o => _selectedOrderIds.has(o.id)) ? 'checked' : ''} onchange="toggleVisibleOrderSelection(this.checked)"></th>
     <th class="pb-2 sortable" onclick="sortOrders('name')">Cliente${sortArrow('orders','name')}</th>
     <th>Items</th>
     <th class="sortable" onclick="sortOrders('total')">Total${sortArrow('orders','total')}</th>
@@ -1245,6 +1353,7 @@ function renderOrders(orders) {
     const statusLabel = ORDER_PAYMENT_STATUS_LABELS[o.payment_status] || o.payment_status || 'Sin estado';
     const date = new Date(o.created_at).toLocaleDateString();
     html += `<tr class="border-t border-gray-100 dark:border-gray-700 order-clickable-row" onclick="openOrderDetail('${o.id}')">
+      <td><input type="checkbox" aria-label="Seleccionar pedido" ${_selectedOrderIds.has(o.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleOrderSelection('${o.id}', this.checked)"></td>
       <td class="py-2"><span class="font-medium text-gray-900 dark:text-gray-100">${escapeHtml(o.display_name || o.platform_id)}</span></td>
       <td class="order-items-cell" title="${escapeHtml(itemSummary)}">${escapeHtml(itemSummary)}</td>
       <td>$${(o.total || 0).toFixed(2)}</td>
@@ -1273,6 +1382,78 @@ function renderOrders(orders) {
   }
   html += '</tbody></table>';
   document.getElementById('orders-list').innerHTML = html;
+}
+
+function renderBulkOrderControls(visibleOrders) {
+  const container = document.getElementById('orders-bulk-controls');
+  if (!container) return;
+  const selectedCount = _selectedOrderIds.size;
+  container.innerHTML = `
+    <div class="flex items-center justify-between gap-2"><span class="text-sm font-medium text-gray-700 dark:text-gray-200">${selectedCount} seleccionado${selectedCount === 1 ? '' : 's'}</span><button class="btn btn-secondary text-xs" type="button" onclick="clearOrderSelection()" ${selectedCount ? '' : 'disabled'}>Limpiar</button></div>
+    <button class="btn btn-secondary text-xs" type="button" onclick="toggleVisibleOrderSelection(true)" ${visibleOrders.length ? '' : 'disabled'}>Seleccionar visibles</button>
+    <select id="bulk-order-payment-status" class="text-sm" ${selectedCount ? '' : 'disabled'}>
+      <option value="">Cambiar estado de pago...</option>
+      ${renderOrderPaymentOptions('')}
+    </select>
+    <button class="btn btn-primary text-xs" type="button" onclick="applyBulkOrderStatus()" ${selectedCount ? '' : 'disabled'}>Aplicar</button><button class="btn btn-secondary text-xs" type="button" onclick="exportOrders(true)" ${selectedCount ? '' : 'disabled'}>Exportar selección</button>`;
+}
+
+function toggleOrderSelection(orderId, selected) {
+  if (selected) _selectedOrderIds.add(orderId);
+  else _selectedOrderIds.delete(orderId);
+  renderOrders(getVisibleOrders());
+}
+
+function toggleVisibleOrderSelection(selected) {
+  getVisibleOrders().forEach(order => {
+    if (selected) _selectedOrderIds.add(order.id);
+    else _selectedOrderIds.delete(order.id);
+  });
+  renderOrders(getVisibleOrders());
+}
+
+function clearOrderSelection() {
+  _selectedOrderIds.clear();
+  renderOrders(getVisibleOrders());
+}
+
+async function applyBulkOrderStatus() {
+  const paymentStatus = document.getElementById('bulk-order-payment-status')?.value;
+  const orderIds = [..._selectedOrderIds];
+  if (!paymentStatus) { toast('Selecciona el nuevo estado de pago', '#dc2626'); return; }
+  if (!orderIds.length) return;
+  if (!confirm(`¿Cambiar el estado de pago de ${orderIds.length} pedido(s)?`)) return;
+
+  const response = await apiFetch(API + '/orders/bulk/payment-status', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({order_ids: orderIds, payment_status: paymentStatus}),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    toast(data.detail || 'Error actualizando pedidos', '#dc2626');
+    return;
+  }
+  const selected = new Set(orderIds);
+  _ordersData.forEach(order => {
+    if (selected.has(order.id)) order.payment_status = paymentStatus;
+  });
+  _selectedOrderIds.clear();
+  populateOrderFilters(_ordersData);
+  renderOrders(getVisibleOrders());
+  toast('Estados actualizados');
+}
+
+async function exportOrders(selectedOnly = false) { await downloadExport(`${API}/orders/export`, selectedOnly ? [..._selectedOrderIds] : []); }
+
+async function downloadExport(url, ids) {
+  const response = await apiFetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids})});
+  if (!response.ok) { toast('No se pudo generar el archivo', '#dc2626'); return; }
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(await response.blob());
+  link.download = url.includes('/customers/') ? 'clientes.xlsx' : 'pedidos.xlsx';
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 function openOrderDetail(orderId) {
@@ -1696,10 +1877,6 @@ function homeDeliveryZoneMarkup(zone = {}, cities = homeDeliveryCitiesFromInputs
       </div>
       <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeShippingRateCard(this)" title="Eliminar zona" aria-label="Eliminar zona">${renderDeleteIcon('Eliminar zona')}</button>
     </div>
-    <div class="mt-3">
-      <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Alias <span class="font-normal text-gray-400">opcional, separados por coma</span></label>
-      <input class="w-full shipping-zone-aliases" value="${escapeHtml((zone.aliases || []).join(', '))}" placeholder="Ej. El Vinedo">
-    </div>
   `);
 }
 
@@ -1721,10 +1898,6 @@ function courierDestinationRateMarkup(rate = {}) {
         </div>
       </div>
       <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeShippingRateCard(this)" title="Eliminar ciudad" aria-label="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button>
-    </div>
-    <div class="mt-3">
-      <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Alias <span class="font-normal text-gray-400">opcional, separados por coma</span></label>
-      <input class="w-full shipping-courier-aliases" value="${escapeHtml((rate.aliases || []).join(', '))}" placeholder="Ej. Distrito Capital">
     </div>
   `);
 }
@@ -1833,12 +2006,12 @@ function collectShippingPolicy() {
   const homeDeliveryZones = Array.from(document.querySelectorAll('#home-delivery-zones-list .shipping-rate-card')).map(card => ({
     city: card.querySelector('.shipping-zone-city')?.value?.trim() || '',
     name: card.querySelector('.shipping-zone-name')?.value?.trim() || '',
-    aliases: shippingAliases(card.querySelector('.shipping-zone-aliases')?.value),
+    aliases: [],
     fee_usd: shippingFee(card.querySelector('.shipping-zone-fee')),
   }));
   const courierDestinationRates = Array.from(document.querySelectorAll('#courier-destination-rates-list .shipping-rate-card')).map(card => ({
     city: card.querySelector('.shipping-courier-city')?.value?.trim() || '',
-    aliases: shippingAliases(card.querySelector('.shipping-courier-aliases')?.value),
+    aliases: [],
     mrw_fee_usd: shippingFee(card.querySelector('.shipping-mrw-fee')),
     zoom_fee_usd: shippingFee(card.querySelector('.shipping-zoom-fee')),
   }));
@@ -2084,7 +2257,7 @@ async function loadSettings() {
   const section = document.getElementById('llm-settings-section');
   if (settings._llm_managed_externally) {
     if (section) {
-      section.innerHTML = '<div class="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30 lg:col-span-2"><p class="text-gray-500 dark:text-gray-400 text-center py-8">La configuración de AI está gestionada desde el panel master.</p></div>';
+      section.innerHTML = '<div class="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30 lg:col-span-2"><p class="text-gray-500 dark:text-gray-400 text-center py-8">La configuración de AI está gestionada por su Administrador.</p></div>';
     }
   } else if (section && !section.querySelector('#set-provider')) {
     window.location.reload();

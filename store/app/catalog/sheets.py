@@ -44,7 +44,7 @@ _SIZE_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _QUANTITY_VARIANT_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[A-Z]+)?$")
-_INVENTORY_LEDGER_TITLE = "_inventory_mutations"
+_INVENTORY_LEDGER_TITLE = "Inventory Movements"
 _INVENTORY_LEDGER_HEADERS = [
     "Operation ID",
     "Type",

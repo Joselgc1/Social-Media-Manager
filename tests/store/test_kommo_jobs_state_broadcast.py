@@ -1489,6 +1489,60 @@ async def test_ready_job_discard_marks_unauthorized_continuation_failed(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_pre_delivery_failure_continues_salesbot_with_safe_customer_message(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[{"id": "job"}, {"id": "job"}])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    job = {
+        "id": "job",
+        "channel": "whatsapp",
+        "processing_lease_id": LEASE_ID,
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+    }
+
+    await jobs._continue_and_discard_job(
+        client,
+        job,
+        "internal database password: secret",
+        send_customer_fallback=True,
+    )
+
+    message = client.continue_salesbot.await_args.kwargs["data"]["message"]
+    assert message == jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE
+    assert "secret" not in message
+    assert "database" not in message
+
+
+@pytest.mark.asyncio
+async def test_definitive_ready_job_failure_continues_salesbot_with_safe_customer_message(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(side_effect=[{"id": "job"}, {"id": "job"}])
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    job = {
+        "id": "job",
+        "channel": "whatsapp",
+        "processing_lease_id": LEASE_ID,
+        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+    }
+
+    await jobs._fail_ready_job(client, job, "internal transcription exception: secret")
+
+    message = client.continue_salesbot.await_args.kwargs["data"]["message"]
+    assert message == jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE
+    assert "secret" not in message
+
+
+@pytest.mark.asyncio
 async def test_stale_worker_cannot_issue_continuation_after_losing_lease(monkeypatch):
     from app.integrations.kommo import jobs
 
@@ -1845,6 +1899,15 @@ def test_invalid_inbound_attachment_metadata_uses_generalized_error():
         jobs._job_inbound_attachments({"inbound_attachments": "not-json"})
 
 
+def test_unsupported_kommo_attachment_is_not_sent_to_the_checkout_agent():
+    from app.integrations.kommo import jobs
+
+    assert jobs._has_unsupported_attachment({"message_type": "file"}) is True
+    assert jobs._has_unsupported_attachment({"message_type": "video"}) is True
+    assert jobs._has_unsupported_attachment({"message_type": "picture"}) is False
+    assert jobs._has_unsupported_attachment({"message_type": "voice"}) is False
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("combined_message", "expected"),
@@ -1984,7 +2047,7 @@ async def test_ready_voice_job_missing_url_fails_without_ai_reply(monkeypatch):
     jobs.generate_response.assert_not_awaited()
     client.continue_salesbot.assert_awaited_once_with(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        data={"status": "fail", "message": ""},
+        data={"status": "fail", "message": jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE},
     )
     assert any(
         call.args[1].get("status") == "failed"
@@ -2393,6 +2456,69 @@ async def test_ready_job_ambiguous_media_send_never_continues_salesbot_fallback(
 
     client.continue_salesbot.assert_not_awaited()
     assert mock_db.execute.await_args.args[1]["status"] == "delivery_unknown"
+
+
+@pytest.mark.asyncio
+async def test_ready_job_pre_delivery_media_exception_sends_safe_fallback(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    _install_ready_job_db(monkeypatch, jobs)
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            reason=None,
+            needs_ai_mode_initialization=False,
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "generate_response",
+        AsyncMock(
+            return_value={
+                "text": "Foto",
+                "product_image": {
+                    "type": "product_image",
+                    "caption": "Foto",
+                    "image_url": "https://cdn.example/product.jpg",
+                },
+                "escalated": False,
+            }
+        ),
+    )
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "deliver_response",
+        AsyncMock(side_effect=RuntimeError("internal media storage error: secret")),
+    )
+    client = MagicMock()
+    client.continue_salesbot = AsyncMock(return_value={"accepted": True})
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            "combined_message": "Foto",
+            "channel": "whatsapp",
+            "talk_id": "105",
+            "correlation_id": "corr",
+        }
+    )
+
+    message = client.continue_salesbot.await_args.kwargs["data"]["message"]
+    assert message == jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE
+    assert "secret" not in message
 
 
 @pytest.mark.asyncio

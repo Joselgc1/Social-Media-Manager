@@ -35,6 +35,8 @@ def render_payment_response(result: PaymentVerificationResult, customer: dict | 
         return f"{prefix}el comprobante parece ser de un método distinto al que quedó en el pedido. Lo revisamos antes de confirmarlo."
     if result.status == "recipient_mismatch":
         return f"{prefix}el comprobante no coincide con los datos configurados para ese método de pago. Lo revisamos antes de confirmarlo."
+    if result.status == "invalid_date":
+        return f"{prefix}la fecha del comprobante no corresponde a este pedido. Revisa que envíes el comprobante de esta compra."
     if result.status == "not_completed":
         return f"{prefix}el comprobante no aparece como pago completado. Cuando salga completado, envíame la captura actualizada."
     if result.status == "duplicate_proof":

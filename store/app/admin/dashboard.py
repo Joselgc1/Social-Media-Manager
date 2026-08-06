@@ -118,3 +118,12 @@ async def order_detail_page(request: Request, order_id: str):
         return _render_template("order_detail.html", replacements)
 
     return _redirect_to_login()
+
+
+@router.get("/customers/{customer_id}", response_class=HTMLResponse)
+async def customer_detail_page(request: Request, customer_id: str):
+    if not get_config().admin_password:
+        raise HTTPException(status_code=403, detail="ADMIN_PASSWORD must be set.")
+    if is_admin_cookie_valid(request):
+        return _render_template("customer_detail.html", {"__CUSTOMER_ID__": html.escape(customer_id, quote=True)})
+    return _redirect_to_login()

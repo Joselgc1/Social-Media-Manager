@@ -125,6 +125,24 @@ async def test_progressive_field_collection_does_not_ask_for_known_fields(monkey
 
 
 @pytest.mark.asyncio
+async def test_checkout_updates_do_not_regress_a_pending_payment_session(monkeypatch):
+    session = _session(
+        _complete_draft(),
+        workflow_stage="waiting_for_payment",
+        current_order_id="order-1",
+    )
+    monkeypatch.setattr(service.sessions, "update_checkout_draft", AsyncMock(return_value=session))
+    set_stage = AsyncMock()
+    monkeypatch.setattr(service.sessions, "set_workflow_stage", set_stage)
+
+    result = await service.update_checkout_draft(_customer(), {"payment_method": "Zelle"})
+
+    assert result["status"] == "payment_pending"
+    assert result["workflow_stage"] == "waiting_for_payment"
+    set_stage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_missing_quantity_and_missing_pickup_agency(monkeypatch):
     monkeypatch.setattr(service.sessions, "get_or_create_session", AsyncMock(return_value=_session({
         "items": [{"product_query": "Pijama satén azul", "size": "M"}],

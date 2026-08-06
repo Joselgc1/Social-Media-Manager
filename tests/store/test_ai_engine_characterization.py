@@ -1246,6 +1246,32 @@ async def test_unreadable_payment_proof_image_short_circuits_llm_without_update(
 
 
 @pytest.mark.asyncio
+async def test_kommo_image_only_message_for_pending_order_short_circuits_to_payment_verification(
+    engine_harness,
+):
+    engine.orders.get_latest_open_order.return_value = _sample_order()
+    engine.orders.get_unambiguous_open_order.return_value = (_sample_order(), False)
+    engine.analyze_payment_screenshot.return_value = {"analyzed": False}
+
+    response = await engine.generate_response(
+        "whatsapp",
+        "584121234567",
+        "El cliente envio una imagen por Kommo.",
+        media_url="https://amojo.kommo.com/v2/attachment.jpeg",
+        integration_context={"provider": "kommo", "media_url_is_direct": True},
+    )
+
+    assert "no pude leer bien el comprobante" in response["text"]
+    engine_harness.provider.chat.assert_not_awaited()
+    engine.orders.update_order_payment_status.assert_not_awaited()
+    engine.analyze_payment_screenshot.assert_awaited_once_with(
+        media_id=None,
+        media_url="https://amojo.kommo.com/v2/attachment.jpeg",
+        channel="instagram",
+    )
+
+
+@pytest.mark.asyncio
 async def test_failed_payment_validation_does_not_mark_payment_as_confirmed(engine_harness):
     engine.orders.get_latest_open_order.return_value = _sample_order(total=28.0, payment_method="Zelle")
     engine.orders.get_unambiguous_open_order.return_value = (

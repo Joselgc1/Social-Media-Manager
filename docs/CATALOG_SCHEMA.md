@@ -1,6 +1,6 @@
 # Product Catalog Schema
 
-The Store reads its live product catalog from the first worksheet of the configured Google Sheet (`PRODUCT_SHEET_ID`). The service account must have **Editor** access because checkout updates `Stock` and writes the hidden `_inventory_mutations` ledger.
+The Store reads its live product catalog from the first worksheet of the configured Google Sheet (`PRODUCT_SHEET_ID`). The service account must have **Editor** access because checkout updates `Stock` and writes the hidden `Inventory Movements` ledger.
 
 ## Columns
 

@@ -126,7 +126,7 @@ If the customer asks to see a specific product and that row has a usable image, 
 
 For the complete field rules and additional examples, see [Product Catalog Schema](../docs/CATALOG_SCHEMA.md).
 
-Share the sheet with the service account email (looks like `vs-chatbot-reader@your-project.iam.gserviceaccount.com`). Give it **Editor** access (write permission). Read-only Viewer access is not enough: checkout decrements the `Stock` column and writes the hidden `_inventory_mutations` worksheet, so the service account must be able to write to the sheet.
+Share the sheet with the service account email (looks like `vs-chatbot-reader@your-project.iam.gserviceaccount.com`). Give it **Editor** access (write permission). Read-only Viewer access is not enough: checkout decrements the `Stock` column and writes the hidden `Inventory Movements` worksheet, so the service account must be able to write to the sheet.
 
 Copy the sheet ID from the URL (the long string between `/d/` and `/edit`). This goes in `.env` as `PRODUCT_SHEET_ID`.
 

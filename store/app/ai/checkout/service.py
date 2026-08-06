@@ -31,6 +31,15 @@ async def update_checkout_draft(
     errors = _validate_draft(draft, quote)
     missing_fields = _missing_fields(draft, quote)
     workflow_stage = session.workflow_stage
+    if workflow_stage == "waiting_for_payment":
+        return {
+            "status": "payment_pending",
+            "draft": draft.public_dict(),
+            "missing_fields": [],
+            "errors": [],
+            "delivery_quote": _public_quote(quote),
+            "workflow_stage": workflow_stage,
+        }
     if not errors and not missing_fields and workflow_stage != "checkout_ready":
         session = await sessions.set_workflow_stage(customer["id"], "checkout_ready")
         workflow_stage = session.workflow_stage

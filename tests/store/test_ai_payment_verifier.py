@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from app.ai.payment import verifier
+from app.ai.payment.models import PaymentVerificationResult
+from app.ai.payment.responder import render_payment_response
 
 
 def _order(**overrides) -> dict:
@@ -357,6 +359,15 @@ async def test_stale_transaction_date_is_rejected(monkeypatch):
 
     assert result.status == "invalid_date"
     update_order_payment_status.assert_not_awaited()
+
+
+def test_invalid_payment_date_has_a_specific_customer_response():
+    response = render_payment_response(
+        PaymentVerificationResult(status="invalid_date"),
+        customer={"display_name": "Jose L. Garcia"},
+    )
+
+    assert "fecha del comprobante no corresponde" in response
 
 
 @pytest.mark.asyncio

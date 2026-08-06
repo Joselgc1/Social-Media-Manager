@@ -432,11 +432,20 @@ async def _claim_delivery(
     request_fingerprint: str,
     attachment_metadata: dict,
 ):
-    values = {
+    insert_values = {
         "job_id": job_id,
         "media_type": media_type,
         "request_fingerprint": request_fingerprint,
         "attachment_metadata": json.dumps(attachment_metadata, separators=(",", ":")),
+    }
+    claim_values = {
+        "job_id": job_id,
+        "request_fingerprint": request_fingerprint,
+        "attachment_metadata": insert_values["attachment_metadata"],
+    }
+    existing_values = {
+        "job_id": job_id,
+        "request_fingerprint": request_fingerprint,
     }
     async with db.get_db().transaction():
         await db.execute(
@@ -451,7 +460,7 @@ async def _claim_delivery(
                 WHERE request_fingerprint IS NOT NULL
             DO NOTHING
             """,
-            values,
+            insert_values,
         )
         claimed = await db.fetch_one(
             """
@@ -501,7 +510,7 @@ async def _claim_delivery(
               AND status IN ('prepared', 'failed')
             RETURNING status, provider_message_id
             """,
-            values,
+            claim_values,
         )
         if claimed:
             return _DeliveryClaim(
@@ -521,7 +530,7 @@ async def _claim_delivery(
               AND transport = 'chats_api'
               AND request_fingerprint = :request_fingerprint
             """,
-            values,
+            existing_values,
         )
         if not existing:
             raise KommoDeliveryStateError("Kommo delivery claim could not be established")

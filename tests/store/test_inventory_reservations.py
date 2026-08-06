@@ -14,7 +14,7 @@ def _sheet(records, *, default_active=True):
     worksheet.get_all_records.return_value = records
     worksheet.row_values.return_value = ["SKU", "Product name", "Stock"]
     ledger = MagicMock()
-    ledger.title = "_inventory_mutations"
+    ledger.title = "Inventory Movements"
     ledger.row_values.return_value = [
         "Operation ID",
         "Type",
@@ -147,7 +147,7 @@ def test_sheet_inventory_operation_id_updates_stock_and_ledger_atomically():
     body = spreadsheet.values_batch_update.call_args.args[0]
     assert body["valueInputOption"] == "RAW"
     assert body["data"][0] == {"range": "'Products'!C2", "values": [[1]]}
-    assert body["data"][1]["range"] == "'_inventory_mutations'!A2:G2"
+    assert body["data"][1]["range"] == "'Inventory Movements'!A2:G2"
     assert body["data"][1]["values"][0][:6] == [
         "order:order-1:reserve",
         "deduct",
@@ -215,7 +215,7 @@ def test_inventory_ledger_grows_before_writing_past_its_grid():
 
     ledger.add_rows.assert_called_once_with(1000)
     body = spreadsheet.values_batch_update.call_args.args[0]
-    assert body["data"][1]["range"] == "'_inventory_mutations'!A3:G3"
+    assert body["data"][1]["range"] == "'Inventory Movements'!A3:G3"
 
 
 def test_inventory_ledger_is_not_reloaded_after_cached_mutation():

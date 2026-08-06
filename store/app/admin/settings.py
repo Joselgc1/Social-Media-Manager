@@ -7,9 +7,13 @@ and other configuration via HTTP endpoints or Telegram commands.
 import json
 import logging
 import re
+from datetime import datetime
+from io import BytesIO
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from openpyxl import Workbook
 from pydantic import BaseModel
 
 from app import db
@@ -73,6 +77,20 @@ class OrderUpdate(BaseModel):
     payment_status: str | None = None
     shipping_status: str | None = None
     tracking_number: str | None = None
+
+
+class BulkOrderPaymentStatusUpdate(BaseModel):
+    order_ids: list[UUID]
+    payment_status: str
+
+
+class BulkCustomerStateUpdate(BaseModel):
+    customer_ids: list[UUID]
+    conversation_state: str
+
+
+class ExportRequest(BaseModel):
+    ids: list[UUID] | None = None
 
 
 class CustomerUpdate(BaseModel):
@@ -950,6 +968,123 @@ async def list_orders(limit: int = 50):
         {"limit": limit},
     )
     return [dict(r) for r in rows]
+
+
+def _xlsx_response(filename: str, headers: list[str], rows: list[list]) -> StreamingResponse:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([
+            value.replace(tzinfo=None) if isinstance(value, datetime) and value.tzinfo else value
+            for value in row
+        ])
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.post("/orders/export")
+async def export_orders(body: ExportRequest):
+    ids = [str(value) for value in body.ids or []]
+    query = "SELECT id::text AS id, total, payment_method, payment_status, shipping_status, shipping_city, created_at FROM orders"
+    values = {}
+    if ids:
+        query += " WHERE id = ANY(CAST(:ids AS uuid[]))"
+        values["ids"] = ids
+    query += " ORDER BY created_at DESC"
+    rows = await db.fetch_all(query, values)
+    return _xlsx_response("pedidos.xlsx", ["ID", "Total", "Método de pago", "Estado pago", "Estado envío", "Ciudad", "Fecha"], [[str(row["id"]), float(row["total"] or 0), row["payment_method"], row["payment_status"], row["shipping_status"], row["shipping_city"], row["created_at"]] for row in rows])
+
+
+@router.post("/customers/export")
+async def export_customers(body: ExportRequest):
+    ids = [str(value) for value in body.ids or []]
+    query = "SELECT id::text AS id, display_name, channel, phone, instagram_handle, conversation_state, total_orders, total_spent, last_active FROM customers"
+    values = {}
+    if ids:
+        query += " WHERE id = ANY(CAST(:ids AS uuid[]))"
+        values["ids"] = ids
+    query += " ORDER BY last_active DESC"
+    rows = await db.fetch_all(query, values)
+    return _xlsx_response("clientes.xlsx", ["ID", "Nombre", "Canal", "Teléfono", "Instagram", "Estado", "Pedidos", "Gastado", "Última actividad"], [[str(row["id"]), row["display_name"], row["channel"], row["phone"], row["instagram_handle"], row["conversation_state"], row["total_orders"], float(row["total_spent"] or 0), row["last_active"]] for row in rows])
+
+
+@router.get("/customers/{customer_id}/detail")
+async def get_customer_detail(customer_id: str):
+    detail = await customer_crm.get_customer_detail(customer_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return detail
+
+
+@router.put("/customers/bulk/state")
+async def bulk_update_customer_state(body: BulkCustomerStateUpdate):
+    """Apply one conversation state to a validated set of customers."""
+    customer_ids = list(dict.fromkeys(str(customer_id) for customer_id in body.customer_ids))
+    state = body.conversation_state.strip().lower()
+    if not customer_ids:
+        raise HTTPException(status_code=400, detail="Select at least one customer")
+    if len(customer_ids) > 100:
+        raise HTTPException(status_code=400, detail="A maximum of 100 customers can be updated at once")
+    if state not in VALID_CUSTOMER_STATES:
+        raise HTTPException(status_code=400, detail="Invalid conversation state")
+
+    rows = await db.fetch_all(
+        """
+        SELECT id::text AS id, channel, conversation_state
+        FROM customers
+        WHERE id = ANY(CAST(:customer_ids AS uuid[]))
+        """,
+        {"customer_ids": customer_ids},
+    )
+    customers_by_id = {str(row["id"]): dict(row) for row in rows}
+    if len(customers_by_id) != len(customer_ids):
+        raise HTTPException(status_code=404, detail="One or more selected customers no longer exist")
+
+    updated_ids = []
+    for customer_id in customer_ids:
+        customer = customers_by_id[customer_id]
+        if customer["conversation_state"] == state:
+            updated_ids.append(customer_id)
+            continue
+        if state == "active":
+            try:
+                await activate_customer_for_admin(customer, channel=customer["channel"])
+            except ManualActivationError as error:
+                raise HTTPException(status_code=502, detail=error.safe_detail) from error
+        elif state == "escalated":
+            await escalations.escalate_customer_manually(customer_id, channel=customer["channel"])
+        else:
+            await escalations.mark_customer_blocked(customer_id, channel=customer["channel"])
+        updated_ids.append(customer_id)
+    return {"status": "updated", "customer_ids": updated_ids, "conversation_state": state}
+
+
+@router.put("/orders/bulk/payment-status")
+async def bulk_update_order_payment_status(body: BulkOrderPaymentStatusUpdate):
+    """Apply one payment status to a validated set of orders."""
+    order_ids = list(dict.fromkeys(str(order_id) for order_id in body.order_ids))
+    if not order_ids:
+        raise HTTPException(status_code=400, detail="Select at least one order")
+    if len(order_ids) > 100:
+        raise HTTPException(status_code=400, detail="A maximum of 100 orders can be updated at once")
+    if body.payment_status not in orders.VALID_PAYMENT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid payment status '{body.payment_status}'")
+
+    existing_orders = await db.fetch_all(
+        "SELECT id::text AS id FROM orders WHERE id = ANY(CAST(:order_ids AS uuid[]))",
+        {"order_ids": order_ids},
+    )
+    found_ids = {str(row["id"]) for row in existing_orders}
+    missing_ids = [order_id for order_id in order_ids if order_id not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail="One or more selected orders no longer exist")
+
+    for order_id in order_ids:
+        await orders.update_order_payment_status(order_id, body.payment_status)
+    return {"status": "updated", "order_ids": order_ids, "payment_status": body.payment_status}
 
 
 @router.get("/orders/{order_id}")

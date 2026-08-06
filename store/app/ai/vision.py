@@ -12,7 +12,7 @@ import hashlib
 import ipaddress
 import json
 import logging
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 GRAPH_API = "https://graph.facebook.com/v21.0"
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DIRECT_IMAGE_TIMEOUT_SECONDS = 15
+MAX_DIRECT_MEDIA_REDIRECTS = 3
 DIRECT_MEDIA_TRUSTED_HOSTS = {
     "amocrm.com",
     "cdninstagram.com",
@@ -34,6 +35,7 @@ DIRECT_MEDIA_TRUSTED_HOSTS = {
     "instagram.com",
     "kommo.com",
 }
+KOMMO_ATTACHMENT_REDIRECT_HOST = "storage.googleapis.com"
 
 PAYMENT_ANALYSIS_PROMPT = """Analyze this payment screenshot. Extract the following information if visible:
 
@@ -182,43 +184,75 @@ async def _download_whatsapp_media(media_id: str) -> tuple[bytes | None, str]:
 
 
 async def _download_url(url: str) -> tuple[bytes | None, str]:
-    """Download an image from a direct URL (used for Instagram media)."""
+    """Download an image from a direct channel-provider URL."""
     try:
         safe_url = await _validate_direct_media_url(url)
-        async with (
-            httpx.AsyncClient(timeout=DIRECT_IMAGE_TIMEOUT_SECONDS, follow_redirects=False) as client,
-            client.stream("GET", safe_url) as resp,
-        ):
-                if resp.status_code != 200:
-                    return None, "image/jpeg"
-
-                content_type = resp.headers.get("content-type", "image/jpeg")
-                mime_type = content_type.split(";")[0].strip()
-                if not mime_type.startswith("image/"):
-                    logger.warning("Direct media URL rejected due to non-image content type.")
-                    return None, "image/jpeg"
-
-                content_length = resp.headers.get("content-length")
-                if content_length and int(content_length) > MAX_IMAGE_BYTES:
-                    logger.warning("Direct media URL rejected because it exceeded the size limit.")
-                    return None, "image/jpeg"
-
-                chunks = []
-                total = 0
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    if total > MAX_IMAGE_BYTES:
-                        logger.warning("Direct media URL rejected because it exceeded the size limit.")
+        async with httpx.AsyncClient(timeout=DIRECT_IMAGE_TIMEOUT_SECONDS, follow_redirects=False) as client:
+            for _ in range(MAX_DIRECT_MEDIA_REDIRECTS + 1):
+                redirect_url = None
+                async with client.stream(
+                    "GET",
+                    safe_url,
+                    headers=_direct_media_headers(safe_url),
+                ) as resp:
+                    if 300 <= resp.status_code < 400:
+                        location = resp.headers.get("location")
+                        if not location:
+                            return None, "image/jpeg"
+                        redirect_url = await _validate_direct_media_url(
+                            urljoin(safe_url, location),
+                            allow_kommo_attachment_redirect=True,
+                        )
+                    elif resp.status_code != 200:
                         return None, "image/jpeg"
-                    chunks.append(chunk)
-                return b"".join(chunks), mime_type
+                    else:
+                        content_type = resp.headers.get("content-type", "image/jpeg")
+                        mime_type = content_type.split(";")[0].strip()
+                        if not mime_type.startswith("image/"):
+                            logger.warning("Direct media URL rejected due to non-image content type.")
+                            return None, "image/jpeg"
+
+                        content_length = resp.headers.get("content-length")
+                        if content_length and int(content_length) > MAX_IMAGE_BYTES:
+                            logger.warning("Direct media URL rejected because it exceeded the size limit.")
+                            return None, "image/jpeg"
+
+                        chunks = []
+                        total = 0
+                        async for chunk in resp.aiter_bytes():
+                            total += len(chunk)
+                            if total > MAX_IMAGE_BYTES:
+                                logger.warning("Direct media URL rejected because it exceeded the size limit.")
+                                return None, "image/jpeg"
+                            chunks.append(chunk)
+                        return b"".join(chunks), mime_type
+
+                if redirect_url:
+                    safe_url = redirect_url
+                    continue
+                return None, "image/jpeg"
+        return None, "image/jpeg"
 
     except Exception as e:
         logger.error("Image download failed: %s", str(e)[:200])
         return None, "image/jpeg"
 
 
-async def _validate_direct_media_url(url: str) -> str:
+def _direct_media_headers(url: str) -> dict[str, str]:
+    """Authorize protected Kommo attachment links without exposing credentials."""
+    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    if hostname == "kommo.com" or hostname.endswith(".kommo.com"):
+        access_token = str(get_config().kommo_access_token or "").strip()
+        if access_token:
+            return {"Authorization": f"Bearer {access_token}"}
+    return {}
+
+
+async def _validate_direct_media_url(
+    url: str,
+    *,
+    allow_kommo_attachment_redirect: bool = False,
+) -> str:
     """Allow direct media downloads only from trusted channel-provider hosts."""
     parsed = urlparse(url)
     if parsed.scheme != "https":
@@ -242,7 +276,9 @@ async def _validate_direct_media_url(url: str) -> str:
     else:
         raise ValueError("Direct media URL host is not allowed")
 
-    if not _is_trusted_media_hostname(hostname):
+    if not _is_trusted_media_hostname(hostname) and not (
+        allow_kommo_attachment_redirect and hostname == KOMMO_ATTACHMENT_REDIRECT_HOST
+    ):
         raise ValueError("Direct media URL host is not trusted")
 
     return url

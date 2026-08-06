@@ -244,6 +244,22 @@ async def update_customer(
     return dict(updated) if updated else None
 
 
+async def get_customer_detail(customer_id: str) -> dict | None:
+    row = await db.fetch_one("SELECT * FROM customers WHERE id::text = :id", {"id": customer_id})
+    if not row:
+        return None
+    customer = dict(row)
+    customer["id"] = str(customer["id"])
+    customer["tags"] = json.loads(customer["tags"] or "[]") if isinstance(customer["tags"], str) else customer["tags"] or []
+    customer["total_spent"] = float(customer["total_spent"] or 0)
+    orders_rows = await db.fetch_all(
+        "SELECT id, total, payment_status, shipping_status, created_at FROM orders WHERE customer_id = :id ORDER BY created_at DESC LIMIT 20",
+        {"id": customer_id},
+    )
+    customer["orders"] = [{**dict(order), "id": str(order["id"]), "total": float(order["total"] or 0)} for order in orders_rows]
+    return customer
+
+
 async def delete_customer(customer_id: str) -> bool:
     row = await db.fetch_one(
         "SELECT id FROM customers WHERE id::text = :id",

@@ -133,7 +133,11 @@ def _resolve_home_delivery(policy: dict, city: dict, delivery_zone: object) -> d
         "shipping_method": None,
         "shipping_fee": fee,
         "shipping_currency": policy["currency"],
-        "message": f"Tarifa de entrega a domicilio: ${fee:.2f} USD.",
+        "message": (
+            "La entrega a domicilio es gratis para esa zona."
+            if fee == 0
+            else f"Tarifa de entrega a domicilio: ${fee:.2f} USD."
+        ),
     }
 
 
