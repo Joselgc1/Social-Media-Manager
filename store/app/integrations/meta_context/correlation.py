@@ -106,7 +106,7 @@ async def _correlate(
             if not event or event["correlation_status"] == "matched":
                 return {"status": "already_matched" if event else "missing"}
             window_seconds = _match_window_seconds(dict(event), config)
-            jobs = await _candidate_jobs(event, window_seconds)
+            jobs = await _candidate_jobs(dict(event), window_seconds)
             candidates = []
             for job in jobs:
                 candidate = await _prepare_candidate(dict(event), dict(job), window_seconds)
