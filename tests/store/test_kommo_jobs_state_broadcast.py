@@ -905,6 +905,59 @@ async def test_two_equally_plausible_private_candidates_are_left_untouched(monke
     assert not any("SET status = 'discarded'" in query for query, _values in create_db.fetch_one_calls)
 
 
+def test_salesbot_iat_fallback_with_large_delta_is_rejected():
+    from app.integrations.kommo import jobs
+
+    candidate = jobs._unique_best_mirror_candidate(
+        [
+            {
+                "id": "candidate",
+                "timestamp_delta_seconds": jobs.COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS + 0.1,
+                "private_timestamp_source": "receipt_received_at",
+                "comment_timestamp_source": "salesbot_iat",
+            }
+        ]
+    )
+
+    assert candidate is None
+
+
+def test_salesbot_iat_fallback_with_small_delta_is_allowed():
+    from app.integrations.kommo import jobs
+
+    candidate = jobs._unique_best_mirror_candidate(
+        [
+            {
+                "id": "candidate",
+                "timestamp_delta_seconds": jobs.COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS,
+                "private_timestamp_source": "receipt_received_at",
+                "comment_timestamp_source": "salesbot_iat",
+            }
+        ]
+    )
+
+    assert candidate is not None
+    assert candidate["id"] == "candidate"
+
+
+def test_matched_meta_timestamp_can_use_configured_wider_window():
+    from app.integrations.kommo import jobs
+
+    candidate = jobs._unique_best_mirror_candidate(
+        [
+            {
+                "id": "candidate",
+                "timestamp_delta_seconds": jobs.COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS + 10,
+                "private_timestamp_source": "receipt_received_at",
+                "comment_timestamp_source": "meta_event_timestamp",
+            }
+        ]
+    )
+
+    assert candidate is not None
+    assert candidate["id"] == "candidate"
+
+
 @pytest.mark.asyncio
 async def test_callback_reconciliation_uses_configured_meta_window(monkeypatch):
     from app.integrations.kommo import jobs

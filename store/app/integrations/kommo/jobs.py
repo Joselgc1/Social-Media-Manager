@@ -1538,16 +1538,21 @@ def _unique_best_mirror_candidate(rows) -> dict | None:
         )
     )
     best = candidates[0]
+    best_delta = float(best["timestamp_delta_seconds"])
     if best.get("comment_timestamp_source") == "meta_event_timestamp":
         return best
     if len(candidates) > 1:
-        best_delta = float(best["timestamp_delta_seconds"])
         next_delta = float(candidates[1]["timestamp_delta_seconds"])
         if next_delta - best_delta <= COMMENT_MIRROR_AMBIGUITY_SECONDS:
             return None
     if (
+        best.get("comment_timestamp_source") != "meta_event_timestamp"
+        and best_delta > COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS
+    ):
+        return None
+    if (
         best.get("private_timestamp_source") == "job_created_at"
-        and float(best["timestamp_delta_seconds"]) > COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS
+        and best_delta > COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS
     ):
         return None
     return best
