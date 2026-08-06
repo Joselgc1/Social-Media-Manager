@@ -594,6 +594,7 @@ async def test_human_mode_story_lifecycle_defers_suppression_until_after_context
         channel="instagram",
         media_url=None,
         source_id="kommo-job:job-1",
+        interaction_type="private_message",
     )
     client.continue_salesbot.assert_awaited_once_with(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
@@ -1342,6 +1343,7 @@ async def test_suppressed_ready_job_applies_only_current_story_event_before_gate
         channel=channel,
         media_url=None,
         source_id="kommo-job:job-1",
+        interaction_type=interaction_type,
     )
     client.continue_salesbot.assert_awaited_once_with(
         "https://acme.kommo.com/api/v4/salesbot/1/continue/2",

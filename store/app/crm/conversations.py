@@ -9,6 +9,10 @@ import re
 
 from app import db
 
+PRIVATE_MESSAGE_SCOPE = "private_message"
+INSTAGRAM_COMMENT_SCOPE = "instagram_comment"
+_INTERACTION_SCOPES = {PRIVATE_MESSAGE_SCOPE, INSTAGRAM_COMMENT_SCOPE}
+
 
 async def store_message(
     customer_id: str,
@@ -19,6 +23,7 @@ async def store_message(
     function_calls: list[dict] | None = None,
     source_id: str | None = None,
     attachments: list[dict] | None = None,
+    interaction_type: str = PRIVATE_MESSAGE_SCOPE,
 ):
     """
     Store a single message in the conversation history.
@@ -34,12 +39,17 @@ async def store_message(
     attachments : Transport-independent semantic attachments for future model context
     """
     semantic_attachments = _normalize_semantic_attachments(attachments)
+    interaction_scope = _normalize_interaction_type(interaction_type)
     await db.execute(
         """
         INSERT INTO conversations (
-            customer_id, role, content, channel, media_url, attachments, function_calls, source_id
+            customer_id, role, content, channel, interaction_type, media_url,
+            attachments, function_calls, source_id
         )
-        VALUES (:cid, :role, :content, :channel, :media, CAST(:attachments AS jsonb), :fc, :source_id)
+        VALUES (
+            :cid, :role, :content, :channel, :interaction_type, :media,
+            CAST(:attachments AS jsonb), :fc, :source_id
+        )
         ON CONFLICT (channel, role, source_id) WHERE source_id IS NOT NULL DO NOTHING
         """,
         {
@@ -47,6 +57,7 @@ async def store_message(
             "role": role,
             "content": content,
             "channel": channel,
+            "interaction_type": interaction_scope,
             "media": media_url,
             "attachments": (
                 json.dumps(semantic_attachments, ensure_ascii=False)
@@ -59,7 +70,11 @@ async def store_message(
     )
 
 
-async def get_history(customer_id: str, limit: int = 20) -> list[dict]:
+async def get_history(
+    customer_id: str,
+    limit: int = 20,
+    interaction_type: str = PRIVATE_MESSAGE_SCOPE,
+) -> list[dict]:
     """
     Retrieve the last `limit` messages for a customer,
     formatted as the messages array expected by OpenAI/Anthropic.
@@ -70,15 +85,17 @@ async def get_history(customer_id: str, limit: int = 20) -> list[dict]:
         [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
         Ordered oldest-first (chronological).
     """
+    interaction_scope = _normalize_interaction_type(interaction_type)
     rows = await db.fetch_all(
         """
         SELECT role, content, attachments
         FROM conversations
         WHERE customer_id = :cid
+          AND interaction_type = :interaction_type
         ORDER BY created_at DESC
         LIMIT :limit
         """,
-        {"cid": customer_id, "limit": limit},
+        {"cid": customer_id, "limit": limit, "interaction_type": interaction_scope},
     )
 
     # Rows come newest-first from DB; reverse to chronological order
@@ -189,20 +206,26 @@ def prepare_history_for_generation(history: list[dict], latest_user_message: str
     return prepared
 
 
-async def get_recent_summary(customer_id: str, limit: int = 5) -> str:
+async def get_recent_summary(
+    customer_id: str,
+    limit: int = 5,
+    interaction_type: str = PRIVATE_MESSAGE_SCOPE,
+) -> str:
     """
     Get a plain-text summary of the last few messages.
     Used for escalation notifications to the store owner.
     """
+    interaction_scope = _normalize_interaction_type(interaction_type)
     rows = await db.fetch_all(
         """
         SELECT role, content, created_at
         FROM conversations
         WHERE customer_id = :cid
+          AND interaction_type = :interaction_type
         ORDER BY created_at DESC
         LIMIT :limit
         """,
-        {"cid": customer_id, "limit": limit},
+        {"cid": customer_id, "limit": limit, "interaction_type": interaction_scope},
     )
 
     lines = []
@@ -233,3 +256,10 @@ async def clear_history_for_customers(customer_ids: list[str]):
                 "DELETE FROM conversations WHERE customer_id = :cid",
                 {"cid": customer_id},
             )
+
+
+def _normalize_interaction_type(value: str | None) -> str:
+    normalized = str(value or PRIVATE_MESSAGE_SCOPE).strip().lower()
+    if normalized not in _INTERACTION_SCOPES:
+        raise ValueError("Unsupported conversation interaction type")
+    return normalized

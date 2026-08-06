@@ -5,6 +5,55 @@ from app.crm import conversations
 from app.crm.conversations import prepare_history_for_generation
 
 
+class _ScopedHistoryDB:
+    def __init__(self):
+        self.rows = []
+
+    async def execute(self, _query, values):
+        self.rows.append(
+            {
+                "customer_id": values["cid"],
+                "role": values["role"],
+                "content": values["content"],
+                "attachments": None,
+                "interaction_type": values["interaction_type"],
+            }
+        )
+
+    async def fetch_all(self, _query, values):
+        matching = [
+            row
+            for row in self.rows
+            if row["customer_id"] == values["cid"]
+            and row["interaction_type"] == values["interaction_type"]
+        ]
+        return list(reversed(matching[-values["limit"] :]))
+
+
+async def _store_turn(
+    customer_id: str,
+    user_text: str,
+    assistant_text: str,
+    *,
+    channel: str = "instagram",
+    interaction_type: str = "private_message",
+):
+    await conversations.store_message(
+        customer_id,
+        "user",
+        user_text,
+        channel,
+        interaction_type=interaction_type,
+    )
+    await conversations.store_message(
+        customer_id,
+        "assistant",
+        assistant_text,
+        channel,
+        interaction_type=interaction_type,
+    )
+
+
 def test_prepare_history_for_generation_keeps_alternating_turns():
     history = [
         {"role": "user", "content": "Tienen pijamas?"},
@@ -61,6 +110,8 @@ async def test_store_message_persists_only_semantic_attachments(monkeypatch):
 
     query, values = execute.await_args.args
     assert "CAST(:attachments AS jsonb)" in query
+    assert "interaction_type" in query
+    assert values["interaction_type"] == "private_message"
     assert values["attachments"] == (
         '[{"type": "product_image", "product_name": "Coconut Passion", "sku": "VS-CP-01"}]'
     )
@@ -216,6 +267,140 @@ async def test_repeated_kommo_job_persistence_keeps_one_row_per_role(monkeypatch
         ("whatsapp", "assistant", source_id),
     }
 
+
+@pytest.mark.asyncio
+async def test_store_message_persists_instagram_comment_scope(monkeypatch):
+    execute = AsyncMock()
+    monkeypatch.setattr(conversations.db, "execute", execute)
+
+    await conversations.store_message(
+        "customer",
+        "user",
+        "Precio?",
+        "instagram",
+        interaction_type="instagram_comment",
+    )
+
+    assert execute.await_args.args[1]["interaction_type"] == "instagram_comment"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interaction_type", ["private_message", "instagram_comment"])
+async def test_get_history_filters_by_interaction_scope(monkeypatch, interaction_type):
+    fetch_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(conversations.db, "fetch_all", fetch_all)
+
+    await conversations.get_history(
+        "customer",
+        limit=20,
+        interaction_type=interaction_type,
+    )
+
+    query, values = fetch_all.await_args.args
+    assert "interaction_type = :interaction_type" in query
+    assert values["interaction_type"] == interaction_type
+
+
+@pytest.mark.asyncio
+async def test_get_recent_summary_filters_by_interaction_scope(monkeypatch):
+    fetch_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(conversations.db, "fetch_all", fetch_all)
+
+    await conversations.get_recent_summary(
+        "customer",
+        interaction_type="instagram_comment",
+    )
+
+    query, values = fetch_all.await_args.args
+    assert "interaction_type = :interaction_type" in query
+    assert values["interaction_type"] == "instagram_comment"
+
+
+@pytest.mark.asyncio
+async def test_dm_comment_dm_history_excludes_public_comment_turn(monkeypatch):
+    history_db = _ScopedHistoryDB()
+    monkeypatch.setattr(conversations, "db", history_db)
+
+    await _store_turn("customer", "Información de productos", "Tenemos varios perfumes")
+    await _store_turn(
+        "customer",
+        "Precio?",
+        "Gucci cuesta $71",
+        interaction_type="instagram_comment",
+    )
+
+    dm_history = await conversations.get_history("customer", interaction_type="private_message")
+
+    assert dm_history == [
+        {"role": "user", "content": "Información de productos"},
+        {"role": "assistant", "content": "Tenemos varios perfumes"},
+    ]
+    assert "Gucci" not in str(dm_history)
+
+
+@pytest.mark.asyncio
+async def test_comment_then_dm_history_excludes_comment_and_reply(monkeypatch):
+    history_db = _ScopedHistoryDB()
+    monkeypatch.setattr(conversations, "db", history_db)
+
+    await _store_turn(
+        "customer",
+        "Precio?",
+        "El precio es $71",
+        interaction_type="instagram_comment",
+    )
+
+    assert await conversations.get_history("customer", interaction_type="private_message") == []
+
+
+@pytest.mark.asyncio
+async def test_dm_then_comment_history_excludes_private_dm(monkeypatch):
+    history_db = _ScopedHistoryDB()
+    monkeypatch.setattr(conversations, "db", history_db)
+
+    await _store_turn("customer", "Quiero comprar", "Claro, te ayudo")
+
+    assert await conversations.get_history(
+        "customer",
+        interaction_type="instagram_comment",
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_consecutive_public_comments_keep_comment_follow_up_context(monkeypatch):
+    history_db = _ScopedHistoryDB()
+    monkeypatch.setattr(conversations, "db", history_db)
+
+    await _store_turn(
+        "customer",
+        "Precio?",
+        "El precio es $71",
+        interaction_type="instagram_comment",
+    )
+
+    comment_history = await conversations.get_history(
+        "customer",
+        interaction_type="instagram_comment",
+    )
+    assert comment_history[-2:] == [
+        {"role": "user", "content": "Precio?"},
+        {"role": "assistant", "content": "El precio es $71"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["instagram", "whatsapp"])
+async def test_private_message_continuity_remains_default_for_dm_and_whatsapp(monkeypatch, channel):
+    history_db = _ScopedHistoryDB()
+    monkeypatch.setattr(conversations, "db", history_db)
+
+    await _store_turn("customer", "Hola", "Hola bella", channel=channel)
+
+    assert await conversations.get_history("customer") == [
+        {"role": "user", "content": "Hola"},
+        {"role": "assistant", "content": "Hola bella"},
+    ]
+
 @pytest.mark.asyncio
 async def test_generate_response_uses_alternating_history_and_strips_later_greeting(monkeypatch):
     from app.ai import engine
@@ -267,3 +452,9 @@ async def test_generate_response_uses_alternating_history_and_strips_later_greet
     assert "No abras con un saludo inicial" in recorded["system_prompt"]
     assert result["text"] == "claro, tenemos talla M."
     assert [message["role"] for message in stored_messages] == ["user", "assistant"]
+    engine.conversations.get_history.assert_awaited_once_with(
+        "customer",
+        limit=20,
+        interaction_type="private_message",
+    )
+    assert {message["interaction_type"] for message in stored_messages} == {"private_message"}

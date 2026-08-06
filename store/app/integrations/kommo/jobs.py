@@ -2258,6 +2258,7 @@ async def _store_assistant_message_after_delivery(
             function_calls=result.get("function_calls"),
             source_id=_conversation_source_id(job),
             attachments=attachments or None,
+            interaction_type=_job_interaction_type(job),
         )
         await db.execute(
             f"""
@@ -2345,6 +2346,7 @@ async def _store_user_message_if_suppressed(customer: dict, job: dict) -> None:
         channel=job.get("channel") or customer.get("channel") or "whatsapp",
         media_url=job.get("media_url"),
         source_id=_conversation_source_id(job),
+        interaction_type=_job_interaction_type(job),
     )
 
 

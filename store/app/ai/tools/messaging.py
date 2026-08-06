@@ -37,7 +37,16 @@ async def escalate_to_human(args: dict, context: ToolExecutionContext) -> dict:
             ),
         }
 
-    summary = await conversations.get_recent_summary(customer_id, limit=5)
+    interaction_type = str(
+        (context.integration_context or {}).get("interaction_type") or "private_message"
+    ).strip().lower()
+    if interaction_type != conversations.INSTAGRAM_COMMENT_SCOPE:
+        interaction_type = conversations.PRIVATE_MESSAGE_SCOPE
+    summary = await conversations.get_recent_summary(
+        customer_id,
+        limit=5,
+        interaction_type=interaction_type,
+    )
     await notify_escalation(
         customer_name=customer.get("display_name"),
         customer_channel=customer.get("channel", "whatsapp"),

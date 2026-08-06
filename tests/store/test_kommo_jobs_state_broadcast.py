@@ -2506,6 +2506,7 @@ async def test_ready_job_native_media_uses_chats_mode_and_persists_semantic_atta
             "function_calls": None,
             "source_id": "kommo-job:job",
             "attachments": delivered_attachments,
+            "interaction_type": "private_message",
         }
     ]
     assert events == ["history", "continue"]
@@ -3072,6 +3073,7 @@ async def test_assistant_history_persisted_after_accepted_kommo_continuation(mon
             "function_calls": [{"name": "check_inventory"}],
             "source_id": "kommo-job:job",
             "attachments": None,
+            "interaction_type": "private_message",
         }
     ]
     assert events == ["continue", "history"]
@@ -3246,6 +3248,7 @@ async def test_assistant_history_persists_semantic_media_turns(
     assert persisted["attachments"] == expected_attachments
     assert persisted["function_calls"] == result.get("function_calls")
     assert persisted["source_id"] == "kommo-job:job"
+    assert persisted["interaction_type"] == "private_message"
     assert "image_url" not in str(persisted["attachments"])
     assert "download_url" not in str(persisted["attachments"])
     assert any("assistant_message_persisted_at = NOW()" in call.args[0] for call in mock_db.execute.await_args_list)
@@ -3283,6 +3286,33 @@ async def test_salesbot_product_image_intent_persists_text_without_attachment(mo
     persisted = store_message.await_args.kwargs
     assert persisted["content"] == result["text"]
     assert persisted["attachments"] is None
+
+
+@pytest.mark.asyncio
+async def test_public_comment_assistant_history_uses_comment_scope(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.fetch_one = AsyncMock(return_value={"assistant_message_persisted_at": None})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+
+    await jobs._store_assistant_message_after_delivery(
+        {"id": "customer", "channel": "instagram"},
+        {
+            "id": "comment-job",
+            "channel": "instagram",
+            "interaction_type": "instagram_comment",
+            "processing_lease_id": LEASE_ID,
+        },
+        {"text": "El precio es $71"},
+        "El precio es $71",
+    )
+
+    assert store_message.await_args.kwargs["interaction_type"] == "instagram_comment"
 
 
 def test_semantic_attachment_builder_keeps_only_transport_independent_fields():

@@ -190,6 +190,11 @@ async def generate_response(
     config = get_config()
     payment_methods = settings.get("payment_methods", [])
     is_public_comment = _is_public_instagram_comment(integration_context)
+    interaction_type = (
+        conversations.INSTAGRAM_COMMENT_SCOPE
+        if is_public_comment
+        else conversations.PRIVATE_MESSAGE_SCOPE
+    )
     orchestration_mode = resolve_effective_orchestration_mode(
         settings,
         getattr(config, "ai_orchestration_mode", "legacy"),
@@ -229,11 +234,16 @@ async def generate_response(
             channel=channel,
             media_url=media_url,
             source_id=message_source_id,
+            interaction_type=interaction_type,
         )
         # Only notify the owner on the first unanswered message.
         last_msg = await db.fetch_one(
-            "SELECT role FROM conversations WHERE customer_id = :cid ORDER BY created_at DESC OFFSET 1 LIMIT 1",
-            {"cid": customer["id"]},
+            """
+            SELECT role FROM conversations
+            WHERE customer_id = :cid AND interaction_type = :interaction_type
+            ORDER BY created_at DESC OFFSET 1 LIMIT 1
+            """,
+            {"cid": customer["id"], "interaction_type": interaction_type},
         )
         already_notified = last_msg and last_msg["role"] == "user"
 
@@ -281,9 +291,14 @@ async def generate_response(
             channel=channel,
             media_url=media_url,
             source_id=message_source_id,
+            interaction_type=interaction_type,
         )
         await escalations.escalate_customer_automatically(customer["id"], settings=settings)
-        summary = await conversations.get_recent_summary(customer["id"], limit=5)
+        summary = await conversations.get_recent_summary(
+            customer["id"],
+            limit=5,
+            interaction_type=interaction_type,
+        )
         await _sync_kommo_escalation_if_needed(
             customer_id=customer["id"],
             reason=hostility_reason,
@@ -310,6 +325,7 @@ async def generate_response(
                     content=handoff_text,
                     channel=channel,
                     source_id=message_source_id,
+                    interaction_type=interaction_type,
             )
         response_time_ms = int((time.monotonic() - t_start) * 1000)
         logger.info(
@@ -376,9 +392,14 @@ async def generate_response(
             channel=channel,
             media_url=media_url,
             source_id=message_source_id,
+            interaction_type=interaction_type,
         )
         await escalations.escalate_customer_automatically(customer["id"], settings=settings)
-        summary = await conversations.get_recent_summary(customer["id"], limit=5)
+        summary = await conversations.get_recent_summary(
+            customer["id"],
+            limit=5,
+            interaction_type=interaction_type,
+        )
         await _sync_kommo_escalation_if_needed(
             customer_id=customer["id"],
             reason=human_request_reason,
@@ -402,6 +423,7 @@ async def generate_response(
                     content=handoff_text,
                     channel=channel,
                     source_id=message_source_id,
+                    interaction_type=interaction_type,
             )
         response_time_ms = int((time.monotonic() - t_start) * 1000)
         await analytics.log_ai_run(
@@ -458,9 +480,14 @@ async def generate_response(
             channel=channel,
             media_url=media_url,
             source_id=message_source_id,
+            interaction_type=interaction_type,
         )
     max_history = settings.get("max_conversation_history", 20)
-    stored_history = [] if is_public_comment else await conversations.get_history(customer["id"], limit=max_history)
+    stored_history = await conversations.get_history(
+        customer["id"],
+        limit=max_history,
+        interaction_type=interaction_type,
+    )
     has_previous_context = bool(stored_history)
     history = conversations.prepare_history_for_generation(stored_history, latest_user_message=message_text)
 
@@ -722,6 +749,7 @@ async def generate_response(
             channel=channel,
             media_url=media_url,
             source_id=message_source_id,
+            interaction_type=interaction_type,
         )
 
     safe_tool_log = _safe_tool_log_for_persistence(agent_result.tool_log)
@@ -733,6 +761,7 @@ async def generate_response(
             channel=channel,
             function_calls=safe_tool_log,
             source_id=message_source_id,
+            interaction_type=interaction_type,
         )
 
     response = {
@@ -788,6 +817,7 @@ async def _handle_payment_proof_attempt(
             channel=channel,
             media_url=media_url,
             source_id=message_source_id,
+            interaction_type=conversations.PRIVATE_MESSAGE_SCOPE,
         )
     result = await verify_payment_proof(
         customer_id=customer["id"],
@@ -827,6 +857,7 @@ async def _handle_payment_proof_attempt(
             channel=channel,
             function_calls=function_calls,
             source_id=message_source_id,
+            interaction_type=conversations.PRIVATE_MESSAGE_SCOPE,
         )
     response = {
         "text": reply_text,
@@ -864,6 +895,7 @@ async def _handle_exchange_rate_question(
             channel=channel,
             media_url=media_url,
             source_id=message_source_id,
+            interaction_type=conversations.PRIVATE_MESSAGE_SCOPE,
         )
     reply_text = _exchange_rate_reply(settings, message_text)
     response_time_ms = int((time.monotonic() - t_start) * 1000)
@@ -894,6 +926,7 @@ async def _handle_exchange_rate_question(
             content=reply_text,
             channel=channel,
             source_id=message_source_id,
+            interaction_type=conversations.PRIVATE_MESSAGE_SCOPE,
         )
     return {
         "text": reply_text,
@@ -927,6 +960,7 @@ async def _handle_public_comment_private_invite(
         channel=channel,
         media_url=media_url,
         source_id=message_source_id,
+        interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
     )
     reply_text = _public_comment_private_invite_text(settings)
     response_time_ms = int((time.monotonic() - t_start) * 1000)
@@ -957,6 +991,7 @@ async def _handle_public_comment_private_invite(
             content=reply_text,
             channel=channel,
             source_id=message_source_id,
+            interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
         )
     return {
         "text": reply_text,
@@ -983,7 +1018,11 @@ async def _handle_public_instagram_comment(
 ) -> dict:
     """Answer safe public Instagram comment intents using mapped catalog context."""
     t_start = time.monotonic()
-    recent_history = await conversations.get_history(customer["id"], limit=2)
+    recent_history = await conversations.get_history(
+        customer["id"],
+        limit=2,
+        interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
+    )
     await conversations.store_message(
         customer_id=customer["id"],
         role="user",
@@ -991,6 +1030,7 @@ async def _handle_public_instagram_comment(
         channel=channel,
         media_url=media_url,
         source_id=message_source_id,
+        interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
     )
 
     request_kind = _classify_public_comment_request(message_text)
@@ -1062,6 +1102,7 @@ async def _handle_public_instagram_comment(
             content=reply_text,
             channel=channel,
             source_id=message_source_id,
+            interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
         )
     return {
         "text": reply_text,

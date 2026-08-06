@@ -147,7 +147,15 @@ class TranscriptHarness:
         monkeypatch.setattr(engine.escalations, "escalate_customer_automatically", AsyncMock(return_value={"id": "customer-1"}))
         monkeypatch.setattr(engine.escalations, "reactivate_if_expired", AsyncMock(return_value=SimpleNamespace(status="skipped")))
         monkeypatch.setattr(engine.customers, "add_tags", AsyncMock(return_value=None))
-        monkeypatch.setattr(engine.conversations, "get_history", AsyncMock(side_effect=lambda customer_id, limit=20: list(self.messages)))
+        monkeypatch.setattr(
+            engine.conversations,
+            "get_history",
+            AsyncMock(
+                side_effect=lambda customer_id, limit=20, interaction_type="private_message": list(
+                    self.messages
+                )
+            ),
+        )
         monkeypatch.setattr(engine.conversations, "get_recent_summary", AsyncMock(return_value="Resumen reciente"))
         monkeypatch.setattr(engine.conversations, "store_message", AsyncMock(side_effect=store_message))
         monkeypatch.setattr(engine.orders, "get_latest_open_order", AsyncMock(return_value=None))

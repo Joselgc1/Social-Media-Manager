@@ -627,8 +627,16 @@ async def test_public_instagram_comment_unresolved_widget_sku_uses_fallback(engi
     assert response["catalog_pdf"] is None
     assert response["product_image"] is None
     engine_harness.provider.chat.assert_not_awaited()
-    engine.conversations.get_history.assert_awaited_once_with("customer-1", limit=2)
+    engine.conversations.get_history.assert_awaited_once_with(
+        "customer-1",
+        limit=2,
+        interaction_type="instagram_comment",
+    )
     engine.orders.get_latest_open_order.assert_not_awaited()
+    assert {
+        call.kwargs["interaction_type"]
+        for call in engine.conversations.store_message.await_args_list
+    } == {"instagram_comment"}
     assert engine.analytics.log_ai_run.await_args.kwargs["route_intent"] == "public_comment_private_invite"
 
 

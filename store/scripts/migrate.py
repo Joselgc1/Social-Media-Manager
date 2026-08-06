@@ -52,6 +52,9 @@ KOMMO_INBOUND_VOICE_MIGRATION_PATH = (
 KOMMO_INBOUND_ATTACHMENTS_MIGRATION_PATH = (
     Path(__file__).resolve().parents[1] / "migrations" / "014_kommo_inbound_attachments.sql"
 )
+CONVERSATION_INTERACTION_SCOPE_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1] / "migrations" / "015_conversation_interaction_scope.sql"
+)
 ADVISORY_LOCK_KEY = 891_014_001
 
 
@@ -90,6 +93,9 @@ async def run_migration(database_url: str | None = None) -> None:
     kommo_inbound_attachments_migration_sql = KOMMO_INBOUND_ATTACHMENTS_MIGRATION_PATH.read_text(
         encoding="utf-8"
     )
+    conversation_interaction_scope_migration_sql = (
+        CONVERSATION_INTERACTION_SCOPE_MIGRATION_PATH.read_text(encoding="utf-8")
+    )
     connection = await asyncpg.connect(database_url)
     try:
         await connection.execute("SELECT pg_advisory_lock($1)", ADVISORY_LOCK_KEY)
@@ -107,6 +113,7 @@ async def run_migration(database_url: str | None = None) -> None:
             await connection.execute(kommo_media_content_hash_migration_sql)
             await connection.execute(kommo_inbound_voice_migration_sql)
             await connection.execute(kommo_inbound_attachments_migration_sql)
+            await connection.execute(conversation_interaction_scope_migration_sql)
         finally:
             await connection.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
     finally:
