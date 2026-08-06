@@ -183,6 +183,21 @@ def test_comment_parser_supports_entry_value_and_missing_optional_fields():
     assert events[0].sender_username is None
 
 
+def test_comment_parser_ignores_self_authored_business_comment():
+    from app.integrations.meta_context.parser import parse_instagram_comment_events
+
+    payload = _comment_payload()
+    payload["entry"][0]["changes"][0]["value"].update(
+        {
+            "id": "outgoing-comment",
+            "text": "¡Hola! El precio de Gucci Mini-Set es $71.",
+            "from": {"id": "ig-account", "username": "royalminiperfume"},
+        }
+    )
+
+    assert parse_instagram_comment_events(payload) == []
+
+
 @pytest.mark.asyncio
 async def test_duplicate_meta_delivery_returns_existing_event(monkeypatch):
     from app.integrations.meta_context import service

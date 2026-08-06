@@ -117,6 +117,14 @@ def _parse_comment_value(
     sender = value.get("from") if isinstance(value.get("from"), dict) else {}
     if not sender and isinstance(value.get("sender"), dict):
         sender = value["sender"]
+    sender_id = _text(sender.get("id") or value.get("sender_id"))
+    effective_account_id = _text(value.get("instagram_account_id")) or account_id
+    if (
+        value.get("is_echo") is True
+        or value.get("is_self") is True
+        or (sender_id and effective_account_id and sender_id == effective_account_id)
+    ):
+        return None
     parent = value.get("parent") if isinstance(value.get("parent"), dict) else {}
     comment_id = _text(value.get("comment_id") or value.get("id"))
     message_id = _text(value.get("message_id") or value.get("mid"))
@@ -141,8 +149,8 @@ def _parse_comment_value(
 
     return MetaInstagramContextEvent(
         external_event_id=external_event_id,
-        instagram_account_id=_text(value.get("instagram_account_id")) or account_id,
-        sender_id=_text(sender.get("id") or value.get("sender_id")),
+        instagram_account_id=effective_account_id,
+        sender_id=sender_id,
         sender_username=_text(sender.get("username") or value.get("sender_username")),
         message_text=message_text,
         event_timestamp=timestamp,

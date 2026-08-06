@@ -116,13 +116,18 @@ class _LaunchSafetyDB:
         self.fetch_one_calls = []
         self.execute_calls = []
 
+    def get_db(self):
+        return _DBHandle()
+
     async def fetch_one(self, query, values=None):
         supplied = set((values or {}).keys())
         expected = _bind_names(query)
         assert supplied == expected
         self.fetch_one_calls.append((query, dict(values or {})))
-        if "interaction_type = 'instagram_comment'" in query:
+        if "comment_job.interaction_type = 'instagram_comment'" in query:
             return self.comment_match
+        if "SET status = 'discarded'" in query:
+            return {"id": (values or {}).get("job_id")} if self.comment_match else None
         if "status = 'waiting_for_salesbot'" in query:
             return {"id": (values or {}).get("id"), "status": "waiting_for_salesbot", "lead_id": "100", "contact_id": "200", "channel": "instagram", "combined_message": "Precio?"}
         return None
@@ -694,9 +699,12 @@ async def test_native_comment_callback_creates_ready_job_from_signed_identity(mo
     assert "pg_advisory_xact_lock(hashtext(:dedupe_key))" in create_db.execute_calls[0][0]
     assert "pg_advisory_xact_lock(hashtext(:reconciliation_key))" in create_db.execute_calls[0][0]
     reconciliation_query, reconciliation_values = create_db.fetch_all_calls[0]
-    assert "status IN ('pending', 'prepared')" in reconciliation_query
+    assert "'processing', 'waiting_for_salesbot'" in reconciliation_query
+    assert "continuation_payload IS NULL" in reconciliation_query
+    assert "created_at - to_timestamp(:comment_event_timestamp)" in reconciliation_query
     assert reconciliation_values["reason"] == "superseded_by_instagram_comment"
-    assert reconciliation_values["window_seconds"] == 30
+    assert reconciliation_values["window_seconds"] == jobs.COMMENT_MIRROR_RECONCILIATION_SECONDS
+    assert reconciliation_values["comment_event_timestamp"] == 123456
     assert reconciliation_values["normalized_message"] == "precio?"
     assert "INSERT INTO kommo_message_receipts" in create_db.execute_calls[1][0]
     assert create_db.execute_calls[1][1]["job_id"] == "comment-job"
@@ -791,11 +799,38 @@ async def test_private_webhook_job_created_before_comment_callback_is_discarded(
     reconciliation_query, reconciliation_values = create_db.fetch_all_calls[0]
     assert "interaction_type = 'private_message'" in reconciliation_query
     assert "channel = 'instagram'" in reconciliation_query
-    assert "status IN ('pending', 'prepared')" in reconciliation_query
+    assert "'processing', 'waiting_for_salesbot'" in reconciliation_query
+    assert "continuation_payload IS NULL" in reconciliation_query
     assert "FOR UPDATE SKIP LOCKED" in reconciliation_query
     assert reconciliation_values["normalized_message"] == "precio?"
     assert reconciliation_values["window_seconds"] == jobs.COMMENT_MIRROR_RECONCILIATION_SECONDS
+    assert reconciliation_values["comment_event_timestamp"] == 123456
     assert reconciliation_values["reason"] == "superseded_by_instagram_comment"
+
+
+@pytest.mark.asyncio
+async def test_comment_callback_reconciles_private_job_already_processing(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    create_db = _CallbackCreateDB(superseded_private_jobs=[{"id": "processing-private-job"}])
+    monkeypatch.setattr(jobs, "db", create_db)
+
+    count = await jobs._discard_recent_private_jobs_superseded_by_comment_callback(
+        values={"entity_type": "leads", "entity_id": "100"},
+        normalized_message="precioo",
+        comment_event_timestamp=1_786_023_182,
+    )
+
+    assert count == 1
+    query, values = create_db.fetch_all_calls[0]
+    assert "'processing', 'waiting_for_salesbot'" in query
+    assert "'waiting_for_context', 'ready'" in query
+    assert "continuation_payload IS NULL" in query
+    assert "assistant_message_persisted_at IS NULL" in query
+    assert "processing_lease_id = NULL" in query
+    assert "created_at - to_timestamp(:comment_event_timestamp)" in query
+    assert "created_at >= NOW()" not in query
+    assert values["comment_event_timestamp"] == 1_786_023_182
 
 
 @pytest.mark.asyncio
@@ -1322,13 +1357,57 @@ async def test_comment_callback_before_private_webhook_job_suppresses_launch(mon
             "channel": "instagram",
             "origin": "instagram_business",
             "interaction_type": "private_message",
+            "created_at": "2026-08-06T13:33:04+00:00",
         }
     )
 
-    assert any("interaction_type = 'instagram_comment'" in query for query, _values in safety_db.fetch_one_calls)
-    discard_values = safety_db.execute_calls[-1][1]
-    assert discard_values["status"] == "discarded"
-    assert discard_values["last_error"] == "superseded_by_instagram_comment"
+    match_query, match_values = next(
+        (query, values)
+        for query, values in safety_db.fetch_one_calls
+        if "comment_job.interaction_type = 'instagram_comment'" in query
+    )
+    assert "NOW()" not in match_query
+    assert "CAST(:private_created_at AS timestamptz)" in match_query
+    assert match_values["private_created_at"] == "2026-08-06T13:33:04+00:00"
+    discard_values = next(
+        values for query, values in safety_db.fetch_one_calls if "SET status = 'discarded'" in query
+    )
+    assert discard_values["reason"] == "superseded_by_instagram_comment"
+
+
+@pytest.mark.asyncio
+async def test_delayed_mirrored_comment_still_suppresses_private_salesbot(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    safety_db = _LaunchSafetyDB(comment_match={"id": "comment-job"})
+    monkeypatch.setattr(jobs, "db", safety_db)
+    original_receipt = "2026-08-06T10:00:00+00:00"
+
+    discarded = await jobs._discard_private_job_if_superseded_by_recent_comment(
+        {
+            "id": "delayed-private-job",
+            "status": "processing",
+            "lead_id": "100",
+            "contact_id": "200",
+            "combined_message": "Precioo",
+            "channel": "instagram",
+            "origin": "instagram_business",
+            "interaction_type": "private_message",
+            "created_at": original_receipt,
+        }
+    )
+
+    assert discarded is True
+    query, values = next(
+        (query, values)
+        for query, values in safety_db.fetch_one_calls
+        if "comment_job.interaction_type = 'instagram_comment'" in query
+    )
+    assert "NOW() -" not in query
+    assert "comment_job.callback_claims ->> 'iat'" in query
+    assert "meta_event.event_timestamp" in query
+    assert values["private_created_at"] == original_receipt
+    assert values["window_seconds"] == jobs.COMMENT_MIRROR_RECONCILIATION_SECONDS
 
 
 @pytest.mark.asyncio
@@ -1372,10 +1451,11 @@ async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkey
             "status": "processing",
             "lead_id": "100",
             "contact_id": "200",
-            "combined_message": "Hola por DM",
+            "combined_message": "Precio?",
             "channel": "instagram",
             "origin": "instagram_business",
             "interaction_type": "private_message",
+            "created_at": "2026-08-06T13:33:04+00:00",
         }
     )
 

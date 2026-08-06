@@ -70,7 +70,7 @@ UNSUPPORTED_ATTACHMENT_MESSAGE = (
     "No pude identificar el archivo que me enviaste. "
     "Por favor envíame una imagen del comprobante o escríbeme qué necesitas."
 )
-COMMENT_MIRROR_RECONCILIATION_SECONDS = 30
+COMMENT_MIRROR_RECONCILIATION_SECONDS = 90
 COMMENT_CALLBACK_DEDUP_SECONDS = 300
 COMMENT_PRIVATE_SUPERSEDED_REASON = "superseded_by_instagram_comment"
 _PUBLIC_COMMENT_CONTEXT_FIELDS = {
@@ -1354,6 +1354,7 @@ async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, valu
         await _discard_recent_private_jobs_superseded_by_comment_callback(
             values=values,
             normalized_message=normalized_message,
+            comment_event_timestamp=values["salesbot_token_iat"],
         )
         duplicate = await _find_duplicate_comment_callback_job(
             external_message_id=external_message_id,
@@ -1408,6 +1409,7 @@ async def _discard_recent_private_jobs_superseded_by_comment_callback(
     *,
     values: dict,
     normalized_message: str,
+    comment_event_timestamp: float,
 ) -> int:
     if not normalized_message:
         return 0
@@ -1418,9 +1420,15 @@ async def _discard_recent_private_jobs_superseded_by_comment_callback(
             FROM kommo_message_jobs
             WHERE interaction_type = 'private_message'
               AND channel = 'instagram'
-              AND status IN ('pending', 'prepared')
+              AND status IN (
+                  'pending', 'prepared', 'processing', 'waiting_for_salesbot',
+                  'waiting_for_context', 'ready'
+              )
+              AND continuation_payload IS NULL
+              AND assistant_message_persisted_at IS NULL
               AND {_signed_entity_match_sql()}
-              AND created_at >= NOW() - (:window_seconds * INTERVAL '1 second')
+              AND ABS(EXTRACT(EPOCH FROM (created_at - to_timestamp(:comment_event_timestamp))))
+                    <= :window_seconds
               AND {_normalized_message_sql('combined_message')} = :normalized_message
             ORDER BY created_at DESC
             FOR UPDATE SKIP LOCKED
@@ -1429,6 +1437,7 @@ async def _discard_recent_private_jobs_superseded_by_comment_callback(
         SET status = 'discarded',
             last_error = :reason,
             processing_started_at = NULL,
+            processing_lease_id = NULL,
             completed_at = NOW(),
             updated_at = NOW()
         FROM candidates
@@ -1439,6 +1448,7 @@ async def _discard_recent_private_jobs_superseded_by_comment_callback(
             "entity_type": values["entity_type"],
             "entity_id": values["entity_id"],
             "normalized_message": normalized_message,
+            "comment_event_timestamp": comment_event_timestamp,
             "window_seconds": COMMENT_MIRROR_RECONCILIATION_SECONDS,
             "reason": COMMENT_PRIVATE_SUPERSEDED_REASON,
         },
@@ -1644,27 +1654,82 @@ async def _discard_private_job_if_superseded_by_recent_comment(job: dict) -> boo
     if not normalized_message:
         return False
     entity_sql, entity_values = _job_entity_match(job)
-    match = await db.fetch_one(
-        f"""
-        SELECT id
-        FROM kommo_message_jobs
-        WHERE interaction_type = 'instagram_comment'
-          AND channel = 'instagram'
-          AND status NOT IN ('discarded', 'failed')
-          AND {entity_sql}
-          AND created_at >= NOW() - (:window_seconds * INTERVAL '1 second')
-          AND {_normalized_message_sql('combined_message')} = :normalized_message
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        entity_values | {
-            "normalized_message": normalized_message,
-            "window_seconds": COMMENT_MIRROR_RECONCILIATION_SECONDS,
-        },
-    )
-    if not match:
-        return False
-    await _mark_job(job["id"], "discarded", COMMENT_PRIVATE_SUPERSEDED_REASON)
+    message_hash = normalized_text_hash(normalized_message)
+    lock_values = _job_reconciliation_values(job, normalized_message)
+    async with db.get_db().transaction():
+        await db.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(:reconciliation_key))",
+            {"reconciliation_key": _comment_reconciliation_key(lock_values, _message_hash(normalized_message))},
+        )
+        match = await db.fetch_one(
+            f"""
+            SELECT candidate.id
+            FROM (
+                SELECT comment_job.id, comment_job.created_at
+                FROM kommo_message_jobs comment_job
+                WHERE comment_job.interaction_type = 'instagram_comment'
+                  AND comment_job.channel = 'instagram'
+                  AND comment_job.status NOT IN ('discarded', 'failed')
+                  AND {entity_sql}
+                  AND {_normalized_message_sql('comment_job.combined_message')} = :normalized_message
+                  AND ABS(EXTRACT(EPOCH FROM (
+                      COALESCE(
+                          to_timestamp(
+                              CASE
+                                  WHEN comment_job.callback_claims ->> 'iat' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                  THEN CAST(comment_job.callback_claims ->> 'iat' AS double precision)
+                                  ELSE NULL
+                              END
+                          ),
+                          comment_job.created_at
+                      ) - CAST(:private_created_at AS timestamptz)
+                  ))) <= :window_seconds
+                UNION ALL
+                SELECT meta_event.id, meta_event.event_timestamp
+                FROM meta_instagram_context_events meta_event
+                WHERE meta_event.event_type = 'comment'
+                  AND meta_event.matched_kommo_job_id = CAST(:job_id AS uuid)
+                  AND meta_event.normalized_text_hash = :normalized_text_hash
+                  AND ABS(EXTRACT(EPOCH FROM (
+                      meta_event.event_timestamp - CAST(:private_created_at AS timestamptz)
+                  ))) <= :window_seconds
+            ) candidate
+            ORDER BY candidate.created_at DESC
+            LIMIT 1
+            """,
+            entity_values
+            | {
+                "job_id": str(job["id"]),
+                "private_created_at": job.get("created_at"),
+                "normalized_message": normalized_message,
+                "normalized_text_hash": message_hash,
+                "window_seconds": COMMENT_MIRROR_RECONCILIATION_SECONDS,
+            },
+        )
+        if not match:
+            return False
+        discarded = await db.fetch_one(
+            """
+            UPDATE kommo_message_jobs
+            SET status = 'discarded',
+                last_error = :reason,
+                processing_started_at = NULL,
+                processing_lease_id = NULL,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = CAST(:job_id AS uuid)
+              AND status IN (
+                  'pending', 'prepared', 'processing', 'waiting_for_salesbot',
+                  'waiting_for_context', 'ready'
+              )
+              AND continuation_payload IS NULL
+              AND assistant_message_persisted_at IS NULL
+            RETURNING id
+            """,
+            {"job_id": str(job["id"]), "reason": COMMENT_PRIVATE_SUPERSEDED_REASON},
+        )
+        if not discarded:
+            return False
     logger.info(
         "Kommo Instagram private-message job discarded before Salesbot launch because native comment job exists: job_id=%s comment_job_id=%s reason=%s",
         job.get("id"),
@@ -1715,11 +1780,29 @@ def _signed_entity_match_sql() -> str:
 
 
 def _job_entity_match(job: dict) -> tuple[str, dict]:
+    clauses = []
+    values = {}
     if job.get("lead_id"):
-        return "lead_id = CAST(:lead_id AS text)", {"lead_id": job.get("lead_id")}
+        clauses.append("comment_job.lead_id = CAST(:lead_id AS text)")
+        values["lead_id"] = job.get("lead_id")
     if job.get("contact_id"):
-        return "contact_id = CAST(:contact_id AS text)", {"contact_id": job.get("contact_id")}
+        clauses.append("comment_job.contact_id = CAST(:contact_id AS text)")
+        values["contact_id"] = job.get("contact_id")
+    if clauses:
+        return f"({' OR '.join(clauses)})", values
     return "FALSE", {}
+
+
+def _job_reconciliation_values(job: dict, normalized_message: str) -> dict:
+    if job.get("lead_id"):
+        entity_type, entity_id = "leads", job.get("lead_id")
+    else:
+        entity_type, entity_id = "contacts", job.get("contact_id")
+    return {
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "normalized_message": normalized_message,
+    }
 
 
 def _instagram_callback_origin(origin: str | None) -> str:
