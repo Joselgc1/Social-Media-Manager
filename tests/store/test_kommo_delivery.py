@@ -727,6 +727,37 @@ async def test_duplicate_direct_instagram_worker_claim_sends_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retrying_accepted_instagram_fallback_does_not_duplicate_send(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    delivery._claim_delivery.side_effect = [
+        delivery._DeliveryClaim("sending", None, True),
+        delivery._DeliveryClaim("accepted", "fallback-message", False),
+    ]
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "fallback-message"}))
+    fallback_job = {**DIRECT_INSTAGRAM_JOB, "direct_delivery_purpose": "fallback"}
+
+    first = await deliver_response(
+        job=fallback_job,
+        result={},
+        customer_text="Disculpa, intenta nuevamente.",
+        client=client,
+    )
+    second = await deliver_response(
+        job=fallback_job,
+        result={},
+        customer_text="Disculpa, intenta nuevamente.",
+        client=client,
+    )
+
+    assert first.provider_message_ids == second.provider_message_ids == ["fallback-message"]
+    assert all(
+        call.kwargs["attachment_metadata"]["delivery_purpose"] == "fallback"
+        for call in delivery._claim_delivery.await_args_list
+    )
+    client.send_talk_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_retrying_accepted_instagram_image_does_not_duplicate_send(monkeypatch):
     _install_chats_dependencies(monkeypatch)
     delivery._claim_delivery.side_effect = [
@@ -1426,4 +1457,39 @@ async def test_kommo_test_reports_instagram_scope_as_manual_unverified(monkeypat
     }
     assert result["automatic_checks_ok"] is True
     assert result["manual_checks_required"] == ["instagram_dm_transport"]
+    assert result["readiness_status"] == "manual_verification_required"
+    assert result["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_kommo_test_reports_failed_automatic_readiness(monkeypatch):
+    from app.admin import settings as admin_settings
+
+    config = SimpleNamespace(
+        channel_backend="kommo",
+        kommo_ai_mode_field_id=10,
+        kommo_ai_active_enum_id=11,
+        kommo_ai_human_enum_id=12,
+        kommo_ai_paused_enum_id=13,
+        kommo_default_responsible_user_id=None,
+        kommo_whatsapp_salesbot_id=15,
+        kommo_salesbot_id=None,
+    )
+    client = SimpleNamespace(
+        get_account=AsyncMock(side_effect=KommoAPIError("unauthorized", status_code=401)),
+        get_lead_custom_field=AsyncMock(
+            return_value={"enums": [{"id": 11}, {"id": 12}, {"id": 13}]}
+        ),
+    )
+    monkeypatch.setattr(admin_settings, "get_config", lambda: config)
+    monkeypatch.setattr(
+        "app.integrations.kommo.client.KommoClient.from_config",
+        lambda: client,
+    )
+
+    result = await admin_settings.kommo_test()
+
     assert result["ok"] is False
+    assert result["automatic_checks_ok"] is False
+    assert result["readiness_status"] == "automatic_checks_failed"
+    assert result["manual_checks_required"] == ["instagram_dm_transport"]

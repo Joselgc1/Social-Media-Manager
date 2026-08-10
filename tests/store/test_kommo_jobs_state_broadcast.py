@@ -50,6 +50,7 @@ def _install_direct_ready_job(
     ai_result=None,
     delivery_result=None,
     delivery_error=None,
+    customer_send_begun=False,
 ):
     from app.integrations.kommo.delivery import DeliveryResult
 
@@ -91,6 +92,11 @@ def _install_direct_ready_job(
     )
     monkeypatch.setattr(jobs, "generate_response", generate)
     monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    monkeypatch.setattr(
+        jobs,
+        "_direct_customer_send_begun",
+        AsyncMock(return_value=customer_send_begun),
+    )
     store_message = AsyncMock()
     monkeypatch.setattr(jobs.conversations, "store_message", store_message)
     deliver = AsyncMock(
@@ -1486,6 +1492,7 @@ async def test_ready_instagram_dm_delivery_failure_is_safely_terminal(
         monkeypatch,
         jobs,
         delivery_error=delivery_error,
+        customer_send_begun=True,
     )
 
     await jobs._process_ready_job(
@@ -1502,9 +1509,167 @@ async def test_ready_instagram_dm_delivery_failure_is_safely_terminal(
     )
 
     deliver.assert_awaited_once()
+    if isinstance(delivery_error, KommoDeliveryUnknownError):
+        jobs._direct_customer_send_begun.assert_not_awaited()
+    else:
+        jobs._direct_customer_send_begun.assert_awaited_once_with("job")
+    client.run_salesbot.assert_not_awaited()
     client.continue_salesbot.assert_not_awaited()
+    client.send_talk_message.assert_not_called()
     store_message.assert_not_awaited()
     assert mock_db.execute.await_args.args[1]["status"] == expected_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["download", "drive_upload"])
+async def test_instagram_image_preflight_failure_sends_one_safe_direct_fallback(
+    monkeypatch,
+    failure_stage,
+):
+    from app.integrations.kommo import delivery, jobs
+    from app.integrations.kommo.files import KommoDownloadedImage
+
+    ai_result = {
+        "text": "Aqui tienes la foto",
+        "product_image": {
+            "type": "product_image",
+            "image_url": "https://cdn.example/product.jpg",
+            "product_name": "Pijama",
+            "sku": "PJ-1",
+        },
+        "escalated": False,
+    }
+    mock_db, client, _generate, _mock_deliver, store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+        ai_result=ai_result,
+        customer_send_begun=False,
+    )
+    config = SimpleNamespace(
+        kommo_ai_active_enum_id=1,
+        instagram_story_context_ttl_hours=24,
+        kommo_chats_media_enabled=True,
+        kommo_chats_product_images_enabled=True,
+        kommo_chats_catalog_pdf_enabled=False,
+        kommo_chats_pdf_attachment_type=None,
+    )
+    monkeypatch.setattr(jobs, "get_config", lambda: config)
+    monkeypatch.setattr(delivery, "get_config", lambda: config)
+    monkeypatch.setattr(jobs, "deliver_response", delivery.deliver_response)
+    downloaded = KommoDownloadedImage(
+        data=b"image-bytes",
+        file_name="product.jpg",
+        mime_type="image/jpeg",
+        content_hash="a" * 64,
+    )
+    files = SimpleNamespace(
+        client=client,
+        download_image=AsyncMock(
+            side_effect=(
+                KommoAPIError("image download failed")
+                if failure_stage == "download"
+                else None
+            ),
+            return_value=downloaded,
+        ),
+        upload_downloaded_image=AsyncMock(
+            side_effect=KommoAPIError("Drive upload failed")
+        ),
+    )
+    monkeypatch.setattr(delivery.KommoFiles, "from_config", lambda _client: files)
+    monkeypatch.setattr(delivery, "_find_cached_upload", AsyncMock(return_value=None))
+    claim = AsyncMock(return_value=delivery._DeliveryClaim("sending", None, True))
+    monkeypatch.setattr(delivery, "_claim_delivery", claim)
+    client.send_talk_message = AsyncMock(return_value={"id": "fallback-message"})
+    monkeypatch.setattr(
+        delivery.db,
+        "fetch_one",
+        AsyncMock(return_value={"provider_message_id": "fallback-message"}),
+    )
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": None,
+            "combined_message": "Enviame la foto",
+            "channel": "instagram",
+            "interaction_type": "private_message",
+            "talk_id": "300",
+            "correlation_id": "corr",
+        }
+    )
+
+    assert claim.await_count == 1
+    assert claim.await_args.kwargs["media_type"] == "text"
+    assert claim.await_args.kwargs["attachment_metadata"]["delivery_purpose"] == "fallback"
+    client.send_talk_message.assert_awaited_once_with(
+        "300",
+        text=jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE,
+    )
+    client.continue_salesbot.assert_not_awaited()
+    store_message.assert_awaited_once()
+    assert store_message.await_args.kwargs["content"] == jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE
+    assert any("SET status = 'discarded'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
+    if failure_stage == "download":
+        files.upload_downloaded_image.assert_not_awaited()
+    else:
+        files.upload_downloaded_image.assert_awaited_once_with(downloaded)
+
+
+@pytest.mark.asyncio
+async def test_direct_customer_send_begun_uses_durable_attempt_state(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    fetch_one = AsyncMock(return_value={"send_begun": True})
+    monkeypatch.setattr(jobs.db, "fetch_one", fetch_one)
+
+    assert await jobs._direct_customer_send_begun("00000000-0000-0000-0000-000000000001") is True
+
+    query, values = fetch_one.await_args.args
+    assert "status IN ('sending', 'accepted', 'confirmed', 'delivery_unknown')" in query
+    assert "attachment_metadata->>'send_attempt_count'" in query
+    assert "::integer >= 1" in query
+    assert values == {"job_id": "00000000-0000-0000-0000-000000000001"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outbound_state",
+    ["sending", "accepted", "confirmed", "delivery_unknown"],
+)
+async def test_durable_outbound_state_prevents_direct_failure_fallback(
+    monkeypatch,
+    outbound_state,
+):
+    from app.integrations.kommo import jobs
+
+    mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+        delivery_error=RuntimeError(f"delivery stopped in {outbound_state}"),
+        customer_send_begun=True,
+    )
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": None,
+            "combined_message": "Precio?",
+            "channel": "instagram",
+            "interaction_type": "private_message",
+            "talk_id": "300",
+            "correlation_id": "corr",
+        }
+    )
+
+    deliver.assert_awaited_once()
+    jobs._direct_customer_send_begun.assert_awaited_once_with("job")
+    client.send_talk_message.assert_not_called()
+    client.continue_salesbot.assert_not_awaited()
+    store_message.assert_not_awaited()
+    assert mock_db.execute.await_args.args[1]["status"] == "failed"
 
 
 @pytest.mark.asyncio

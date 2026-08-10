@@ -952,7 +952,6 @@ async def _process_ready_job(job: dict) -> None:
     client = KommoClient.from_config()
     continuation_started = False
     media_delivery_succeeded = False
-    direct_delivery_attempted = False
     customer = None
     try:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
@@ -1161,7 +1160,6 @@ async def _process_ready_job(job: dict) -> None:
             )
             await _continue_and_discard_job(client, job, "empty_after_sanitization")
             return
-        direct_delivery_attempted = _is_direct_instagram_dm(job)
         delivery_result = await deliver_response(
             job=job,
             result=result,
@@ -1310,7 +1308,21 @@ async def _process_ready_job(job: dict) -> None:
             sanitize_job_error(e),
             processing_lease_id=job.get("processing_lease_id"),
         )
-    except (KommoDeliveryUnknownError, KommoDeliveryStateError) as e:
+    except KommoDeliveryUnknownError as e:
+        logger.warning(
+            "Kommo media delivery requires manual reconciliation: job_id=%s error=%s",
+            job["id"],
+            sanitize_job_error(e),
+        )
+        await _mark_job(
+            job["id"],
+            "delivery_unknown",
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
+    except KommoDeliveryStateError as e:
+        if await _send_direct_failure_fallback_if_safe(client, job, customer, e):
+            return
         logger.warning(
             "Kommo media delivery requires manual reconciliation: job_id=%s error=%s",
             job["id"],
@@ -1327,14 +1339,8 @@ async def _process_ready_job(job: dict) -> None:
         if (
             not continuation_started
             and not media_delivery_succeeded
-            and (
-                job.get("return_url")
-                or (
-                    _is_direct_instagram_dm(job)
-                    and not direct_delivery_attempted
-                    and customer is not None
-                )
-            )
+            and job.get("return_url")
+            and not _is_direct_instagram_dm(job)
         ):
             await _continue_and_discard_job(
                 client,
@@ -1343,6 +1349,12 @@ async def _process_ready_job(job: dict) -> None:
                 send_customer_fallback=True,
                 customer=customer,
             )
+            return
+        if (
+            not continuation_started
+            and not media_delivery_succeeded
+            and await _send_direct_failure_fallback_if_safe(client, job, customer, e)
+        ):
             return
         await _mark_job(
             job["id"],
@@ -1359,14 +1371,8 @@ async def _process_ready_job(job: dict) -> None:
         if (
             not continuation_started
             and not media_delivery_succeeded
-            and (
-                job.get("return_url")
-                or (
-                    _is_direct_instagram_dm(job)
-                    and not direct_delivery_attempted
-                    and customer is not None
-                )
-            )
+            and job.get("return_url")
+            and not _is_direct_instagram_dm(job)
         ):
             await _continue_and_discard_job(
                 client,
@@ -1376,6 +1382,12 @@ async def _process_ready_job(job: dict) -> None:
                 customer=customer,
             )
             return
+        if (
+            not continuation_started
+            and not media_delivery_succeeded
+            and await _send_direct_failure_fallback_if_safe(client, job, customer, e)
+        ):
+            return
         await _mark_job(
             job["id"],
             "delivery_unknown"
@@ -1384,6 +1396,57 @@ async def _process_ready_job(job: dict) -> None:
             sanitize_job_error(e),
             processing_lease_id=job.get("processing_lease_id"),
         )
+
+
+async def _direct_customer_send_begun(job_id: str) -> bool:
+    row = await db.fetch_one(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM kommo_outbound_deliveries
+            WHERE job_id = CAST(:job_id AS uuid)
+              AND transport = 'chats_api'
+              AND (
+                  status IN ('sending', 'accepted', 'confirmed', 'delivery_unknown')
+                  OR (
+                      attachment_metadata->>'send_attempt_count' ~ '^[0-9]+$'
+                      AND (attachment_metadata->>'send_attempt_count')::integer >= 1
+                  )
+              )
+        ) AS send_begun
+        """,
+        {"job_id": job_id},
+    )
+    return bool(row and row["send_begun"])
+
+
+async def _send_direct_failure_fallback_if_safe(
+    client: KommoClient,
+    job: dict,
+    customer: dict | None,
+    error: Exception,
+) -> bool:
+    if not _is_direct_instagram_dm(job) or customer is None:
+        return False
+    try:
+        send_begun = await _direct_customer_send_begun(str(job["id"]))
+    except Exception as lookup_error:
+        logger.warning(
+            "Kommo direct fallback safety check failed closed: job_id=%s error=%s",
+            job.get("id"),
+            sanitize_job_error(lookup_error),
+        )
+        return False
+    if send_begun:
+        return False
+    await _continue_and_discard_job(
+        client,
+        job,
+        sanitize_job_error(error),
+        send_customer_fallback=True,
+        customer=customer,
+    )
+    return True
 
 
 async def _fetch_contact_for_job(client: KommoClient, job: dict) -> dict | None:

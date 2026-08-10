@@ -526,11 +526,17 @@ async def kommo_test():
     manual_checks_required = [
         item["name"] for item in checks if not item.get("automatic_check", True)
     ]
+    readiness_status = (
+        "manual_verification_required"
+        if automatic_checks_ok
+        else "automatic_checks_failed"
+    )
     return {
         "channel_backend": config.channel_backend,
-        "ok": automatic_checks_ok and not manual_checks_required,
+        "ok": automatic_checks_ok,
         "automatic_checks_ok": automatic_checks_ok,
         "manual_checks_required": manual_checks_required,
+        "readiness_status": readiness_status,
         "checks": checks,
     }
 
