@@ -153,7 +153,7 @@ Set exactly one channel backend per store:
 | Backend | Use When                                                                       | Webhooks                                                      | Sends Replies Through |
 | ------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------- | --------------------- |
 | `meta`  | You want direct WhatsApp Cloud API and Instagram Messaging API control.        | `/webhooks/whatsapp`, `/webhooks/instagram`                   | Meta Graph API        |
-| `kommo` | You want Kommo to own WhatsApp/Instagram channel connections and shared inbox. | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | Kommo Salesbot        |
+| `kommo` | You want Kommo to own WhatsApp/Instagram channel connections and shared inbox. | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | WhatsApp Salesbot; Instagram Talks/Chats API |
 
 
 For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) after the core PostgreSQL, LLM, Google Sheets, and Telegram setup is complete.
@@ -250,9 +250,8 @@ KOMMO_SUBDOMAIN=your-account-subdomain
 KOMMO_ACCESS_TOKEN=...
 KOMMO_INTEGRATION_ID=...
 KOMMO_INTEGRATION_SECRET=...
-KOMMO_INSTAGRAM_DM_SALESBOT_ID=123456
 KOMMO_WHATSAPP_SALESBOT_ID=234567
-KOMMO_SALESBOT_ID=                 # Temporary fallback during migration
+KOMMO_SALESBOT_ID=                 # Temporary WhatsApp-only fallback
 KOMMO_WEBHOOK_SECRET=your-random-path-secret
 KOMMO_AI_MODE_FIELD_ID=111
 KOMMO_AI_ACTIVE_ENUM_ID=222
@@ -310,7 +309,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 open http://localhost:8000/admin/login
 ```
 
-> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters and at least one real LLM API key. Documented sample credentials are rejected. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
+> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters and at least one real LLM API key. Documented sample credentials are rejected. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, WhatsApp Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
 
 ---
 
@@ -362,13 +361,13 @@ Only do this when `CHANNEL_BACKEND=kommo`.
 
 1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 15.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
-3. Create separate Instagram DM and WhatsApp Salesbots with their matching widget blocks. Route `success` to a channel-restricted Message step using `{{json.message}}`, `media` to a silent end, and `fail` to a silent end or human fallback.
+3. Create the WhatsApp Salesbot with its matching widget block. Route `success` to a WhatsApp-restricted Message step using `{{json.message}}`, `media` to a silent end, and `fail` to a silent end or human fallback. Instagram DMs do not use Salesbot; they require webhook `talk_id` and are answered directly through Talks/Chats API.
 4. Create the public-comment Kommo Salesbot with Kommo's native `When a comment is received` trigger, the `Ask Eva AI for Instagram comments` widget step, and a Comment step with `{{json.message}}` on `success`.
 5. Register a Kommo general webhook at `https://abc123.ngrok-free.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`.
 6. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
 7. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
 
-Instagram public comments should use the native comment-triggered Salesbot. Kommo can also mirror those comments through the general webhook as `origin=instagram_business`, `message_type=text`; the backend reconciles the authenticated comment callback against any recent matching private-message mirror and discards the mirror before the private-message Salesbot is launched.
+Instagram public comments should use the native comment-triggered Salesbot. Kommo can also mirror those comments through the general webhook as `origin=instagram_business`, `message_type=text`; the backend reconciles the authenticated comment callback against any recent matching private-message mirror and discards the mirror before direct Instagram processing.
 
 The complete Kommo setup is documented in [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md).
 
@@ -431,17 +430,16 @@ Additional variables for `CHANNEL_BACKEND=kommo`:
 | `KOMMO_ACCESS_TOKEN`                | Long-lived private integration token       |
 | `KOMMO_INTEGRATION_ID`              | Private integration ID/client UUID         |
 | `KOMMO_INTEGRATION_SECRET`          | JWT validation secret                      |
-| `KOMMO_INSTAGRAM_DM_SALESBOT_ID`    | Preferred Instagram DM Salesbot            |
 | `KOMMO_WHATSAPP_SALESBOT_ID`        | Preferred WhatsApp Salesbot                |
-| `KOMMO_SALESBOT_ID`                 | Temporary fallback for a missing dedicated ID |
+| `KOMMO_SALESBOT_ID`                 | Temporary WhatsApp-only Salesbot fallback  |
 | `KOMMO_WEBHOOK_SECRET`              | Random path secret for general webhook URL |
 | `KOMMO_AI_MODE_FIELD_ID`            | Lead field ID for AI Mode                  |
 | `KOMMO_AI_ACTIVE_ENUM_ID`           | Enum ID for AI Active                      |
 | `KOMMO_AI_HUMAN_ENUM_ID`            | Enum ID for Human                          |
 | `KOMMO_AI_PAUSED_ENUM_ID`           | Enum ID for Paused                         |
 | `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` | Optional assignment target on escalation   |
-| `KOMMO_CHATS_MEDIA_ENABLED`         | Global WhatsApp Chats API media kill switch; default `false` |
-| `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED` | Independent product-image rollout flag     |
+| `KOMMO_CHATS_MEDIA_ENABLED`         | Global WhatsApp/Instagram Chats API media kill switch; default `false` |
+| `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED` | WhatsApp/Instagram product-image rollout flag |
 | `KOMMO_CHATS_CATALOG_PDF_ENABLED`   | Independent WhatsApp PDF rollout flag      |
 | `KOMMO_CHATS_API_MONTHLY_LIMIT`     | Optional local monitoring value; not enforcement |
 | `KOMMO_CHATS_PDF_ATTACHMENT_TYPE`   | Must be `file` before PDF delivery is enabled |
@@ -482,7 +480,7 @@ https://vs-chatbot-production.up.railway.app/webhooks/whatsapp
 
 For Kommo mode, update:
 
-- Salesbot widget URL in both the private-message Salesbot and native comment-triggered Salesbot: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/salesbot`
+- Salesbot widget URL in both the WhatsApp Salesbot and native comment-triggered Salesbot: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/salesbot`
 - General webhook URL: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`
 
 ---
@@ -785,7 +783,7 @@ Agent and tool locations:
 
 ### 10.3 Instagram Conversations (After App Review)
 
-For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, test that Instagram DMs enter Kommo and are answered through the Salesbot flow.
+For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, test that Instagram DMs enter Kommo with a valid `talk_id` and are answered directly through Talks/Chats API without a Salesbot.
 
 ```text
 [ ] Ice Breakers appear on first DM open
@@ -847,11 +845,12 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 ```text
 [ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 15
 [ ] Widget ZIP uploaded to private Kommo integration
-[ ] Dedicated Instagram DM and WhatsApp Salesbots contain their matching widget steps and success/media/fail exits
+[ ] WhatsApp Salesbot contains its widget step and success/media/fail exits
+[ ] Instagram DM webhook jobs contain `talk_id` and direct text/product-image replies reach the same Kommo conversation without Salesbot
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>
 [ ] POST /admin/settings/kommo/test with auth -> read-only checks pass
 [ ] WhatsApp message appears in Kommo inbox and creates a Kommo job
-[ ] Customer receives AI response through Kommo Salesbot
+[ ] WhatsApp customer receives AI response through Kommo Salesbot
 [ ] Lead AI Mode=Human -> local customer becomes escalated and AI stops
 [ ] Lead AI Mode=AI Active -> AI can answer the next inbound message
 [ ] Store dashboard resolves a Kommo escalation -> Kommo AI Mode is confirmed active before local state/history changes
@@ -1039,7 +1038,7 @@ Testing (DEBUG=true, direct loopback only, forwarding headers rejected):
 - **Kommo Salesbot callbacks return 401**
   Verify `KOMMO_INTEGRATION_SECRET`, `KOMMO_INTEGRATION_ID`, `KOMMO_SUBDOMAIN`, and the widget request JWT. Confirm the Salesbot widget URL points to `/webhooks/kommo/salesbot`.
 - **Kommo jobs stuck in `waiting_for_salesbot`**
-  The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. If this repeats, verify the matching channel-specific widget block, HTTPS callback, and `KOMMO_INSTAGRAM_DM_SALESBOT_ID` or `KOMMO_WHATSAPP_SALESBOT_ID` (with `KOMMO_SALESBOT_ID` only as fallback). Public Instagram comments use Kommo's native comment trigger and do not create backend-launched waits.
+  This state is WhatsApp-only. The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. Verify the WhatsApp widget block, HTTPS callback, and `KOMMO_WHATSAPP_SALESBOT_ID` (with `KOMMO_SALESBOT_ID` only as a temporary WhatsApp fallback). Instagram DMs never enter this state; public comments use Kommo's native comment trigger.
 - **Kommo image payment screenshots are ignored**
   Direct media downloads are intentionally limited to trusted Meta/Instagram/Kommo hosts over HTTPS, with redirects disabled and a 5 MB size limit. Some Kommo media payloads may need manual production validation.
 - **Kommo WhatsApp catalog requests do not send PDFs**

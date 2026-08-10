@@ -92,13 +92,15 @@ async def deliver_response(
 ) -> DeliveryResult:
     """Send direct Instagram text, supported WhatsApp media, or use Salesbot."""
     clean_text = str(customer_text or "").strip()
-    if _is_direct_instagram_dm(job):
-        return await _deliver_direct_text(job, clean_text, client=client)
-
+    direct_instagram = _is_direct_instagram_dm(job)
     product_image = _product_image_payload(result)
     catalog_pdf = _catalog_pdf_payload(result)
     if not product_image and not catalog_pdf:
-        return _salesbot_result(clean_text)
+        return (
+            await _deliver_direct_text(job, clean_text, client=client)
+            if direct_instagram
+            else _salesbot_result(clean_text)
+        )
 
     config = get_config()
     enabled_media_types = get_enabled_media_types(job, result, config=config)
@@ -107,7 +109,11 @@ async def deliver_response(
     if "catalog_pdf" not in enabled_media_types:
         catalog_pdf = None
     if not product_image and not catalog_pdf:
-        return _salesbot_result(clean_text)
+        return (
+            await _deliver_direct_text(job, clean_text, client=client)
+            if direct_instagram
+            else _salesbot_result(clean_text)
+        )
 
     if catalog_pdf and not config.kommo_chats_pdf_attachment_type:
         raise KommoPDFSendUnsupportedError(
@@ -259,10 +265,10 @@ def _is_direct_instagram_dm(job: dict) -> bool:
 def get_enabled_media_types(job: dict, result: dict, *, config=None) -> frozenset[str]:
     """Return media types enabled for this Kommo job and response."""
     config = config or get_config()
+    channel = str(job.get("channel") or "").strip().lower()
     if (
-        str(job.get("channel") or "").strip().lower() != "whatsapp"
-        or str(job.get("interaction_type") or "private_message").strip().lower()
-        != "private_message"
+        channel not in {"instagram", "whatsapp"}
+        or str(job.get("interaction_type") or "private_message").strip().lower() != "private_message"
         or not getattr(config, "kommo_chats_media_enabled", False)
     ):
         return frozenset()
@@ -271,7 +277,11 @@ def get_enabled_media_types(job: dict, result: dict, *, config=None) -> frozense
         config, "kommo_chats_product_images_enabled", False
     ):
         enabled.add("product_image")
-    if _catalog_pdf_payload(result) and getattr(config, "kommo_chats_catalog_pdf_enabled", False):
+    if (
+        channel == "whatsapp"
+        and _catalog_pdf_payload(result)
+        and getattr(config, "kommo_chats_catalog_pdf_enabled", False)
+    ):
         enabled.add("catalog_pdf")
     return frozenset(enabled)
 

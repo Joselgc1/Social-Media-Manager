@@ -275,7 +275,6 @@ async def process_ready_jobs(limit: int = 5) -> int:
 
 async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, claims: dict | None = None) -> dict:
     values = _callback_values(data, return_url, claims or {})
-    config = get_config()
     update_values = {
         "return_url": values["return_url"],
         "entity_id": values["entity_id"],
@@ -295,35 +294,12 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "sender_username": values["sender_username"],
         "sender_profile_url": values["sender_profile_url"],
     }
-    story_wait_enabled = bool(config.meta_story_context_enabled)
-    if story_wait_enabled:
-        update_values.update({
-            "story_context_enabled": True,
-            "story_context_wait_seconds": config.meta_story_context_wait_seconds,
-        })
-
-    status_sql = """CASE
-                WHEN :story_context_enabled
-                     AND job.channel = 'instagram'
-                     AND job.interaction_type = 'private_message'
-                THEN 'waiting_for_context'
-                ELSE 'ready'
-            END""" if story_wait_enabled else "'ready'"
-    story_context_sql = """
-            context_status = CASE
-                WHEN job.channel = 'instagram' AND job.interaction_type = 'private_message'
-                THEN 'pending' ELSE context_status END,
-            context_deadline_at = CASE
-                WHEN job.channel = 'instagram' AND job.interaction_type = 'private_message'
-                THEN NOW() + (:story_context_wait_seconds * INTERVAL '1 second')
-                ELSE context_deadline_at END,
-    """ if story_wait_enabled else ""
 
     job = await db.fetch_one(
-        f"""
+        """
         UPDATE kommo_message_jobs job
         SET return_url = :return_url,
-            status = {status_sql},
+            status = 'ready',
             processing_lease_id = NULL,
             ai_started_at = NULL,
             callback_claims = CAST(:callback_claims AS jsonb),
@@ -335,7 +311,6 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             author_profile_url = COALESCE(:author_profile_url, author_profile_url),
             sender_username = COALESCE(:sender_username, sender_username),
             sender_profile_url = COALESCE(:sender_profile_url, sender_profile_url),
-            {story_context_sql}
             updated_at = NOW()
         WHERE job.id = (
             SELECT candidate.id
@@ -378,8 +353,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
     )
     if job:
         logger.info("Kommo Salesbot callback matched waiting job: %s", _job_log_context(dict(job)))
-        status = "waiting_for_context" if job["status"] == "waiting_for_context" else "ready"
-        return {"status": status, "job_id": str(job["id"])}
+        return {"status": "ready", "job_id": str(job["id"])}
 
     if values["interaction_type"] == "instagram_comment":
         duplicate = await _find_job_for_callback_identity(values)
@@ -800,10 +774,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
         )
         return
 
-    config = get_config()
     try:
-        if await _discard_private_job_if_superseded_by_recent_comment(job):
-            return
         salesbot_id = _salesbot_id_for_channel(job.get("channel"))
         logger.info("Kommo Salesbot launch preparing job: %s", _job_log_context(job))
         settings = await db.get_settings()
@@ -829,15 +800,9 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             kommo_ai_mode_enum_id=ai_mode_enum,
             job_status=job.get("status"),
         )
-        defer_suppression = (
-            not decision.allowed
-            and config.meta_story_context_enabled
-            and job.get("channel") == "instagram"
-            and _job_interaction_type(job) == "private_message"
-        )
-        if not decision.allowed and not defer_suppression:
+        if not decision.allowed:
             logger.info(
-                "Kommo job suppressed before Salesbot launch: job_id=%s reason=%s",
+                "Kommo WhatsApp job suppressed before Salesbot launch: job_id=%s reason=%s",
                 job["id"],
                 decision.reason,
             )
@@ -849,31 +814,19 @@ async def _launch_salesbot_for_job(job: dict) -> None:
                 processing_lease_id=processing_lease_id,
             )
             return
-        if defer_suppression:
-            logger.info(
-                "Kommo job suppression deferred until after Story context: job_id=%s reason=%s",
-                job["id"],
-                decision.reason,
-            )
 
         entity_id = job.get("lead_id") or job.get("contact_id")
         entity_type = "leads" if job.get("lead_id") else "contacts"
         if not entity_id:
-            logger.warning("Kommo job failed before Salesbot launch: job_id=%s reason=missing_entity_id", job["id"])
+            logger.warning("Kommo WhatsApp job failed before Salesbot launch: job_id=%s reason=missing_entity_id", job["id"])
             await _mark_job(job["id"], "failed", "missing_entity_id", processing_lease_id=processing_lease_id)
-            return
-        if await _discard_private_job_if_superseded_by_recent_comment(job):
             return
         waiting_job = await _mark_job_waiting_for_salesbot(
             job["id"],
             processing_lease_id,
-            suppress_after_context=defer_suppression,
-            automation_block_reason=decision.reason if defer_suppression else None,
         )
         if not waiting_job:
             logger.info("Kommo Salesbot launch skipped because job was no longer processing: job_id=%s", job["id"])
-            return
-        if await _discard_private_job_if_superseded_by_recent_comment(dict(waiting_job)):
             return
         logger.info("Kommo job waiting for Salesbot callback before launch: job_id=%s", job["id"])
         try:
@@ -901,17 +854,12 @@ async def _launch_salesbot_for_job(job: dict) -> None:
 async def _mark_job_waiting_for_salesbot(
     job_id: str,
     processing_lease_id: str | None,
-    *,
-    suppress_after_context: bool = False,
-    automation_block_reason: str | None = None,
 ):
     return await db.fetch_one(
         """
         UPDATE kommo_message_jobs
         SET status = 'waiting_for_salesbot',
             salesbot_launched_at = NOW(),
-            suppress_after_context = :suppress_after_context,
-            automation_block_reason = :automation_block_reason,
             processing_started_at = NULL,
             updated_at = NOW()
         WHERE id = :id
@@ -922,8 +870,6 @@ async def _mark_job_waiting_for_salesbot(
         {
             "id": job_id,
             "processing_lease_id": processing_lease_id,
-            "suppress_after_context": suppress_after_context,
-            "automation_block_reason": automation_block_reason,
         },
     )
 
@@ -2017,7 +1963,7 @@ async def _discard_private_job_if_superseded_by_recent_comment(job: dict) -> boo
         if not discarded:
             return False
     logger.info(
-        "Kommo Instagram private-message job discarded before Salesbot launch because native comment job exists: job_id=%s comment_job_id=%s reason=%s",
+        "Kommo Instagram private-message job discarded before direct processing because native comment job exists: job_id=%s comment_job_id=%s reason=%s",
         job.get("id"),
         match["id"],
         COMMENT_PRIVATE_SUPERSEDED_REASON,

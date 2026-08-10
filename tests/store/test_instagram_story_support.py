@@ -467,7 +467,6 @@ async def test_human_mode_story_lifecycle_defers_suppression_until_after_context
         meta_story_context_enabled=True,
         meta_story_context_wait_seconds=3,
         instagram_story_context_ttl_hours=24,
-        kommo_instagram_dm_salesbot_id=701,
         kommo_whatsapp_salesbot_id=702,
         kommo_salesbot_id=700,
         kommo_ai_active_enum_id=1,
@@ -908,59 +907,6 @@ def test_explicit_product_override_and_context_leakage_guards():
             message_text="Precio?",
             products=_products(),
         ) == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("channel", "interaction_type", "expected_status"),
-    [
-        ("instagram", "private_message", "waiting_for_context"),
-        ("instagram", "instagram_comment", "ready"),
-        ("whatsapp", "private_message", "ready"),
-    ],
-)
-async def test_salesbot_callback_waits_only_for_instagram_private_story_candidates(
-    monkeypatch, channel, interaction_type, expected_status
-):
-    from app.integrations.kommo import jobs
-    from app.integrations.kommo.models import SalesbotWidgetData
-
-    returned_job = {
-        "id": "job-1",
-        "status": expected_status,
-        "suppress_after_context": True,
-        "automation_block_reason": "kommo_ai_mode_human",
-    }
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(return_value=returned_job)
-    monkeypatch.setattr(jobs, "db", mock_db)
-    monkeypatch.setattr(
-        jobs,
-        "get_config",
-        lambda: SimpleNamespace(
-            meta_story_context_enabled=True,
-            meta_story_context_wait_seconds=3,
-        ),
-    )
-
-    result = await jobs.persist_salesbot_callback(
-        SalesbotWidgetData(
-            lead_id="100",
-            origin=channel,
-            interaction_type=interaction_type,
-        ),
-        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        {"iat": 123456, "entity_type": "leads", "entity_id": "100"},
-    )
-
-    query, values = mock_db.fetch_one.await_args.args
-    assert result["status"] == expected_status
-    assert "job.channel = 'instagram'" in query
-    assert "job.interaction_type = 'private_message'" in query
-    assert "suppress_after_context =" not in query
-    assert "automation_block_reason =" not in query
-    assert values["story_context_enabled"] is True
-    assert values["story_context_wait_seconds"] == 3
 
 
 @pytest.mark.asyncio

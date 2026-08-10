@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from app.integrations.kommo import delivery
@@ -203,6 +203,105 @@ async def test_image_and_text_use_one_chats_api_send(monkeypatch):
     assert result.delivered_attachments == [
         {"type": "product_image", "product_name": "Pijama Satin", "sku": "PJ-1"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_instagram_image_and_text_use_existing_drive_and_chats_path(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "ig-image"}))
+
+    result = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result=_image_result(),
+        customer_text="Aqui tienes la foto",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+
+    client.send_talk_message.assert_awaited_once_with(
+        "105",
+        text="Aqui tienes la foto",
+        attachment={
+            "drive_uuid": FILE_UUID,
+            "drive_version_uuid": VERSION_UUID,
+            "type": "picture",
+        },
+    )
+    assert result.provider_message_ids == ["ig-image"]
+    assert result.delivered_attachments == [
+        {"type": "product_image", "product_name": "Pijama Satin", "sku": "PJ-1"}
+    ]
+    assert delivery._claim_delivery.await_args.kwargs["media_type"] == "product_image"
+
+
+@pytest.mark.asyncio
+async def test_instagram_image_plus_pdf_sends_only_image(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    generate_pdf = MagicMock(side_effect=AssertionError("Instagram must not generate a PDF"))
+    monkeypatch.setattr(delivery, "ensure_catalog_pdf", generate_pdf)
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "ig-image"}))
+
+    result = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result={**_image_result(), **_pdf_result()},
+        customer_text="Foto disponible; el catalogo se envia por WhatsApp",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+
+    client.send_talk_message.assert_awaited_once()
+    assert client.send_talk_message.await_args.kwargs["attachment"]["type"] == "picture"
+    assert result.delivered_attachments == [
+        {"type": "product_image", "product_name": "Pijama Satin", "sku": "PJ-1"}
+    ]
+    generate_pdf.assert_not_called()
+    assert delivery._get_or_upload_media.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_instagram_pdf_only_sends_whatsapp_handoff_text_without_pdf(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    generate_pdf = MagicMock(side_effect=AssertionError("Instagram must not generate a PDF"))
+    monkeypatch.setattr(delivery, "ensure_catalog_pdf", generate_pdf)
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "ig-text"}))
+
+    result = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result=_pdf_result(),
+        customer_text="Te envio el catalogo por WhatsApp.",
+        client=client,
+    )
+
+    client.send_talk_message.assert_awaited_once_with(
+        "105", text="Te envio el catalogo por WhatsApp."
+    )
+    assert result.delivered_attachments == []
+    assert delivery._claim_delivery.await_args.kwargs["media_type"] == "text"
+    delivery._get_or_upload_media.assert_not_awaited()
+    generate_pdf.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config",
+    [_config(enabled=False), _config(images_enabled=False)],
+)
+async def test_disabled_instagram_image_stays_on_direct_text_not_salesbot(monkeypatch, config):
+    _install_chats_dependencies(monkeypatch)
+    monkeypatch.setattr(delivery, "get_config", lambda: config)
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "ig-text"}))
+
+    result = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result=_image_result(),
+        customer_text="Mira la foto en el enlace",
+        client=client,
+    )
+
+    assert result.transport == "chats_api"
+    client.send_talk_message.assert_awaited_once_with("105", text="Mira la foto en el enlace")
+    assert delivery._claim_delivery.await_args.kwargs["media_type"] == "text"
+    delivery._get_or_upload_media.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -613,6 +712,34 @@ async def test_duplicate_direct_instagram_worker_claim_sends_once(monkeypatch):
     )
 
     assert first.provider_message_ids == second.provider_message_ids == ["instagram-message"]
+    client.send_talk_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retrying_accepted_instagram_image_does_not_duplicate_send(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    delivery._claim_delivery.side_effect = [
+        delivery._DeliveryClaim("sending", None, True),
+        delivery._DeliveryClaim("accepted", "ig-image", False),
+    ]
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "ig-image"}))
+
+    first = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result=_image_result(),
+        customer_text="Foto",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+    second = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result=_image_result(),
+        customer_text="Foto",
+        client=client,
+        files=SimpleNamespace(client=client),
+    )
+
+    assert first.provider_message_ids == second.provider_message_ids == ["ig-image"]
     client.send_talk_message.assert_awaited_once()
 
 
@@ -1141,6 +1268,7 @@ async def test_kommo_status_exposes_safe_media_flags_and_usage(monkeypatch):
 
     status = await admin_settings.kommo_status()
 
+    assert status["kommo_instagram_dm_transport"] == "chats_api"
     assert status["kommo_chats_media_enabled"] is True
     assert status["kommo_chats_product_images_enabled"] is True
     assert status["kommo_chats_catalog_pdf_enabled"] is False

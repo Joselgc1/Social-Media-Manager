@@ -9,7 +9,6 @@
     "backend_url": "Salesbot callback URL"
   },
   "salesbot": {
-    "instagram_dm_handler_name": "Ask Eva AI for Instagram DMs",
     "whatsapp_handler_name": "Ask Eva AI for WhatsApp",
     "instagram_comment_handler_name": "Ask Eva AI for Instagram comments",
     "webhook_url": "Salesbot callback URL override",

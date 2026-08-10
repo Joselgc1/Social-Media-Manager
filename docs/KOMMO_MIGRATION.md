@@ -20,7 +20,10 @@ WhatsApp catalog PDF
 -> Salesbot media branch finishes silently
 
 Instagram DM
--> existing Salesbot path
+-> durable job with required talk_id
+-> optional Story/context correlation
+-> AI response
+-> Talks/Chats API text or enabled product image
 
 Instagram public comment
 -> existing native comment Salesbot
@@ -30,7 +33,7 @@ Kommo owns the WhatsApp and Instagram channel connection. The app does not creat
 
 ## Why Kommo
 
-Kommo removes the need to manage Meta Developers app review, long-lived Meta access tokens, WhatsApp Cloud API setup, Instagram Messaging API permissions, and webhook subscriptions directly. Ordinary text replies use Salesbot through Kommo's connected channels. Opted-in WhatsApp product images and catalog PDFs use the Files API plus Chats API without creating a custom channel or calling Meta directly.
+Kommo removes the need to manage Meta Developers app review, long-lived Meta access tokens, WhatsApp Cloud API setup, Instagram Messaging API permissions, and webhook subscriptions directly. WhatsApp text replies use Salesbot. Instagram DM replies use the originating Kommo `talk_id` and Talks/Chats API. Enabled product images use the Files API/cache plus Chats API on both channels; catalog PDFs remain WhatsApp-only.
 
 ## Backend Modes
 
@@ -44,8 +47,9 @@ Kommo removes the need to manage Meta Developers app review, long-lived Meta acc
 
 - Registers `/webhooks/kommo/events/{webhook_secret}` and `/webhooks/kommo/salesbot`.
 - Does not require Meta credentials.
-- Launches the Salesbot configured for the private-message channel and resumes it with text replies or a silent media completion.
-- Uses Chats API only for opted-in WhatsApp media responses; Instagram remains on Salesbot.
+- Launches and resumes the configured Salesbot for WhatsApp private messages.
+- Requires `talk_id` for Instagram private messages and delivers them directly through Talks/Chats API, with no Salesbot fallback.
+- Uses Files API/cache plus Chats API for enabled WhatsApp/Instagram product images; catalog PDFs remain WhatsApp-only.
 - Rejects direct WhatsApp broadcast delivery.
 
 ## Kommo Plan Prerequisites
@@ -68,22 +72,21 @@ Public Instagram comments use the same durable job system as private messages:
 Kommo native comment trigger -> widget callback -> create ready or context-waiting kommo_message_job -> AI response -> continue Salesbot with json.message
 ```
 
-Private messages use channel-specific backend-created job paths:
+Private messages use channel-specific durable paths:
 
 ```text
-Instagram DM webhook -> create kommo_message_job -> launch KOMMO_INSTAGRAM_DM_SALESBOT_ID -> widget callback -> AI response -> continue Salesbot with json.message
+Instagram DM webhook -> create kommo_message_job with talk_id -> optional context wait -> AI response -> direct Talks/Chats API send
 WhatsApp webhook -> create kommo_message_job -> launch KOMMO_WHATSAPP_SALESBOT_ID -> widget callback -> AI response -> continue Salesbot with json.message
 ```
 
-Create three Salesbot flows that use the installed Social Media Manager widget:
+Create two Salesbot flows that use the installed Social Media Manager widget:
 
-1. Instagram DM Salesbot: add `Ask Eva AI for Instagram DMs`, followed by a Kommo Message step using `{{json.message}}` restricted to the Instagram channel. Do not add a native incoming-message trigger. Set its ID as `KOMMO_INSTAGRAM_DM_SALESBOT_ID`.
-2. WhatsApp Salesbot: add `Ask Eva AI for WhatsApp`, followed by a Kommo Message step using `{{json.message}}` restricted to the WhatsApp channel. Do not add a native incoming-message trigger. Set its ID as `KOMMO_WHATSAPP_SALESBOT_ID`.
-3. Instagram comment Salesbot: keep Kommo's native `When a comment is received` trigger, add `Ask Eva AI for Instagram comments`, followed by a Kommo Comment step using `{{json.message}}`. Do not configure this Salesbot's ID in the backend.
+1. WhatsApp Salesbot: add `Ask Eva AI for WhatsApp`, followed by a Kommo Message step using `{{json.message}}` restricted to the WhatsApp channel. Do not add a native incoming-message trigger. Set its ID as `KOMMO_WHATSAPP_SALESBOT_ID`.
+2. Instagram comment Salesbot: keep Kommo's native `When a comment is received` trigger, add `Ask Eva AI for Instagram comments`, followed by a Kommo Comment step using `{{json.message}}`. Do not configure this Salesbot's ID in the backend.
 
-The backend never launches the comment Salesbot through `/api/v4/bots/{id}/run`. Authenticated Instagram-comment widget callbacks create durable `ready` jobs, or `waiting_for_context` jobs when supplemental Meta context is enabled. Private-message callbacks must still match an existing `waiting_for_salesbot` job.
+The backend never launches the comment Salesbot through `/api/v4/bots/{id}/run`. Authenticated Instagram-comment widget callbacks create durable `ready` jobs, or `waiting_for_context` jobs when supplemental Meta context is enabled. WhatsApp private-message callbacks must match an existing `waiting_for_salesbot` job. Instagram private messages never call the Salesbot callback endpoint.
 
-Kommo may also mirror a native Instagram comment through the general webhook as `origin=instagram_business` with `message_type=text`. That event is intentionally treated as a normal Instagram private-message job first. The authenticated native comment-triggered Salesbot callback creates the durable `instagram_comment` job, then reconciliation discards any recent matching private-message mirror before the Instagram DM Salesbot can launch.
+Kommo may also mirror a native Instagram comment through the general webhook as `origin=instagram_business` with `message_type=text`. That event is intentionally treated as a normal Instagram private-message job first. The authenticated native comment-triggered Salesbot callback creates the durable `instagram_comment` job, then reconciliation discards any recent matching private-message mirror before direct Instagram processing.
 
 Public-comment replies are deterministic. Eva answers only price or availability. A single mapped product can be answered directly; with multiple mapped products, a generic question requests clarification and a confident explicit product reference can select one product. Greetings, sizing, recommendations, payment, delivery, ordering, comparisons, complaints, unknown products, and unresolved context return `Para más información escríbenos al DM o por WhatsApp al {store_phone_number}!`; if `store_phone_number` is empty, the reply is `Para más información escríbenos al DM!`.
 
@@ -146,7 +149,6 @@ KOMMO_SUBDOMAIN=
 KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
 KOMMO_INTEGRATION_SECRET=
-KOMMO_INSTAGRAM_DM_SALESBOT_ID=
 KOMMO_WHATSAPP_SALESBOT_ID=
 KOMMO_SALESBOT_ID=
 KOMMO_WEBHOOK_SECRET=
@@ -162,9 +164,9 @@ KOMMO_CHATS_API_MONTHLY_LIMIT=
 KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 ```
 
-`KOMMO_INSTAGRAM_DM_SALESBOT_ID` and `KOMMO_WHATSAPP_SALESBOT_ID` are optional while migrating. For each missing dedicated ID, the backend temporarily falls back to `KOMMO_SALESBOT_ID`. New installations should configure both dedicated IDs; remove the legacy fallback only after both channels have been tested. `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` is optional. Do not add `KOMMO_ACCOUNT_ID`, `KOMMO_RETURN_URL_ALLOWLIST`, `KOMMO_AUTO_TAKEOVER_ON_HUMAN_REPLY`, or `KOMMO_REQUEST_TIMEOUT_SECONDS`.
+`KOMMO_WHATSAPP_SALESBOT_ID` selects the WhatsApp Salesbot. The backend temporarily falls back to `KOMMO_SALESBOT_ID` only for WhatsApp. Instagram DMs intentionally have no Salesbot ID or fallback. `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` is optional. Do not add `KOMMO_ACCOUNT_ID`, `KOMMO_RETURN_URL_ALLOWLIST`, `KOMMO_AUTO_TAKEOVER_ON_HUMAN_REPLY`, or `KOMMO_REQUEST_TIMEOUT_SECONDS`.
 
-`KOMMO_CHATS_MEDIA_ENABLED` is the global kill switch. Product images additionally require `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=true`; PDFs additionally require `KOMMO_CHATS_CATALOG_PDF_ENABLED=true` and the code-accepted `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file`. Verify PDF delivery in the development account before production. If a response contains both media types, only the independently enabled types are sent. All media flags default to `false`. `KOMMO_CHATS_API_MONTHLY_LIMIT` is an optional positive integer used only for local monitoring; Kommo remains authoritative for billing and quota.
+`KOMMO_CHATS_MEDIA_ENABLED` is the global kill switch. Product images on WhatsApp or Instagram additionally require `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=true`. PDFs are selected only for WhatsApp and additionally require `KOMMO_CHATS_CATALOG_PDF_ENABLED=true` plus `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file`. Instagram catalog requests are redirected toward WhatsApp and never upload or send a PDF. All media flags default to `false`. `KOMMO_CHATS_API_MONTHLY_LIMIT` is an optional positive integer used only for local monitoring; Kommo remains authoritative for billing and quota.
 
 ## Database Migration
 
@@ -181,7 +183,7 @@ python3 build_widget.py --widget-code YOUR_WIDGET_CODE
 
 Use the real widget code shown by the private Kommo integration. The source `manifest.json` keeps `__WIDGET_CODE__`; the builder substitutes the real value only inside the ZIP manifest and validates the installable manifest, i18n keys, PNG assets, widget version, and obvious secret markers. The build creates `store/kommo-widget/social-media-manager-kommo-widget.zip` with `manifest.json` at the archive root.
 
-The widget version must be incremented on every upload. [`store/kommo-widget/manifest.json`](../store/kommo-widget/manifest.json) is authoritative and currently specifies `1.2.13`.
+The widget version must be incremented on every upload. [`store/kommo-widget/manifest.json`](../store/kommo-widget/manifest.json) is authoritative and currently specifies `1.2.14`.
 
 ## Widget Installation
 
@@ -207,19 +209,19 @@ If invalid manifests were previously uploaded first and Kommo continues using st
 
 ## Salesbot Creation
 
-Create separate private-message Salesbots containing `Ask Eva AI for Instagram DMs` and `Ask Eva AI for WhatsApp`. Neither Salesbot should have a native incoming-message trigger because the backend launches exactly one after durable webhook processing. The integration settings `backend_url` is used automatically, so do not enter the same URL twice. If needed for a per-block override, set the block URL as:
+Create the WhatsApp private-message Salesbot containing `Ask Eva AI for WhatsApp`. It should not have a native incoming-message trigger because the backend launches it after durable webhook processing. The integration settings `backend_url` is used automatically, so do not enter the same URL twice. If needed for a per-block override, set the block URL as:
 
 ```text
 https://<store-domain>/webhooks/kommo/salesbot
 ```
 
-The private-message blocks send `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, `{{origin}}`, `interaction_type`, and a fixed `expected_channel` (`instagram` or `whatsapp`). The backend will not let one channel's callback consume the other channel's waiting job. Each saved Salesbot source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. The widget exposes three exits: route `success` to the channel-restricted Message/Comment step, route `media` to a silent end because Chats API already delivered the response, and route `fail` to a silent end or explicit human handling without a customer-visible `{{json.message}}` step.
+The WhatsApp block sends `{{message_text}}`, `{{lead.id}}`, `{{contact.id}}`, `{{origin}}`, `interaction_type`, and `expected_channel=whatsapp`. Its saved source must use `widget_request` followed by `goto` question step `1`, so the bot waits for this backend to call the validated continuation URL. If the block URL is empty, the widget uses the installed account-level `backend_url`. Route `success` to the WhatsApp Message step, `media` to a silent end because Chats API already delivered the response, and `fail` to a silent end or explicit human handling without a customer-visible `{{json.message}}` step.
 
 For public comments, create a separate Kommo Salesbot using the native `When a comment is received` trigger and the installed `Ask Eva AI for Instagram comments` widget block. End that flow with a Kommo Comment step using `{{json.message}}`. The backend validates the widget JWT and creates the durable comment job from the callback, so no comment Salesbot ID is configured in this app.
 
 ## Salesbot ID Retrieval
 
-Retrieve both private-message Salesbot IDs from Kommo's Salesbot UI or API. Set the Instagram DM ID as `KOMMO_INSTAGRAM_DM_SALESBOT_ID` and the WhatsApp ID as `KOMMO_WHATSAPP_SALESBOT_ID`. During migration, keep the existing `KOMMO_SALESBOT_ID` so either channel continues working until its dedicated ID is present. Do not configure a public-comment Salesbot ID in the backend.
+Retrieve the WhatsApp Salesbot ID from Kommo's Salesbot UI or API and set it as `KOMMO_WHATSAPP_SALESBOT_ID`. During migration, `KOMMO_SALESBOT_ID` may remain as a WhatsApp-only fallback. Do not configure backend Salesbot IDs for Instagram DMs or public comments.
 
 ## General Webhook Registration
 
@@ -249,7 +251,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 1. Run `python3 store/scripts/migrate.py`. Use `002_consolidated_upgrade.sql` only when a documented pre-consolidation schema error requires recovery, then run the normal migration runner again.
 2. Upload the widget.
-3. Create and test the Instagram DM Salesbot, WhatsApp Salesbot, and native comment-triggered Salesbot.
+3. Create and test the WhatsApp Salesbot and native comment-triggered Salesbot; verify direct Instagram DM delivery by `talk_id`.
 4. Register the general webhook.
 5. Set all Kommo env vars.
 6. Set `CHANNEL_BACKEND=kommo`.
@@ -266,14 +268,14 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 [ ] Widget ZIP uploaded to the private integration
 [ ] Widget installed from Settings -> Integrations with backend_url=https://<store-domain>/webhooks/kommo/salesbot
 [ ] Social Media Manager AI appears in Salesbot as an installed widget
-[ ] Instagram DM Salesbot has no native trigger and ends with an Instagram-only Message step using {{json.message}}
 [ ] WhatsApp Salesbot has no native trigger and ends with a WhatsApp-only Message step using {{json.message}}
-[ ] Both private-message Salesbots route the widget media exit to a silent end
+[ ] WhatsApp Salesbot routes the widget media exit to a silent end
+[ ] Instagram DMs contain a valid talk_id and receive direct Chats API replies without Salesbot
 [ ] Comment Salesbot ends with a Comment step using {{json.message}}
 [ ] General webhook points to https://<store-domain>/webhooks/kommo/events/<secret>
 [ ] /admin/settings/kommo/test passes with admin auth
 [ ] A real WhatsApp or Instagram DM produces one customer reply through Kommo
-[ ] A real Instagram comment creates the authoritative native-comment job; any general-webhook private-message mirror is discarded as superseded before the Instagram DM Salesbot launches
+[ ] A real Instagram comment creates the authoritative native-comment job; any general-webhook private-message mirror is discarded as superseded before direct Instagram processing
 [ ] AI Mode=Human suppresses future AI replies
 ```
 
@@ -288,7 +290,9 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 1. Send an Instagram DM to the connected account.
 2. Confirm origin maps to `instagram`.
-3. Confirm AI response appears through Kommo, not Meta sender modules.
+3. Confirm the durable job persists the originating `talk_id`.
+4. Confirm AI text or an enabled product image is sent through `/api/v4/talks/{talk_id}/send_message`, without `run_salesbot()` or `continue_salesbot()`.
+5. Confirm catalog requests redirect toward WhatsApp and no PDF is uploaded or sent.
 
 ## Inbound Voice Notes
 
@@ -301,7 +305,7 @@ Transcription always uses OpenAI `gpt-4o-mini-transcribe`, so `OPENAI_API_KEY` i
 1. Create a public Instagram comment.
 2. Confirm the native comment-triggered Salesbot calls the widget and the public reply comes from the Kommo Comment step using `{{json.message}}`.
 3. Confirm the general webhook may create a short-lived Instagram `private_message` mirror when Kommo sends `origin=instagram_business`, `message_type=text`.
-4. Confirm the authenticated native comment callback creates the `instagram_comment` job and the mirrored private-message job is discarded with `superseded_by_instagram_comment` before the Instagram DM Salesbot launches.
+4. Confirm the authenticated native comment callback creates the `instagram_comment` job and the mirrored private-message job is discarded with `superseded_by_instagram_comment` before direct Instagram processing.
 
 ## Human Takeover Procedure
 
@@ -330,7 +334,7 @@ The existing `escalate_to_human` tool now also attempts to:
 
 ## Hybrid Media Delivery
 
-Text-only WhatsApp responses and all Instagram responses remain on Salesbot and consume zero outgoing Chats API sends. A WhatsApp response containing an opted-in product image or catalog PDF uses Chats API for the whole response, including accompanying text. One attachment produces one `POST /api/v4/talks/{talk_id}/send_message` request. An image plus PDF produces two requests because Kommo currently accepts one attachment per request; customer text is included only on the first request. PDF delivery remains WhatsApp-only. Unsupported buttons degrade to numbered text choices.
+Text-only WhatsApp responses remain on Salesbot. Instagram private-message text always uses `POST /api/v4/talks/{talk_id}/send_message`; enabled Instagram product images use the same request with text plus one picture attachment. A WhatsApp response containing an opted-in product image or catalog PDF uses Chats API for the whole response, including accompanying text. A WhatsApp image plus PDF produces two requests because Kommo accepts one attachment per request; customer text is included only on the first request. PDF delivery remains strictly WhatsApp-only. Unsupported buttons degrade to numbered text choices.
 
 The Files API upload/cache lifecycle is separate from outgoing Chats API message usage. The metered operation is `POST /api/v4/talks/{talk_id}/send_message`; ordinary Salesbot text replies do not consume that outgoing Chats API pool.
 
@@ -338,15 +342,15 @@ Only incoming external Kommo messages create AI jobs. Outgoing `add_outgoing_mes
 
 Conversation history stores one logical assistant turn regardless of transport. `conversations.attachments` contains only semantic product-image or catalog-PDF context. Kommo Drive UUIDs, provider message IDs, request fingerprints, and raw provider payloads stay in Kommo delivery/cache records and are never supplied to the LLM. Signed inbound attachment URLs are stored temporarily in the durable job's `inbound_attachments` metadata so audio/images survive debounce and retries.
 
-Kommo Salesbot continuations are data-only payloads. Salesbot delivery uses `{"data":{"status":"success","delivery_mode":"salesbot","message":"..."}}`; Chats API delivery uses `{"data":{"status":"success","delivery_mode":"chats_api","message":""}}`; failures use `{"data":{"status":"fail","message":""}}`. They do not include `execute_handlers`, `attachment_type`, or public catalog PDF URLs.
+Kommo Salesbot continuations are data-only payloads. WhatsApp Salesbot delivery uses `{"data":{"status":"success","delivery_mode":"salesbot","message":"..."}}`; after WhatsApp media is delivered through Chats API, its Salesbot receives `{"data":{"status":"success","delivery_mode":"chats_api","message":""}}`. Failures use `{"data":{"status":"fail","message":""}}`. Direct Instagram jobs never create a continuation or require `return_url`.
 
-Emoji and markdown formatting are normalized before Kommo continuation. Per-channel settings `kommo_emoji_mode_whatsapp` and `kommo_emoji_mode_instagram` accept `preserve`, `safe`, or `strip`; the default is `safe`. The legacy `kommo_strip_emoji=true` setting still forces stripping.
+Emoji and markdown formatting are normalized before Kommo delivery. Per-channel settings `kommo_emoji_mode_whatsapp` and `kommo_emoji_mode_instagram` accept `preserve`, `safe`, or `strip`; the default is `safe`. The legacy `kommo_strip_emoji=true` setting still forces stripping.
 
 For `interaction_type=instagram_comment`, final text is additionally collapsed to one short public-safe message before continuation.
 
 ## Kommo Media Transport
 
-The Files and Chats transport is wired into WhatsApp private-message job processing behind the three rollout flags. Text-only and feature-disabled responses safely remain on the existing Salesbot path.
+The Files and Chats transport supports enabled product images for WhatsApp and Instagram private messages. WhatsApp text-only and feature-disabled media responses remain on Salesbot. Instagram always remains on direct Chats API text delivery when images are disabled. Catalog PDFs are selected only for WhatsApp.
 
 The Kommo private integration requires these additional scopes before the transport can be exercised:
 
@@ -378,7 +382,7 @@ The implementation validates intermediate and final chunk statuses separately. I
 
 Inventory image downloads allow at most three manual redirects. Every initial and redirected hostname is resolved asynchronously and rejected if any resolved address is private, loopback, link-local, multicast, reserved, or unspecified. Each request is then pinned to the validated address while preserving the original HTTP Host and TLS SNI hostname, preventing a second DNS lookup from bypassing validation. URL schemes, ports, userinfo, response size, MIME type, and binary signatures are also validated at every applicable step.
 
-Image attachment type `picture` is live-verified. PDF sending remains disabled unless the global flag, PDF-specific flag, and `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file` are all configured. Files may still be uploaded independently for diagnostics without consuming an outgoing Chats API send.
+Image attachment type `picture` is live-verified. WhatsApp PDF sending remains disabled unless the global flag, PDF-specific flag, and `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file` are all configured. Instagram never selects a PDF attachment. Files may still be uploaded independently for diagnostics without consuming an outgoing Chats API send.
 
 ## Payment-Image Limitations
 

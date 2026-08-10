@@ -2,7 +2,7 @@
 
 This widget must be installed at the Kommo account level before it appears as an installed widget inside Salesbot.
 
-The authoritative widget version is `widget.version` in [`manifest.json`](manifest.json) (currently `1.2.13`). Increment it every time a new archive is uploaded so Kommo refreshes the widget files.
+The authoritative widget version is `widget.version` in [`manifest.json`](manifest.json) (currently `1.2.14`). Increment it every time a new archive is uploaded so Kommo refreshes the widget files.
 
 Build:
 
@@ -28,16 +28,16 @@ Installation sequence:
 11. Hard refresh the browser if Salesbot still shows stale widget fields.
 12. Open Salesbot.
 13. Add a Widget step.
-14. Select `Ask Eva AI for Instagram DMs`, `Ask Eva AI for WhatsApp`, or `Ask Eva AI for Instagram comments` for the corresponding Salesbot.
+14. Select `Ask Eva AI for WhatsApp` or `Ask Eva AI for Instagram comments` for the corresponding Salesbot.
 15. Leave the Salesbot block's `Salesbot callback URL override` empty unless this block must call a different store backend.
 
 The widget uses `installation=true`, has both `settings` and `salesbot_designer` locations, and requires the top-level `backend_url` setting. The Salesbot block `webhook_url` is an optional per-block override. If it is empty, the generated Salesbot source uses the installed account-level `backend_url`; if it is valid, it overrides the global URL.
 
 The Salesbot source uses `widget_request` followed by `goto` question step `1`. The backend resumes the flow by calling Kommo's continuation URL. The widget exposes three Salesbot exits: `success` for text delivered by Salesbot, `media` for media already delivered by the backend Chats API, and `fail` for errors.
 
-The same installed widget is used by all three Kommo Salesbot flows. The Instagram DM and WhatsApp Salesbots route `success` to a channel-restricted Kommo Message step using `{{json.message}}`, while `media` finishes directly without a Message step. Their IDs are configured as `KOMMO_INSTAGRAM_DM_SALESBOT_ID` and `KOMMO_WHATSAPP_SALESBOT_ID`. The public-comment Salesbot uses Kommo's native `When a comment is received` trigger, selects the Instagram-comment widget block, and routes `success` to a Kommo Comment step using `{{json.message}}`; the backend does not launch this Salesbot and does not need its ID.
+The installed widget is used by the WhatsApp and public-comment Salesbot flows. The WhatsApp Salesbot routes `success` to a WhatsApp-restricted Kommo Message step using `{{json.message}}`, while `media` finishes directly without a Message step. Its ID is configured as `KOMMO_WHATSAPP_SALESBOT_ID`, with `KOMMO_SALESBOT_ID` retained only as a temporary WhatsApp fallback. The public-comment Salesbot uses Kommo's native `When a comment is received` trigger, selects the Instagram-comment widget block, and routes `success` to a Kommo Comment step using `{{json.message}}`; the backend does not launch this Salesbot and does not need its ID.
 
-The Instagram DM Salesbot must reach the backend widget callback before any customer-visible Message step. This ordering is required because suppressed Story replies launch the Salesbot only to correlate Meta context, then resume through the widget's `fail` exit with an empty message. Put the Instagram Message step only on the widget's `success` exit; the `fail` exit must terminate without sending anything.
+Instagram DMs do not use this widget or any Salesbot. They enter through the general Kommo webhook and are delivered directly through Kommo Talks/Chats API using the persisted `talk_id`.
 
 The Instagram-comment widget block sends optional post/product placeholders such as post caption, product SKU, product name, and media URL. The backend ignores unresolved placeholders and answers only price/availability. A mapping may contain multiple products: generic questions request clarification, while a confident explicit reference can select one mapped product.
 

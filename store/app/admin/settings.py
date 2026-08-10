@@ -427,10 +427,7 @@ async def kommo_status():
         "kommo_integration_secret_configured": bool(config.kommo_integration_secret),
         "kommo_salesbot_id": config.kommo_salesbot_id,
         "kommo_salesbot_id_configured": config.kommo_salesbot_id is not None,
-        "kommo_instagram_dm_salesbot_id": config.kommo_instagram_dm_salesbot_id,
-        "kommo_instagram_dm_salesbot_id_configured": (
-            config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
-        ) is not None,
+        "kommo_instagram_dm_transport": "chats_api",
         "kommo_whatsapp_salesbot_id": config.kommo_whatsapp_salesbot_id,
         "kommo_whatsapp_salesbot_id_configured": (
             config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
@@ -505,12 +502,12 @@ async def kommo_test():
             lambda: client.get_user(config.kommo_default_responsible_user_id),
         )
 
-    for channel, salesbot_id in (
-        ("instagram_dm", config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id),
-        ("whatsapp", config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id),
-    ):
-        salesbot_id_ok = isinstance(salesbot_id, int) and salesbot_id > 0
-        checks.append({"name": f"{channel}_salesbot_id_format", "ok": salesbot_id_ok})
+    whatsapp_salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
+    checks.append({
+        "name": "whatsapp_salesbot_id_format",
+        "ok": isinstance(whatsapp_salesbot_id, int) and whatsapp_salesbot_id > 0,
+    })
+    checks.append({"name": "instagram_dm_transport", "ok": True, "transport": "chats_api"})
 
     return {"channel_backend": config.channel_backend, "ok": all(item["ok"] for item in checks), "checks": checks}
 

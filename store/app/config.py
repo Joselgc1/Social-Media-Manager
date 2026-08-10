@@ -34,12 +34,11 @@ class Settings(BaseSettings):
     instagram_story_mapping_ttl_hours: int = Field(default=24, ge=1, le=168)
     instagram_story_context_ttl_hours: int = Field(default=24, ge=1, le=168)
 
-    # --- Kommo private integration / Salesbot transport ---
+    # --- Kommo private integration / hybrid channel transport ---
     kommo_subdomain: str = ""
     kommo_access_token: str = ""
     kommo_integration_id: str = ""
     kommo_integration_secret: str = ""
-    kommo_instagram_dm_salesbot_id: int | None = None
     kommo_whatsapp_salesbot_id: int | None = None
     kommo_salesbot_id: int | None = None
     kommo_webhook_secret: str = ""
@@ -120,7 +119,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "kommo_salesbot_id",
-        "kommo_instagram_dm_salesbot_id",
         "kommo_whatsapp_salesbot_id",
         "kommo_ai_mode_field_id",
         "kommo_ai_active_enum_id",

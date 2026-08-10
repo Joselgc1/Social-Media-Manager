@@ -1317,6 +1317,124 @@ async def test_ready_instagram_dm_delivers_directly_and_marks_sent(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_pdf", [False, True])
+async def test_ready_instagram_product_image_persists_only_semantic_image(
+    monkeypatch,
+    include_pdf,
+):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import DeliveryResult
+
+    image_url = "https://cdn.example/private-product.jpg"
+    ai_result = {
+        "text": f"Aqui tienes la foto. {image_url}",
+        "product_image": {
+            "type": "product_image",
+            "caption": "Aqui tienes la foto.",
+            "image_url": image_url,
+            "product_name": "Pijama Satin",
+            "sku": "PJ-1",
+        },
+        "escalated": False,
+    }
+    if include_pdf:
+        ai_result["catalog_pdf"] = {
+            "type": "catalog_pdf",
+            "caption": "El catalogo se envia por WhatsApp.",
+        }
+    semantic_image = {
+        "type": "product_image",
+        "product_name": "Pijama Satin",
+        "sku": "PJ-1",
+    }
+    delivery_result = DeliveryResult(
+        transport="chats_api",
+        customer_text="Aqui tienes la foto.",
+        delivered_attachments=[semantic_image],
+        provider_message_ids=["instagram-image"],
+    )
+    mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+        ai_result=ai_result,
+        delivery_result=delivery_result,
+    )
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_ai_active_enum_id=1,
+            instagram_story_context_ttl_hours=24,
+            kommo_chats_media_enabled=True,
+            kommo_chats_product_images_enabled=True,
+            kommo_chats_catalog_pdf_enabled=True,
+        ),
+    )
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": None,
+            "combined_message": "Enviame foto y catalogo",
+            "channel": "instagram",
+            "interaction_type": "private_message",
+            "talk_id": "300",
+            "correlation_id": "corr",
+        }
+    )
+
+    assert deliver.await_args.kwargs["customer_text"] == "Aqui tienes la foto."
+    assert image_url not in deliver.await_args.kwargs["customer_text"]
+    store_message.assert_awaited_once()
+    assert store_message.await_args.kwargs["attachments"] == [semantic_image]
+    assert all(item["type"] != "catalog_pdf" for item in store_message.await_args.kwargs["attachments"])
+    client.continue_salesbot.assert_not_awaited()
+    assert any("SET status = 'sent'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_ready_instagram_catalog_handoff_persists_text_without_pdf(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import DeliveryResult
+
+    handoff = "Te envio el catalogo por WhatsApp."
+    result = DeliveryResult(
+        transport="chats_api",
+        customer_text=handoff,
+        delivered_attachments=[],
+        provider_message_ids=["instagram-text"],
+    )
+    _mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+        ai_result={
+            "text": handoff,
+            "catalog_pdf": {"type": "catalog_pdf", "caption": "Catalogo"},
+            "escalated": False,
+        },
+        delivery_result=result,
+    )
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": None,
+            "combined_message": "Catalogo",
+            "channel": "instagram",
+            "interaction_type": "private_message",
+            "talk_id": "300",
+            "correlation_id": "corr",
+        }
+    )
+
+    assert deliver.await_args.kwargs["customer_text"] == handoff
+    assert store_message.await_args.kwargs["attachments"] is None
+    client.continue_salesbot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("delivery_error", "expected_status"),
     [
@@ -1578,7 +1696,6 @@ async def test_salesbot_launch_race_preserves_ready_callback(monkeypatch):
         lambda: SimpleNamespace(
             channel_backend="kommo",
             kommo_ai_active_enum_id=1,
-            kommo_instagram_dm_salesbot_id=555,
             kommo_whatsapp_salesbot_id=556,
             kommo_salesbot_id=557,
         ),
@@ -1674,7 +1791,6 @@ async def test_non_story_human_mode_keeps_early_suppression(
         "get_config",
         lambda: SimpleNamespace(
             meta_story_context_enabled=story_context_enabled,
-            kommo_instagram_dm_salesbot_id=701,
             kommo_whatsapp_salesbot_id=702,
             kommo_salesbot_id=700,
         ),
@@ -1861,7 +1977,6 @@ async def test_instagram_dm_bypasses_salesbot_and_is_prepared(
         lambda: SimpleNamespace(
             meta_story_context_enabled=story_context_enabled,
             meta_story_context_wait_seconds=3,
-            kommo_instagram_dm_salesbot_id=701,
             kommo_whatsapp_salesbot_id=702,
             kommo_salesbot_id=700,
         ),
@@ -3892,12 +4007,18 @@ async def test_stale_job_recovery_runs_all_updates(monkeypatch):
     assert mock_db.execute.await_count == 4
     assert result["failed_waiting"] == 1
     assert result["marked_delivery_unknown"] == 1
-    assert "COALESCE(salesbot_launched_at, updated_at, created_at)" in mock_db.execute.await_args_list[0].args[0]
+    waiting_query = mock_db.execute.await_args_list[0].args[0]
+    assert "WHERE status = 'waiting_for_salesbot'" in waiting_query
+    assert "COALESCE(salesbot_launched_at, updated_at, created_at)" in waiting_query
     reset_query = mock_db.execute.await_args_list[1].args[0]
     unknown_query = mock_db.execute.await_args_list[2].args[0]
     failed_query = mock_db.execute.await_args_list[3].args[0]
     assert "processing_lease_id = NULL" in reset_query
     assert "ai_started_at IS NULL" in reset_query
+    assert "channel = 'instagram'" in reset_query
+    assert "interaction_type = 'private_message'" in reset_query
+    assert "talk_id IS NOT NULL" in reset_query
+    assert "THEN 'ready'" in reset_query
     assert "status = 'processing' AND ai_started_at IS NOT NULL" in unknown_query
     assert "manual reconciliation required" in unknown_query
     assert "processing_lease_id = NULL" in unknown_query

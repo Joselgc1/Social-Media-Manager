@@ -78,7 +78,7 @@ ngrok http 8000
 | Build/upload the Kommo Salesbot widget | [`store/kommo-widget/README.md`](store/kommo-widget/README.md) |
 | Back up, restore, migrate, roll back, and review retention | [`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md) |
 
-Use `CHANNEL_BACKEND=meta` for direct Meta WhatsApp/Instagram webhooks. Use `CHANNEL_BACKEND=kommo` when Kommo owns the official WhatsApp/Instagram channel integrations and this backend only receives Kommo events plus Salesbot callbacks.
+Use `CHANNEL_BACKEND=meta` for direct Meta WhatsApp/Instagram webhooks. Use `CHANNEL_BACKEND=kommo` when Kommo owns the official channel integrations: WhatsApp uses Salesbot callbacks, while Instagram DMs use direct Talks/Chats API delivery by persisted `talk_id`.
 
 ## Railway PostgreSQL
 
@@ -242,14 +242,15 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 
 ### Kommo Mode
 
-- WhatsApp and Instagram DM text handling through channel-specific Kommo Salesbots.
+- WhatsApp text handling through the configured Kommo Salesbot.
+- Instagram DM text and enabled product images are delivered directly through Kommo Talks/Chats API using the originating `talk_id`; there is intentionally no Instagram DM Salesbot fallback.
 - Public Instagram comment replies use Kommo's native comment-triggered Salesbot flow; the authenticated widget callback creates a durable `instagram_comment` job directly.
 - Interactive choices become numbered text; URL actions become text plus URLs.
-- Opted-in WhatsApp product images and catalog PDFs use Kommo Files API/cache plus Chats API; disabled media safely falls back to Salesbot behavior.
-- Product images and PDFs have independent rollout flags under a global media kill switch. PDF delivery remains WhatsApp-only.
+- Opted-in WhatsApp product images and catalog PDFs use Kommo Files API/cache plus Chats API; disabled WhatsApp media safely falls back to Salesbot behavior.
+- Product images can be enabled for WhatsApp and Instagram under the global media kill switch. Catalog PDF delivery remains strictly WhatsApp-only.
 - Incoming Kommo `voice` and `audio` attachments in private WhatsApp and Instagram DMs are downloaded safely and transcribed before the AI turn. This path requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio is not transcribed.
 - Durable jobs and outbound records track `delivery_unknown` when Salesbot or Chats API acceptance cannot be confirmed; inspect Kommo before manual retry.
-- Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable job reconciliation discards the mirrored private-message job before the selected Instagram DM Salesbot can launch.
+- Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable reconciliation discards the mirrored private-message job before direct Instagram processing.
 
 ## Telegram Admin Commands
 
@@ -363,7 +364,7 @@ Transcript regression tests live in `tests/store/test_ai_transcript_regressions.
 - **CORS:** Restricted to the app's own origin (`APP_BASE_URL`).
 - **Security headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Strict-Transport-Security` (production), `Content-Security-Policy` (production).
 - **Error sanitization:** Unhandled exceptions return a generic 500 in production; full errors only shown in debug mode.
-- **Production startup validation:** In `store/`, production boot fails fast if `ADMIN_PASSWORD` or all LLM keys are missing. Meta mode requires WhatsApp Meta credentials. Kommo mode requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Instagram and Telegram remain optional, but if either Meta Instagram or Telegram is enabled it must be fully configured.
+- **Production startup validation:** In `store/`, production boot fails fast if `ADMIN_PASSWORD` or all LLM keys are missing. Meta mode requires WhatsApp Meta credentials. Kommo mode requires the Kommo private integration, WhatsApp Salesbot, webhook secret, and AI Mode field/enum variables. Instagram and Telegram remain optional, but if either Meta Instagram context or Telegram is enabled it must be fully configured.
 - **Log redaction:** Normal webhook logging uses masked sender IDs and avoids logging raw customer message text or tool arguments at `INFO`.
 - **Inbound debounce:** Rapid consecutive inbound messages from the same customer are buffered briefly and grouped into a single AI turn, so the bot does not answer twice when the user is still typing follow-up context.
 
@@ -437,9 +438,8 @@ KOMMO_SUBDOMAIN=
 KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
 KOMMO_INTEGRATION_SECRET=
-KOMMO_INSTAGRAM_DM_SALESBOT_ID=
 KOMMO_WHATSAPP_SALESBOT_ID=
-KOMMO_SALESBOT_ID=
+KOMMO_SALESBOT_ID= # Temporary WhatsApp-only fallback
 KOMMO_WEBHOOK_SECRET=
 KOMMO_AI_MODE_FIELD_ID=
 KOMMO_AI_ACTIVE_ENUM_ID=

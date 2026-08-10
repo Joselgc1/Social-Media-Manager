@@ -91,9 +91,6 @@ define(['jquery'], function ($) {
       if (handlerCode === 'kommo_ai_instagram_comment') {
         return { interactionType: 'instagram_comment', expectedChannel: null };
       }
-      if (handlerCode === 'kommo_ai_instagram_dm') {
-        return { interactionType: 'private_message', expectedChannel: 'instagram' };
-      }
       if (handlerCode === 'kommo_ai_whatsapp') {
         return { interactionType: 'private_message', expectedChannel: 'whatsapp' };
       }

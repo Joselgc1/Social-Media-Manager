@@ -208,14 +208,13 @@ def _log_kommo_startup_config_summary(config) -> None:
     logger.info(
         "Kommo startup config summary: channel_backend=%s kommo_subdomain=%s "
         "integration_id_present=%s integration_secret_present=%s integration_secret_length=%s "
-        "instagram_dm_salesbot_configured=%s whatsapp_salesbot_configured=%s "
+        "instagram_dm_transport=chats_api whatsapp_salesbot_configured=%s "
         "legacy_salesbot_fallback_configured=%s",
         config.channel_backend,
         config.kommo_subdomain or "",
         bool(config.kommo_integration_id),
         bool(config.kommo_integration_secret),
         len(config.kommo_integration_secret or ""),
-        bool(config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id),
         bool(config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id),
         bool(config.kommo_salesbot_id),
     )

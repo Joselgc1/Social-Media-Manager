@@ -37,7 +37,6 @@ def _base_config(**overrides):
         "kommo_access_token": "kommo-token",
         "kommo_integration_id": "client-uuid",
         "kommo_integration_secret": "kommo-secret",
-        "kommo_instagram_dm_salesbot_id": 124,
         "kommo_whatsapp_salesbot_id": 125,
         "kommo_salesbot_id": 123,
         "kommo_webhook_secret": "webhook-secret",
@@ -173,25 +172,12 @@ def test_kommo_mode_requires_whatsapp_dedicated_or_fallback_salesbot_id():
         )
 
 
-def test_kommo_mode_startup_does_not_require_instagram_salesbot_id():
-    from app.main import _validate_startup_config
-
-    _validate_startup_config(
-        _base_config(
-            channel_backend="kommo",
-            kommo_instagram_dm_salesbot_id=None,
-            kommo_salesbot_id=None,
-        )
-    )
-
-
 def test_kommo_mode_accepts_legacy_salesbot_fallback_for_whatsapp():
     from app.main import _validate_startup_config
 
     _validate_startup_config(
         _base_config(
             channel_backend="kommo",
-            kommo_instagram_dm_salesbot_id=None,
             kommo_whatsapp_salesbot_id=None,
             kommo_salesbot_id=123,
         )
@@ -236,7 +222,7 @@ def test_optional_kommo_responsible_user_accepts_empty_string(monkeypatch):
 
 @pytest.mark.parametrize(
     "env_name",
-    ["KOMMO_INSTAGRAM_DM_SALESBOT_ID", "KOMMO_WHATSAPP_SALESBOT_ID", "KOMMO_SALESBOT_ID"],
+    ["KOMMO_WHATSAPP_SALESBOT_ID", "KOMMO_SALESBOT_ID"],
 )
 def test_optional_kommo_salesbot_ids_accept_empty_string(monkeypatch, env_name):
     monkeypatch.setenv(env_name, "")
@@ -266,7 +252,7 @@ def test_kommo_startup_config_summary_logs_only_safe_fields(caplog):
     assert "integration_id_present=True" in caplog.text
     assert "integration_secret_present=True" in caplog.text
     assert "integration_secret_length=18" in caplog.text
-    assert "instagram_dm_salesbot_configured=True" in caplog.text
+    assert "instagram_dm_transport=chats_api" in caplog.text
     assert "whatsapp_salesbot_configured=True" in caplog.text
     assert "legacy_salesbot_fallback_configured=True" in caplog.text
     assert "124" not in caplog.text
