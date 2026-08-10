@@ -7,7 +7,7 @@ from fastapi import HTTPException
 
 def _kommo_config(**overrides):
     data = {
-        "channel_backend": "kommo",
+        "whatsapp_backend": "kommo",
         "kommo_ai_mode_field_id": 111,
         "kommo_ai_active_enum_id": 222,
     }
@@ -122,7 +122,7 @@ async def test_admin_activation_without_kommo_mapping_is_local_only(monkeypatch)
 async def test_admin_activation_in_meta_backend_is_local_only_without_mapping_lookup(monkeypatch):
     from app.admin import customer_activation
 
-    monkeypatch.setattr(customer_activation, "get_config", lambda: _kommo_config(channel_backend="meta"))
+    monkeypatch.setattr(customer_activation, "get_config", lambda: _kommo_config(whatsapp_backend="meta"))
     get_mapping = AsyncMock()
     monkeypatch.setattr(customer_activation, "get_mapping_by_customer", get_mapping)
     monkeypatch.setattr(

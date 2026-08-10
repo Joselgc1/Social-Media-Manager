@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-`CHANNEL_BACKEND=meta` keeps the current direct Meta webhook and sender flow. `CHANNEL_BACKEND=kommo` uses Kommo official WhatsApp and Instagram integrations as the channel provider and shared inbox, while this app remains the AI, CRM, catalog, order, analytics, escalation, Telegram, and multi-store backend.
+`WHATSAPP_BACKEND=meta` keeps direct Meta WhatsApp delivery. `WHATSAPP_BACKEND=kommo` uses Kommo for WhatsApp; Instagram is selected independently with `INSTAGRAM_BACKEND`.
 
 ```text
 WhatsApp text
@@ -34,13 +34,13 @@ Kommo removes the need to manage Meta Developers app review, long-lived Meta acc
 
 ## Backend Modes
 
-`CHANNEL_BACKEND=meta`:
+`WHATSAPP_BACKEND=meta`:
 
 - Registers `/webhooks/whatsapp` and `/webhooks/instagram`.
 - Requires production Meta WhatsApp credentials.
 - Sends replies and broadcasts through Meta Graph APIs.
 
-`CHANNEL_BACKEND=kommo`:
+`WHATSAPP_BACKEND=kommo`:
 
 - Registers `/webhooks/kommo/events/{webhook_secret}` and `/webhooks/kommo/salesbot`.
 - Does not require Meta credentials.
@@ -141,7 +141,7 @@ Retrieve a Kommo user ID from Kommo's users API or UI. Set `KOMMO_DEFAULT_RESPON
 Final Kommo-specific contract:
 
 ```env
-CHANNEL_BACKEND=meta|kommo
+WHATSAPP_BACKEND=meta|kommo
 KOMMO_SUBDOMAIN=
 KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
@@ -252,7 +252,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 3. Create and test the Instagram DM Salesbot, WhatsApp Salesbot, and native comment-triggered Salesbot.
 4. Register the general webhook.
 5. Set all Kommo env vars.
-6. Set `CHANNEL_BACKEND=kommo`.
+6. Set `WHATSAPP_BACKEND=kommo`.
 7. Redeploy manually when ready.
 
 ## Production Go-Live Checklist
@@ -260,7 +260,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 ```text
 [ ] Store Railway root directory is store/
 [ ] python3 store/scripts/migrate.py completed and store/app/db.py accepts the complete migration set through version 15
-[ ] CHANNEL_BACKEND=kommo is set in the store environment
+[ ] WHATSAPP_BACKEND=kommo is set in the store environment
 [ ] All required KOMMO_* variables are set
 [ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL
 [ ] Widget ZIP uploaded to the private integration
@@ -396,10 +396,10 @@ Current trusted direct-media host suffixes are:
 
 ## Broadcast Limitation
 
-Direct WhatsApp broadcast delivery is rejected when `CHANNEL_BACKEND=kommo`:
+Direct WhatsApp broadcast delivery is rejected when `WHATSAPP_BACKEND=kommo`:
 
 ```text
-WhatsApp broadcast delivery is unavailable while CHANNEL_BACKEND=kommo. Use Kommo broadcasts or an approved Kommo WhatsApp template flow.
+WhatsApp broadcast delivery is unavailable while WHATSAPP_BACKEND=kommo. Use Kommo broadcasts or an approved Kommo WhatsApp template flow.
 ```
 
 Existing broadcast records, previews, history, and Meta-mode delivery behavior remain.
@@ -448,7 +448,7 @@ Set `KOMMO_CHATS_MEDIA_ENABLED=false` and redeploy. Ordinary Salesbot text proce
 
 ## Rollback To Meta Mode
 
-1. Set `CHANNEL_BACKEND=meta`.
+1. Set `WHATSAPP_BACKEND=meta`.
 2. Restore valid Meta WhatsApp credentials.
 3. Ensure Meta webhook routes are registered in Meta Developers.
 4. Redeploy manually.

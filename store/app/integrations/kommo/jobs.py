@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from app import db
 from app.ai.engine import generate_response
 from app.ai.transcription import AudioTranscriptionError, transcribe_audio_url
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import conversations, escalations, sessions
 from app.crm.channel_mappings import (
     persist_verified_meta_instagram_sender,
@@ -239,7 +239,11 @@ async def schedule_due_job_processing(delay_seconds: float | None = None) -> Non
 
 
 async def process_pending_jobs(limit: int = 10) -> int:
-    if get_config().channel_backend != "kommo":
+    config = get_config()
+    if not any(
+        channel_backend_for(channel, config) == "kommo"
+        for channel in ("whatsapp", "instagram")
+    ):
         return 0
     processed = 0
     for _ in range(limit):
@@ -256,7 +260,11 @@ async def process_pending_jobs(limit: int = 10) -> int:
 
 
 async def process_ready_jobs(limit: int = 5) -> int:
-    if get_config().channel_backend != "kommo":
+    config = get_config()
+    if not any(
+        channel_backend_for(channel, config) == "kommo"
+        for channel in ("whatsapp", "instagram")
+    ):
         return 0
     processed = 0
     for _ in range(limit):

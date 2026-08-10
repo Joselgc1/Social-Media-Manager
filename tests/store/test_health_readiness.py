@@ -7,7 +7,7 @@ import pytest
 
 def _config():
     return SimpleNamespace(
-        channel_backend="meta",
+        whatsapp_backend="meta",
         whatsapp_access_token="wa-token",
         instagram_access_token="",
     )

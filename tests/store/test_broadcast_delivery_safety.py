@@ -49,7 +49,7 @@ async def test_instagram_broadcast_is_rejected_before_campaign_claim(monkeypatch
 
     fetch_one = AsyncMock(return_value=_broadcast(target_channel="instagram"))
     monkeypatch.setattr(sender, "db", SimpleNamespace(fetch_one=fetch_one))
-    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(whatsapp_backend="meta"))
 
     result = await sender.execute_broadcast("broadcast-1")
 
@@ -63,7 +63,7 @@ async def test_concurrent_sender_cannot_claim_same_campaign(monkeypatch):
 
     fetch_one = AsyncMock(side_effect=[_broadcast(), None])
     monkeypatch.setattr(sender, "db", SimpleNamespace(fetch_one=fetch_one))
-    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(whatsapp_backend="meta"))
 
     result = await sender.execute_broadcast("broadcast-1")
 
@@ -91,7 +91,7 @@ async def test_broadcast_records_and_sends_each_claimed_recipient_once(monkeypat
     mock_db = SimpleNamespace(fetch_one=fetch_one, execute=execute, get_db=lambda: _database())
     send_template = AsyncMock(return_value={"message_id": "wamid-1"})
     monkeypatch.setattr(sender, "db", mock_db)
-    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(whatsapp_backend="meta"))
     monkeypatch.setattr(sender, "notify_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(sender.asyncio, "sleep", AsyncMock(return_value=None))
     monkeypatch.setattr(whatsapp_sender, "send_template", send_template)
@@ -251,7 +251,7 @@ async def test_meta_delivery_unknown_is_quarantined_for_manual_reconciliation(mo
     execute = AsyncMock()
     mock_db = SimpleNamespace(fetch_one=fetch_one, execute=execute, get_db=lambda: _database())
     monkeypatch.setattr(sender, "db", mock_db)
-    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(whatsapp_backend="meta"))
     monkeypatch.setattr(sender, "notify_owner", AsyncMock())
     monkeypatch.setattr(
         whatsapp_sender,

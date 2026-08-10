@@ -556,7 +556,7 @@ async def test_cmd_settings_is_concise_owner_summary_without_secrets():
         "payment_methods": [{"name": "Pago Móvil", "details": "0412..."}],
     }
     config = SimpleNamespace(
-        channel_backend="kommo",
+        whatsapp_backend="kommo",
         kommo_chats_media_enabled=True,
         kommo_chats_product_images_enabled=False,
         kommo_chats_catalog_pdf_enabled=True,
@@ -572,7 +572,8 @@ async def test_cmd_settings_is_concise_owner_summary_without_secrets():
     assert "gpt-5.6-luna" in result
     assert "multi\\_agent" in result
     assert "36,50" in result
-    assert "Backend: kommo" in result
+    assert "WhatsApp: kommo" in result
+    assert "Instagram: kommo" in result
     assert "media en chats" in result
     assert "PDF de catálogo" in result
     assert "openai_api_key" not in result
@@ -596,7 +597,7 @@ async def test_cmd_settings_marks_ai_paused_and_missing_rate():
         "escalation_telegram_enabled": False,
     }
     config = SimpleNamespace(
-        channel_backend="meta",
+        whatsapp_backend="meta",
         kommo_chats_media_enabled=False,
         kommo_chats_product_images_enabled=False,
         kommo_chats_catalog_pdf_enabled=False,
@@ -611,5 +612,6 @@ async def test_cmd_settings_marks_ai_paused_and_missing_rate():
     assert "pausado" in result
     assert "no disponible" in result
     assert "desactivadas" in result
-    assert "Backend: meta" in result
+    assert "WhatsApp: meta" in result
+    assert "Instagram: meta" in result
     assert "Fallback" not in result

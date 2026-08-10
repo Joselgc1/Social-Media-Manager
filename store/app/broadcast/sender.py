@@ -19,7 +19,7 @@ from datetime import datetime
 from app import db
 from app.admin.notify import notify_owner
 from app.channels.meta_errors import MetaSendError
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.customer_identity import extract_safe_first_name
 
 logger = logging.getLogger(__name__)
@@ -55,10 +55,10 @@ async def execute_broadcast(broadcast_id: str) -> dict:
     if broadcast["status"] not in ("draft", "scheduled"):
         return {"error": f"Broadcast already in status '{broadcast['status']}'. Cannot re-send."}
 
-    if get_config().channel_backend == "kommo":
+    if channel_backend_for("whatsapp", get_config()) == "kommo":
         return {
             "error": (
-                "WhatsApp broadcast delivery is unavailable while CHANNEL_BACKEND=kommo. "
+                "WhatsApp broadcast delivery is unavailable while WHATSAPP_BACKEND=kommo. "
                 "Use Kommo broadcasts or an approved Kommo WhatsApp template flow."
             )
         }

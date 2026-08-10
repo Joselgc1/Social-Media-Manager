@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app import db
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import conversations, sessions
 from app.crm.channel_mappings import get_mapping_by_customer
 from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
@@ -444,7 +444,10 @@ async def _reactivate_expired_locked(customer: dict, *, now: datetime) -> Reacti
 
 async def _reactivate_delivery_provider_if_needed(customer_id: str) -> tuple[str, str | None]:
     config = get_config()
-    if getattr(config, "channel_backend", "meta") != "kommo":
+    if not any(
+        channel_backend_for(channel, config) == "kommo"
+        for channel in ("whatsapp", "instagram")
+    ):
         return "meta", None
 
     mapping = await get_mapping_by_customer(customer_id, provider="kommo")

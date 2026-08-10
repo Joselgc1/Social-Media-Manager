@@ -29,7 +29,7 @@ from app.catalog.pdf_generator import (
     is_catalog_pdf_current,
 )
 from app.catalog.sheets import get_cached_catalog
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import customers as customer_crm
 from app.crm import escalations, orders
 from app.crm.customers import add_tags, normalize_tags, remove_tag
@@ -420,7 +420,8 @@ async def kommo_status():
             "diagnostics_available": False,
         }
     return {
-        "channel_backend": config.channel_backend,
+        "whatsapp_backend": channel_backend_for("whatsapp", config),
+        "instagram_backend": channel_backend_for("instagram", config),
         "kommo_subdomain_configured": bool(config.kommo_subdomain),
         "kommo_access_token_configured": bool(config.kommo_access_token),
         "kommo_integration_id_configured": bool(config.kommo_integration_id),
@@ -465,8 +466,12 @@ async def kommo_status():
 async def kommo_test():
     """Run safe read-only Kommo connectivity and configuration checks."""
     config = get_config()
-    if config.channel_backend != "kommo":
-        return {"channel_backend": config.channel_backend, "checks": [], "ok": False}
+    if channel_backend_for("whatsapp", config) != "kommo":
+        return {
+            "whatsapp_backend": channel_backend_for("whatsapp", config),
+            "checks": [],
+            "ok": False,
+        }
 
     from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
 
@@ -505,14 +510,20 @@ async def kommo_test():
             lambda: client.get_user(config.kommo_default_responsible_user_id),
         )
 
-    for channel, salesbot_id in (
-        ("instagram_dm", config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id),
-        ("whatsapp", config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id),
-    ):
+    salesbots = [("whatsapp", config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id)]
+    if channel_backend_for("instagram", config) == "kommo":
+        salesbots.append(
+            ("instagram_dm", config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id)
+        )
+    for channel, salesbot_id in salesbots:
         salesbot_id_ok = isinstance(salesbot_id, int) and salesbot_id > 0
         checks.append({"name": f"{channel}_salesbot_id_format", "ok": salesbot_id_ok})
 
-    return {"channel_backend": config.channel_backend, "ok": all(item["ok"] for item in checks), "checks": checks}
+    return {
+        "whatsapp_backend": channel_backend_for("whatsapp", config),
+        "ok": all(item["ok"] for item in checks),
+        "checks": checks,
+    }
 
 
 @router.get("/meta-instagram-context/status")
@@ -547,7 +558,8 @@ async def meta_instagram_context_status():
     return {
         "enabled": config.meta_instagram_context_enabled,
         "story_enabled": config.meta_story_context_enabled,
-        "channel_backend": config.channel_backend,
+        "whatsapp_backend": channel_backend_for("whatsapp", config),
+        "instagram_backend": channel_backend_for("instagram", config),
         "meta_app_secret_configured": bool(config.meta_app_secret),
         "instagram_access_token_configured": bool(config.instagram_access_token),
         "instagram_verify_token_configured": bool(config.instagram_verify_token),

@@ -6,6 +6,7 @@ __pycache__/
 # Extras
 google_data.json
 *.sh
+reset.txt
 
 # C extensions
 *.so

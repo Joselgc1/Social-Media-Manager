@@ -1331,7 +1331,7 @@ async def test_salesbot_launch_race_preserves_ready_callback(monkeypatch):
         jobs,
         "get_config",
         lambda: SimpleNamespace(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             kommo_ai_active_enum_id=1,
             kommo_instagram_dm_salesbot_id=555,
             kommo_whatsapp_salesbot_id=556,
@@ -3604,10 +3604,10 @@ async def test_broadcast_delivery_rejected_in_kommo_mode(monkeypatch):
     mock_db.fetch_one = AsyncMock(return_value={"id": "b1", "status": "draft"})
     mock_db.execute = AsyncMock()
     monkeypatch.setattr(sender, "db", mock_db)
-    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(channel_backend="kommo"))
+    monkeypatch.setattr(sender, "get_config", lambda: SimpleNamespace(whatsapp_backend="kommo"))
 
     result = await sender.execute_broadcast("b1")
-    assert "CHANNEL_BACKEND=kommo" in result["error"]
+    assert "WHATSAPP_BACKEND=kommo" in result["error"]
     mock_db.execute.assert_not_awaited()
 
 

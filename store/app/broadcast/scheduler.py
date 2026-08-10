@@ -26,7 +26,7 @@ from app.catalog.sheets import (
     refresh_catalog_async,
     set_refresh_interval,
 )
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import escalations, orders
 from app.data_retention import run_data_retention
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
@@ -146,7 +146,16 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
         replace_existing=True,
     )
 
-    if outbound_processing_enabled and get_config().channel_backend == "meta":
+    channel_config = get_config()
+    meta_channels_enabled = any(
+        channel_backend_for(channel, channel_config) == "meta"
+        for channel in ("whatsapp", "instagram")
+    )
+    kommo_channels_enabled = any(
+        channel_backend_for(channel, channel_config) == "kommo"
+        for channel in ("whatsapp", "instagram")
+    )
+    if outbound_processing_enabled and meta_channels_enabled:
         scheduler.add_job(
             _process_meta_inbound_jobs,
             trigger=IntervalTrigger(seconds=5),
@@ -161,7 +170,7 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
             name="Clean completed Meta inbound jobs",
             replace_existing=True,
         )
-    elif outbound_processing_enabled:
+    if outbound_processing_enabled and kommo_channels_enabled:
         scheduler.add_job(
             _process_kommo_jobs,
             trigger=IntervalTrigger(seconds=15),
@@ -172,7 +181,7 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
     context_config = get_config()
     context_processing_enabled = (
         outbound_processing_enabled
-        and context_config.channel_backend == "kommo"
+        and channel_backend_for("whatsapp", context_config) == "kommo"
         and (
             getattr(context_config, "meta_instagram_context_enabled", False) is True
             or getattr(context_config, "meta_story_context_enabled", False) is True
@@ -269,7 +278,11 @@ async def _token_refresh_reminder():
     Meta long-lived tokens last ~60 days. This runs daily and warns
     at 50 days so there's time to refresh.
     """
-    if get_config().channel_backend != "meta":
+    config = get_config()
+    if not any(
+        channel_backend_for(channel, config) == "meta"
+        for channel in ("whatsapp", "instagram")
+    ):
         return
 
     # This is a reminder system, not an auto-refresh.
@@ -353,7 +366,7 @@ async def _process_meta_context_jobs():
     config = get_config()
     if not (
         _outbound_processing_enabled
-        and config.channel_backend == "kommo"
+        and channel_backend_for("whatsapp", config) == "kommo"
         and (
             getattr(config, "meta_instagram_context_enabled", False) is True
             or getattr(config, "meta_story_context_enabled", False) is True

@@ -31,7 +31,7 @@ Customer comments on Instagram
 Meta must **not** send the final reply. The production configuration remains:
 
 ```env
-CHANNEL_BACKEND=kommo
+WHATSAPP_BACKEND=kommo
 ```
 
 The Meta endpoint is specifically a signed, context-only webhook. It stores comment and Story-reply context, enriches media information, and correlates events with waiting Kommo jobs. Enable comment and Story context independently with `META_INSTAGRAM_CONTEXT_ENABLED` and `META_STORY_CONTEXT_ENABLED`.
@@ -646,7 +646,7 @@ INSTAGRAM_STORY_CONTEXT_TTL_HOURS=
 Use:
 
 ```env
-CHANNEL_BACKEND=kommo
+WHATSAPP_BACKEND=kommo
 
 META_INSTAGRAM_CONTEXT_ENABLED=true
 META_APP_SECRET=YOUR_META_APP_SECRET
@@ -696,7 +696,7 @@ KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 When Meta context is enabled, application startup validates that:
 
 ```text
-CHANNEL_BACKEND is kommo
+WHATSAPP_BACKEND is kommo
 META_APP_SECRET is present
 INSTAGRAM_ACCESS_TOKEN is present
 INSTAGRAM_VERIFY_TOKEN is present
@@ -707,7 +707,7 @@ META_GRAPH_API_VERSION is present
 The Meta route is registered when Kommo mode is active and at least one context listener is enabled:
 
 ```env
-CHANNEL_BACKEND=kommo
+WHATSAPP_BACKEND=kommo
 META_INSTAGRAM_CONTEXT_ENABLED=true  # comments
 # or META_STORY_CONTEXT_ENABLED=true # Story replies
 ```
@@ -1015,7 +1015,7 @@ and is intended for direct Meta DM delivery—not the new context-only Kommo int
 Because:
 
 ```env
-CHANNEL_BACKEND=kommo
+WHATSAPP_BACKEND=kommo
 ```
 
 Kommo continues receiving and sending Instagram DMs.
@@ -1627,7 +1627,7 @@ Confirm:
 
 ```text
 META_INSTAGRAM_CONTEXT_ENABLED=true
-CHANNEL_BACKEND=kommo
+WHATSAPP_BACKEND=kommo
 Verify token matches exactly
 Correct environment has been restarted/redeployed
 Correct /webhooks/meta/instagram-context path
@@ -1690,7 +1690,7 @@ At least one valid product is mapped; use exactly one for the first test
 
 | Variable                             | Correct value                                     |
 | ------------------------------------ | ------------------------------------------------- |
-| `CHANNEL_BACKEND`                    | `kommo`                                           |
+| `WHATSAPP_BACKEND`                   | `kommo`                                           |
 | `META_APP_SECRET`                    | App Secret from App Settings → Basic              |
 | `INSTAGRAM_ACCESS_TOKEN`             | Facebook Page access token from `/me/accounts`    |
 | `INSTAGRAM_ACCOUNT_ID`               | `instagram_business_account.id`                   |

@@ -65,7 +65,7 @@ def test_scheduler_registers_daily_sensitive_data_retention(monkeypatch):
     mock_scheduler = MagicMock()
     mock_scheduler.running = False
     monkeypatch.setattr(scheduler, "get_scheduler", lambda: mock_scheduler)
-    monkeypatch.setattr(scheduler, "get_config", lambda: MagicMock(channel_backend="meta"))
+    monkeypatch.setattr(scheduler, "get_config", lambda: MagicMock(whatsapp_backend="meta"))
     monkeypatch.setattr(scheduler.asyncio, "create_task", lambda coroutine: coroutine.close())
 
     scheduler.start_scheduler()

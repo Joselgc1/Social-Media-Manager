@@ -494,7 +494,7 @@ function renderStoreDetail(store, stats, creds) {
 // ── Grouped Credentials ────────────────────────────────────
 const CRED_GROUPS = [
     { name: 'LLM API Keys', test: k => /^(OPENAI_API_KEY|ANTHROPIC_API_KEY)$/.test(k) },
-    { name: 'Channel Backend', test: k => /^CHANNEL_BACKEND$/.test(k) },
+    { name: 'Channel Providers', test: k => /^(WHATSAPP_BACKEND|INSTAGRAM_BACKEND|CHANNEL_BACKEND)$/.test(k) },
     { name: 'Kommo', test: k => /^KOMMO_/.test(k) },
     { name: 'Meta Channels', test: k => /^(WHATSAPP_|INSTAGRAM_|META_)/.test(k) },
     { name: 'Telegram', test: k => /^TELEGRAM_/.test(k) },
@@ -657,7 +657,7 @@ async function confirmDeleteStore(storeId, name) {
 // ── Credential Modals ───────────────────────────────────────
 function showAddCredentialModal(storeId) {
     const commonKeys = [
-        'CHANNEL_BACKEND',
+        'WHATSAPP_BACKEND', 'INSTAGRAM_BACKEND',
         'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DATABASE_URL',
         'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_VERIFY_TOKEN',
         'META_APP_SECRET', 'INSTAGRAM_ACCESS_TOKEN', 'INSTAGRAM_VERIFY_TOKEN',

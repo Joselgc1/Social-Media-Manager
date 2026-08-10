@@ -436,6 +436,47 @@ async def test_instagram_uses_meta_mid_for_durable_deduplication():
 
 
 @pytest.mark.asyncio
+async def test_native_meta_instagram_webhook_enqueues_dm():
+    from app.webhooks import instagram
+
+    payload = {
+        "object": "instagram",
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig-user"},
+                "message": {"mid": "ig-mid-456", "text": "Hola"},
+            }]
+        }],
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    secret = "meta-secret"
+    signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    app = FastAPI()
+    app.include_router(instagram.router)
+    enqueue = AsyncMock(return_value=True)
+
+    with (
+        patch.object(instagram, "get_config", return_value=SimpleNamespace(meta_app_secret=secret)),
+        patch.object(instagram, "enqueue_inbound_message", enqueue),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/instagram",
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "X-Hub-Signature-256": signature,
+                },
+            )
+
+    assert response.status_code == 200
+    enqueue.assert_awaited_once()
+    assert enqueue.await_args.kwargs["channel"] == "instagram"
+    assert enqueue.await_args.kwargs["message_id"] == "ig-mid-456"
+
+
+@pytest.mark.asyncio
 async def test_whatsapp_returns_failure_when_durable_enqueue_fails():
     from app.webhooks import whatsapp
 

@@ -14,7 +14,7 @@ RETURN_URL = "https://acme.kommo.com/api/v4/salesbot/1/continue/2?request_id=sec
 
 def _config(**overrides):
     data = {
-        "channel_backend": "kommo",
+        "whatsapp_backend": "kommo",
         "kommo_subdomain": "acme",
         "kommo_integration_secret": "secret",
         "kommo_integration_id": "client-uuid",
@@ -136,6 +136,49 @@ async def test_salesbot_callback_accepts_comment_interaction_type(client):
 
 
 @pytest.mark.asyncio
+async def test_hybrid_mode_ignores_kommo_instagram_private_salesbot_callback(client, monkeypatch):
+    monkeypatch.setattr(
+        kommo,
+        "get_config",
+        lambda: _config(instagram_backend="meta"),
+    )
+
+    response = await _post(
+        client,
+        json=_json_body(
+            data={
+                "message": "Hola",
+                "lead_id": "100",
+                "origin": "instagram",
+                "expected_channel": "instagram",
+            }
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ignored",
+        "reason": "instagram_managed_by_meta",
+    }
+    kommo.persist_salesbot_callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_mode_keeps_kommo_whatsapp_salesbot_callback(client, monkeypatch):
+    monkeypatch.setattr(
+        kommo,
+        "get_config",
+        lambda: _config(instagram_backend="meta"),
+    )
+
+    response = await _post(client, json=_json_body())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    kommo.persist_salesbot_callback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_salesbot_callback_logs_interaction_message_and_signed_entity(client, caplog):
     with caplog.at_level("INFO", logger="app.webhooks.kommo"):
         response = await _post(
@@ -178,6 +221,29 @@ async def test_mirrored_comment_general_webhook_creates_private_message_job_for_
     assert "Kommo webhook completed" in caplog.text
     assert "statuses={'created': 1}" in caplog.text
     assert "Precio?" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_hybrid_mode_ignores_kommo_instagram_general_webhook(
+    client,
+    monkeypatch,
+    sanitized_a105_native_instagram_comment_payload,
+):
+    monkeypatch.setattr(
+        kommo,
+        "get_config",
+        lambda: _config(instagram_backend="meta"),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr(kommo, "record_incoming_event", record)
+
+    response = await client.post(
+        "/webhooks/kommo/events/secret-path",
+        json=sanitized_a105_native_instagram_comment_payload,
+    )
+
+    assert response.status_code == 200
+    record.assert_not_awaited()
 
 
 @pytest.mark.asyncio

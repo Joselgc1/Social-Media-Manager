@@ -34,7 +34,7 @@ from app.analytics import get_conversion_funnel, get_popular_products, get_respo
 from app.broadcast.sender import execute_broadcast, list_broadcasts, preview_broadcast
 from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata
 from app.catalog.sheets import get_cached_catalog
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import orders
 from app.crm.customers import add_tags, remove_tag
 from app.exchange_rates import format_rate_for_customer, selected_exchange_rate
@@ -523,7 +523,7 @@ async def _cmd_settings() -> str:
         f"• Escalaciones por Telegram: {'activadas' if escalation_telegram else 'desactivadas'}",
     ])
 
-    backend = getattr(config, "channel_backend", "meta")
+    backend = channel_backend_for("whatsapp", config)
     lines.append("\n⚙️ *Canal*")
     if backend == "kommo":
         kommo_notes = []
@@ -534,9 +534,10 @@ async def _cmd_settings() -> str:
         if getattr(config, "kommo_chats_catalog_pdf_enabled", False):
             kommo_notes.append("PDF de catálogo")
         suffix = f" ({', '.join(kommo_notes)})" if kommo_notes else ""
-        lines.append(f"• Backend: kommo{escape_markdown(suffix)}")
+        lines.append(f"• WhatsApp: kommo{escape_markdown(suffix)}")
     else:
-        lines.append("• Backend: meta")
+        lines.append("• WhatsApp: meta")
+    lines.append(f"• Instagram: {channel_backend_for('instagram', config)}")
 
     return "\n".join(lines)
 

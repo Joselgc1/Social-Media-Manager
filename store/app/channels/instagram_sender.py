@@ -22,7 +22,8 @@ from app.config import get_config
 
 logger = logging.getLogger(__name__)
 
-GRAPH_API = "https://graph.facebook.com/v21.0"
+def _graph_api_url(config) -> str:
+    return f"https://graph.facebook.com/{config.meta_graph_api_version}"
 
 
 async def send_text(to: str, text: str):
@@ -37,7 +38,7 @@ async def send_text(to: str, text: str):
         Message body (max 1000 bytes UTF-8).
     """
     config = get_config()
-    url = f"{GRAPH_API}/me/messages"
+    url = f"{_graph_api_url(config)}/me/messages"
     body_text = format_customer_text(text, "instagram")
 
     payload = {
@@ -60,7 +61,7 @@ async def send_text_with_quick_replies(to: str, text: str, quick_replies: list[d
         Max 13 options, each title max 20 characters.
     """
     config = get_config()
-    url = f"{GRAPH_API}/me/messages"
+    url = f"{_graph_api_url(config)}/me/messages"
     body_text = format_customer_text(text, "instagram")
 
     qr_objects = [
@@ -86,7 +87,7 @@ async def send_text_with_quick_replies(to: str, text: str, quick_replies: list[d
 async def send_image(to: str, image_url: str):
     """Send an image message (e.g., product photo)."""
     config = get_config()
-    url = f"{GRAPH_API}/me/messages"
+    url = f"{_graph_api_url(config)}/me/messages"
 
     payload = {
         "recipient": {"id": to},
@@ -118,7 +119,7 @@ async def send_generic_template(to: str, elements: list[dict]):
         Max 10 elements.
     """
     config = get_config()
-    url = f"{GRAPH_API}/me/messages"
+    url = f"{_graph_api_url(config)}/me/messages"
 
     payload = {
         "recipient": {"id": to},
@@ -143,7 +144,7 @@ async def send_private_reply(comment_id: str, text: str):
     must reply to your DM to start a conversation.
     """
     config = get_config()
-    url = f"{GRAPH_API}/me/messages"
+    url = f"{_graph_api_url(config)}/me/messages"
     body_text = format_customer_text(text, "instagram")
 
     payload = {
@@ -179,7 +180,7 @@ async def setup_ice_breakers(ig_user_id: str, ice_breakers: list[dict] | None = 
             {"question": "¿Hacen envíos a mi ciudad?", "payload": "SHIPPING_INFO"},
         ]
 
-    url = f"{GRAPH_API}/{ig_user_id}/ice_breakers"
+    url = f"{_graph_api_url(config)}/{ig_user_id}/ice_breakers"
     payload = {"ice_breakers": ice_breakers[:4]}
 
     return await _send(url, payload, config.instagram_access_token)
@@ -189,7 +190,7 @@ async def setup_ice_breakers(ig_user_id: str, ice_breakers: list[dict] | None = 
 async def delete_ice_breakers(ig_user_id: str):
     """Remove all Ice Breakers from the Instagram account."""
     config = get_config()
-    url = f"{GRAPH_API}/{ig_user_id}/ice_breakers"
+    url = f"{_graph_api_url(config)}/{ig_user_id}/ice_breakers"
 
     headers = {"Authorization": f"Bearer {config.instagram_access_token}"}
     try:
@@ -209,7 +210,7 @@ async def subscribe_page_to_webhooks(page_id: str):
     Must be called once after app setup to start receiving DM notifications.
     """
     config = get_config()
-    url = f"{GRAPH_API}/{page_id}/subscribed_apps"
+    url = f"{_graph_api_url(config)}/{page_id}/subscribed_apps"
 
     payload = {
         "subscribed_fields": "messages,messaging_postbacks",

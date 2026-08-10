@@ -220,7 +220,7 @@ cp store/.env.example store/.env
 Open `.env` and fill in every value from Part 1:
 
 ```bash
-CHANNEL_BACKEND=meta
+WHATSAPP_BACKEND=meta
 META_APP_SECRET=abc123...
 WHATSAPP_ACCESS_TOKEN=EAAG...
 WHATSAPP_PHONE_NUMBER_ID=123456789
@@ -245,7 +245,7 @@ AI_ORCHESTRATION_MODE=legacy
 For Kommo local testing, replace the Meta channel variables with:
 
 ```bash
-CHANNEL_BACKEND=kommo
+WHATSAPP_BACKEND=kommo
 KOMMO_SUBDOMAIN=your-account-subdomain
 KOMMO_ACCESS_TOKEN=...
 KOMMO_INTEGRATION_ID=...
@@ -310,7 +310,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 open http://localhost:8000/admin/login
 ```
 
-> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters and at least one real LLM API key. Documented sample credentials are rejected. `CHANNEL_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `CHANNEL_BACKEND=kommo` requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
+> **Note:** With `DEBUG=true` and no `ADMIN_PASSWORD` set, admin routes are accessible without auth for local development. In production, startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters and at least one real LLM API key. Documented sample credentials are rejected. `WHATSAPP_BACKEND=meta` requires the full WhatsApp config (`META_APP_SECRET`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`). `WHATSAPP_BACKEND=kommo` requires the Kommo private integration, WhatsApp Salesbot, webhook secret, and AI Mode field/enum variables. Telegram is optional, but if you enable it, provide `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
 
 ---
 
@@ -358,7 +358,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 ### 4.2 Kommo Mode: General Webhook and Salesbot
 
-Only do this when `CHANNEL_BACKEND=kommo`.
+Only do this when `WHATSAPP_BACKEND=kommo`.
 
 1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 15.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
@@ -401,7 +401,7 @@ Minimum production variables shared by both backends:
 
 | Variable                                            | Notes                                                                 |
 | --------------------------------------------------- | --------------------------------------------------------------------- |
-| `CHANNEL_BACKEND`                                   | `meta` or `kommo`                                                     |
+| `WHATSAPP_BACKEND`                                  | `meta` or `kommo`                                                     |
 | `ADMIN_PASSWORD`                                    | Required when `DEBUG=false`                                           |
 | `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`             | At least one is required                                              |
 | `DATABASE_URL`                                      | `${{StorePostgres.DATABASE_URL}}` Railway reference variable          |
@@ -410,7 +410,7 @@ Minimum production variables shared by both backends:
 | `STORE_NAME`, `OWNER_NAME`, `APP_BASE_URL`, `DEBUG` | Store metadata/runtime                                                |
 
 
-Additional variables for `CHANNEL_BACKEND=meta`:
+Additional variables for `WHATSAPP_BACKEND=meta`:
 
 
 | Variable                                           | Notes                                                |
@@ -422,7 +422,7 @@ Additional variables for `CHANNEL_BACKEND=meta`:
 | `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_VERIFY_TOKEN` | Optional, but all-or-nothing if Instagram is enabled |
 
 
-Additional variables for `CHANNEL_BACKEND=kommo`:
+Additional variables for `WHATSAPP_BACKEND=kommo`:
 
 
 | Variable                            | Notes                                      |
@@ -520,7 +520,7 @@ Test:
 
 ### 6.2 Instagram in Meta Mode (After App Review)
 
-This section applies only to `CHANNEL_BACKEND=meta`. In Kommo mode, connect Instagram inside Kommo and test that Instagram DMs appear in the Kommo inbox before enabling the store app's Kommo webhooks.
+This section applies when `INSTAGRAM_BACKEND=meta`.
 
 Submit for App Review requesting `instagram_business_basic`, `instagram_business_manage_messages`, and `human_agent`. Include a screencast, privacy policy, and app icon. This takes 1–4 weeks.
 
@@ -746,8 +746,8 @@ Agent and tool locations:
 [ ] Toggle dark mode -> UI switches, persists on refresh
 [ ] Configuracion tab -> AI settings, orchestration mode, payment methods, and store-only settings visible; PDF auto-refresh shown read-only
 [ ] Send /start to Telegram bot -> command menu appears
-[ ] CHANNEL_BACKEND=meta -> /webhooks/whatsapp and /webhooks/instagram are registered
-[ ] CHANNEL_BACKEND=kommo -> /webhooks/kommo/events/{secret} and /webhooks/kommo/salesbot are registered
+[ ] WHATSAPP_BACKEND=meta -> /webhooks/whatsapp is registered
+[ ] WHATSAPP_BACKEND=kommo -> Kommo webhooks are registered and /webhooks/whatsapp is absent
 [ ] Meta context enabled with Kommo -> /webhooks/meta/instagram-context is also registered
 [ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
 [ ] GET /test/ui with DEBUG=true from direct loopback and no forwarding headers -> test page loads
@@ -1049,7 +1049,7 @@ Testing (DEBUG=true, direct loopback only, forwarding headers rejected):
 - **Broadcasts send 0 messages**  
   Tags don't match any customers. Use `/preview` first. Verify template name matches Meta Business Manager exactly.
 - **Broadcasts fail immediately in Kommo mode**
-  This is expected. This backend does not send direct WhatsApp Cloud API broadcasts when `CHANNEL_BACKEND=kommo`; use Kommo broadcasts or approved Kommo WhatsApp template flows.
+  This is expected. This backend does not send direct WhatsApp Cloud API broadcasts when `WHATSAPP_BACKEND=kommo`; use Kommo broadcasts or approved Kommo WhatsApp template flows.
 - **Broadcast stuck in "sending"**  
   The send crashed mid-execution. Use the "Resetear" button in the dashboard or `POST /admin/broadcasts/{id}/reset` to return it to draft. Crash recovery now auto-sets failed broadcasts to "failed" status.
 - **Payment screenshots not recognized**  

@@ -7,13 +7,19 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     # --- Channel backend ---
-    channel_backend: Literal["meta", "kommo"] = "meta"
+    whatsapp_backend: Literal["meta", "kommo"] = Field(
+        default="meta",
+        validation_alias=AliasChoices("WHATSAPP_BACKEND", "CHANNEL_BACKEND"),
+    )
+    # Optional per-channel override. When omitted, Instagram keeps the legacy
+    # behavior and uses WHATSAPP_BACKEND.
+    instagram_backend: Literal["meta", "kommo"] | None = None
 
     # --- Meta APIs (optional for local testing without webhooks) ---
     meta_app_secret: str = ""
@@ -91,7 +97,11 @@ class Settings(BaseSettings):
     # --- AI orchestration ---
     ai_orchestration_mode: str = "legacy"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "populate_by_name": True,
+    }
 
     @field_validator("store_name", "owner_name", mode="before")
     @classmethod
@@ -142,3 +152,16 @@ class Settings(BaseSettings):
 def get_config() -> Settings:
     """Cached settings instance. Call this anywhere you need config."""
     return Settings()
+
+
+def channel_backend_for(channel: str, config=None) -> str:
+    """Resolve a channel provider, tolerating legacy config-like objects."""
+    config = config or get_config()
+    whatsapp_backend = getattr(
+        config,
+        "whatsapp_backend",
+        getattr(config, "channel_backend", "meta"),
+    )
+    if channel == "instagram":
+        return getattr(config, "instagram_backend", None) or whatsapp_backend
+    return whatsapp_backend

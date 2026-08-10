@@ -186,14 +186,14 @@ async def _process_message(
     text = ""
     media_url = None
 
-    # Text message
-    if "text" in message:
-        text = message["text"]
-
     # Quick Reply callback (user tapped a Quick Reply pill)
-    elif "quick_reply" in message:
+    if "quick_reply" in message:
         payload = message["quick_reply"].get("payload", "")
         text = message.get("text", payload)
+
+    # Text message
+    elif "text" in message:
+        text = message["text"]
 
     # Attachments (images, audio, video, shares)
     elif "attachments" in message:

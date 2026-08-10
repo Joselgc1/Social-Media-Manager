@@ -16,7 +16,7 @@ def test_send_catalog_pdf_excluded_from_kommo_tool_availability():
     tools = _tools_for_delivery(
         "whatsapp",
         {"provider": "kommo"},
-        SimpleNamespace(channel_backend="kommo"),
+        SimpleNamespace(whatsapp_backend="kommo"),
     )
 
     assert "send_catalog_pdf" not in _tool_names(tools)
@@ -29,7 +29,7 @@ def test_send_catalog_pdf_available_for_configured_kommo_whatsapp_private_messag
         "whatsapp",
         {"provider": "kommo", "interaction_type": "private_message"},
         SimpleNamespace(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             kommo_chats_media_enabled=True,
             kommo_chats_catalog_pdf_enabled=True,
             kommo_chats_pdf_attachment_type="file",
@@ -63,7 +63,7 @@ def test_send_catalog_pdf_stays_unavailable_outside_configured_kommo_whatsapp_pr
         channel,
         {"provider": "kommo", "interaction_type": interaction_type},
         SimpleNamespace(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             kommo_chats_media_enabled=enabled,
             kommo_chats_catalog_pdf_enabled=pdf_enabled,
             kommo_chats_pdf_attachment_type=pdf_type,
@@ -79,7 +79,7 @@ def test_send_catalog_pdf_available_for_direct_meta_whatsapp():
     tools = _tools_for_delivery(
         "whatsapp",
         None,
-        SimpleNamespace(channel_backend="meta"),
+        SimpleNamespace(whatsapp_backend="meta"),
     )
 
     assert "send_catalog_pdf" in _tool_names(tools)
@@ -91,7 +91,7 @@ def test_send_catalog_pdf_excluded_from_instagram_tool_availability():
     tools = _tools_for_delivery(
         "instagram",
         None,
-        SimpleNamespace(channel_backend="meta"),
+        SimpleNamespace(whatsapp_backend="meta"),
     )
 
     assert "send_catalog_pdf" not in _tool_names(tools)
@@ -103,7 +103,7 @@ def test_public_instagram_comment_restricts_mutating_tools():
     tools = _tools_for_delivery(
         "instagram",
         {"provider": "kommo", "interaction_type": "instagram_comment"},
-        SimpleNamespace(channel_backend="kommo"),
+        SimpleNamespace(whatsapp_backend="kommo"),
     )
 
     assert _tool_names(tools) == {"check_inventory"}
@@ -136,7 +136,7 @@ async def test_kommo_catalog_request_returns_normal_text_response(monkeypatch):
     monkeypatch.setattr(engine.orders, "get_latest_open_order", AsyncMock(return_value=None))
     monkeypatch.setattr(engine, "get_cached_catalog", lambda: [{"product_name": "Pijama", "category": "pijamas"}])
     monkeypatch.setattr(engine, "format_catalog_as_markdown", lambda _catalog: "| Producto | Categoría |")
-    monkeypatch.setattr(engine, "get_config", lambda: SimpleNamespace(store_name="Zona Pink", channel_backend="kommo"))
+    monkeypatch.setattr(engine, "get_config", lambda: SimpleNamespace(store_name="Zona Pink", whatsapp_backend="kommo"))
     monkeypatch.setattr(engine, "_list_providers", lambda: ["openai"])
     monkeypatch.setattr(engine, "get_provider", lambda _provider: Provider())
     monkeypatch.setattr(engine.analytics, "log_response", AsyncMock())
@@ -167,7 +167,7 @@ async def test_direct_meta_pdf_tool_behavior_remains_available(monkeypatch, tmp_
         return tmp_path / "catalog.pdf"
 
     monkeypatch.setattr(engine, "ensure_catalog_pdf", ensure)
-    monkeypatch.setattr(engine, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(engine, "get_config", lambda: SimpleNamespace(whatsapp_backend="meta"))
 
     result = await engine._execute_tool(
         "send_catalog_pdf",

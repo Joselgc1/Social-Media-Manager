@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import escalations
 from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
 
@@ -117,7 +117,10 @@ async def sync_escalation_to_kommo(
     lead_id: str | None = None,
 ) -> None:
     config = get_config()
-    if config.channel_backend != "kommo":
+    if not any(
+        channel_backend_for(channel, config) == "kommo"
+        for channel in ("whatsapp", "instagram")
+    ):
         return
 
     try:

@@ -78,7 +78,7 @@ ngrok http 8000
 | Build/upload the Kommo Salesbot widget | [`store/kommo-widget/README.md`](store/kommo-widget/README.md) |
 | Back up, restore, migrate, roll back, and review retention | [`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md) |
 
-Use `CHANNEL_BACKEND=meta` for direct Meta WhatsApp/Instagram webhooks. Use `CHANNEL_BACKEND=kommo` when Kommo owns the official WhatsApp/Instagram channel integrations and this backend only receives Kommo events plus Salesbot callbacks.
+Use `WHATSAPP_BACKEND=meta` for direct Meta WhatsApp webhooks. Use `WHATSAPP_BACKEND=kommo` when Kommo owns WhatsApp. Configure Instagram independently with `INSTAGRAM_BACKEND`; `CHANNEL_BACKEND` remains a deprecated environment alias for existing deployments.
 
 ## Railway PostgreSQL
 
@@ -120,7 +120,7 @@ Store DB settings (source of truth for runtime settings)
 
 ## Webhook Endpoints
 
-Registered channel endpoints depend on `CHANNEL_BACKEND`.
+Registered channel endpoints depend on `WHATSAPP_BACKEND` and `INSTAGRAM_BACKEND`.
 
 Meta mode:
 
@@ -207,7 +207,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 
 ## Instagram Setup (after Meta App Review approval)
 
-This section applies to `CHANNEL_BACKEND=meta`. For Kommo mode, connect Instagram inside Kommo and see [docs/KOMMO_MIGRATION.md](docs/KOMMO_MIGRATION.md).
+This section applies to `WHATSAPP_BACKEND=meta`. For Kommo mode, see [docs/KOMMO_MIGRATION.md](docs/KOMMO_MIGRATION.md).
 
 ```bash
 # 1. Subscribe your Facebook Page to messaging webhooks (once)
@@ -432,7 +432,7 @@ See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the full setup guide.
 Channel backend variables managed per store can include:
 
 ```env
-CHANNEL_BACKEND=meta|kommo
+WHATSAPP_BACKEND=meta|kommo
 KOMMO_SUBDOMAIN=
 KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=

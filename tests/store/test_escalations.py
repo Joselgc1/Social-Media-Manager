@@ -173,7 +173,7 @@ async def test_expired_meta_customer_becomes_active_and_context_resets(monkeypat
     expired = _customer(escalation_expires_at=now - timedelta(minutes=1))
     active = _active_customer()
     mock_db = _install_escalation_db(monkeypatch, escalations, fetch_one_side_effect=[expired, active])
-    monkeypatch.setattr(escalations, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(escalations, "get_config", lambda: SimpleNamespace(whatsapp_backend="meta"))
     monkeypatch.setattr(escalations.conversations, "clear_history", AsyncMock())
     monkeypatch.setattr(escalations.sessions, "reset_session", AsyncMock())
 
@@ -198,7 +198,7 @@ async def test_expired_kommo_customer_changes_to_ai_active_and_is_verified(monke
     monkeypatch.setattr(
         escalations,
         "get_config",
-        lambda: SimpleNamespace(channel_backend="kommo", kommo_ai_active_enum_id=222, kommo_ai_mode_field_id=111),
+        lambda: SimpleNamespace(whatsapp_backend="kommo", kommo_ai_active_enum_id=222, kommo_ai_mode_field_id=111),
     )
     monkeypatch.setattr(escalations, "get_mapping_by_customer", AsyncMock(return_value={"external_lead_id": "100"}))
     monkeypatch.setattr(escalations.conversations, "clear_history", AsyncMock())
@@ -227,7 +227,7 @@ async def test_kommo_failure_keeps_local_customer_escalated(monkeypatch):
     monkeypatch.setattr(
         escalations,
         "get_config",
-        lambda: SimpleNamespace(channel_backend="kommo", kommo_ai_active_enum_id=222, kommo_ai_mode_field_id=111),
+        lambda: SimpleNamespace(whatsapp_backend="kommo", kommo_ai_active_enum_id=222, kommo_ai_mode_field_id=111),
     )
     monkeypatch.setattr(escalations, "get_mapping_by_customer", AsyncMock(return_value={"external_lead_id": "100"}))
     monkeypatch.setattr(escalations.conversations, "clear_history", AsyncMock())
@@ -320,7 +320,7 @@ async def test_locked_processor_uses_conditional_update_to_prevent_stale_reactiv
     now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     expired = _customer(escalation_expires_at=now - timedelta(minutes=1))
     mock_db = _install_escalation_db(monkeypatch, escalations, fetch_one_side_effect=[expired, _active_customer()])
-    monkeypatch.setattr(escalations, "get_config", lambda: SimpleNamespace(channel_backend="meta"))
+    monkeypatch.setattr(escalations, "get_config", lambda: SimpleNamespace(whatsapp_backend="meta"))
     monkeypatch.setattr(escalations.conversations, "clear_history", AsyncMock())
     monkeypatch.setattr(escalations.sessions, "reset_session", AsyncMock())
 

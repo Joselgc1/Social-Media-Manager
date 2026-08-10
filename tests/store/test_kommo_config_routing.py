@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 def _base_config(**overrides):
     data = {
-        "channel_backend": "meta",
+        "whatsapp_backend": "meta",
         "debug": False,
         "admin_password": "test-admin-password",
         "openai_api_key": "sk-test",
@@ -128,7 +128,7 @@ def test_kommo_mode_startup_validation_does_not_require_meta_credentials():
 
     _validate_startup_config(
         _base_config(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             meta_app_secret="",
             whatsapp_access_token="",
             whatsapp_phone_number_id="",
@@ -137,13 +137,61 @@ def test_kommo_mode_startup_validation_does_not_require_meta_credentials():
     )
 
 
+def test_hybrid_startup_validation_requires_meta_instagram_but_not_instagram_salesbot():
+    from app.main import _validate_startup_config
+
+    _validate_startup_config(
+        _base_config(
+            whatsapp_backend="kommo",
+            instagram_backend="meta",
+            kommo_instagram_dm_salesbot_id=None,
+            kommo_salesbot_id=None,
+            instagram_access_token="ig-token",
+            instagram_verify_token="ig-verify",
+            instagram_account_id="ig-account",
+        )
+    )
+
+
+def test_hybrid_startup_validation_rejects_missing_meta_instagram_credentials():
+    from app.main import _validate_startup_config
+
+    with pytest.raises(RuntimeError, match="INSTAGRAM_ACCESS_TOKEN"):
+        _validate_startup_config(
+            _base_config(
+                whatsapp_backend="kommo",
+                instagram_backend="meta",
+                instagram_access_token="",
+                instagram_verify_token="ig-verify",
+                instagram_account_id="ig-account",
+            )
+        )
+
+
+def test_hybrid_startup_validation_requires_dedicated_whatsapp_salesbot():
+    from app.main import _validate_startup_config
+
+    with pytest.raises(RuntimeError, match="KOMMO_WHATSAPP_SALESBOT_ID"):
+        _validate_startup_config(
+            _base_config(
+                whatsapp_backend="kommo",
+                instagram_backend="meta",
+                kommo_whatsapp_salesbot_id=None,
+                kommo_salesbot_id=123,
+                instagram_access_token="ig-token",
+                instagram_verify_token="ig-verify",
+                instagram_account_id="ig-account",
+            )
+        )
+
+
 def test_kommo_mode_requires_complete_meta_context_credentials_when_enabled():
     from app.main import _validate_startup_config
 
     with pytest.raises(RuntimeError, match="INSTAGRAM_ACCOUNT_ID"):
         _validate_startup_config(
             _base_config(
-                channel_backend="kommo",
+                whatsapp_backend="kommo",
                 meta_instagram_context_enabled=True,
                 meta_app_secret="meta-secret",
                 instagram_access_token="ig-token",
@@ -157,7 +205,7 @@ def test_kommo_mode_startup_validation_requires_kommo_credentials():
     from app.main import _validate_startup_config
 
     with pytest.raises(RuntimeError, match="KOMMO_INTEGRATION_ID"):
-        _validate_startup_config(_base_config(channel_backend="kommo", kommo_integration_id=""))
+        _validate_startup_config(_base_config(whatsapp_backend="kommo", kommo_integration_id=""))
 
 
 @pytest.mark.parametrize(
@@ -177,7 +225,7 @@ def test_kommo_mode_requires_dedicated_or_fallback_salesbot_id(overrides, expect
     from app.main import _validate_startup_config
 
     with pytest.raises(RuntimeError, match=expected):
-        _validate_startup_config(_base_config(channel_backend="kommo", **overrides))
+        _validate_startup_config(_base_config(whatsapp_backend="kommo", **overrides))
 
 
 def test_kommo_mode_accepts_legacy_salesbot_fallback_for_both_channels():
@@ -185,7 +233,7 @@ def test_kommo_mode_accepts_legacy_salesbot_fallback_for_both_channels():
 
     _validate_startup_config(
         _base_config(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             kommo_instagram_dm_salesbot_id=None,
             kommo_whatsapp_salesbot_id=None,
             kommo_salesbot_id=123,
@@ -197,16 +245,36 @@ def test_kommo_mode_startup_validation_rejects_invalid_subdomain():
     from app.main import _validate_startup_config
 
     with pytest.raises(RuntimeError, match="KOMMO_SUBDOMAIN"):
-        _validate_startup_config(_base_config(channel_backend="kommo", kommo_subdomain="acme.kommo.com/evil"))
+        _validate_startup_config(_base_config(whatsapp_backend="kommo", kommo_subdomain="acme.kommo.com/evil"))
 
 
-def test_invalid_channel_backend_rejected(monkeypatch):
-    monkeypatch.setenv("CHANNEL_BACKEND", "bad")
+def test_invalid_whatsapp_backend_rejected(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_BACKEND", "bad")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
     monkeypatch.setenv("GOOGLE_SHEETS_CREDENTIALS_B64", "e30=")
     monkeypatch.setenv("PRODUCT_SHEET_ID", "sheet")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_legacy_channel_backend_environment_alias_is_supported(monkeypatch):
+    monkeypatch.delenv("WHATSAPP_BACKEND", raising=False)
+    monkeypatch.setenv("CHANNEL_BACKEND", "kommo")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
+    monkeypatch.setenv("GOOGLE_SHEETS_CREDENTIALS_B64", "e30=")
+    monkeypatch.setenv("PRODUCT_SHEET_ID", "sheet")
+
+    assert Settings(_env_file=None).whatsapp_backend == "kommo"
+
+
+def test_whatsapp_backend_takes_precedence_over_legacy_alias(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_BACKEND", "kommo")
+    monkeypatch.setenv("CHANNEL_BACKEND", "meta")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
+    monkeypatch.setenv("GOOGLE_SHEETS_CREDENTIALS_B64", "e30=")
+    monkeypatch.setenv("PRODUCT_SHEET_ID", "sheet")
+
+    assert Settings(_env_file=None).whatsapp_backend == "kommo"
 
 
 @pytest.mark.parametrize("retention_hours", [0, 169])
@@ -246,7 +314,7 @@ def test_kommo_startup_config_summary_logs_only_safe_fields(caplog):
     from app.main import _log_kommo_startup_config_summary
 
     config = _base_config(
-        channel_backend="kommo",
+        whatsapp_backend="kommo",
         kommo_access_token="access-token-secret",
         kommo_integration_id="client-uuid-secret",
         kommo_integration_secret="integration-secret",
@@ -256,7 +324,7 @@ def test_kommo_startup_config_summary_logs_only_safe_fields(caplog):
     with caplog.at_level("INFO", logger="app.main"):
         _log_kommo_startup_config_summary(config)
 
-    assert "channel_backend=kommo" in caplog.text
+    assert "whatsapp_backend=kommo" in caplog.text
     assert "kommo_subdomain=store" in caplog.text
     assert "integration_id_present=True" in caplog.text
     assert "integration_secret_present=True" in caplog.text
@@ -272,8 +340,13 @@ def test_kommo_startup_config_summary_logs_only_safe_fields(caplog):
     assert "webhook-secret" not in caplog.text
 
 
-def _load_main_for_backend(monkeypatch, backend: str):
-    monkeypatch.setenv("CHANNEL_BACKEND", backend)
+def _load_main_for_backend(monkeypatch, backend: str, *, instagram_backend: str | None = None):
+    monkeypatch.setenv("WHATSAPP_BACKEND", backend)
+    monkeypatch.delenv("CHANNEL_BACKEND", raising=False)
+    if instagram_backend is None:
+        monkeypatch.delenv("INSTAGRAM_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("INSTAGRAM_BACKEND", instagram_backend)
     monkeypatch.setenv("DEBUG", "true")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
     monkeypatch.setenv("GOOGLE_SHEETS_CREDENTIALS_B64", "e30=")
@@ -308,6 +381,36 @@ def test_kommo_routes_registered_only_in_kommo_mode(monkeypatch):
     assert "/test/chat" in paths
 
 
+def test_hybrid_routes_keep_kommo_and_enable_only_native_instagram(monkeypatch):
+    main = _load_main_for_backend(monkeypatch, "kommo", instagram_backend="meta")
+    paths = _route_paths(main.app)
+
+    assert "/webhooks/kommo/events/{webhook_secret}" in paths
+    assert "/webhooks/kommo/salesbot" in paths
+    assert "/webhooks/instagram" in paths
+    assert "/webhooks/whatsapp" not in paths
+
+
+@pytest.mark.asyncio
+async def test_instagram_sender_uses_configured_graph_api_version(monkeypatch):
+    from app.channels import instagram_sender
+
+    send = AsyncMock(return_value={"message_id": "mid-1"})
+    monkeypatch.setattr(instagram_sender, "_send", send)
+    monkeypatch.setattr(
+        instagram_sender,
+        "get_config",
+        lambda: SimpleNamespace(
+            instagram_access_token="ig-token",
+            meta_graph_api_version="v99.0",
+        ),
+    )
+
+    await instagram_sender.send_text("ig-user", "Hola")
+
+    assert send.await_args.args[0] == "https://graph.facebook.com/v99.0/me/messages"
+
+
 def test_kommo_and_meta_context_routes_run_together_when_enabled(monkeypatch):
     monkeypatch.setenv("META_INSTAGRAM_CONTEXT_ENABLED", "true")
     monkeypatch.setenv("META_APP_SECRET", "meta-secret")
@@ -335,7 +438,7 @@ def _scheduler_job_ids(monkeypatch, *, enabled: bool, outbound: bool):
         scheduler,
         "get_config",
         lambda: SimpleNamespace(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             meta_instagram_context_enabled=enabled,
             outbound_processing_enabled=outbound,
         ),
@@ -350,6 +453,33 @@ def test_meta_context_scheduler_registered_only_when_fully_enabled(monkeypatch):
     job_ids = _scheduler_job_ids(monkeypatch, enabled=True, outbound=True)
 
     assert "meta_instagram_context_processor" in job_ids
+
+
+def test_hybrid_scheduler_runs_both_durable_channel_processors(monkeypatch):
+    from app.broadcast import scheduler
+
+    mock_scheduler = MagicMock()
+    mock_scheduler.running = False
+    mock_scheduler.get_job.return_value = None
+    monkeypatch.setattr(scheduler, "get_scheduler", lambda: mock_scheduler)
+    monkeypatch.setattr(
+        scheduler,
+        "get_config",
+        lambda: SimpleNamespace(
+            whatsapp_backend="kommo",
+            instagram_backend="meta",
+            meta_instagram_context_enabled=False,
+            meta_story_context_enabled=False,
+            outbound_processing_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(scheduler.asyncio, "create_task", lambda coroutine: coroutine.close())
+
+    scheduler.start_scheduler(outbound_processing_enabled=True)
+    job_ids = {call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list}
+
+    assert "kommo_job_processor" in job_ids
+    assert "meta_inbound_job_processor" in job_ids
 
 
 @pytest.mark.parametrize(
@@ -375,7 +505,7 @@ async def test_meta_context_scheduled_function_defensively_skips_when_disabled(m
         scheduler,
         "get_config",
         lambda: SimpleNamespace(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             meta_instagram_context_enabled=False,
             outbound_processing_enabled=True,
         ),
@@ -407,7 +537,7 @@ async def test_meta_context_scheduler_enriches_before_final_wait_deadline_check(
         scheduler,
         "get_config",
         lambda: SimpleNamespace(
-            channel_backend="kommo",
+            whatsapp_backend="kommo",
             meta_instagram_context_enabled=True,
             outbound_processing_enabled=True,
         ),

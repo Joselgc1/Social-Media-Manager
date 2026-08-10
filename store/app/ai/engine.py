@@ -46,7 +46,7 @@ from app.catalog.sheets import (
     get_cached_reference_catalog,
     group_catalog_products,
 )
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import conversations, customers, escalations, orders, sessions
 from app.exchange_rates import build_customer_exchange_rate_reply
 
@@ -1696,7 +1696,7 @@ def _catalog_pdf_supported(channel: str, integration_context: dict | None, confi
     config = config or get_config()
     delivery_provider = (integration_context or {}).get("provider")
     if not delivery_provider:
-        delivery_provider = getattr(config, "channel_backend", "meta")
+        delivery_provider = channel_backend_for(channel, config)
     if not isinstance(delivery_provider, str) or delivery_provider not in {"meta", "kommo"}:
         delivery_provider = "meta"
     if channel != "whatsapp":
@@ -1930,7 +1930,11 @@ async def _sync_kommo_escalation_if_needed(
     conversation_summary: str,
     lead_id: str | None = None,
 ) -> None:
-    if getattr(get_config(), "channel_backend", "meta") != "kommo":
+    config = get_config()
+    if not any(
+        channel_backend_for(channel, config) == "kommo"
+        for channel in ("whatsapp", "instagram")
+    ):
         return
     from app.integrations.kommo.state import sync_escalation_to_kommo
 

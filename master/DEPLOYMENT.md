@@ -286,7 +286,7 @@ Click **"+ Add Credential"** and add each one:
 
 | Key | Value |
 | --- | ----- |
-| `CHANNEL_BACKEND` | `meta` or `kommo` |
+| `WHATSAPP_BACKEND` | `meta` or `kommo` |
 | `OPENAI_API_KEY` | sk-... |
 | `ANTHROPIC_API_KEY` | sk-ant-... |
 | `ADMIN_PASSWORD` | Store dashboard password |
@@ -364,7 +364,7 @@ Either way, set the Railway service root directory to `store/`, and add all envi
 
 ```ini
 DATABASE_URL=${{StorePostgres.DATABASE_URL}}
-CHANNEL_BACKEND=meta                   # Or kommo
+WHATSAPP_BACKEND=meta                  # Or kommo
 WHATSAPP_ACCESS_TOKEN=...              # NEW phone number token
 WHATSAPP_PHONE_NUMBER_ID=...           # NEW phone number ID
 TELEGRAM_BOT_TOKEN=...                 # NEW Telegram bot
@@ -528,8 +528,8 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 [ ] Store with LLM_MANAGED_EXTERNALLY=true -> PUT /admin/settings/llm_provider returns 403
 [ ] Store with LLM_MANAGED_EXTERNALLY=true -> Telegram /provider returns managed message
 [ ] Store without LLM_MANAGED_EXTERNALLY -> LLM controls work as normal
-[ ] Store with CHANNEL_BACKEND=meta -> Meta webhook routes are present and Kommo routes are absent
-[ ] Store with CHANNEL_BACKEND=kommo -> Kommo webhook routes are present and Meta routes are absent
+[ ] Store with WHATSAPP_BACKEND=meta -> native Meta WhatsApp routes are present
+[ ] Store with WHATSAPP_BACKEND=kommo -> Kommo webhook routes are present and native Meta WhatsApp is absent
 [ ] Kommo store -> GET /admin/settings/kommo/status returns sanitized diagnostics
 [ ] Kommo store -> POST /admin/settings/kommo/test verifies read-only Kommo API checks
 ```

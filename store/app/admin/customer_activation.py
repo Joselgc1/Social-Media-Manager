@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm import escalations
 from app.crm.channel_mappings import get_mapping_by_customer
 from app.integrations.kommo.client import KommoClient, sanitize_kommo_error
@@ -47,7 +47,10 @@ async def activate_customer_for_admin(customer: dict, *, channel: str | None = N
 
 async def _sync_kommo_ai_active_if_needed(customer_id: str) -> str | None:
     config = get_config()
-    if config.channel_backend != "kommo":
+    if not any(
+        channel_backend_for(channel, config) == "kommo"
+        for channel in ("whatsapp", "instagram")
+    ):
         return None
 
     mapping = await get_mapping_by_customer(customer_id, provider="kommo")

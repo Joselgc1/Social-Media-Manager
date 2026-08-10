@@ -13,7 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from app import db
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.crm.channel_mappings import lookup_by_lead_id
 from app.integrations.kommo.auth import (
     KommoAuthError,
@@ -91,6 +91,15 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
                     event.origin or "unknown",
                 )
                 continue
+            if (
+                event.channel == "instagram"
+                and channel_backend_for("instagram", config) == "meta"
+            ):
+                logger.info(
+                    "Kommo Instagram private message ignored because Instagram uses Meta: %s",
+                    _event_log_context(event),
+                )
+                continue
 
             incoming_count += 1
             persistence_started = time.perf_counter()
@@ -165,6 +174,9 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
         claims.get("entity_type"),
         claims.get("entity_id"),
     )
+    if _is_meta_managed_instagram_private_callback(callback.data, config):
+        logger.info("Kommo Instagram private-message callback ignored because Instagram uses Meta")
+        return {"status": "ignored", "reason": "instagram_managed_by_meta"}
 
     try:
         result = await persist_salesbot_callback(callback.data, return_url, claims)
@@ -181,6 +193,15 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
         background_tasks.add_task(schedule_context_job_processing, result["job_id"])
 
     return {"status": "accepted"}
+
+
+def _is_meta_managed_instagram_private_callback(data, config) -> bool:
+    if channel_backend_for("instagram", config) != "meta":
+        return False
+    if (data.interaction_type or "private_message") == "instagram_comment":
+        return False
+    origin = str(data.origin or "").strip().lower()
+    return data.expected_channel == "instagram" or "instagram" in origin
 
 
 async def parse_salesbot_callback_request(request: Request) -> SalesbotWidgetRequest:
