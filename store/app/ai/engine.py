@@ -195,6 +195,11 @@ async def generate_response(
         if is_public_comment
         else conversations.PRIVATE_MESSAGE_SCOPE
     )
+    interaction_scope = (
+        conversations.instagram_comment_scope_from_context(integration_context)
+        if is_public_comment
+        else {}
+    )
     orchestration_mode = resolve_effective_orchestration_mode(
         settings,
         getattr(config, "ai_orchestration_mode", "legacy"),
@@ -247,15 +252,23 @@ async def generate_response(
             media_url=media_url,
             source_id=message_source_id,
             interaction_type=interaction_type,
+            **interaction_scope,
         )
         # Only notify the owner on the first unanswered message.
         last_msg = await db.fetch_one(
             """
             SELECT role FROM conversations
             WHERE customer_id = :cid AND interaction_type = :interaction_type
+              AND (:instagram_media_id IS NULL OR instagram_media_id = :instagram_media_id)
+              AND (:instagram_thread_id IS NULL OR instagram_thread_id = :instagram_thread_id)
             ORDER BY created_at DESC OFFSET 1 LIMIT 1
             """,
-            {"cid": customer["id"], "interaction_type": interaction_type},
+            {
+                "cid": customer["id"],
+                "interaction_type": interaction_type,
+                "instagram_media_id": interaction_scope.get("instagram_media_id"),
+                "instagram_thread_id": interaction_scope.get("instagram_thread_id"),
+            },
         )
         already_notified = last_msg and last_msg["role"] == "user"
 
@@ -292,6 +305,7 @@ async def generate_response(
                 settings=settings,
                 orchestration_mode=orchestration_mode,
                 route_intent="hostile_message",
+                integration_context=integration_context,
                 persist_assistant_message=persist_assistant_message,
                 message_source_id=message_source_id,
             )
@@ -398,6 +412,7 @@ async def generate_response(
                 settings=settings,
                 orchestration_mode=orchestration_mode,
                 route_intent="human_request",
+                integration_context=integration_context,
                 persist_assistant_message=persist_assistant_message,
                 message_source_id=message_source_id,
             )
@@ -970,11 +985,13 @@ async def _handle_public_comment_private_invite(
     settings: dict,
     orchestration_mode: str,
     route_intent: str,
+    integration_context: dict | None = None,
     persist_assistant_message: bool = True,
     message_source_id: str | None = None,
 ) -> dict:
     """Answer public comments without changing private customer or escalation state."""
     t_start = time.monotonic()
+    comment_scope = conversations.instagram_comment_scope_from_context(integration_context)
     await conversations.store_message(
         customer_id=customer["id"],
         role="user",
@@ -983,6 +1000,7 @@ async def _handle_public_comment_private_invite(
         media_url=media_url,
         source_id=message_source_id,
         interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
+        **comment_scope,
     )
     reply_text = _public_comment_private_invite_text(settings)
     response_time_ms = int((time.monotonic() - t_start) * 1000)
@@ -1014,6 +1032,7 @@ async def _handle_public_comment_private_invite(
             channel=channel,
             source_id=message_source_id,
             interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
+            **comment_scope,
         )
     return {
         "text": reply_text,
@@ -1040,10 +1059,13 @@ async def _handle_public_instagram_comment(
 ) -> dict:
     """Answer safe public Instagram comment intents using mapped catalog context."""
     t_start = time.monotonic()
+    comment_scope = conversations.instagram_comment_scope_from_context(integration_context)
     recent_history = await conversations.get_history(
         customer["id"],
         limit=2,
         interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
+        instagram_media_id=comment_scope["instagram_media_id"],
+        instagram_thread_id=comment_scope["instagram_thread_id"],
     )
     await conversations.store_message(
         customer_id=customer["id"],
@@ -1053,6 +1075,7 @@ async def _handle_public_instagram_comment(
         media_url=media_url,
         source_id=message_source_id,
         interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
+        **comment_scope,
     )
 
     request_kind = _classify_public_comment_request(message_text)
@@ -1125,6 +1148,7 @@ async def _handle_public_instagram_comment(
             channel=channel,
             source_id=message_source_id,
             interaction_type=conversations.INSTAGRAM_COMMENT_SCOPE,
+            **comment_scope,
         )
     return {
         "text": reply_text,

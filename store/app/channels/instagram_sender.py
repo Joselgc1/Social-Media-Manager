@@ -219,13 +219,34 @@ async def subscribe_page_to_webhooks(page_id: str):
     """
     config = get_config()
     url = f"{_graph_api_url(config)}/{page_id}/subscribed_apps"
+    page_access_token = await _get_page_access_token(page_id, config)
+    payload = {"subscribed_fields": "feed,messages,messaging_postbacks"}
 
-    payload = {
-        "subscribed_fields": "messages,messaging_postbacks,comments",
-    }
-
-    await _send(url, payload, config.instagram_access_token)
+    await _send(url, payload, page_access_token)
     logger.info(f"Page {page_id} subscribed to messaging webhooks.")
+
+
+async def _get_page_access_token(page_id: str, config) -> str:
+    """Resolve the Page token required by the Page subscribed_apps edge."""
+    url = f"{_graph_api_url(config)}/me/accounts"
+    headers = {"Authorization": f"Bearer {config.instagram_access_token}"}
+    params = {"fields": "id,access_token", "limit": 100}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=headers, params=params)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+        raise MetaSendError("Meta Page token lookup failed", retryable=True) from exc
+
+    if not resp.is_success:
+        raise MetaSendError(
+            f"Meta Page token lookup failed with HTTP {resp.status_code}",
+            retryable=resp.status_code == 429 or 500 <= resp.status_code < 600,
+            delivery_known=True,
+        )
+    for page in resp.json().get("data", []):
+        if str(page.get("id")) == str(page_id) and page.get("access_token"):
+            return str(page["access_token"])
+    raise MetaSendError("Configured token does not grant access to the requested Facebook Page")
 
 
 # ── Internal helper ──────────────────────────────────────────
@@ -252,7 +273,7 @@ async def _send(url: str, payload: dict, access_token: str):
         )
         raise MetaSendError(
             f"Instagram API error {resp.status_code}: {error_data}",
-            retryable=resp.status_code in {401, 403, 429},
+            retryable=resp.status_code == 429 or 500 <= resp.status_code < 600,
             delivery_known=resp.status_code < 500,
         )
 

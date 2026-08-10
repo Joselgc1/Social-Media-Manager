@@ -86,6 +86,18 @@ def test_metadata_marks_side_effecting_tools():
     assert order_status.safe_for_shadow is True
 
 
+def test_interactive_schema_supports_whatsapp_and_instagram_dm_common_limits():
+    schema = get_tool_spec("send_interactive_buttons").schema
+    buttons = schema["parameters"]["properties"]["buttons"]
+
+    assert "WhatsApp buttons or Instagram DM Quick Replies" in schema["description"]
+    assert "Never use this for public Instagram comments" in schema["description"]
+    assert buttons["minItems"] == 1
+    assert buttons["maxItems"] == 3
+    assert buttons["uniqueItems"] is True
+    assert buttons["items"]["maxLength"] == 20
+
+
 def test_registry_returns_defensive_schema_copies():
     schemas = get_tool_schemas()
     schemas[0]["parameters"]["properties"]["product_query"]["description"] = "mutated"

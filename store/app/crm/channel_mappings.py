@@ -70,6 +70,23 @@ async def lookup_by_author_id(provider: str, external_author_id: str) -> dict | 
     return await _lookup_one(provider, "external_author_id", external_author_id)
 
 
+async def lookup_meta_instagram_sender(sender_id: str) -> dict | None:
+    """Resolve only the verified Meta Instagram IGSID identity column."""
+    row = await db.fetch_one(
+        """
+        SELECT *
+        FROM customer_channel_mappings
+        WHERE provider = 'meta'
+          AND channel = 'instagram'
+          AND external_author_id = :sender_id
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        {"sender_id": sender_id},
+    )
+    return dict(row) if row else None
+
+
 async def persist_verified_meta_instagram_sender(
     *,
     customer_id: str,
@@ -157,7 +174,7 @@ async def resolve_meta_instagram_customer(
     if not sender_id:
         raise ValueError("Meta Instagram sender ID is required")
 
-    mapping = await lookup_by_provider("meta", "instagram", sender_id)
+    mapping = await lookup_meta_instagram_sender(sender_id)
     if mapping:
         row = await db.fetch_one(
             "SELECT * FROM customers WHERE id = :id",
@@ -188,7 +205,7 @@ async def resolve_meta_instagram_customer(
     if result.get("status") != "conflict":
         return customer
 
-    mapping = await lookup_by_provider("meta", "instagram", sender_id)
+    mapping = await lookup_meta_instagram_sender(sender_id)
     if mapping:
         row = await db.fetch_one(
             "SELECT * FROM customers WHERE id = :id",

@@ -49,11 +49,6 @@ def app(monkeypatch):
     monkeypatch.setattr(kommo, "get_config", lambda: _config())
     monkeypatch.setattr(kommo, "persist_salesbot_callback", AsyncMock(return_value={"status": "ready", "job_id": "job-1"}))
     monkeypatch.setattr(kommo, "process_ready_jobs", AsyncMock(return_value=1))
-    monkeypatch.setattr(
-        kommo,
-        "_event_log_context",
-        lambda event: {"type": event.event_type, "channel": event.channel},
-    )
     return app
 
 

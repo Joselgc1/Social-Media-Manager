@@ -26,6 +26,10 @@ async def store_message(
     interaction_type: str = PRIVATE_MESSAGE_SCOPE,
     author_type: str | None = None,
     provider_message_id: str | None = None,
+    instagram_media_id: str | None = None,
+    instagram_comment_id: str | None = None,
+    instagram_parent_comment_id: str | None = None,
+    instagram_thread_id: str | None = None,
 ):
     """
     Store a single message in the conversation history.
@@ -45,15 +49,26 @@ async def store_message(
     message_author = author_type or ("customer" if role == "user" else "ai")
     if message_author not in {"customer", "ai", "human"}:
         raise ValueError("Unsupported conversation author type")
+    comment_scope = _normalize_instagram_comment_scope(
+        interaction_scope,
+        instagram_media_id=instagram_media_id,
+        instagram_comment_id=instagram_comment_id,
+        instagram_parent_comment_id=instagram_parent_comment_id,
+        instagram_thread_id=instagram_thread_id,
+    )
     await db.execute(
         """
         INSERT INTO conversations (
             customer_id, role, content, channel, interaction_type, media_url,
-            attachments, function_calls, source_id, author_type, provider_message_id
+            attachments, function_calls, source_id, author_type, provider_message_id,
+            instagram_media_id, instagram_comment_id,
+            instagram_parent_comment_id, instagram_thread_id
         )
         VALUES (
             :cid, :role, :content, :channel, :interaction_type, :media,
-            CAST(:attachments AS jsonb), :fc, :source_id, :author_type, :provider_message_id
+            CAST(:attachments AS jsonb), :fc, :source_id, :author_type, :provider_message_id,
+            :instagram_media_id, :instagram_comment_id,
+            :instagram_parent_comment_id, :instagram_thread_id
         )
         ON CONFLICT (channel, role, source_id) WHERE source_id IS NOT NULL DO NOTHING
         """,
@@ -73,6 +88,7 @@ async def store_message(
             "source_id": source_id,
             "author_type": message_author,
             "provider_message_id": provider_message_id,
+            **comment_scope,
         },
     )
 
@@ -81,6 +97,8 @@ async def get_history(
     customer_id: str,
     limit: int = 20,
     interaction_type: str = PRIVATE_MESSAGE_SCOPE,
+    instagram_media_id: str | None = None,
+    instagram_thread_id: str | None = None,
 ) -> list[dict]:
     """
     Retrieve the last `limit` messages for a customer,
@@ -93,16 +111,38 @@ async def get_history(
         Ordered oldest-first (chronological).
     """
     interaction_scope = _normalize_interaction_type(interaction_type)
+    comment_scope = _normalize_instagram_comment_scope(
+        interaction_scope,
+        instagram_media_id=instagram_media_id,
+        instagram_thread_id=instagram_thread_id,
+    )
+    if interaction_scope == INSTAGRAM_COMMENT_SCOPE and not (
+        comment_scope["instagram_media_id"] and comment_scope["instagram_thread_id"]
+    ):
+        return []
     rows = await db.fetch_all(
         """
         SELECT role, content, attachments, author_type
         FROM conversations
         WHERE customer_id = :cid
           AND interaction_type = :interaction_type
+          AND (
+              :interaction_type <> 'instagram_comment'
+              OR (
+                  instagram_media_id = :instagram_media_id
+                  AND instagram_thread_id = :instagram_thread_id
+              )
+          )
         ORDER BY created_at DESC
         LIMIT :limit
         """,
-        {"cid": customer_id, "limit": limit, "interaction_type": interaction_scope},
+        {
+            "cid": customer_id,
+            "limit": limit,
+            "interaction_type": interaction_scope,
+            "instagram_media_id": comment_scope["instagram_media_id"],
+            "instagram_thread_id": comment_scope["instagram_thread_id"],
+        },
     )
 
     # Rows come newest-first from DB; reverse to chronological order
@@ -114,6 +154,58 @@ async def get_history(
             content = _content_with_delivery_context(content, _row_attachments(row))
         messages.append({"role": role, "content": content})
     return messages
+
+
+async def resolve_instagram_comment_thread(
+    *,
+    media_id: str | None,
+    comment_id: str | None,
+    parent_comment_id: str | None,
+) -> dict[str, str | None]:
+    """Resolve a stable post/thread scope without crossing media boundaries."""
+    media_id = _clean_scope_value(media_id)
+    comment_id = _clean_scope_value(comment_id)
+    parent_comment_id = _clean_scope_value(parent_comment_id)
+    thread_id = None
+    if media_id and parent_comment_id:
+        parent = await db.fetch_one(
+            """
+            SELECT instagram_thread_id
+            FROM conversations
+            WHERE interaction_type = 'instagram_comment'
+              AND instagram_media_id = :media_id
+              AND instagram_comment_id = :parent_comment_id
+              AND instagram_thread_id IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            {"media_id": media_id, "parent_comment_id": parent_comment_id},
+        )
+        if parent:
+            thread_id = _clean_scope_value(parent["instagram_thread_id"])
+    return {
+        "instagram_media_id": media_id,
+        "instagram_comment_id": comment_id,
+        "instagram_parent_comment_id": parent_comment_id,
+        "instagram_thread_id": thread_id or parent_comment_id or comment_id,
+    }
+
+
+def instagram_comment_scope_from_context(context: dict | None) -> dict[str, str | None]:
+    context = context or {}
+    public_context = context.get("public_comment_context")
+    public_context = public_context if isinstance(public_context, dict) else {}
+    return _normalize_instagram_comment_scope(
+        INSTAGRAM_COMMENT_SCOPE,
+        instagram_media_id=context.get("media_id") or public_context.get("media_id"),
+        instagram_comment_id=context.get("comment_id") or public_context.get("comment_id"),
+        instagram_parent_comment_id=(
+            context.get("parent_comment_id") or public_context.get("parent_comment_id")
+        ),
+        instagram_thread_id=(
+            context.get("instagram_thread_id") or public_context.get("instagram_thread_id")
+        ),
+    )
 
 
 def _normalize_semantic_attachments(attachments: list[dict] | None) -> list[dict] | None:
@@ -276,3 +368,31 @@ def _normalize_interaction_type(value: str | None) -> str:
     if normalized not in _INTERACTION_SCOPES:
         raise ValueError("Unsupported conversation interaction type")
     return normalized
+
+
+def _normalize_instagram_comment_scope(
+    interaction_type: str,
+    *,
+    instagram_media_id: str | None = None,
+    instagram_comment_id: str | None = None,
+    instagram_parent_comment_id: str | None = None,
+    instagram_thread_id: str | None = None,
+) -> dict[str, str | None]:
+    if interaction_type != INSTAGRAM_COMMENT_SCOPE:
+        return {
+            "instagram_media_id": None,
+            "instagram_comment_id": None,
+            "instagram_parent_comment_id": None,
+            "instagram_thread_id": None,
+        }
+    return {
+        "instagram_media_id": _clean_scope_value(instagram_media_id),
+        "instagram_comment_id": _clean_scope_value(instagram_comment_id),
+        "instagram_parent_comment_id": _clean_scope_value(instagram_parent_comment_id),
+        "instagram_thread_id": _clean_scope_value(instagram_thread_id),
+    }
+
+
+def _clean_scope_value(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    return text[:255] or None

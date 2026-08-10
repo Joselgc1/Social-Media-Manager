@@ -309,23 +309,30 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         category="messaging",
         creates_side_effects=True,
         safe_for_shadow=False,
-        description="Signals that channel-specific reply buttons should be sent.",
+        description="Signals that WhatsApp buttons or Instagram DM Quick Replies should be sent.",
         schema={
             "name": "send_interactive_buttons",
             "description": (
-                "Send a message with clickable reply buttons to the customer. Only works on WhatsApp. "
-                "Use for presenting 2-3 clear choices like payment methods or shipping options ONLY when the customer "
-                "has not already answered in plain text. Do NOT use buttons to re-confirm a choice the customer already made."
+                "Send 1-3 clickable choices as WhatsApp buttons or Instagram DM Quick Replies. "
+                "Never use this for public Instagram comments. Use it ONLY when the customer has not already "
+                "answered in plain text. Do NOT use it to re-confirm a choice the customer already made."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "body_text": {"type": "string", "description": "The message text shown above the buttons"},
+                    "body_text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000,
+                        "description": "The message text shown above the choices (max 1000 UTF-8 bytes)",
+                    },
                     "buttons": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {"type": "string", "minLength": 1, "maxLength": 20},
+                        "minItems": 1,
                         "maxItems": 3,
-                        "description": "Button labels (max 20 chars each)",
+                        "uniqueItems": True,
+                        "description": "One to three unique choice labels (max 20 characters each)",
                     },
                 },
                 "required": ["body_text", "buttons"],

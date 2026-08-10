@@ -187,6 +187,8 @@ def test_instagram_prompts_enforce_informational_channel_policy(prompt_name):
     assert "continuamos las compras por WhatsApp" in prompt
     assert "llama send_whatsapp_handoff" in prompt
     assert "No redirijas a WhatsApp" in prompt
+    assert "se enviarán como Quick Replies" in prompt
+    assert "Nunca uses esta herramienta en comentarios públicos" in prompt
     assert "pagos@example.com" not in prompt
     assert "Nombre confirmado para saludar: Luisana" in prompt
     assert "Intereses: pajamas" in prompt

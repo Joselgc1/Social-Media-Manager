@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     instagram_access_token: str = ""
     instagram_verify_token: str = ""
     instagram_account_id: str = ""
-    meta_graph_api_version: str = "v21.0"
+    meta_graph_api_version: str = "v26.0"
     instagram_story_mapping_ttl_hours: int = Field(default=24, ge=1, le=168)
     instagram_story_context_ttl_hours: int = Field(default=24, ge=1, le=168)
 
@@ -115,6 +115,14 @@ class Settings(BaseSettings):
                 "TELEGRAM_WEBHOOK_SECRET must contain only letters, numbers, underscores, or hyphens"
             )
         return value
+
+    @field_validator("meta_graph_api_version")
+    @classmethod
+    def _validate_meta_graph_api_version(cls, value: str) -> str:
+        version = str(value or "").strip()
+        if not re.fullmatch(r"v\d+\.\d+", version):
+            raise ValueError("META_GRAPH_API_VERSION must use the vN.N format")
+        return version
 
     @field_validator(
         "kommo_salesbot_id",

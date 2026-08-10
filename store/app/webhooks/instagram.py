@@ -21,9 +21,11 @@ Key constraints:
 import hashlib
 import json
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from app import db
 from app.admin.notify import notify_owner
 from app.ai.engine import generate_response
 from app.channels.instagram_sender import (
@@ -38,9 +40,16 @@ from app.integrations.meta_context.models import MetaInstagramContextEvent
 from app.integrations.meta_context.parser import parse_instagram_context_events
 from app.request_limits import limiter
 from app.webhooks.inbound_buffer import (
+    AutomationDeliverySuppressed,
+    claim_pending_instagram_outbound_echoes,
+    defer_unknown_instagram_outbound_echo,
     enqueue_inbound_message,
+    ensure_instagram_ai_delivery_allowed,
+    has_unknown_instagram_outbound_delivery,
     inbound_audio_placeholder,
+    is_recent_instagram_outbound_inflight,
     is_recorded_meta_outbound_message,
+    mark_instagram_outbound_echo,
     send_with_delivery_record,
 )
 from app.webhooks.meta_security import verify_meta_signature
@@ -166,6 +175,16 @@ async def _enqueue_context_event(event: MetaInstagramContextEvent) -> None:
         else conversations.PRIVATE_MESSAGE_SCOPE
     )
     context = _initial_integration_context(event, interaction_type)
+    if interaction_type == conversations.INSTAGRAM_COMMENT_SCOPE:
+        comment_scope = await conversations.resolve_instagram_comment_thread(
+            media_id=event.media_id,
+            comment_id=event.comment_id,
+            parent_comment_id=event.parent_comment_id,
+        )
+        context["instagram_thread_id"] = comment_scope["instagram_thread_id"]
+        context["public_comment_context"]["instagram_thread_id"] = comment_scope[
+            "instagram_thread_id"
+        ]
     await enqueue_inbound_message(
         channel="instagram",
         sender_id=event.sender_id,
@@ -313,25 +332,96 @@ async def _process_outbound_echo(event: dict) -> None:
     if not text:
         return
 
+    if message_id and await defer_unknown_instagram_outbound_echo(
+        message_id=message_id,
+        recipient_id=recipient_id,
+        message_text=text,
+    ):
+        logger.info("Queued unknown Instagram outgoing echo for durable classification")
+        return
+
+    await _record_manual_outbound_echo(
+        message_id=message_id,
+        recipient_id=recipient_id,
+        text=text,
+        source_id=f"meta-echo:{message_id}" if message_id else _event_fingerprint(event),
+    )
+
+
+async def _record_manual_outbound_echo(
+    *,
+    message_id: str,
+    recipient_id: str,
+    text: str,
+    source_id: str,
+) -> None:
+    """Persist one genuine administrator reply and atomically pause automation."""
+
     from app.crm import escalations
     from app.crm.channel_mappings import resolve_meta_instagram_customer
 
     customer = await resolve_meta_instagram_customer(recipient_id)
-    await conversations.store_message(
-        customer_id=str(customer["id"]),
-        role="assistant",
-        author_type="human",
-        content=text,
-        channel="instagram",
-        source_id=f"meta-echo:{message_id}" if message_id else _event_fingerprint(event),
-        provider_message_id=message_id or None,
-        interaction_type=conversations.PRIVATE_MESSAGE_SCOPE,
-    )
-    await escalations.escalate_customer_manually(
+    async with db.get_db().transaction():
+        await conversations.store_message(
+            customer_id=str(customer["id"]),
+            role="assistant",
+            author_type="human",
+            content=text,
+            channel="instagram",
+            source_id=source_id,
+            provider_message_id=message_id or None,
+            interaction_type=conversations.PRIVATE_MESSAGE_SCOPE,
+        )
+        await escalations.escalate_customer_manually(
+            str(customer["id"]),
+            channel="instagram",
+        )
+    logger.info("Instagram manual administrator message recorded; AI paused for customer")
+
+
+async def reconcile_pending_instagram_outbound_echoes(limit: int = 10) -> int:
+    """Resolve echo-first races after durable API acceptance has had time to commit."""
+    rows = await claim_pending_instagram_outbound_echoes(limit)
+    reconciled = 0
+    for row in rows:
+        message_id = str(row["provider_message_id"])
+        recipient_id = str(row["recipient_id"])
+        if await is_recorded_meta_outbound_message("instagram", message_id):
+            await mark_instagram_outbound_echo(message_id, "backend")
+            reconciled += 1
+            continue
+        if await is_recent_instagram_outbound_inflight(recipient_id):
+            await mark_instagram_outbound_echo(message_id, "backend", retry=True)
+            continue
+        if await has_unknown_instagram_outbound_delivery(recipient_id):
+            await _record_unknown_outbound_echo(
+                recipient_id=recipient_id,
+            )
+            await mark_instagram_outbound_echo(message_id, "unknown")
+            reconciled += 1
+            continue
+        await _record_manual_outbound_echo(
+            message_id=message_id,
+            recipient_id=recipient_id,
+            text=str(row["message_text"]),
+            source_id=f"meta-echo:{message_id}",
+        )
+        await mark_instagram_outbound_echo(message_id, "manual")
+        reconciled += 1
+    return reconciled
+
+
+async def _record_unknown_outbound_echo(*, recipient_id: str) -> None:
+    """Pause automation without misrepresenting an uncertain delivery as a human reply."""
+    from app.crm import escalations
+    from app.crm.channel_mappings import resolve_meta_instagram_customer
+
+    customer = await resolve_meta_instagram_customer(recipient_id)
+    await escalations.escalate_customer_automatically(
         str(customer["id"]),
         channel="instagram",
     )
-    logger.info("Instagram manual administrator message recorded; AI paused for customer")
+    logger.warning("Instagram echo matched a delivery-unknown job; automation paused for reconciliation")
 
 
 async def _process_message(
@@ -395,7 +485,7 @@ async def _process_message(
             elif att_type in ("video", "file"):
                 attachment_texts.append(f"[El cliente envió un archivo de tipo: {att_type}]")
 
-            elif att_type == "share":
+            elif att_type in {"share", "reel", "ig_reel"}:
                 # Shared a post, reel, or profile
                 share_url = payload.get("url", "")
                 attachment_texts.append(
@@ -517,6 +607,7 @@ async def _deliver_ai_response(
     Route the normalized message through the AI engine
     and send the response back via Instagram DM.
     """
+    current_turn_started_at = datetime.now(UTC)
     try:
         result = await generate_response(
             channel="instagram",
@@ -532,6 +623,14 @@ async def _deliver_ai_response(
     except Exception as e:
         logger.exception(f"Error generating Instagram response for {_mask_sender(sender_id)}: {e}")
         try:
+            from app.crm.channel_mappings import lookup_meta_instagram_sender
+
+            mapping = await lookup_meta_instagram_sender(sender_id)
+            fallback_guard = {
+                "customer_id": str(mapping["customer_id"]) if mapping else None,
+                "current_turn_started_at": current_turn_started_at,
+                "recipient_id": sender_id,
+            }
             if interaction_type == conversations.INSTAGRAM_COMMENT_SCOPE:
                 await _send_with_delivery_record(
                     reply_to_comment,
@@ -539,6 +638,7 @@ async def _deliver_ai_response(
                     lease_token,
                     comment_id=(integration_context or {}).get("comment_id", ""),
                     text=_APOLOGY_TEXT,
+                    **fallback_guard,
                 )
             else:
                 await _send_with_delivery_record(
@@ -547,7 +647,10 @@ async def _deliver_ai_response(
                     lease_token,
                     to=sender_id,
                     text=_APOLOGY_TEXT,
+                    **fallback_guard,
                 )
+        except AutomationDeliverySuppressed:
+            logger.info("Instagram fallback delivery suppressed because automation state changed")
         except Exception as send_error:
             logger.error(f"Failed to send Instagram fallback reply to {_mask_sender(sender_id)}: {send_error}")
             raise
@@ -561,16 +664,26 @@ async def _deliver_ai_response(
         return
 
     delivered_parts = []
+    delivery_guard = {
+        "customer_id": str(result["customer_id"]),
+        "recipient_id": sender_id,
+        "allow_current_automatic_escalation": bool(result.get("escalated")),
+        "current_turn_started_at": current_turn_started_at,
+    }
+    comment_provider_message_id = None
     try:
-        if interaction_type == conversations.INSTAGRAM_COMMENT_SCOPE and result.get("text"):
-            await _send_with_delivery_record(
-                reply_to_comment,
-                inbound_job_id,
-                lease_token,
-                comment_id=(integration_context or {}).get("comment_id", ""),
-                text=result["text"],
-            )
-            delivered_parts.append(result["text"])
+        if interaction_type == conversations.INSTAGRAM_COMMENT_SCOPE:
+            if result.get("text"):
+                response = await _send_with_delivery_record(
+                    reply_to_comment,
+                    inbound_job_id,
+                    lease_token,
+                    comment_id=(integration_context or {}).get("comment_id", ""),
+                    text=result["text"],
+                    **delivery_guard,
+                )
+                comment_provider_message_id = _meta_response_message_id(response)
+                delivered_parts.append(result["text"])
         elif result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
             quick_replies = [
                 {"title": btn, "payload": btn.upper().replace(" ", "_")}
@@ -583,6 +696,7 @@ async def _deliver_ai_response(
                 to=sender_id,
                 text=result["interactive"]["body_text"],
                 quick_replies=quick_replies,
+                **delivery_guard,
             )
             delivered_parts.append(result["interactive"]["body_text"])
         elif result.get("product_image") and result["product_image"].get("type") == "product_image":
@@ -592,6 +706,7 @@ async def _deliver_ai_response(
                 lease_token,
                 to=sender_id,
                 image_url=result["product_image"]["image_url"],
+                **delivery_guard,
             )
             delivered_parts.append("[Imagen de producto enviada]")
             follow_up = (result.get("text") or result["product_image"].get("caption") or "").strip()
@@ -599,21 +714,45 @@ async def _deliver_ai_response(
                 if len(follow_up.encode("utf-8")) > 950:
                     chunks = _split_message(follow_up, max_bytes=950)
                     for chunk in chunks:
-                        await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=chunk)
+                        await _send_with_delivery_record(
+                            send_text, inbound_job_id, lease_token,
+                            to=sender_id, text=chunk, **delivery_guard,
+                        )
                         delivered_parts.append(chunk)
                 else:
-                    await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=follow_up)
+                    await _send_with_delivery_record(
+                        send_text, inbound_job_id, lease_token,
+                        to=sender_id, text=follow_up, **delivery_guard,
+                    )
                     delivered_parts.append(follow_up)
         elif result.get("text"):
             reply = result["text"]
             if len(reply.encode("utf-8")) > 950:
                 chunks = _split_message(reply, max_bytes=950)
                 for chunk in chunks:
-                    await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=chunk)
+                    await _send_with_delivery_record(
+                        send_text, inbound_job_id, lease_token,
+                        to=sender_id, text=chunk, **delivery_guard,
+                    )
                     delivered_parts.append(chunk)
             else:
-                await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=reply)
+                await _send_with_delivery_record(
+                    send_text, inbound_job_id, lease_token,
+                    to=sender_id, text=reply, **delivery_guard,
+                )
                 delivered_parts.append(reply)
+    except AutomationDeliverySuppressed:
+        logger.info("Instagram AI delivery suppressed because automation state changed")
+        if delivered_parts:
+            await _store_delivered_assistant_message(
+                result,
+                "\n".join(delivered_parts),
+                inbound_job_id,
+                interaction_type,
+                integration_context=integration_context,
+                provider_message_id=comment_provider_message_id,
+            )
+        return
     except Exception as e:
         logger.exception(f"Error sending Instagram response to {_mask_sender(sender_id)}: {e}")
         await _notify_delivery_failure(sender_id, str(e))
@@ -625,11 +764,38 @@ async def _deliver_ai_response(
             "\n".join(delivered_parts),
             inbound_job_id,
             interaction_type,
+            integration_context=integration_context,
+            provider_message_id=comment_provider_message_id,
         )
 
 
-async def _send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
-    return await send_with_delivery_record(send_func, inbound_job_id, lease_token, **kwargs)
+async def _send_with_delivery_record(
+    send_func,
+    inbound_job_id: str,
+    lease_token: str,
+    *,
+    customer_id: str | None = None,
+    recipient_id: str = "",
+    allow_current_automatic_escalation: bool = False,
+    current_turn_started_at=None,
+    **kwargs,
+):
+    async def guard() -> None:
+        await ensure_instagram_ai_delivery_allowed(
+            customer_id,
+            recipient_id=recipient_id,
+            allow_current_automatic_escalation=allow_current_automatic_escalation,
+            current_turn_started_at=current_turn_started_at,
+        )
+
+    return await send_with_delivery_record(
+        send_func,
+        inbound_job_id,
+        lease_token,
+        pre_send_guard=guard if recipient_id else None,
+        instagram_recipient_id=recipient_id,
+        **kwargs,
+    )
 
 
 async def _store_delivered_assistant_message(
@@ -637,8 +803,20 @@ async def _store_delivered_assistant_message(
     content: str,
     source_id: str,
     interaction_type: str = "private_message",
+    integration_context: dict | None = None,
+    provider_message_id: str | None = None,
 ) -> None:
     try:
+        comment_scope = (
+            conversations.instagram_comment_scope_from_context(integration_context)
+            if interaction_type == conversations.INSTAGRAM_COMMENT_SCOPE
+            else {}
+        )
+        if comment_scope and provider_message_id:
+            comment_scope["instagram_parent_comment_id"] = comment_scope[
+                "instagram_comment_id"
+            ]
+            comment_scope["instagram_comment_id"] = provider_message_id
         await conversations.store_message(
             customer_id=result["customer_id"],
             role="assistant",
@@ -647,9 +825,18 @@ async def _store_delivered_assistant_message(
             function_calls=result.get("function_calls"),
             source_id=source_id or None,
             interaction_type=interaction_type,
+            provider_message_id=provider_message_id,
+            **comment_scope,
         )
     except Exception:
         logger.exception("Failed to persist delivered Instagram response for job %s", source_id)
+
+
+def _meta_response_message_id(response: dict | None) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    message_id = str(response.get("message_id") or response.get("id") or "").strip()
+    return message_id or None
 
 
 # ── Helpers ──────────────────────────────────────────────────

@@ -93,6 +93,7 @@ async def test_instagram_assistant_history_is_written_only_after_send():
 
     with (
         patch.object(instagram, "generate_response", AsyncMock(return_value=_response("Respuesta IG"))),
+        patch.object(instagram, "ensure_instagram_ai_delivery_allowed", AsyncMock()),
         patch.object(instagram, "send_text", side_effect=send_success),
         patch.object(instagram.conversations, "store_message", side_effect=store_success),
     ):
@@ -110,6 +111,7 @@ async def test_instagram_long_unpunctuated_response_is_delivered_without_truncat
     store_message = AsyncMock()
     with (
         patch.object(instagram, "generate_response", AsyncMock(return_value=_response(response_text))),
+        patch.object(instagram, "ensure_instagram_ai_delivery_allowed", AsyncMock()),
         patch.object(instagram, "send_text", send_text),
         patch.object(instagram.conversations, "store_message", store_message),
     ):

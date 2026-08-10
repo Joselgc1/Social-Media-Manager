@@ -76,38 +76,51 @@ async def enrich_native_instagram_context(integration_context: dict) -> dict:
         public_context = dict(context.get("public_comment_context") or {})
         media_id = str(public_context.get("media_id") or context.get("media_id") or "").strip()
         if media_id and not public_context.get("post_url"):
-            media = await MetaContextClient.from_config().get_media(media_id)
-            public_context.update({
-                "media_id": media.id,
-                "post_id": media.id,
-                "post_url": media.permalink,
-                "post_caption": media.caption,
-                "media_type": media.media_type,
-                "media_product_type": (
-                    media.media_product_type or public_context.get("media_product_type")
-                ),
-                "content_type": detect_instagram_content_type(
-                    media_product_type=media.media_product_type,
-                    media_type=media.media_type,
-                    permalink=media.permalink,
-                ),
-                "media_timestamp": media.timestamp.isoformat() if media.timestamp else None,
-                "media_thumbnail_url": media.thumbnail_url,
-            })
-            public_context = {
-                key: value for key, value in public_context.items() if value is not None
-            }
             try:
-                await backfill_instagram_mapping(media)
+                media = await MetaContextClient.from_config().get_media(media_id)
             except Exception:
-                logger.exception("Meta-native Instagram mapping metadata backfill failed")
+                logger.exception("Meta-native Instagram comment media lookup failed")
+                public_context["media_lookup_status"] = "unavailable"
+            else:
+                public_context.update({
+                    "media_id": media.id,
+                    "post_id": media.id,
+                    "post_url": media.permalink,
+                    "post_caption": media.caption,
+                    "media_type": media.media_type,
+                    "media_product_type": (
+                        media.media_product_type or public_context.get("media_product_type")
+                    ),
+                    "content_type": detect_instagram_content_type(
+                        media_product_type=media.media_product_type,
+                        media_type=media.media_type,
+                        permalink=media.permalink,
+                    ),
+                    "media_timestamp": media.timestamp.isoformat() if media.timestamp else None,
+                    "media_thumbnail_url": media.thumbnail_url,
+                    "media_lookup_status": "available",
+                })
+                public_context = {
+                    key: value for key, value in public_context.items() if value is not None
+                }
+                try:
+                    await backfill_instagram_mapping(media)
+                except Exception:
+                    logger.exception("Meta-native Instagram mapping metadata backfill failed")
 
-        resolution = await resolve_content_product_mapping(
-            media_id=media_id or public_context.get("media_id"),
-            permalink=public_context.get("post_url"),
-        )
         public_context.pop("product_sku", None)
         public_context.pop("product_skus", None)
+        public_context.pop("content_id", None)
+        try:
+            resolution = await resolve_content_product_mapping(
+                media_id=media_id or public_context.get("media_id"),
+                permalink=public_context.get("post_url"),
+            )
+        except Exception:
+            logger.exception("Meta-native Instagram comment mapping lookup failed")
+            public_context["mapping_status"] = "error"
+            context["public_comment_context"] = public_context
+            return context
         public_context["mapping_status"] = resolution.get("status", "not_found")
         if resolution.get("status") == "resolved":
             product_skus = resolution.get("product_skus") or [resolution["product_sku"]]
@@ -121,12 +134,21 @@ async def enrich_native_instagram_context(integration_context: dict) -> dict:
 
     story_id = str(context.get("story_id") or "").strip()
     if story_id:
-        await discover_instagram_story({
-            "story_id": story_id,
-            "story_url": context.get("story_url"),
-            "event_timestamp": context.get("event_timestamp"),
-        })
-        resolution = await resolve_content_product_mapping(media_id=story_id, permalink=None)
+        context.pop("incoming_instagram_context", None)
+        try:
+            await discover_instagram_story({
+                "story_id": story_id,
+                "story_url": context.get("story_url"),
+                "event_timestamp": context.get("event_timestamp"),
+            })
+        except Exception:
+            logger.exception("Meta-native Instagram Story discovery failed")
+            return context
+        try:
+            resolution = await resolve_content_product_mapping(media_id=story_id, permalink=None)
+        except Exception:
+            logger.exception("Meta-native Instagram Story mapping lookup failed")
+            return context
         story_context = {
             "source": "story_reply",
             "story_id": story_id,

@@ -82,7 +82,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     role            TEXT NOT NULL,               -- "user" or "assistant"
     content         TEXT NOT NULL,
     channel         TEXT NOT NULL,
-    interaction_type TEXT NOT NULL DEFAULT 'private_message',
     media_url       TEXT,
     attachments     JSONB,                       -- Transport-independent semantic attachments
     function_calls  JSONB,                       -- Log of any tools the AI invoked
@@ -92,19 +91,9 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 ALTER TABLE conversations
     ADD COLUMN IF NOT EXISTS source_id TEXT,
-    ADD COLUMN IF NOT EXISTS attachments JSONB,
-    ADD COLUMN IF NOT EXISTS interaction_type TEXT NOT NULL DEFAULT 'private_message';
-
-ALTER TABLE conversations
-    DROP CONSTRAINT IF EXISTS conversations_interaction_type_check;
-ALTER TABLE conversations
-    ADD CONSTRAINT conversations_interaction_type_check CHECK (
-        interaction_type IN ('private_message', 'instagram_comment')
-    );
+    ADD COLUMN IF NOT EXISTS attachments JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_conv_customer ON conversations(customer_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_conv_customer_interaction
-    ON conversations(customer_id, interaction_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_delivery_source
     ON conversations(channel, role, source_id)

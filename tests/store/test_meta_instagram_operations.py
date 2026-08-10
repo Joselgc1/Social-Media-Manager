@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -111,6 +111,68 @@ async def test_instagram_transcription_failure_requeues_without_ai(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("event_kind", ["comment_media_and_mapping", "story_mapping"])
+async def test_instagram_enrichment_failures_still_reach_normal_processor(
+    monkeypatch,
+    event_kind,
+):
+    from app.integrations.meta_context import service
+    from app.webhooks import inbound_buffer
+
+    if event_kind == "comment_media_and_mapping":
+        context = {
+            "provider": "meta",
+            "interaction_type": "instagram_comment",
+            "media_id": "media-1",
+            "public_comment_context": {"media_id": "media-1", "comment_id": "comment-1"},
+        }
+        client = SimpleNamespace(get_media=AsyncMock(side_effect=TimeoutError("Meta timeout")))
+        monkeypatch.setattr(service.MetaContextClient, "from_config", lambda: client)
+    else:
+        context = {
+            "provider": "meta",
+            "interaction_type": "private_message",
+            "story_id": "story-1",
+        }
+        monkeypatch.setattr(service, "discover_instagram_story", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "resolve_content_product_mapping",
+        AsyncMock(side_effect=RuntimeError("mapping unavailable")),
+    )
+
+    processor = AsyncMock()
+    monkeypatch.setattr(inbound_buffer, "_resolve_processor", lambda _channel: processor)
+    monkeypatch.setattr(
+        inbound_buffer.db,
+        "fetch_one",
+        AsyncMock(side_effect=[{"id": "job-1"}, {"id": "job-1"}]),
+    )
+    monkeypatch.setattr(inbound_buffer.db, "execute", AsyncMock())
+    job = {
+        "id": "job-1",
+        "channel": "instagram",
+        "sender_id": "ig-user",
+        "message_parts": ["Precio?"],
+        "customer_profile": {"identity_provider": "meta"},
+        "interaction_type": context["interaction_type"],
+        "integration_context": context,
+        "inbound_attachments": [],
+        "attempt_count": 1,
+        "processing_lease_token": "lease-1",
+    }
+
+    await inbound_buffer._process_claimed_job(job)
+
+    processor.assert_awaited_once()
+    delivered_context = processor.await_args.args[7]
+    if event_kind == "comment_media_and_mapping":
+        assert delivered_context["public_comment_context"]["mapping_status"] == "error"
+    else:
+        assert "incoming_instagram_context" not in delivered_context
+
+
+@pytest.mark.asyncio
 async def test_ai_paused_instagram_inbound_is_stored_without_response(monkeypatch):
     from app.ai import engine
 
@@ -192,6 +254,19 @@ async def test_manual_instagram_echo_is_persisted_and_pauses_ai(monkeypatch):
         "is_recorded_meta_outbound_message",
         AsyncMock(return_value=False),
     )
+    monkeypatch.setattr(
+        instagram,
+        "defer_unknown_instagram_outbound_echo",
+        AsyncMock(return_value=False),
+    )
+    transaction = MagicMock()
+    transaction.__aenter__ = AsyncMock(return_value=None)
+    transaction.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        instagram.db,
+        "get_db",
+        lambda: SimpleNamespace(transaction=lambda: transaction),
+    )
     store = AsyncMock()
     monkeypatch.setattr(instagram.conversations, "store_message", store)
     with (
@@ -232,7 +307,7 @@ async def test_meta_sender_mapping_reuses_existing_customer(monkeypatch):
     }
     monkeypatch.setattr(
         channel_mappings,
-        "lookup_by_provider",
+        "lookup_meta_instagram_sender",
         AsyncMock(return_value=mapping),
     )
     monkeypatch.setattr(channel_mappings.db, "fetch_one", AsyncMock(return_value=customer))
@@ -291,13 +366,13 @@ async def test_new_native_instagram_automatic_escalation_has_no_expiry(monkeypat
     assert fetch_one.await_args.args[1]["expires_at"] is None
 
 
-def test_operations_migration_adds_audio_and_human_provenance():
+def test_meta_native_migration_adds_audio_and_human_provenance():
     from pathlib import Path
 
-    migration = Path("store/migrations/017_meta_instagram_operations.sql").read_text(
+    migration = Path("store/migrations/016_meta_native_instagram.sql").read_text(
         encoding="utf-8"
     )
     assert "inbound_attachments JSONB" in migration
     assert "author_type TEXT" in migration
     assert "provider_message_id TEXT" in migration
-    assert "(17, 'meta_instagram_operations')" in migration
+    assert "(16, 'meta_native_instagram')" in migration

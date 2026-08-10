@@ -183,7 +183,12 @@ class AgentRunner:
                 "result": formatted_result,
             })
 
-            if authorized and name == "send_interactive_buttons" and context.channel in {"whatsapp", "instagram"}:
+            if (
+                authorized
+                and name == "send_interactive_buttons"
+                and context.channel in {"whatsapp", "instagram"}
+                and result.get("type") == "interactive_buttons"
+            ):
                 interactive_payload = result
             if authorized and name == "send_catalog_pdf" and result.get("type") == "catalog_pdf":
                 catalog_pdf_payload = result

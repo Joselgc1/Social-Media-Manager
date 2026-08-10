@@ -187,3 +187,20 @@ async def test_verified_meta_sender_mapping_reuses_exact_binding_and_rejects_rea
 
     assert result == expected
     assert mock_db.fetch_one.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_meta_instagram_sender_lookup_uses_only_verified_igsid_column(monkeypatch):
+    from app.crm import channel_mappings
+
+    fetch = AsyncMock(return_value=None)
+    monkeypatch.setattr(channel_mappings.db, "fetch_one", fetch)
+
+    assert await channel_mappings.lookup_meta_instagram_sender("igsid-1") is None
+
+    query, values = fetch.await_args.args
+    assert "provider = 'meta'" in query
+    assert "channel = 'instagram'" in query
+    assert "external_author_id = :sender_id" in query
+    assert "external_contact_id" not in query
+    assert values == {"sender_id": "igsid-1"}

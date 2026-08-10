@@ -331,6 +331,12 @@ async def _process_meta_inbound_jobs():
         await process_due_inbound_jobs(limit=10)
     except Exception:
         logger.exception("Meta inbound job processor failed")
+    try:
+        from app.webhooks.instagram import reconcile_pending_instagram_outbound_echoes
+
+        await reconcile_pending_instagram_outbound_echoes(limit=10)
+    except Exception:
+        logger.exception("Instagram outbound echo reconciliation failed")
 
 
 async def _cleanup_meta_inbound_jobs():

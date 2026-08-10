@@ -41,7 +41,7 @@ In the Railway project, add a PostgreSQL service named `StorePostgres`. Deploy t
 DATABASE_URL=${{StorePostgres.DATABASE_URL}}
 ```
 
-`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The runner applies the normal migration sequence through Store schema version `18`; a failure blocks the deployment. Migration 018 deprecates but does not drop the legacy Instagram/Kommo correlation schema. It also blocks deployment while launched or uncertain legacy Instagram Kommo jobs remain; disable legacy Instagram Kommo ingress, let the old deployment drain those jobs, and retry. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`. Do not run individual SQL files for a normal install or upgrade.
+`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The runner applies the normal migration sequence through Store schema version `16`; a failure blocks the deployment. Migration 016 completes Meta-native Instagram support, deprecates but does not drop the legacy Instagram/Kommo correlation schema, and adds durable echo reconciliation and comment thread scope. It also blocks deployment while launched or uncertain legacy Instagram Kommo jobs remain; disable legacy Instagram Kommo ingress, let the old deployment drain those jobs, and retry. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`. Do not run individual SQL files for a normal install or upgrade.
 
 Back up before changing an existing database. See [Railway PostgreSQL Deployment](../docs/RAILWAY_POSTGRES.md) for Store/Master setup, legacy recovery migrations, backup, and cutover instructions.
 
@@ -349,7 +349,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 Only do this when `WHATSAPP_BACKEND=kommo`.
 
-1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 18.
+1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 16.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
 3. Create one WhatsApp Salesbot with the matching widget block. Route `success` to a WhatsApp-restricted Message step using `{{json.message}}`, `media` to a silent end, and `fail` to a silent end or human fallback.
 4. Register a Kommo general webhook at `https://abc123.ngrok-free.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`.
@@ -407,7 +407,7 @@ Additional variables for native Meta Instagram when Instagram is enabled:
 | `INSTAGRAM_ACCESS_TOKEN`    | Native Instagram Graph API token         |
 | `INSTAGRAM_VERIFY_TOKEN`    | Instagram webhook verification token     |
 | `INSTAGRAM_ACCOUNT_ID`      | Managed Instagram Professional account   |
-| `META_GRAPH_API_VERSION`    | Tested Graph API version, such as `vXX.X` |
+| `META_GRAPH_API_VERSION`    | Validated Graph API version (`v26.0`)      |
 
 Additional variables for `WHATSAPP_BACKEND=meta`:
 
@@ -837,7 +837,7 @@ Test native Instagram Messaging API behavior regardless of the WhatsApp backend.
 ### 10.6 Kommo WhatsApp Mode
 
 ```text
-[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 18
+[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 16
 [ ] Widget ZIP uploaded to private Kommo integration
 [ ] WhatsApp Salesbot contains its matching widget step and success/media/fail exits
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>

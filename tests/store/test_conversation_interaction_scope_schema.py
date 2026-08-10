@@ -6,6 +6,9 @@ MIGRATION = (ROOT / "store/migrations/015_conversation_interaction_scope.sql").r
 )
 BASELINE = (ROOT / "store/migrations/001_schema.sql").read_text(encoding="utf-8")
 RUNNER = (ROOT / "store/scripts/migrate.py").read_text(encoding="utf-8")
+BASELINE_CONVERSATIONS = BASELINE.split("-- Conversations (message history)", 1)[1].split(
+    "-- Orders", 1
+)[0]
 
 
 def test_conversation_scope_migration_adds_and_backfills_interaction_type():
@@ -17,8 +20,15 @@ def test_conversation_scope_migration_adds_and_backfills_interaction_type():
     assert "(15, 'conversation_interaction_scope')" in MIGRATION
 
 
-def test_fresh_schema_and_runner_include_conversation_scope():
-    assert "interaction_type TEXT NOT NULL DEFAULT 'private_message'" in BASELINE
-    assert "conversations_interaction_type_check" in BASELINE
-    assert "idx_conv_customer_interaction" in BASELINE
+def test_baseline_excludes_conversation_interaction_scope():
+    assert "interaction_type" not in BASELINE_CONVERSATIONS
+    assert "conversations_interaction_type_check" not in BASELINE_CONVERSATIONS
+    assert "idx_conv_customer_interaction" not in BASELINE_CONVERSATIONS
+
+
+def test_migration_015_owns_conversation_interaction_scope_and_runner_includes_it():
+    assert "ADD COLUMN IF NOT EXISTS interaction_type" in MIGRATION
+    assert "conversations_interaction_type_check" in MIGRATION
+    assert "idx_conv_customer_interaction" in MIGRATION
     assert "015_conversation_interaction_scope.sql" in RUNNER
+    assert "await connection.execute(conversation_interaction_scope_migration_sql)" in RUNNER

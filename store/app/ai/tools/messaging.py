@@ -74,11 +74,25 @@ async def escalate_to_human(args: dict, context: ToolExecutionContext) -> dict:
 
 
 async def send_interactive_buttons(args: dict, context: ToolExecutionContext) -> dict:
-    """Return an interactive-button payload for the channel sender."""
+    """Return a payload within the common WhatsApp/Instagram DM limits."""
+    body_text = str(args.get("body_text") or "").strip()
+    raw_buttons = args.get("buttons")
+    buttons = [str(button).strip() for button in raw_buttons] if isinstance(raw_buttons, list) else []
+    if (
+        not body_text
+        or len(body_text.encode("utf-8")) > 1000
+        or not 1 <= len(buttons) <= 3
+        or any(not button or len(button) > 20 for button in buttons)
+        or len(set(buttons)) != len(buttons)
+    ):
+        return {
+            "status": "error",
+            "message": "Interactive choices require body text up to 1000 UTF-8 bytes and 1-3 unique labels of at most 20 characters.",
+        }
     return {
         "type": "interactive_buttons",
-        "body_text": args.get("body_text", ""),
-        "buttons": args.get("buttons", []),
+        "body_text": body_text,
+        "buttons": buttons,
     }
 
 

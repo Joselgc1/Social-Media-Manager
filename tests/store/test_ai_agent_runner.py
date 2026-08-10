@@ -243,6 +243,32 @@ async def test_payload_preservation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_instagram_captures_only_successful_interactive_payload(monkeypatch):
+    provider = _provider(LLMResponse(tool_calls=[_tool_call(
+        "send_interactive_buttons",
+        {"body_text": "Elige", "buttons": ["Una"]},
+    )]))
+    provider.continue_after_tool.return_value = LLMResponse(text="Dime cuál prefieres.")
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: provider)
+    monkeypatch.setattr(
+        "app.ai.runner.execute_tool",
+        AsyncMock(return_value={"status": "error", "message": "Invalid interactive choices"}),
+    )
+
+    result = await AgentRunner().run(
+        LEGACY_AGENT,
+        "prompt",
+        [],
+        _settings(),
+        _context(channel="instagram"),
+    )
+
+    assert result.interactive is None
+    assert result.text == "Dime cuál prefieres."
+
+
+@pytest.mark.asyncio
 async def test_escalation_tool_sets_result_flags(monkeypatch):
     provider = _provider(LLMResponse(tool_calls=[_tool_call("escalate_to_human", {"reason": "Cliente pide humano"})]))
     provider.continue_after_tool.return_value = LLMResponse(text="Te paso con una persona del equipo.")

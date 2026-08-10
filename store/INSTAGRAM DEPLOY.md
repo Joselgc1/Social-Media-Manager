@@ -15,7 +15,7 @@ Instagram DM, Story interaction, or public comment
 
 WhatsApp may independently use Meta or Kommo through `WHATSAPP_BACKEND`; that setting does not change Instagram routing. Do not create an Instagram Kommo Salesbot, subscribe Kommo to Instagram, configure an Instagram backend selector, or use the retired context-only `/webhooks/meta/instagram-context` route.
 
-Migration `018_retire_kommo_instagram.sql` deprecates live legacy Instagram/Kommo processing but intentionally does not drop the old correlation schema. Historical correlation rows and columns may remain in upgraded databases and must not be treated as active architecture. Before deploying it, disable legacy Instagram Kommo ingress and wait for active jobs to drain; the migration fails closed rather than abandoning a launched Salesbot or uncertain delivery.
+Migration `016_meta_native_instagram.sql` completes Meta-native Instagram support and deprecates live legacy Instagram/Kommo processing, but intentionally does not drop the old correlation schema. Historical correlation rows and columns may remain in upgraded databases and must not be treated as active architecture. Before deploying it, disable legacy Instagram Kommo ingress and wait for active jobs to drain; the migration fails closed rather than abandoning a launched Salesbot or uncertain delivery.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ Migration `018_retire_kommo_instagram.sql` deprecates live legacy Instagram/Komm
 - Required business verification, App Review, and Advanced Access shown by the current Meta dashboard.
 - Public HTTPS store URL and a single Store application instance.
 
-Use the Graph API version currently supported and tested for the app. Meta's dashboard is authoritative for current permission names, review requirements, and webhook subscription fields.
+The Store validates one Graph API version setting and currently defaults to the tested `v26.0`. Meta's dashboard is authoritative for current permission names, review requirements, and webhook subscription fields.
 
 ## Credentials
 
@@ -36,7 +36,7 @@ META_APP_SECRET=
 INSTAGRAM_ACCESS_TOKEN=
 INSTAGRAM_VERIFY_TOKEN=
 INSTAGRAM_ACCOUNT_ID=
-META_GRAPH_API_VERSION=vXX.X
+META_GRAPH_API_VERSION=v26.0
 APP_BASE_URL=https://YOUR-STORE-DOMAIN
 ```
 
@@ -52,6 +52,14 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
 Never commit or log access tokens or the app secret. Monitor token validity and expiration; the application does not renew Meta tokens automatically.
+
+Before a continuity review, run the read-only database audit:
+
+```bash
+DATABASE_URL="$STORE_DATABASE_URL" python store/scripts/audit_instagram_customer_continuity.py
+```
+
+Its output contains only counts and internal customer UUID samples. It never merges records, prints PII or external identifiers, or calls Meta or Kommo APIs.
 
 ## Meta App Setup
 
@@ -72,9 +80,11 @@ Deploy the Store with root directory `store/` and one replica. Railway pre-deplo
 python scripts/migrate.py
 ```
 
-The current Store schema version is `18`. Back up an existing production database before migration. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery, then rerun the normal migration runner.
+The current Store schema version is `16`. Back up an existing production database before migration. Migration 016 adds durable outbound-echo reconciliation and post/thread-scoped public-comment history. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery, then rerun the normal migration runner.
 
 Set `APP_BASE_URL` to the final public domain and deploy the Meta credentials. Confirm `/health` is healthy before connecting webhooks.
+
+Native Instagram delivery rechecks manual takeover, external pause, blocked state, and the global AI switch before every outbound part. Echoes that arrive before the Graph response ID is committed are durably reconciled rather than immediately treated as administrator replies. Public comment history is isolated by post and root thread, and optional media/mapping enrichment fails soft to safe generic replies. Instagram DM interactive choices are delivered as Quick Replies; public comments remain text-only.
 
 ## Webhook Subscription
 
@@ -135,7 +145,7 @@ No Kommo job, callback, mirror, or correlation event participates in this flow.
 Use a separate Railway environment and database when validating a new Meta app or token. While the app is in Development mode, real test users generally need an app role allowed by Meta.
 
 ```text
-[ ] Migration runner accepts schema version 18
+[ ] Migration runner accepts schema version 16
 [ ] GET /webhooks/instagram verifies with the configured token
 [ ] Unsigned or incorrectly signed POST returns 403
 [ ] Real DM creates one meta_inbound_jobs row and one Meta reply
@@ -154,7 +164,7 @@ Meta's synthetic Test button proves callback reachability, not complete producti
 ## Production Cutover
 
 1. Back up StorePostgres.
-2. Deploy the application revision and migration 018.
+2. Deploy the application revision and migration 016.
 3. Deploy production Meta credentials and final `APP_BASE_URL`.
 4. Verify `/health`, admin login, catalog loading, and content mappings.
 5. Verify and save `https://YOUR-STORE-DOMAIN/webhooks/instagram` in Meta.

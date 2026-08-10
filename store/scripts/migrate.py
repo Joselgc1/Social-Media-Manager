@@ -55,16 +55,8 @@ KOMMO_INBOUND_ATTACHMENTS_MIGRATION_PATH = (
 CONVERSATION_INTERACTION_SCOPE_MIGRATION_PATH = (
     Path(__file__).resolve().parents[1] / "migrations" / "015_conversation_interaction_scope.sql"
 )
-META_INBOUND_INSTAGRAM_CONTEXT_MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "migrations"
-    / "016_meta_inbound_instagram_context.sql"
-)
-META_INSTAGRAM_OPERATIONS_MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "migrations" / "017_meta_instagram_operations.sql"
-)
-RETIRE_KOMMO_INSTAGRAM_MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "migrations" / "018_retire_kommo_instagram.sql"
+META_NATIVE_INSTAGRAM_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1] / "migrations" / "016_meta_native_instagram.sql"
 )
 ADVISORY_LOCK_KEY = 891_014_001
 
@@ -107,13 +99,7 @@ async def run_migration(database_url: str | None = None) -> None:
     conversation_interaction_scope_migration_sql = (
         CONVERSATION_INTERACTION_SCOPE_MIGRATION_PATH.read_text(encoding="utf-8")
     )
-    meta_inbound_instagram_context_migration_sql = (
-        META_INBOUND_INSTAGRAM_CONTEXT_MIGRATION_PATH.read_text(encoding="utf-8")
-    )
-    meta_instagram_operations_migration_sql = META_INSTAGRAM_OPERATIONS_MIGRATION_PATH.read_text(
-        encoding="utf-8"
-    )
-    retire_kommo_instagram_migration_sql = RETIRE_KOMMO_INSTAGRAM_MIGRATION_PATH.read_text(
+    meta_native_instagram_migration_sql = META_NATIVE_INSTAGRAM_MIGRATION_PATH.read_text(
         encoding="utf-8"
     )
     connection = await asyncpg.connect(database_url)
@@ -134,9 +120,7 @@ async def run_migration(database_url: str | None = None) -> None:
             await connection.execute(kommo_inbound_voice_migration_sql)
             await connection.execute(kommo_inbound_attachments_migration_sql)
             await connection.execute(conversation_interaction_scope_migration_sql)
-            await connection.execute(meta_inbound_instagram_context_migration_sql)
-            await connection.execute(meta_instagram_operations_migration_sql)
-            await connection.execute(retire_kommo_instagram_migration_sql)
+            await connection.execute(meta_native_instagram_migration_sql)
         finally:
             await connection.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
     finally:

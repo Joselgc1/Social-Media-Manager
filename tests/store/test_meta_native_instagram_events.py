@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 
@@ -123,6 +124,39 @@ async def test_native_instagram_media_attachment_is_durably_ingested(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("attachment_type", ["reel", "ig_reel"])
+async def test_native_instagram_reel_attachment_is_shared_content(
+    monkeypatch, attachment_type
+):
+    from app.webhooks import instagram
+
+    enqueue = AsyncMock(return_value=True)
+    monkeypatch.setattr(instagram, "enqueue_inbound_message", enqueue)
+    reel_url = "https://www.instagram.com/reel/ABC123/"
+
+    await instagram.ingest_instagram_payload({
+        "object": "instagram",
+        "entry": [{
+            "id": "ig-account",
+            "messaging": [{
+                "sender": {"id": "ig-user"},
+                "message": {
+                    "mid": f"mid-{attachment_type}",
+                    "attachments": [{
+                        "type": attachment_type,
+                        "payload": {"url": reel_url},
+                    }],
+                },
+            }],
+        }],
+    })
+
+    values = enqueue.await_args.kwargs
+    assert values["text"] == f"El cliente compartió un enlace: {reel_url}"
+    assert values["inbound_attachments"] == []
+
+
+@pytest.mark.asyncio
 async def test_public_comment_persists_authoritative_meta_context(monkeypatch):
     from app.webhooks import instagram
 
@@ -132,6 +166,11 @@ async def test_public_comment_persists_authoritative_meta_context(monkeypatch):
         instagram,
         "get_config",
         lambda: SimpleNamespace(instagram_account_id="ig-account"),
+    )
+    monkeypatch.setattr(
+        instagram.conversations,
+        "resolve_instagram_comment_thread",
+        AsyncMock(return_value={"instagram_thread_id": "comment-1"}),
     )
 
     await instagram.ingest_instagram_payload(_comment_payload())
@@ -404,6 +443,16 @@ async def test_unknown_outbound_echo_records_manual_takeover(monkeypatch):
         "is_recorded_meta_outbound_message",
         AsyncMock(return_value=False),
     )
+    monkeypatch.setattr(
+        instagram,
+        "defer_unknown_instagram_outbound_echo",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        instagram.db,
+        "get_db",
+        lambda: SimpleNamespace(transaction=lambda: _Transaction()),
+    )
     customer = {"id": "customer-1"}
     with (
         patch(
@@ -543,11 +592,13 @@ async def test_instagram_comment_sender_uses_public_replies_endpoint(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_instagram_webhook_subscription_includes_comments(monkeypatch):
+async def test_instagram_webhook_subscription_uses_page_token_and_valid_fields(monkeypatch):
     from app.channels import instagram_sender
 
     send = AsyncMock(return_value={"success": True})
+    page_token = AsyncMock(return_value="page-token")
     monkeypatch.setattr(instagram_sender, "_send", send)
+    monkeypatch.setattr(instagram_sender, "_get_page_access_token", page_token)
     monkeypatch.setattr(
         instagram_sender,
         "get_config",
@@ -559,13 +610,55 @@ async def test_instagram_webhook_subscription_includes_comments(monkeypatch):
 
     await instagram_sender.subscribe_page_to_webhooks("page-1")
 
-    assert send.await_args.args[1]["subscribed_fields"] == (
-        "messages,messaging_postbacks,comments"
+    page_token.assert_awaited_once()
+    assert send.await_args.args[1]["subscribed_fields"] == "feed,messages,messaging_postbacks"
+    assert send.await_args.args[2] == "page-token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "retryable", "delivery_known"),
+    [
+        (401, False, True),
+        (403, False, True),
+        (429, True, True),
+        (500, True, False),
+        (503, True, False),
+    ],
+)
+async def test_instagram_sender_classifies_http_failures(
+    monkeypatch, status_code, retryable, delivery_known
+):
+    from app.channels import instagram_sender
+    from app.channels.meta_errors import MetaSendError
+
+    response = httpx.Response(
+        status_code,
+        json={"error": {"message": "safe test error"}},
+        request=httpx.Request("POST", "https://graph.facebook.com/v26.0/me/messages"),
     )
 
+    class _Client:
+        async def __aenter__(self):
+            return self
 
-def test_meta_inbound_context_migration_is_new_and_scope_aware():
-    migration = Path("store/migrations/016_meta_inbound_instagram_context.sql").read_text(
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return response
+
+    monkeypatch.setattr(instagram_sender.httpx, "AsyncClient", lambda **_kwargs: _Client())
+
+    with pytest.raises(MetaSendError) as exc_info:
+        await instagram_sender._send("https://graph.facebook.com/messages", {}, "token")
+
+    assert exc_info.value.retryable is retryable
+    assert exc_info.value.delivery_known is delivery_known
+
+
+def test_meta_native_instagram_migration_is_scope_aware_and_consolidated():
+    migration = Path("store/migrations/016_meta_native_instagram.sql").read_text(
         encoding="utf-8"
     )
 
@@ -573,10 +666,13 @@ def test_meta_inbound_context_migration_is_new_and_scope_aware():
     assert "ADD COLUMN IF NOT EXISTS integration_context JSONB" in migration
     assert "instagram_comment" in migration
     assert "DROP INDEX IF EXISTS uq_meta_inbound_jobs_pending_sender" in migration
-    assert "(16, 'meta_inbound_instagram_context')" in migration
+    assert "(16, 'meta_native_instagram')" in migration
+    assert "(17," not in migration
+    assert "(18," not in migration
+    assert "(19," not in migration
     runner = Path("store/scripts/migrate.py").read_text(encoding="utf-8")
-    assert "016_meta_inbound_instagram_context.sql" in runner
-    assert "meta_inbound_instagram_context_migration_sql" in runner
+    assert "016_meta_native_instagram.sql" in runner
+    assert "meta_native_instagram_migration_sql" in runner
 
 
 def test_instagram_architecture_is_native_meta_regardless_of_whatsapp_backend():
@@ -592,8 +688,8 @@ def test_instagram_architecture_is_native_meta_regardless_of_whatsapp_backend():
     assert "fastapi_app.include_router(instagram_router)" in main_source
 
 
-def test_migration_018_drains_only_safe_legacy_work_and_preserves_history():
-    migration = Path("store/migrations/018_retire_kommo_instagram.sql").read_text(
+def test_meta_native_migration_drains_only_safe_legacy_work_and_preserves_history():
+    migration = Path("store/migrations/016_meta_native_instagram.sql").read_text(
         encoding="utf-8"
     )
 
@@ -611,4 +707,4 @@ def test_migration_018_drains_only_safe_legacy_work_and_preserves_history():
     assert "instagram_transport_is_meta_native" in migration
     assert "DROP TABLE" not in migration.upper()
     assert "DELETE FROM meta_instagram_context_events" not in migration
-    assert "(18, 'retire_kommo_instagram')" in migration
+    assert "(16, 'meta_native_instagram')" in migration

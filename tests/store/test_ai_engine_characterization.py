@@ -639,6 +639,8 @@ async def test_public_instagram_comment_unresolved_widget_sku_uses_fallback(engi
         "customer-1",
         limit=2,
         interaction_type="instagram_comment",
+        instagram_media_id=None,
+        instagram_thread_id=None,
     )
     engine.orders.get_latest_open_order.assert_not_awaited()
     assert {

@@ -350,7 +350,7 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), configure native Meta Instagram through section 1.7 when enabled, and use the Kommo migration guide only when WhatsApp uses Kommo:
 
-1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `python scripts/migrate.py` through schema version 18. Migration 018 deprecates but does not drop the legacy Instagram/Kommo correlation schema. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal migration runner.
+1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `python scripts/migrate.py` through schema version 16. Migration 016 completes native Instagram delivery and comment-scope hardening while deprecating, but not dropping, the legacy Instagram/Kommo correlation schema. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal migration runner.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
 4. **Channels:** configure native Meta Instagram when enabled, and choose either direct Meta or Kommo credentials for WhatsApp.

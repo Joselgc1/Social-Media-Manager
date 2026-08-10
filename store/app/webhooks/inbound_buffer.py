@@ -19,10 +19,15 @@ PROCESSING_LEASE_MINUTES = 5
 PROCESSING_HEARTBEAT_SECONDS = 30
 MAX_PROCESSING_ATTEMPTS = 5
 MAX_META_SEND_ATTEMPTS = 3
+INSTAGRAM_ECHO_GRACE_SECONDS = 20
 MAX_CONCURRENT_INBOUND_PROCESSORS = 3
 _inbound_processor_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INBOUND_PROCESSORS)
 
 Processor = Callable[[str, str, str | None, dict, str, str, str, dict], Awaitable[None]]
+
+
+class AutomationDeliverySuppressed(RuntimeError):
+    """Raised when a human or explicit pause wins before Meta delivery."""
 
 
 def _merge_profile(current: dict, new_values: dict | None) -> dict:
@@ -368,6 +373,14 @@ async def cleanup_completed_inbound_jobs(retention_days: int = 7) -> None:
         """,
         {"days": retention_days},
     )
+    await db.execute(
+        """
+        DELETE FROM meta_instagram_outbound_echoes
+        WHERE classification <> 'pending'
+          AND updated_at < NOW() - (:days * INTERVAL '1 day')
+        """,
+        {"days": retention_days},
+    )
 
 
 async def _claim_due_job() -> dict | None:
@@ -533,7 +546,11 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
     retry = int(job.get("attempt_count") or 0) < MAX_PROCESSING_ATTEMPTS
     if isinstance(error, AudioTranscriptionError) and not error.retryable:
         retry = False
-    known_safe_send_failure = isinstance(error, MetaSendError) and error.retryable
+    known_safe_send_failure = (
+        isinstance(error, MetaSendError)
+        and error.retryable
+        and error.delivery_known
+    )
     error_name = type(error).__name__[:100] if isinstance(error, Exception) else str(error)[:100]
     async with db.get_db().transaction():
         await _lock_sender(channel, sender_id)
@@ -645,6 +662,9 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
             UPDATE meta_inbound_jobs
                 SET status = :status,
                 available_at = CASE WHEN :retry THEN NOW() + INTERVAL '30 seconds' ELSE available_at END,
+                outbound_started_at = CASE
+                    WHEN :clear_outbound_started THEN NULL ELSE outbound_started_at
+                END,
                 processing_started_at = NULL, processing_heartbeat_at = NULL,
                 processing_lease_token = NULL, last_error = :error, updated_at = NOW()
             WHERE id = :job_id AND processing_lease_token = :lease_token
@@ -652,6 +672,7 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
             {
                 "status": "pending" if retry else "failed",
                 "retry": retry,
+                "clear_outbound_started": known_safe_send_failure,
                 "error": error_name,
                 "job_id": str(current["id"]),
                 "lease_token": lease_token,
@@ -762,7 +783,7 @@ async def record_outbound_message(job_id: str, lease_token: str, response: dict 
     message_ids = _extract_meta_message_ids(response or {})
     if not job_id or not lease_token or not message_ids:
         return
-    await db.execute(
+    row = await db.fetch_one(
         """
         UPDATE meta_inbound_jobs
         SET outbound_message_ids = (
@@ -770,7 +791,8 @@ async def record_outbound_message(job_id: str, lease_token: str, response: dict 
                 FROM jsonb_array_elements_text(outbound_message_ids || CAST(:message_ids AS jsonb)) AS ids(value)
             ),
             updated_at = NOW()
-        WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
+        WHERE id = :job_id
+        RETURNING id
         """,
         {
             "job_id": job_id,
@@ -778,6 +800,19 @@ async def record_outbound_message(job_id: str, lease_token: str, response: dict 
             "message_ids": json.dumps(message_ids),
         },
     )
+    if not row:
+        raise RuntimeError("Meta outbound message was accepted after the inbound lease expired.")
+    for message_id in message_ids:
+        await db.execute(
+            """
+            UPDATE meta_instagram_outbound_echoes
+            SET classification = 'backend', message_text = '',
+                reconciled_at = NOW(), updated_at = NOW()
+            WHERE provider_message_id = :message_id
+              AND classification = 'pending'
+            """,
+            {"message_id": message_id},
+        )
 
 
 async def is_recorded_meta_outbound_message(channel: str, message_id: str) -> bool:
@@ -795,28 +830,258 @@ async def is_recorded_meta_outbound_message(channel: str, message_id: str) -> bo
         """,
         {"channel": channel, "message_ids": json.dumps([message_id])},
     )
+    if row:
+        return True
+    if channel != "instagram":
+        return False
+    echo = await db.fetch_one(
+        """
+        SELECT provider_message_id
+        FROM meta_instagram_outbound_echoes
+        WHERE provider_message_id = :message_id
+          AND classification = 'backend'
+        """,
+        {"message_id": message_id},
+    )
+    return bool(echo)
+
+
+async def is_recent_instagram_outbound_inflight(recipient_id: str) -> bool:
+    if not recipient_id:
+        return False
+    row = await db.fetch_one(
+        """
+        SELECT id
+        FROM meta_inbound_jobs
+        WHERE channel = 'instagram'
+          AND sender_id = :recipient_id
+          AND status = 'processing'
+          AND outbound_started_at IS NOT NULL
+          AND COALESCE(processing_heartbeat_at, processing_started_at)
+              >= NOW() - (:minutes * INTERVAL '1 minute')
+        ORDER BY outbound_started_at DESC
+        LIMIT 1
+        """,
+        {"recipient_id": recipient_id, "minutes": PROCESSING_LEASE_MINUTES},
+    )
     return bool(row)
 
 
-async def send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
+async def defer_unknown_instagram_outbound_echo(
+    *,
+    message_id: str,
+    recipient_id: str,
+    message_text: str,
+) -> bool:
+    """Durably defer an echo only while a recent backend send is unresolved."""
+    if not message_id:
+        return False
+    async with db.get_db().transaction():
+        await _lock_sender("instagram", recipient_id)
+        if await is_recorded_meta_outbound_message("instagram", message_id):
+            return True
+        inflight = await is_recent_instagram_outbound_inflight(recipient_id)
+        await db.execute(
+            """
+            INSERT INTO meta_instagram_outbound_echoes (
+                provider_message_id, recipient_id, message_text, eligible_at
+            ) VALUES (
+                :message_id, :recipient_id, :message_text,
+                NOW() + (:seconds * INTERVAL '1 second')
+            )
+            ON CONFLICT (provider_message_id) DO UPDATE
+            SET updated_at = NOW()
+            """,
+            {
+                "message_id": message_id,
+                "recipient_id": recipient_id,
+                "message_text": message_text,
+                "seconds": INSTAGRAM_ECHO_GRACE_SECONDS if inflight else 0,
+            },
+        )
+    return True
+
+
+async def claim_pending_instagram_outbound_echoes(limit: int = 10) -> list[dict]:
+    rows = await db.fetch_all(
+        """
+        UPDATE meta_instagram_outbound_echoes echo
+        SET eligible_at = NOW() + INTERVAL '1 minute', updated_at = NOW()
+        WHERE echo.provider_message_id IN (
+            SELECT candidate.provider_message_id
+            FROM meta_instagram_outbound_echoes candidate
+            WHERE candidate.classification = 'pending'
+              AND candidate.eligible_at <= NOW()
+            ORDER BY candidate.eligible_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT :limit
+        )
+        RETURNING provider_message_id, recipient_id, message_text
+        """,
+        {"limit": limit},
+    )
+    return [dict(row) for row in rows]
+
+
+async def mark_instagram_outbound_echo(
+    message_id: str,
+    classification: str,
+    *,
+    retry: bool = False,
+) -> None:
+    if classification not in {"backend", "manual", "unknown"}:
+        raise ValueError("Unsupported Instagram echo classification")
+    if retry:
+        await db.execute(
+            """
+            UPDATE meta_instagram_outbound_echoes
+            SET eligible_at = NOW() + (:seconds * INTERVAL '1 second'), updated_at = NOW()
+            WHERE provider_message_id = :message_id AND classification = 'pending'
+            """,
+            {"message_id": message_id, "seconds": INSTAGRAM_ECHO_GRACE_SECONDS},
+        )
+        return
+    await db.execute(
+        """
+        UPDATE meta_instagram_outbound_echoes
+        SET classification = :classification, message_text = '',
+            reconciled_at = NOW(), updated_at = NOW()
+        WHERE provider_message_id = :message_id AND classification = 'pending'
+        """,
+        {"message_id": message_id, "classification": classification},
+    )
+
+
+async def has_unknown_instagram_outbound_delivery(recipient_id: str) -> bool:
+    """Return whether a recent failed send may have reached Meta without a recorded ID."""
+    if not recipient_id:
+        return False
+    row = await db.fetch_one(
+        """
+        SELECT id
+        FROM meta_inbound_jobs
+        WHERE channel = 'instagram'
+          AND sender_id = :recipient_id
+          AND status = 'failed'
+          AND outbound_started_at IS NOT NULL
+          AND jsonb_array_length(outbound_message_ids) = 0
+          AND last_error IN (
+              'delivery_unknown_after_send_attempt',
+              'delivery_unknown_after_stale_lease'
+          )
+          AND updated_at >= NOW() - INTERVAL '7 days'
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        {"recipient_id": recipient_id},
+    )
+    return bool(row)
+
+
+async def ensure_instagram_ai_delivery_allowed(
+    customer_id: str | None,
+    *,
+    recipient_id: str = "",
+    allow_current_automatic_escalation: bool,
+    current_turn_started_at=None,
+) -> None:
+    settings = await db.get_settings()
+    if not bool(settings.get("ai_enabled", True)):
+        raise AutomationDeliverySuppressed("AI was paused before Instagram delivery")
+    if recipient_id:
+        pending_echo = await db.fetch_one(
+            """
+            SELECT provider_message_id
+            FROM meta_instagram_outbound_echoes
+            WHERE recipient_id = :recipient_id
+              AND classification = 'pending'
+            ORDER BY echo_seen_at DESC
+            LIMIT 1
+            """,
+            {"recipient_id": recipient_id},
+        )
+        if pending_echo:
+            raise AutomationDeliverySuppressed("Unresolved administrator echo before Instagram delivery")
+    if not customer_id:
+        return
+    customer = await db.fetch_one(
+        """
+        SELECT conversation_state, escalation_source, escalated_at,
+               COALESCE(is_blocked, FALSE) AS is_blocked
+        FROM customers
+        WHERE id = :customer_id
+        """,
+        {"customer_id": customer_id},
+    )
+    if not customer or customer["is_blocked"]:
+        raise AutomationDeliverySuppressed("Customer is blocked before Instagram delivery")
+    if customer["conversation_state"] == "active":
+        return
+    if (
+        allow_current_automatic_escalation
+        and customer["conversation_state"] == "escalated"
+        and customer["escalation_source"] == "automatic"
+        and current_turn_started_at is not None
+        and customer["escalated_at"] is not None
+        and customer["escalated_at"] >= current_turn_started_at
+    ):
+        return
+    raise AutomationDeliverySuppressed("Human takeover won before Instagram delivery")
+
+
+async def send_with_delivery_record(
+    send_func,
+    inbound_job_id: str,
+    lease_token: str,
+    *,
+    pre_send_guard: Callable[[], Awaitable[None]] | None = None,
+    instagram_recipient_id: str = "",
+    **kwargs,
+):
     """Fence a Meta send and retry only failures known not to reach Meta."""
-    if inbound_job_id and lease_token:
-        marked = await mark_outbound_send_started(inbound_job_id, lease_token)
-        if not marked:
-            raise RuntimeError("Meta inbound lease is no longer active; refusing outbound send.")
+    async def guard_and_mark() -> None:
+        if pre_send_guard:
+            await pre_send_guard()
+        if inbound_job_id and lease_token:
+            marked = await mark_outbound_send_started(inbound_job_id, lease_token)
+            if not marked:
+                raise RuntimeError("Meta inbound lease is no longer active; refusing outbound send.")
+
+    serialized_instagram_send = bool(instagram_recipient_id and inbound_job_id and lease_token)
+    if serialized_instagram_send:
+        async with db.get_db().transaction():
+            await _lock_sender("instagram", instagram_recipient_id)
+            await guard_and_mark()
+    else:
+        await guard_and_mark()
 
     for attempt in range(MAX_META_SEND_ATTEMPTS):
         try:
+            if serialized_instagram_send:
+                async with db.get_db().transaction():
+                    await _lock_sender("instagram", instagram_recipient_id)
+                    if pre_send_guard:
+                        await pre_send_guard()
+                    response = await send_func(**kwargs)
+                    await record_outbound_message(inbound_job_id, lease_token, response)
+                    return response
+
+            if pre_send_guard and attempt:
+                await pre_send_guard()
             response = await send_func(**kwargs)
-            break
+            if inbound_job_id and lease_token:
+                await record_outbound_message(inbound_job_id, lease_token, response)
+            return response
         except MetaSendError as exc:
-            if not exc.retryable or attempt + 1 >= MAX_META_SEND_ATTEMPTS:
+            if (
+                not exc.retryable
+                or not exc.delivery_known
+                or attempt + 1 >= MAX_META_SEND_ATTEMPTS
+            ):
                 raise
             await asyncio.sleep(2**attempt)
 
-    if inbound_job_id and lease_token:
-        await record_outbound_message(inbound_job_id, lease_token, response)
-    return response
+    raise RuntimeError("Meta send attempts exhausted without a response")
 
 
 def _extract_meta_message_ids(response: dict) -> list[str]:

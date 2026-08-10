@@ -23,7 +23,7 @@ Instagram customer or commenter
 
 `WHATSAPP_BACKEND=meta` keeps direct Meta WhatsApp delivery. `WHATSAPP_BACKEND=kommo` moves only WhatsApp to Kommo. There is no Instagram backend selector, Instagram Salesbot, comment mirror, Meta/Kommo event correlation, or context-only Meta listener in the final architecture.
 
-Migration `018_retire_kommo_instagram.sql` retires live Instagram/Kommo processing and expires pending legacy records. It deliberately does not drop the old correlation tables or columns, preserving historical data and forward-only migration safety.
+Migration `016_meta_native_instagram.sql` retires live Instagram/Kommo processing while completing the Meta-native schema. It expires pending legacy records but deliberately does not drop the old correlation tables or columns, preserving historical data.
 
 ## Prerequisites
 
@@ -100,7 +100,7 @@ Run the normal migration runner through Railway pre-deploy or against the intend
 python3 store/scripts/migrate.py
 ```
 
-The current Store schema version is `18`, through `018_retire_kommo_instagram.sql`. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery, then rerun the normal migration runner. Migration 018 deprecates but does not drop the legacy Instagram/Kommo correlation schema.
+The current Store schema version is `16`, through `016_meta_native_instagram.sql`. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery, then rerun the normal migration runner. Migration 016 deprecates but does not drop the legacy Instagram/Kommo correlation schema.
 
 ## Widget Build And Installation
 
@@ -217,7 +217,7 @@ Authenticated diagnostics:
 They expose sanitized booleans, timestamps, counts, and errors, never secrets or raw customer payloads. Status also reports local Chats API attempt estimates; Kommo billing remains authoritative.
 
 ```text
-[ ] Store migration runner accepts schema version 18
+[ ] Store migration runner accepts schema version 16
 [ ] WHATSAPP_BACKEND=kommo
 [ ] Required Kommo credentials and AI Mode IDs are set
 [ ] KOMMO_SUBDOMAIN contains only the subdomain

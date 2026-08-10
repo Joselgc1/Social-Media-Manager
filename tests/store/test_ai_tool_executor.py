@@ -439,6 +439,39 @@ async def test_executor_interactive_payload():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "buttons",
+    [
+        [],
+        ["Uno", "Dos", "Tres", "Cuatro"],
+        ["Duplicada", "Duplicada"],
+        ["Esta etiqueta supera veinte caracteres", "Otra"],
+    ],
+)
+async def test_executor_rejects_interactive_payload_outside_common_limits(buttons):
+    result = await execute_tool(
+        "send_interactive_buttons",
+        {"body_text": "Elige una opción", "buttons": buttons},
+        _context(channel="instagram"),
+    )
+
+    assert result["status"] == "error"
+    assert result["message"].startswith("Invalid arguments for send_interactive_buttons")
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_interactive_body_over_utf8_byte_limit():
+    result = await execute_tool(
+        "send_interactive_buttons",
+        {"body_text": "á" * 600, "buttons": ["Sí"]},
+        _context(channel="instagram"),
+    )
+
+    assert result["status"] == "error"
+    assert "1000 UTF-8 bytes" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_executor_handoff_payload():
     result = await execute_tool(
         "request_agent_handoff",

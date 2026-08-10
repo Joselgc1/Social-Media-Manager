@@ -17,6 +17,8 @@ class _ScopedHistoryDB:
                 "content": values["content"],
                 "attachments": None,
                 "interaction_type": values["interaction_type"],
+                "instagram_media_id": values.get("instagram_media_id"),
+                "instagram_thread_id": values.get("instagram_thread_id"),
             }
         )
 
@@ -26,6 +28,13 @@ class _ScopedHistoryDB:
             for row in self.rows
             if row["customer_id"] == values["cid"]
             and row["interaction_type"] == values["interaction_type"]
+            and (
+                values["interaction_type"] != "instagram_comment"
+                or (
+                    row["instagram_media_id"] == values["instagram_media_id"]
+                    and row["instagram_thread_id"] == values["instagram_thread_id"]
+                )
+            )
         ]
         return list(reversed(matching[-values["limit"] :]))
 
@@ -37,6 +46,8 @@ async def _store_turn(
     *,
     channel: str = "instagram",
     interaction_type: str = "private_message",
+    instagram_media_id: str | None = None,
+    instagram_thread_id: str | None = None,
 ):
     await conversations.store_message(
         customer_id,
@@ -44,6 +55,8 @@ async def _store_turn(
         user_text,
         channel,
         interaction_type=interaction_type,
+        instagram_media_id=instagram_media_id,
+        instagram_thread_id=instagram_thread_id,
     )
     await conversations.store_message(
         customer_id,
@@ -51,6 +64,8 @@ async def _store_turn(
         assistant_text,
         channel,
         interaction_type=interaction_type,
+        instagram_media_id=instagram_media_id,
+        instagram_thread_id=instagram_thread_id,
     )
 
 
@@ -290,10 +305,16 @@ async def test_get_history_filters_by_interaction_scope(monkeypatch, interaction
     fetch_all = AsyncMock(return_value=[])
     monkeypatch.setattr(conversations.db, "fetch_all", fetch_all)
 
+    scope = (
+        {"instagram_media_id": "media-1", "instagram_thread_id": "thread-1"}
+        if interaction_type == "instagram_comment"
+        else {}
+    )
     await conversations.get_history(
         "customer",
         limit=20,
         interaction_type=interaction_type,
+        **scope,
     )
 
     query, values = fetch_all.await_args.args
@@ -348,6 +369,8 @@ async def test_comment_then_dm_history_excludes_comment_and_reply(monkeypatch):
         "Precio?",
         "El precio es $71",
         interaction_type="instagram_comment",
+        instagram_media_id="media-1",
+        instagram_thread_id="thread-1",
     )
 
     assert await conversations.get_history("customer", interaction_type="private_message") == []
@@ -363,6 +386,8 @@ async def test_dm_then_comment_history_excludes_private_dm(monkeypatch):
     assert await conversations.get_history(
         "customer",
         interaction_type="instagram_comment",
+        instagram_media_id="media-1",
+        instagram_thread_id="thread-1",
     ) == []
 
 
@@ -376,16 +401,66 @@ async def test_consecutive_public_comments_keep_comment_follow_up_context(monkey
         "Precio?",
         "El precio es $71",
         interaction_type="instagram_comment",
+        instagram_media_id="media-1",
+        instagram_thread_id="thread-1",
     )
 
     comment_history = await conversations.get_history(
         "customer",
         interaction_type="instagram_comment",
+        instagram_media_id="media-1",
+        instagram_thread_id="thread-1",
     )
     assert comment_history[-2:] == [
         {"role": "user", "content": "Precio?"},
         {"role": "assistant", "content": "El precio es $71"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_comment_history_does_not_cross_posts_or_threads(monkeypatch):
+    history_db = _ScopedHistoryDB()
+    monkeypatch.setattr(conversations, "db", history_db)
+
+    await _store_turn(
+        "customer",
+        "Precio?",
+        "El precio es $71",
+        interaction_type="instagram_comment",
+        instagram_media_id="post-a",
+        instagram_thread_id="thread-a",
+    )
+
+    assert await conversations.get_history(
+        "customer",
+        interaction_type="instagram_comment",
+        instagram_media_id="post-b",
+        instagram_thread_id="thread-a",
+    ) == []
+    assert await conversations.get_history(
+        "customer",
+        interaction_type="instagram_comment",
+        instagram_media_id="post-a",
+        instagram_thread_id="thread-b",
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_comment_reply_inherits_known_parent_thread_only_on_same_post(monkeypatch):
+    fetch = AsyncMock(return_value={"instagram_thread_id": "root-comment"})
+    monkeypatch.setattr(conversations.db, "fetch_one", fetch)
+
+    scope = await conversations.resolve_instagram_comment_thread(
+        media_id="post-a",
+        comment_id="customer-reply",
+        parent_comment_id="bot-reply",
+    )
+
+    assert scope["instagram_thread_id"] == "root-comment"
+    assert fetch.await_args.args[1] == {
+        "media_id": "post-a",
+        "parent_comment_id": "bot-reply",
+    }
 
 
 @pytest.mark.asyncio

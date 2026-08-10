@@ -12,6 +12,21 @@ META_LEASE_COLUMNS = [
     {"column_name": "integration_context"},
     {"column_name": "inbound_attachments"},
 ]
+INSTAGRAM_CONVERSATION_COLUMNS = [
+    {"column_name": "instagram_media_id"},
+    {"column_name": "instagram_comment_id"},
+    {"column_name": "instagram_parent_comment_id"},
+    {"column_name": "instagram_thread_id"},
+]
+INSTAGRAM_ECHO_COLUMNS = [
+    {"column_name": "provider_message_id"},
+    {"column_name": "recipient_id"},
+    {"column_name": "message_text"},
+    {"column_name": "classification"},
+    {"column_name": "eligible_at"},
+    {"column_name": "echo_seen_at"},
+    {"column_name": "reconciled_at"},
+]
 
 
 @pytest.mark.asyncio
@@ -23,6 +38,8 @@ async def test_store_schema_version_accepts_exact_supported_version(monkeypatch)
             side_effect=[
                 [{"version": version} for version in range(1, db.EXPECTED_SCHEMA_VERSION + 1)],
                 META_LEASE_COLUMNS,
+                INSTAGRAM_CONVERSATION_COLUMNS,
+                INSTAGRAM_ECHO_COLUMNS,
             ]
         ),
     )
@@ -53,10 +70,10 @@ async def test_store_schema_version_accepts_consolidated_upgrade_version(monkeyp
                     {"version": 14},
                     {"version": 15},
                     {"version": 16},
-                    {"version": 17},
-                    {"version": 18},
                 ],
                 META_LEASE_COLUMNS,
+                INSTAGRAM_CONVERSATION_COLUMNS,
+                INSTAGRAM_ECHO_COLUMNS,
             ]
         ),
     )
@@ -105,8 +122,6 @@ async def test_store_schema_version_rejects_historical_upgrade_without_meta_leas
                     {"version": 14},
                     {"version": 15},
                     {"version": 16},
-                    {"version": 17},
-                    {"version": 18},
                 ],
                 [{"column_name": "outbound_started_at"}],
             ]
@@ -114,4 +129,23 @@ async def test_store_schema_version_rejects_historical_upgrade_without_meta_leas
     )
 
     with pytest.raises(RuntimeError, match="required Meta inbound columns"):
+        await db.verify_schema_version()
+
+
+@pytest.mark.asyncio
+async def test_store_schema_version_rejects_missing_instagram_echo_artifacts(monkeypatch):
+    monkeypatch.setattr(
+        db,
+        "fetch_all",
+        AsyncMock(
+            side_effect=[
+                [{"version": version} for version in range(1, db.EXPECTED_SCHEMA_VERSION + 1)],
+                META_LEASE_COLUMNS,
+                INSTAGRAM_CONVERSATION_COLUMNS,
+                [],
+            ]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="meta_instagram_outbound_echoes"):
         await db.verify_schema_version()

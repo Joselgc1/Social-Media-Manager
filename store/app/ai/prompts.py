@@ -308,14 +308,15 @@ def _build_channel_context(channel: str, catalog_pdf_supported: bool | None = No
     )
     if channel == "whatsapp":
         return (
-            "Estás hablando por WhatsApp. Puedes usar send_interactive_buttons para mostrar opciones con botones. "
+            "Estás hablando por WhatsApp. Puedes usar send_interactive_buttons para mostrar 1-3 opciones con botones. "
             "Úsalos solo cuando el cliente todavía no haya escogido una opción por texto. "
             f"Los mensajes pueden ser más largos que en Instagram. {pdf_note}"
         )
     if channel == "instagram":
         return (
-            "Estás hablando por Instagram DM. No puedes enviar botones interactivos (usa send_interactive_buttons igual, "
-            "se convertirá automáticamente a Quick Replies). Mantén los mensajes más cortos (máximo 1000 bytes). "
+            "Estás hablando por Instagram DM. Puedes usar send_interactive_buttons para mostrar 1-3 opciones; "
+            "se enviarán como Quick Replies. Nunca uses esta herramienta en comentarios públicos. "
+            "Mantén los mensajes más cortos (máximo 1000 bytes). "
             "NO puedes enviar mensajes proactivos: solo puedes responder dentro de las 24 horas después del último mensaje del cliente. "
             "Instagram es un canal exclusivamente informativo: responde normalmente preguntas de productos, recomendaciones, "
             "precios, disponibilidad, presentaciones/opciones, comparaciones e imágenes. No inicies ni continúes checkout, "

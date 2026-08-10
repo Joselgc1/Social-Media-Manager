@@ -26,7 +26,7 @@ from app.payment_methods import (
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_VERSION = 18
+EXPECTED_SCHEMA_VERSION = 16
 SLOW_DB_OPERATION_MS = 500.0
 
 _db: _InstrumentedDatabase | None = None
@@ -217,13 +217,13 @@ async def verify_schema_version() -> None:
 
     versions = {int(row["version"]) for row in rows}
     accepted_versions = (
-        {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18},
-        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18},
+        {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
     )
     if versions not in accepted_versions:
         raise RuntimeError(
             f"Store database schema version mismatch: expected one of {[sorted(item) for item in accepted_versions]}, found {sorted(versions)}. "
-            "Apply Store migrations through store/migrations/018_retire_kommo_instagram.sql."
+            "Apply Store migrations through store/migrations/016_meta_native_instagram.sql."
         )
 
     required_meta_columns = {
@@ -247,7 +247,53 @@ async def verify_schema_version() -> None:
         raise RuntimeError(
             "Store database schema is missing required Meta inbound columns: "
             f"{', '.join(sorted(missing_columns))}. "
-            "Apply store/migrations/018_retire_kommo_instagram.sql."
+            "Apply store/migrations/016_meta_native_instagram.sql."
+        )
+
+    required_conversation_columns = {
+        "instagram_media_id",
+        "instagram_comment_id",
+        "instagram_parent_comment_id",
+        "instagram_thread_id",
+    }
+    conversation_column_rows = await fetch_all(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'conversations'
+        """
+    )
+    actual_conversation_columns = {str(row["column_name"]) for row in conversation_column_rows}
+    missing_conversation_columns = required_conversation_columns - actual_conversation_columns
+    if missing_conversation_columns:
+        raise RuntimeError(
+            "Store database schema is missing required Instagram conversation columns: "
+            f"{', '.join(sorted(missing_conversation_columns))}. "
+            "Apply store/migrations/016_meta_native_instagram.sql."
+        )
+
+    echo_column_rows = await fetch_all(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'meta_instagram_outbound_echoes'
+        """
+    )
+    required_echo_columns = {
+        "provider_message_id",
+        "recipient_id",
+        "message_text",
+        "classification",
+        "eligible_at",
+        "echo_seen_at",
+        "reconciled_at",
+    }
+    actual_echo_columns = {str(row["column_name"]) for row in echo_column_rows}
+    missing_echo_columns = required_echo_columns - actual_echo_columns
+    if missing_echo_columns:
+        raise RuntimeError(
+            "Store database schema is missing required meta_instagram_outbound_echoes columns: "
+            f"{', '.join(sorted(missing_echo_columns))}. "
+            "Apply store/migrations/016_meta_native_instagram.sql."
         )
 
 

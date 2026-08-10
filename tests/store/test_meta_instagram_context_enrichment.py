@@ -209,3 +209,79 @@ async def test_mapping_with_different_media_id_records_conflict_without_update(m
     assert result == {"status": "conflict", "reason": "mapping_has_different_media_id"}
     mock_db.fetch_one.assert_not_awaited()
     mock_db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_comment_enrichment_continues_when_media_lookup_is_unavailable(monkeypatch):
+    from app.integrations.meta_context import service
+
+    client = MagicMock()
+    client.get_media = AsyncMock(side_effect=RuntimeError("Graph response details"))
+    resolve = AsyncMock(return_value={"status": "not_found"})
+    monkeypatch.setattr(service.MetaContextClient, "from_config", lambda: client)
+    monkeypatch.setattr(service, "resolve_content_product_mapping", resolve)
+
+    enriched = await service.enrich_native_instagram_context({
+        "interaction_type": "instagram_comment",
+        "public_comment_context": {"media_id": "media-1"},
+    })
+
+    public = enriched["public_comment_context"]
+    assert public["media_lookup_status"] == "unavailable"
+    assert public["mapping_status"] == "not_found"
+    assert "Graph response details" not in str(public)
+    resolve.assert_awaited_once_with(media_id="media-1", permalink=None)
+
+
+@pytest.mark.asyncio
+async def test_comment_enrichment_marks_mapping_lookup_error_safely(monkeypatch):
+    from app.integrations.meta_context import service
+
+    monkeypatch.setattr(
+        service,
+        "resolve_content_product_mapping",
+        AsyncMock(side_effect=RuntimeError("database details")),
+    )
+
+    enriched = await service.enrich_native_instagram_context({
+        "interaction_type": "instagram_comment",
+        "public_comment_context": {
+            "media_id": "media-1",
+            "post_url": "https://www.instagram.com/p/ABC123/",
+            "product_skus": ["STALE-SKU"],
+        },
+    })
+
+    public = enriched["public_comment_context"]
+    assert public["mapping_status"] == "error"
+    assert "product_skus" not in public
+    assert "database details" not in str(public)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_operation", ["discovery", "mapping"])
+async def test_story_enrichment_failure_returns_without_product_context(
+    monkeypatch, failed_operation
+):
+    from app.integrations.meta_context import service
+
+    discovery = AsyncMock(return_value={"status": "discovered"})
+    mapping = AsyncMock(return_value={"status": "resolved", "product_skus": ["SKU-1"]})
+    if failed_operation == "discovery":
+        discovery.side_effect = RuntimeError("discovery failed")
+    else:
+        mapping.side_effect = RuntimeError("mapping failed")
+    monkeypatch.setattr(service, "discover_instagram_story", discovery)
+    monkeypatch.setattr(service, "resolve_content_product_mapping", mapping)
+
+    enriched = await service.enrich_native_instagram_context({
+        "story_id": "story-1",
+        "incoming_instagram_context": {
+            "mapping_status": "resolved",
+            "product_skus": ["STALE-SKU"],
+        },
+    })
+
+    assert "incoming_instagram_context" not in enriched
+    if failed_operation == "discovery":
+        mapping.assert_not_awaited()
