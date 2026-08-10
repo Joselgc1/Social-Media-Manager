@@ -1,7 +1,7 @@
-"""Transport router for opt-in Kommo Chats media delivery.
+"""Transport router for durable Kommo Chats API delivery.
 
-Routes Kommo WhatsApp media responses through the Chats API while
-leaving text-only responses on the existing Salesbot transport.
+Routes Instagram private-message text and opt-in WhatsApp media through
+the Chats API while leaving WhatsApp text on the existing Salesbot transport.
 """
 
 from __future__ import annotations
@@ -90,8 +90,11 @@ async def deliver_response(
     client: KommoClient | None = None,
     files: KommoFiles | None = None,
 ) -> DeliveryResult:
-    """Prepare and send supported media, or defer text delivery to Salesbot."""
+    """Send direct Instagram text, supported WhatsApp media, or use Salesbot."""
     clean_text = str(customer_text or "").strip()
+    if _is_direct_instagram_dm(job):
+        return await _deliver_direct_text(job, clean_text, client=client)
+
     product_image = _product_image_payload(result)
     catalog_pdf = _catalog_pdf_payload(result)
     if not product_image and not catalog_pdf:
@@ -189,6 +192,67 @@ async def deliver_response(
         customer_text=clean_text,
         delivered_attachments=delivered_attachments,
         provider_message_ids=provider_message_ids,
+    )
+
+
+async def _deliver_direct_text(
+    job: dict,
+    customer_text: str,
+    *,
+    client: KommoClient | None = None,
+) -> DeliveryResult:
+    if not customer_text:
+        raise KommoAPIError("Kommo direct text delivery requires a message")
+    job_id = str(job.get("id") or "").strip()
+    if not job_id:
+        raise KommoAPIError("Kommo direct text delivery requires a durable job ID")
+    talk_id = _validated_talk_id(job.get("talk_id"))
+    text_hash = hashlib.sha256(customer_text.encode()).hexdigest()
+    request_fingerprint = _text_request_fingerprint(
+        job_id=job_id,
+        talk_id=talk_id,
+        text_hash=text_hash,
+    )
+    claim = await _claim_delivery(
+        job_id=job_id,
+        media_type="text",
+        request_fingerprint=request_fingerprint,
+        attachment_metadata={
+            "delivery_type": "text",
+            "talk_id": talk_id,
+            "text_hash": text_hash,
+        },
+    )
+    if claim.status in {"accepted", "confirmed"}:
+        provider_message_id = claim.provider_message_id
+        if not provider_message_id:
+            raise KommoDeliveryStateError(
+                f"Kommo delivery {request_fingerprint} is {claim.status} without a provider message ID"
+            )
+    elif claim.status == "sending" and claim.send_allowed:
+        provider_message_id = await _send_claimed_delivery(
+            client or KommoClient.from_config(),
+            job_id=job_id,
+            talk_id=talk_id,
+            text=customer_text,
+            request_fingerprint=request_fingerprint,
+        )
+    else:
+        raise KommoDeliveryStateError(
+            f"Kommo delivery {request_fingerprint} is {claim.status}; refusing an unsafe resend"
+        )
+    return DeliveryResult(
+        transport="chats_api",
+        customer_text=customer_text,
+        delivered_attachments=[],
+        provider_message_ids=[str(provider_message_id)],
+    )
+
+
+def _is_direct_instagram_dm(job: dict) -> bool:
+    return (
+        str(job.get("channel") or "").strip().lower() == "instagram"
+        and str(job.get("interaction_type") or "").strip().lower() == "private_message"
     )
 
 
@@ -425,6 +489,17 @@ def _request_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _text_request_fingerprint(*, job_id: str, talk_id: str, text_hash: str) -> str:
+    logical_send = {
+        "job_id": job_id,
+        "talk_id": talk_id,
+        "delivery_type": "text",
+        "text_hash": text_hash,
+    }
+    encoded = json.dumps(logical_send, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 async def _claim_delivery(
     *,
     job_id: str,
@@ -551,16 +626,19 @@ async def _send_claimed_delivery(
     job_id: str,
     talk_id: str,
     text: str,
-    uploaded: KommoUploadedFile,
-    media: _MediaRequest,
     request_fingerprint: str,
+    uploaded: KommoUploadedFile | None = None,
+    media: _MediaRequest | None = None,
 ) -> str:
     try:
-        response = await client.send_talk_message(
-            talk_id,
-            text=text or None,
-            attachment=uploaded.attachment(media.attachment_type),
-        )
+        if uploaded is not None and media is not None:
+            response = await client.send_talk_message(
+                talk_id,
+                text=text or None,
+                attachment=uploaded.attachment(media.attachment_type),
+            )
+        else:
+            response = await client.send_talk_message(talk_id, text=text or None)
         provider_message_id = response.get("id") if isinstance(response, dict) else None
         if not isinstance(provider_message_id, str) or not provider_message_id.strip():
             raise KommoAPIError("Kommo send-message response is missing the message ID")
@@ -571,7 +649,7 @@ async def _send_claimed_delivery(
         except Exception as persistence_error:
             if status == "delivery_unknown":
                 raise KommoDeliveryUnknownError(
-                    "Kommo media send outcome is unknown and its state could not be persisted"
+                    "Kommo Chats API send outcome is unknown and its state could not be persisted"
                 ) from error
             raise error from persistence_error
         if status == "delivery_unknown":
@@ -601,7 +679,7 @@ async def _send_claimed_delivery(
         )
     except Exception as error:
         raise KommoDeliveryUnknownError(
-            "Kommo accepted the media send but its delivery state could not be persisted"
+            "Kommo accepted the Chats API send but its delivery state could not be persisted"
         ) from error
     if not accepted:
         raise KommoDeliveryStateError("Kommo delivery acceptance could not be persisted")

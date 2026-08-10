@@ -15,6 +15,11 @@ JOB = {
     "channel": "whatsapp",
     "interaction_type": "private_message",
 }
+DIRECT_INSTAGRAM_JOB = {
+    **JOB,
+    "channel": "instagram",
+    "interaction_type": "private_message",
+}
 FILE_UUID = "367b9f38-5f01-4cea-947e-dfab47aea522"
 VERSION_UUID = "43de3be7-307b-4766-a23e-5e88211b9a8d"
 PDF_FILE_UUID = "89a61e7b-ba30-476f-b2f6-705a964e85c6"
@@ -117,6 +122,60 @@ async def test_text_only_returns_salesbot_without_external_calls():
 
 
 @pytest.mark.asyncio
+async def test_direct_instagram_text_uses_durable_chats_delivery(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "instagram-message"}))
+
+    result = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result={"text": "  Respuesta original  "},
+        customer_text="  Respuesta final  ",
+        client=client,
+    )
+
+    assert result == delivery.DeliveryResult(
+        transport="chats_api",
+        customer_text="Respuesta final",
+        delivered_attachments=[],
+        provider_message_ids=["instagram-message"],
+    )
+    client.send_talk_message.assert_awaited_once_with("105", text="Respuesta final")
+    claim_values = delivery._claim_delivery.await_args.kwargs
+    assert claim_values["job_id"] == DIRECT_INSTAGRAM_JOB["id"]
+    assert claim_values["media_type"] == "text"
+    assert len(claim_values["request_fingerprint"]) == 64
+    assert claim_values["attachment_metadata"] == {
+        "delivery_type": "text",
+        "talk_id": "105",
+        "text_hash": delivery.hashlib.sha256(b"Respuesta final").hexdigest(),
+    }
+    accepted_values = delivery.db.fetch_one.await_args.args[1]
+    assert accepted_values["provider_message_id"] == "instagram-message"
+
+
+def test_direct_text_fingerprint_is_deterministic_and_transport_specific():
+    text_hash = delivery.hashlib.sha256(b"Respuesta final").hexdigest()
+    first = delivery._text_request_fingerprint(
+        job_id=JOB["id"], talk_id="105", text_hash=text_hash
+    )
+    duplicate = delivery._text_request_fingerprint(
+        job_id=JOB["id"], talk_id="105", text_hash=text_hash
+    )
+    changed_talk = delivery._text_request_fingerprint(
+        job_id=JOB["id"], talk_id="106", text_hash=text_hash
+    )
+    changed_text = delivery._text_request_fingerprint(
+        job_id=JOB["id"],
+        talk_id="105",
+        text_hash=delivery.hashlib.sha256(b"Otra respuesta").hexdigest(),
+    )
+
+    assert first == duplicate
+    assert first != changed_talk
+    assert first != changed_text
+
+
+@pytest.mark.asyncio
 async def test_image_and_text_use_one_chats_api_send(monkeypatch):
     _install_chats_dependencies(monkeypatch)
     client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "message-image"}))
@@ -205,7 +264,6 @@ async def test_image_pdf_and_text_send_sequentially_with_text_only_first(monkeyp
 @pytest.mark.parametrize(
     "job",
     [
-        {**JOB, "channel": "instagram"},
         {**JOB, "interaction_type": "instagram_comment"},
     ],
 )
@@ -225,6 +283,24 @@ async def test_non_whatsapp_private_media_stays_on_salesbot(monkeypatch, job):
     assert result.transport == "salesbot"
     client.send_talk_message.assert_not_awaited()
     files.upload_image_from_url.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_instagram_missing_talk_id_sends_nothing(monkeypatch):
+    claim = AsyncMock()
+    monkeypatch.setattr(delivery, "_claim_delivery", claim)
+    client = SimpleNamespace(send_talk_message=AsyncMock())
+
+    with pytest.raises(KommoAPIError, match="talk ID is invalid"):
+        await deliver_response(
+            job={**DIRECT_INSTAGRAM_JOB, "talk_id": None},
+            result={"text": "Hola"},
+            customer_text="Hola",
+            client=client,
+        )
+
+    claim.assert_not_awaited()
+    client.send_talk_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -490,6 +566,57 @@ async def test_duplicate_accepted_fingerprint_never_resends(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["accepted", "confirmed"])
+async def test_direct_instagram_accepted_or_confirmed_delivery_never_resends(
+    monkeypatch,
+    status,
+):
+    _install_chats_dependencies(monkeypatch, claim_status=status)
+    delivery._claim_delivery.return_value = delivery._DeliveryClaim(
+        status=status,
+        provider_message_id="existing-instagram-message",
+        send_allowed=False,
+    )
+    client = SimpleNamespace(send_talk_message=AsyncMock())
+
+    result = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result={"text": "Hola"},
+        customer_text="Hola",
+        client=client,
+    )
+
+    assert result.provider_message_ids == ["existing-instagram-message"]
+    client.send_talk_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_direct_instagram_worker_claim_sends_once(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    delivery._claim_delivery.side_effect = [
+        delivery._DeliveryClaim("sending", None, True),
+        delivery._DeliveryClaim("accepted", "instagram-message", False),
+    ]
+    client = SimpleNamespace(send_talk_message=AsyncMock(return_value={"id": "instagram-message"}))
+
+    first = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result={"text": "Hola"},
+        customer_text="Hola",
+        client=client,
+    )
+    second = await deliver_response(
+        job=DIRECT_INSTAGRAM_JOB,
+        result={"text": "Hola"},
+        customer_text="Hola",
+        client=client,
+    )
+
+    assert first.provider_message_ids == second.provider_message_ids == ["instagram-message"]
+    client.send_talk_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_retry_reuses_accepted_delivery_without_another_paid_send(monkeypatch):
     _install_chats_dependencies(monkeypatch)
     delivery._claim_delivery.side_effect = [
@@ -550,6 +677,61 @@ async def test_retry_after_ambiguous_send_never_repeats_paid_request(monkeypatch
         )
 
     client.send_talk_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_instagram_ambiguous_send_is_unknown_and_never_retries(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    mark_error = AsyncMock()
+    monkeypatch.setattr(delivery, "_mark_delivery_error", mark_error)
+    delivery._claim_delivery.side_effect = [
+        delivery._DeliveryClaim("sending", None, True),
+        delivery._DeliveryClaim("delivery_unknown", None, False),
+    ]
+    client = SimpleNamespace(
+        send_talk_message=AsyncMock(side_effect=KommoAPIError("connection lost"))
+    )
+
+    with pytest.raises(delivery.KommoDeliveryUnknownError):
+        await deliver_response(
+            job=DIRECT_INSTAGRAM_JOB,
+            result={"text": "Hola"},
+            customer_text="Hola",
+            client=client,
+        )
+    with pytest.raises(KommoDeliveryStateError, match="unsafe resend"):
+        await deliver_response(
+            job=DIRECT_INSTAGRAM_JOB,
+            result={"text": "Hola"},
+            customer_text="Hola",
+            client=client,
+        )
+
+    client.send_talk_message.assert_awaited_once()
+    assert mark_error.await_args.args[2] == "delivery_unknown"
+
+
+@pytest.mark.asyncio
+async def test_direct_instagram_definitive_failure_records_retryable_failed_state(monkeypatch):
+    _install_chats_dependencies(monkeypatch)
+    mark_error = AsyncMock()
+    monkeypatch.setattr(delivery, "_mark_delivery_error", mark_error)
+    client = SimpleNamespace(
+        send_talk_message=AsyncMock(
+            side_effect=KommoAPIError("bad request", status_code=400)
+        )
+    )
+
+    with pytest.raises(KommoAPIError, match="bad request"):
+        await deliver_response(
+            job=DIRECT_INSTAGRAM_JOB,
+            result={"text": "Hola"},
+            customer_text="Hola",
+            client=client,
+        )
+
+    assert mark_error.await_args.args[2] == "failed"
+    client.send_talk_message.assert_awaited_once_with("105", text="Hola")
 
 
 @pytest.mark.asyncio
@@ -680,7 +862,7 @@ async def test_accepted_send_with_database_persistence_error_is_delivery_unknown
         semantic_attachment={"type": "product_image"},
     )
 
-    with pytest.raises(delivery.KommoDeliveryUnknownError, match="accepted the media send"):
+    with pytest.raises(delivery.KommoDeliveryUnknownError, match="accepted the Chats API send"):
         await delivery._send_claimed_delivery(
             client,
             job_id=JOB["id"],

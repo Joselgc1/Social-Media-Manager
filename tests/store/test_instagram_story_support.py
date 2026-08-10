@@ -1062,12 +1062,14 @@ def test_story_prompt_uses_live_context_without_internal_or_unmapped_leakage():
 async def test_ready_job_story_context_lifecycle(monkeypatch, case):
     from app.channels import instagram_sender
     from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import DeliveryResult
 
     story_a = _session_context(story_id="story-a", skus=["SKU-A"])
     story_b = _session_context(story_id="story-b", skus=["SKU-B"])
     story_b["meta_context_event_id"] = "event-b"
     channel = "whatsapp" if case == "whatsapp" else "instagram"
     interaction_type = "instagram_comment" if case == "public_comment" else "private_message"
+    is_direct_instagram = channel == "instagram" and interaction_type == "private_message"
     event_id = None
     job_context = {}
     if case == "unmapped_story_b":
@@ -1145,6 +1147,20 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
     monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
     meta_send = AsyncMock()
     monkeypatch.setattr(instagram_sender, "send_text", meta_send)
+    direct_delivery = AsyncMock(
+        return_value=DeliveryResult(
+            transport="chats_api",
+            customer_text="Respuesta Kommo",
+            delivered_attachments=[],
+            provider_message_ids=["instagram-message"],
+        )
+    )
+    direct_history = AsyncMock()
+    direct_sent = AsyncMock(return_value=True)
+    if is_direct_instagram:
+        monkeypatch.setattr(jobs, "deliver_response", direct_delivery)
+        monkeypatch.setattr(jobs, "_store_assistant_message_after_delivery", direct_history)
+        monkeypatch.setattr(jobs, "_mark_direct_job_sent", direct_sent)
 
     client = MagicMock()
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
@@ -1155,10 +1171,10 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
         "processing_lease_id": "00000000-0000-0000-0000-000000000001",
         "return_url": (
             None
-            if channel == "instagram" and interaction_type == "private_message"
+            if is_direct_instagram
             else "https://acme.kommo.com/api/v4/salesbot/1/continue/2"
         ),
-        "talk_id": "300" if channel == "instagram" and interaction_type == "private_message" else None,
+        "talk_id": "300" if is_direct_instagram else None,
         "combined_message": "Precio?",
         "channel": channel,
         "interaction_type": interaction_type,
@@ -1192,11 +1208,17 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
     if case == "public_comment":
         assert integration_context["public_comment_context"] == public_context
 
-    if channel == "instagram" and interaction_type == "private_message":
+    if is_direct_instagram:
         client.continue_salesbot.assert_not_awaited()
-        terminal_values = mock_db.execute.await_args_list[-1].args[1]
-        assert terminal_values["status"] == "failed"
-        assert terminal_values["last_error"] == "instagram_direct_delivery_not_implemented"
+        direct_delivery.assert_awaited_once()
+        assert direct_delivery.await_args.kwargs["job"]["talk_id"] == "300"
+        direct_history.assert_awaited_once()
+        assert direct_history.await_args.kwargs["expected_job_status"] == "processing"
+        direct_sent.assert_awaited_once_with(
+            "job-1",
+            "00000000-0000-0000-0000-000000000001",
+            ["instagram-message"],
+        )
     else:
         client.continue_salesbot.assert_awaited_once_with(
             "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
@@ -1389,6 +1411,7 @@ async def test_suppressed_ready_job_applies_only_current_story_event_before_gate
 async def test_story_reply_delivery_waits_for_direct_transport_and_never_uses_salesbot_or_meta(monkeypatch):
     from app.channels import instagram_sender
     from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import DeliveryResult
 
     mock_db = MagicMock()
     mock_db.get_settings = AsyncMock(
@@ -1440,6 +1463,19 @@ async def test_story_reply_delivery_waits_for_direct_transport_and_never_uses_sa
     monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
     meta_send = AsyncMock()
     monkeypatch.setattr(instagram_sender, "send_text", meta_send)
+    direct_delivery = AsyncMock(
+        return_value=DeliveryResult(
+            transport="chats_api",
+            customer_text="Cuesta $25.",
+            delivered_attachments=[],
+            provider_message_ids=["instagram-message"],
+        )
+    )
+    direct_history = AsyncMock()
+    direct_sent = AsyncMock(return_value=True)
+    monkeypatch.setattr(jobs, "deliver_response", direct_delivery)
+    monkeypatch.setattr(jobs, "_store_assistant_message_after_delivery", direct_history)
+    monkeypatch.setattr(jobs, "_mark_direct_job_sent", direct_sent)
 
     client = MagicMock()
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
@@ -1459,9 +1495,13 @@ async def test_story_reply_delivery_waits_for_direct_transport_and_never_uses_sa
     })
 
     client.continue_salesbot.assert_not_awaited()
-    terminal_values = mock_db.execute.await_args_list[-1].args[1]
-    assert terminal_values["status"] == "failed"
-    assert terminal_values["last_error"] == "instagram_direct_delivery_not_implemented"
+    direct_delivery.assert_awaited_once()
+    direct_history.assert_awaited_once()
+    direct_sent.assert_awaited_once_with(
+        "job-1",
+        "00000000-0000-0000-0000-000000000001",
+        ["instagram-message"],
+    )
     meta_send.assert_not_awaited()
     integration_context = jobs.generate_response.await_args.kwargs["integration_context"]
     assert integration_context["incoming_instagram_context"]["story_id"] == "story-1"

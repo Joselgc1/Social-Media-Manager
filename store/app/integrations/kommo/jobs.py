@@ -1211,24 +1211,31 @@ async def _process_ready_job(job: dict) -> None:
             )
             await _continue_and_discard_job(client, job, "empty_after_sanitization")
             return
-        if _is_direct_instagram_dm(job):
-            logger.info(
-                "Kommo direct Instagram delivery deferred to Stage 2: job_id=%s",
-                job["id"],
-            )
-            await _mark_job(
-                job["id"],
-                "failed",
-                "instagram_direct_delivery_not_implemented",
-                processing_lease_id=job.get("processing_lease_id"),
-            )
-            return
         delivery_result = await deliver_response(
             job=job,
             result=result,
             customer_text=customer_text,
             client=client,
         )
+        if _is_direct_instagram_dm(job):
+            media_delivery_succeeded = True
+            await _store_assistant_message_after_delivery(
+                customer,
+                job,
+                result,
+                delivery_result.customer_text,
+                delivered_attachments=delivery_result.delivered_attachments,
+                expected_job_status="processing",
+            )
+            if not await _mark_direct_job_sent(
+                job["id"],
+                job.get("processing_lease_id"),
+                delivery_result.provider_message_ids,
+            ):
+                raise KommoDeliveryStateError(
+                    "Kommo direct Instagram job could not be marked sent after delivery acceptance"
+                )
+            return
         if delivery_result.transport == "salesbot":
             fallback_mapped = map_ai_response_to_salesbot(result)
             fallback_text = (fallback_mapped.customer_text or "").strip()
@@ -2314,6 +2321,42 @@ async def _mark_job_sent(job_id: str, processing_lease_id: str | None, response_
     )
     if updated:
         logger.info("Kommo continuation accepted: job_id=%s", job_id)
+    return bool(updated)
+
+
+async def _mark_direct_job_sent(
+    job_id: str,
+    processing_lease_id: str | None,
+    provider_message_ids: list[str],
+) -> bool:
+    updated = await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs
+        SET status = 'sent',
+            last_error = NULL,
+            continuation_response = CAST(:delivery_response AS jsonb),
+            processing_started_at = NULL,
+            processing_lease_id = NULL,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'processing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+        RETURNING id
+        """,
+        {
+            "id": job_id,
+            "processing_lease_id": processing_lease_id,
+            "delivery_response": json.dumps(
+                {
+                    "transport": "chats_api",
+                    "provider_message_ids": provider_message_ids,
+                }
+            ),
+        },
+    )
+    if updated:
+        logger.info("Kommo direct Instagram delivery accepted: job_id=%s", job_id)
     return bool(updated)
 
 

@@ -182,7 +182,13 @@ async def test_mirrored_comment_general_webhook_creates_private_message_job_for_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("matched", [True, False])
-async def test_outgoing_webhook_only_reconciles_existing_delivery(client, monkeypatch, matched):
+@pytest.mark.parametrize("origin", ["whatsapp", "instagram"])
+async def test_outgoing_webhook_only_reconciles_existing_delivery(
+    client,
+    monkeypatch,
+    matched,
+    origin,
+):
     confirm = AsyncMock(return_value=matched)
     record = AsyncMock()
     monkeypatch.setattr(kommo, "confirm_outbound_delivery", confirm)
@@ -195,7 +201,7 @@ async def test_outgoing_webhook_only_reconciles_existing_delivery(client, monkey
                 "add": [
                     {
                         "id": "provider-message-1",
-                        "origin": "whatsapp",
+                        "origin": origin,
                         "author": {"type": "internal"},
                     }
                 ]

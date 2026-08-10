@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from app.integrations.kommo.client import KommoAPIError
+from app.integrations.kommo.delivery import KommoDeliveryUnknownError
 from app.integrations.kommo.models import NormalizedKommoEvent, SalesbotWidgetData
 from app.integrations.kommo.state import evaluate_automation_state
 
@@ -39,6 +41,74 @@ def _install_ready_job_db(monkeypatch, jobs, *, settings=None, assistant_persist
     monkeypatch.setattr(jobs, "db", mock_db)
     monkeypatch.setattr(jobs.conversations, "store_message", AsyncMock())
     return mock_db
+
+
+def _install_direct_ready_job(
+    monkeypatch,
+    jobs,
+    *,
+    ai_result=None,
+    delivery_result=None,
+    delivery_error=None,
+):
+    from app.integrations.kommo.delivery import DeliveryResult
+
+    mock_db = _install_ready_job_db(
+        monkeypatch,
+        jobs,
+        settings={"ai_enabled": True, "kommo_emoji_mode_instagram": "preserve"},
+    )
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(
+            kommo_ai_active_enum_id=1,
+            instagram_story_context_ttl_hours=24,
+        ),
+    )
+    monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    monkeypatch.setattr(
+        jobs.sessions,
+        "load_active_instagram_content_context",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "evaluate_automation_state",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            reason=None,
+            needs_ai_mode_initialization=False,
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "resolve_customer_from_kommo_job",
+        AsyncMock(return_value={"id": "customer", "conversation_state": "active"}),
+    )
+    generate = AsyncMock(
+        return_value=ai_result or {"text": "Respuesta directa", "escalated": False}
+    )
+    monkeypatch.setattr(jobs, "generate_response", generate)
+    monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+    deliver = AsyncMock(
+        return_value=delivery_result
+        or DeliveryResult(
+            transport="chats_api",
+            customer_text="Respuesta directa",
+            delivered_attachments=[],
+            provider_message_ids=["instagram-message"],
+        ),
+        side_effect=delivery_error,
+    )
+    monkeypatch.setattr(jobs, "deliver_response", deliver)
+    client = MagicMock()
+    client.run_salesbot = AsyncMock()
+    client.continue_salesbot = AsyncMock()
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+    return mock_db, client, generate, deliver, store_message
 
 
 def _bind_names(query: str) -> set[str]:
@@ -1195,6 +1265,168 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
     assert values["widget_contact_id"] == "200"
     assert values["interaction_type"] == "private_message"
     assert values["expected_channel"] is None
+
+
+@pytest.mark.asyncio
+async def test_ready_instagram_dm_delivers_directly_and_marks_sent(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+    )
+    job = {
+        "id": "job",
+        "processing_lease_id": LEASE_ID,
+        "return_url": None,
+        "combined_message": "Precio?",
+        "channel": "instagram",
+        "interaction_type": "private_message",
+        "talk_id": "300",
+        "correlation_id": "corr",
+    }
+
+    await jobs._process_ready_job(job)
+
+    deliver.assert_awaited_once()
+    assert deliver.await_args.kwargs["job"]["talk_id"] == "300"
+    assert deliver.await_args.kwargs["customer_text"] == "Respuesta directa"
+    client.run_salesbot.assert_not_awaited()
+    client.continue_salesbot.assert_not_awaited()
+    store_message.assert_awaited_once_with(
+        customer_id="customer",
+        role="assistant",
+        content="Respuesta directa",
+        channel="instagram",
+        function_calls=None,
+        source_id="kommo-job:job",
+        attachments=None,
+        interaction_type="private_message",
+    )
+    sent_call = next(
+        call
+        for call in mock_db.fetch_one.await_args_list
+        if "SET status = 'sent'" in call.args[0]
+    )
+    assert "status = 'processing'" in sent_call.args[0]
+    assert "status = 'continuing'" not in sent_call.args[0]
+    assert json.loads(sent_call.args[1]["delivery_response"]) == {
+        "transport": "chats_api",
+        "provider_message_ids": ["instagram-message"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delivery_error", "expected_status"),
+    [
+        (KommoAPIError("bad request", status_code=400), "failed"),
+        (KommoDeliveryUnknownError("connection lost"), "delivery_unknown"),
+    ],
+)
+async def test_ready_instagram_dm_delivery_failure_is_safely_terminal(
+    monkeypatch,
+    delivery_error,
+    expected_status,
+):
+    from app.integrations.kommo import jobs
+
+    mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+        delivery_error=delivery_error,
+    )
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": None,
+            "combined_message": "Precio?",
+            "channel": "instagram",
+            "interaction_type": "private_message",
+            "talk_id": "300",
+            "correlation_id": "corr",
+        }
+    )
+
+    deliver.assert_awaited_once()
+    client.continue_salesbot.assert_not_awaited()
+    store_message.assert_not_awaited()
+    assert mock_db.execute.await_args.args[1]["status"] == expected_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_overrides", "ai_result", "expected_reason"),
+    [
+        ({"message_type": "file"}, None, "unsupported_attachment"),
+        ({}, {"text": "", "escalated": False}, "empty_response"),
+    ],
+)
+async def test_direct_instagram_no_reply_paths_never_continue_salesbot(
+    monkeypatch,
+    job_overrides,
+    ai_result,
+    expected_reason,
+):
+    from app.integrations.kommo import jobs
+
+    mock_db, client, generate, deliver, _store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+        ai_result=ai_result,
+    )
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": None,
+            "combined_message": "Contenido",
+            "channel": "instagram",
+            "interaction_type": "private_message",
+            "talk_id": "300",
+            "correlation_id": "corr",
+            **job_overrides,
+        }
+    )
+
+    if job_overrides:
+        generate.assert_not_awaited()
+    deliver.assert_not_awaited()
+    client.continue_salesbot.assert_not_awaited()
+    terminal_values = mock_db.execute.await_args.args[1]
+    assert terminal_values["status"] == "discarded"
+    assert terminal_values["last_error"] == expected_reason
+
+
+@pytest.mark.asyncio
+async def test_direct_instagram_ai_failure_sends_nothing_and_never_continues_salesbot(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db, client, generate, deliver, store_message = _install_direct_ready_job(
+        monkeypatch,
+        jobs,
+    )
+    generate.side_effect = RuntimeError("AI unavailable")
+
+    await jobs._process_ready_job(
+        {
+            "id": "job",
+            "processing_lease_id": LEASE_ID,
+            "return_url": None,
+            "combined_message": "Precio?",
+            "channel": "instagram",
+            "interaction_type": "private_message",
+            "talk_id": "300",
+            "correlation_id": "corr",
+        }
+    )
+
+    deliver.assert_not_awaited()
+    store_message.assert_not_awaited()
+    client.continue_salesbot.assert_not_awaited()
+    assert mock_db.execute.await_args.args[1]["status"] == "failed"
 
 
 @pytest.mark.asyncio

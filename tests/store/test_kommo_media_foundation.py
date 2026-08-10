@@ -607,6 +607,36 @@ async def test_send_talk_message_posts_text_and_image_attachment_and_accepts_202
 
 
 @pytest.mark.asyncio
+async def test_send_talk_message_posts_text_only_to_exact_talk(monkeypatch):
+    from app.integrations.kommo import client as client_module
+
+    recorded = {}
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        recorded["path"] = request.url.path
+        recorded["payload"] = json.loads(request.content)
+        return httpx.Response(202, json={"id": MESSAGE_UUID})
+
+    def client_factory(*args, **kwargs):
+        return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(client_module, "KOMMO_MIN_REQUEST_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(client_module.httpx, "AsyncClient", client_factory)
+
+    response = await KommoClient(subdomain="acme", access_token="token").send_talk_message(
+        "300",
+        text="Respuesta directa",
+    )
+
+    assert response == {"id": MESSAGE_UUID}
+    assert recorded == {
+        "path": "/api/v4/talks/300/send_message",
+        "payload": {"text": "Respuesta directa"},
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "attachment",
     [
