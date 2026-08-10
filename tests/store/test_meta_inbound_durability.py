@@ -158,7 +158,16 @@ async def test_claimed_job_completion_is_fenced_by_lease_token():
     ):
         await inbound_buffer._process_claimed_job(job)
 
-    processor.assert_awaited_once_with("sender-1", "Hola", None, {}, "job-1", "lease-1")
+    processor.assert_awaited_once_with(
+        "sender-1",
+        "Hola",
+        None,
+        {},
+        "job-1",
+        "lease-1",
+        "private_message",
+        {},
+    )
     completion_query, completion_values = fetch_one.await_args.args
     assert "processing_lease_token = :lease_token" in completion_query
     assert completion_values == {"job_id": "job-1", "lease_token": "lease-1"}

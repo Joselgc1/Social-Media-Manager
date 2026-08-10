@@ -55,6 +55,9 @@ async def test_store_migration_runner_executes_schema_and_closes_connection(monk
     conversation_scope_migration_sql = (
         runner.CONVERSATION_INTERACTION_SCOPE_MIGRATION_PATH.read_text(encoding="utf-8")
     )
+    meta_inbound_instagram_context_migration_sql = (
+        runner.META_INBOUND_INSTAGRAM_CONTEXT_MIGRATION_PATH.read_text(encoding="utf-8")
+    )
     assert connection.execute.await_args_list[1].args == (migration_sql,)
     assert connection.execute.await_args_list[2].args == (delivery_migration_sql,)
     assert connection.execute.await_args_list[3].args == (instagram_content_migration_sql,)
@@ -69,8 +72,11 @@ async def test_store_migration_runner_executes_schema_and_closes_connection(monk
     assert connection.execute.await_args_list[12].args == (inbound_voice_migration_sql,)
     assert connection.execute.await_args_list[13].args == (inbound_attachments_migration_sql,)
     assert connection.execute.await_args_list[14].args == (conversation_scope_migration_sql,)
+    assert connection.execute.await_args_list[15].args == (
+        meta_inbound_instagram_context_migration_sql,
+    )
     assert connection.execute.await_args_list[0].args[0] == "SELECT pg_advisory_lock($1)"
-    assert connection.execute.await_args_list[15].args[0] == "SELECT pg_advisory_unlock($1)"
+    assert connection.execute.await_args_list[16].args[0] == "SELECT pg_advisory_unlock($1)"
     connection.close.assert_awaited_once()
 
 

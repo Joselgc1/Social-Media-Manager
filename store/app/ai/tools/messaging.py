@@ -57,6 +57,7 @@ async def escalate_to_human(args: dict, context: ToolExecutionContext) -> dict:
     )
     await escalations.escalate_customer_automatically(customer_id)
     await _sync_kommo_escalation_if_needed(
+        channel=context.channel,
         customer_id=customer_id,
         reason=args.get("reason", "Razón no especificada"),
         urgency=args.get("urgency", "medium"),
@@ -279,6 +280,7 @@ def _catalog_pdf_supported(channel: str, integration_context: dict | None) -> bo
 
 async def _sync_kommo_escalation_if_needed(
     *,
+    channel: str,
     customer_id: str,
     reason: str,
     urgency: str,
@@ -286,10 +288,7 @@ async def _sync_kommo_escalation_if_needed(
     lead_id: str | None = None,
 ) -> None:
     config = get_config()
-    if not any(
-        channel_backend_for(channel, config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    ):
+    if channel_backend_for(channel, config) != "kommo":
         return
     from app.integrations.kommo.state import sync_escalation_to_kommo
 

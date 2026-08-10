@@ -300,6 +300,7 @@ async def generate_response(
             interaction_type=interaction_type,
         )
         await _sync_kommo_escalation_if_needed(
+            channel=channel,
             customer_id=customer["id"],
             reason=hostility_reason,
             urgency="high",
@@ -401,6 +402,7 @@ async def generate_response(
             interaction_type=interaction_type,
         )
         await _sync_kommo_escalation_if_needed(
+            channel=channel,
             customer_id=customer["id"],
             reason=human_request_reason,
             urgency="medium",
@@ -1617,7 +1619,7 @@ def _resolve_private_instagram_content_context(
     context = (integration_context or {}).get("incoming_instagram_context")
     if (
         channel != "instagram"
-        or (integration_context or {}).get("provider") != "kommo"
+        or (integration_context or {}).get("provider") not in {"kommo", "meta"}
         or (integration_context or {}).get("interaction_type") != "private_message"
         or not isinstance(context, dict)
         or context.get("source") != "story_reply"
@@ -1924,6 +1926,7 @@ def _strip_catalog_skus_from_text(text: str) -> str:
 
 async def _sync_kommo_escalation_if_needed(
     *,
+    channel: str,
     customer_id: str,
     reason: str,
     urgency: str,
@@ -1931,10 +1934,7 @@ async def _sync_kommo_escalation_if_needed(
     lead_id: str | None = None,
 ) -> None:
     config = get_config()
-    if not any(
-        channel_backend_for(channel, config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    ):
+    if channel_backend_for(channel, config) != "kommo":
         return
     from app.integrations.kommo.state import sync_escalation_to_kommo
 

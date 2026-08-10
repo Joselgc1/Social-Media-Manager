@@ -176,6 +176,8 @@ async def _deliver_ai_response(
     customer_profile: dict,
     inbound_job_id: str = "",
     lease_token: str = "",
+    interaction_type: str = "private_message",
+    integration_context: dict | None = None,
 ):
     # Route through the AI engine
     try:

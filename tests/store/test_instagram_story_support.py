@@ -132,6 +132,8 @@ def _story_webhook_client(monkeypatch, *, account_id="ig-account"):
     from app.webhooks import meta_instagram_context as webhook
 
     config = SimpleNamespace(
+        whatsapp_backend="kommo",
+        instagram_backend="kommo",
         meta_instagram_context_enabled=False,
         meta_story_context_enabled=True,
         instagram_verify_token="verify-token",

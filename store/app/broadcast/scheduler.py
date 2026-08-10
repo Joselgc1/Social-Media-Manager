@@ -181,7 +181,7 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
     context_config = get_config()
     context_processing_enabled = (
         outbound_processing_enabled
-        and channel_backend_for("whatsapp", context_config) == "kommo"
+        and channel_backend_for("instagram", context_config) == "kommo"
         and (
             getattr(context_config, "meta_instagram_context_enabled", False) is True
             or getattr(context_config, "meta_story_context_enabled", False) is True
@@ -366,7 +366,7 @@ async def _process_meta_context_jobs():
     config = get_config()
     if not (
         _outbound_processing_enabled
-        and channel_backend_for("whatsapp", config) == "kommo"
+        and channel_backend_for("instagram", config) == "kommo"
         and (
             getattr(config, "meta_instagram_context_enabled", False) is True
             or getattr(config, "meta_story_context_enabled", False) is True

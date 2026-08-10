@@ -164,6 +164,36 @@ async def test_hybrid_mode_ignores_kommo_instagram_private_salesbot_callback(cli
 
 
 @pytest.mark.asyncio
+async def test_hybrid_mode_ignores_kommo_instagram_comment_salesbot_callback(client, monkeypatch):
+    monkeypatch.setattr(
+        kommo,
+        "get_config",
+        lambda: _config(instagram_backend="meta"),
+    )
+
+    response = await _post(
+        client,
+        json=_json_body(
+            data={
+                "message": "Precio?",
+                "lead_id": "100",
+                "origin": "instagram",
+                "expected_channel": "instagram",
+                "interaction_type": "instagram_comment",
+                "comment_id": "comment-1",
+            }
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ignored",
+        "reason": "instagram_managed_by_meta",
+    }
+    kommo.persist_salesbot_callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hybrid_mode_keeps_kommo_whatsapp_salesbot_callback(client, monkeypatch):
     monkeypatch.setattr(
         kommo,

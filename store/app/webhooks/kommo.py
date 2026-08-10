@@ -174,8 +174,8 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
         claims.get("entity_type"),
         claims.get("entity_id"),
     )
-    if _is_meta_managed_instagram_private_callback(callback.data, config):
-        logger.info("Kommo Instagram private-message callback ignored because Instagram uses Meta")
+    if _is_meta_managed_instagram_callback(callback.data, config):
+        logger.info("Kommo Instagram callback ignored because Instagram uses Meta")
         return {"status": "ignored", "reason": "instagram_managed_by_meta"}
 
     try:
@@ -195,13 +195,15 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
     return {"status": "accepted"}
 
 
-def _is_meta_managed_instagram_private_callback(data, config) -> bool:
+def _is_meta_managed_instagram_callback(data, config) -> bool:
     if channel_backend_for("instagram", config) != "meta":
         return False
-    if (data.interaction_type or "private_message") == "instagram_comment":
-        return False
     origin = str(data.origin or "").strip().lower()
-    return data.expected_channel == "instagram" or "instagram" in origin
+    return (
+        data.expected_channel == "instagram"
+        or (data.interaction_type or "private_message") == "instagram_comment"
+        or "instagram" in origin
+    )
 
 
 async def parse_salesbot_callback_request(request: Request) -> SalesbotWidgetRequest:

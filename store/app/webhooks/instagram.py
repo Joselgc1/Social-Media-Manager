@@ -27,12 +27,15 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from app.admin.notify import notify_owner
 from app.ai.engine import generate_response
 from app.channels.instagram_sender import (
+    reply_to_comment,
     send_image,
     send_text,
     send_text_with_quick_replies,
 )
 from app.config import get_config
 from app.crm import conversations
+from app.integrations.meta_context.models import MetaInstagramContextEvent
+from app.integrations.meta_context.parser import parse_instagram_context_events
 from app.request_limits import limiter
 from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
 from app.webhooks.meta_security import verify_meta_signature
@@ -114,10 +117,7 @@ async def handle_instagram(request: Request):
     if body.get("object") != "instagram":
         return Response(status_code=200)
 
-    for entry in body.get("entry", []):
-        # Each entry can have multiple messaging events
-        for event in entry.get("messaging", []):
-            await _process_event(event)
+    await ingest_instagram_payload(body)
 
     # Always return 200 quickly
     return Response(content="EVENT_RECEIVED", status_code=200)
@@ -125,7 +125,102 @@ async def handle_instagram(request: Request):
 
 # ── Event processing ─────────────────────────────────────────
 
-async def _process_event(event: dict):
+async def ingest_instagram_payload(body: dict) -> None:
+    """Persist authoritative Meta Instagram comments and messaging events."""
+    context_events = parse_instagram_context_events(body)
+    stories_by_message_id = {
+        event.message_id: event
+        for event in context_events
+        if event.event_type == "story_reply" and event.message_id
+    }
+    for event in context_events:
+        if event.event_type == "comment":
+            await _enqueue_context_event(event)
+
+    for entry in body.get("entry", []):
+        for event in entry.get("messaging", []):
+            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+            story_event = stories_by_message_id.get(message.get("mid") or message.get("message_id"))
+            await _process_event(event, story_event=story_event)
+
+
+async def _enqueue_context_event(event: MetaInstagramContextEvent) -> None:
+    config = get_config()
+    if event.instagram_account_id != getattr(config, "instagram_account_id", ""):
+        logger.warning("Ignored Meta Instagram event for a different account")
+        return
+    if not event.sender_id:
+        logger.warning("Ignored Meta Instagram event without a sender ID")
+        return
+    if event.event_type == "comment" and not event.comment_id:
+        logger.warning("Ignored Meta Instagram comment without a comment ID")
+        return
+    interaction_type = (
+        conversations.INSTAGRAM_COMMENT_SCOPE
+        if event.event_type == "comment"
+        else conversations.PRIVATE_MESSAGE_SCOPE
+    )
+    context = _initial_integration_context(event, interaction_type)
+    await enqueue_inbound_message(
+        channel="instagram",
+        sender_id=event.sender_id,
+        message_id=event.external_event_id,
+        text=event.message_text or "El cliente interactuó con contenido de Instagram.",
+        customer_profile={
+            "display_name": event.sender_username,
+            "instagram_handle": event.sender_username,
+        },
+        interaction_type=interaction_type,
+        integration_context=context,
+    )
+
+
+def _initial_integration_context(
+    event: MetaInstagramContextEvent,
+    interaction_type: str,
+) -> dict:
+    context = {
+        "provider": "meta",
+        "interaction_type": interaction_type,
+        "meta_event_type": event.event_type,
+        "instagram_account_id": event.instagram_account_id,
+        "commenter_id": event.sender_id,
+        "commenter_username": event.sender_username,
+        "event_timestamp": event.event_timestamp.isoformat(),
+    }
+    if event.event_type == "comment":
+        context.update({
+            "comment_id": event.comment_id,
+            "parent_comment_id": event.parent_comment_id,
+            "media_id": event.media_id,
+            "public_comment_context": {
+                "comment_id": event.comment_id,
+                "parent_comment_id": event.parent_comment_id,
+                "media_id": event.media_id,
+                "post_id": event.media_id,
+                "media_product_type": event.media_product_type,
+            },
+        })
+    else:
+        context.update({
+            "story_id": event.story_id,
+            "story_url": event.story_url,
+        })
+    return _drop_none(context)
+
+
+def _drop_none(value: dict) -> dict:
+    return {
+        key: _drop_none(item) if isinstance(item, dict) else item
+        for key, item in value.items()
+        if item is not None
+    }
+
+
+async def _process_event(
+    event: dict,
+    story_event: MetaInstagramContextEvent | None = None,
+):
     """
     Route an Instagram messaging event to the appropriate handler.
     Events can be messages, postbacks, referrals, or read receipts.
@@ -158,7 +253,13 @@ async def _process_event(event: dict):
     if "message" in event:
         message = event["message"]
         message_id = message.get("mid") or _event_fingerprint(event)
-        await _process_message(sender_id, message, message_id, sender_profile)
+        await _process_message(
+            sender_id,
+            message,
+            message_id,
+            sender_profile,
+            story_event=story_event,
+        )
         return
 
     # ── Postbacks (Ice Breaker taps, button clicks) ──────────
@@ -181,6 +282,7 @@ async def _process_message(
     message: dict,
     message_id: str,
     sender_profile: dict | None = None,
+    story_event: MetaInstagramContextEvent | None = None,
 ):
     """Process a regular text or media message."""
     text = ""
@@ -228,7 +330,19 @@ async def _process_message(
         return
 
     logger.info(f"Instagram DM received from {_mask_sender(sender_id)}")
-    await _route_to_ai(sender_id, text, message_id, media_url, sender_profile)
+    integration_context = (
+        _initial_integration_context(story_event, conversations.PRIVATE_MESSAGE_SCOPE)
+        if story_event
+        else None
+    )
+    await _route_to_ai(
+        sender_id,
+        text,
+        message_id,
+        media_url,
+        sender_profile,
+        integration_context=integration_context,
+    )
 
 
 async def _process_postback(
@@ -289,6 +403,7 @@ async def _route_to_ai(
     message_id: str,
     media_url: str | None = None,
     sender_profile: dict | None = None,
+    integration_context: dict | None = None,
 ):
     await enqueue_inbound_message(
         channel="instagram",
@@ -297,6 +412,8 @@ async def _route_to_ai(
         text=text,
         media_url=media_url,
         customer_profile=sender_profile or {},
+        interaction_type=(integration_context or {}).get("interaction_type", "private_message"),
+        integration_context=integration_context,
     )
 
 
@@ -307,6 +424,8 @@ async def _deliver_ai_response(
     sender_profile: dict | None = None,
     inbound_job_id: str = "",
     lease_token: str = "",
+    interaction_type: str = "private_message",
+    integration_context: dict | None = None,
 ):
     """
     Route the normalized message through the AI engine
@@ -322,11 +441,27 @@ async def _deliver_ai_response(
             persist_assistant_message=False,
             persist_user_before_response=True,
             message_source_id=inbound_job_id or None,
+            integration_context=integration_context,
         )
     except Exception as e:
         logger.exception(f"Error generating Instagram response for {_mask_sender(sender_id)}: {e}")
         try:
-            await _send_with_delivery_record(send_text, inbound_job_id, lease_token, to=sender_id, text=_APOLOGY_TEXT)
+            if interaction_type == conversations.INSTAGRAM_COMMENT_SCOPE:
+                await _send_with_delivery_record(
+                    reply_to_comment,
+                    inbound_job_id,
+                    lease_token,
+                    comment_id=(integration_context or {}).get("comment_id", ""),
+                    text=_APOLOGY_TEXT,
+                )
+            else:
+                await _send_with_delivery_record(
+                    send_text,
+                    inbound_job_id,
+                    lease_token,
+                    to=sender_id,
+                    text=_APOLOGY_TEXT,
+                )
         except Exception as send_error:
             logger.error(f"Failed to send Instagram fallback reply to {_mask_sender(sender_id)}: {send_error}")
             raise
@@ -341,7 +476,16 @@ async def _deliver_ai_response(
 
     delivered_parts = []
     try:
-        if result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
+        if interaction_type == conversations.INSTAGRAM_COMMENT_SCOPE and result.get("text"):
+            await _send_with_delivery_record(
+                reply_to_comment,
+                inbound_job_id,
+                lease_token,
+                comment_id=(integration_context or {}).get("comment_id", ""),
+                text=result["text"],
+            )
+            delivered_parts.append(result["text"])
+        elif result.get("interactive") and result["interactive"].get("type") == "interactive_buttons":
             quick_replies = [
                 {"title": btn, "payload": btn.upper().replace(" ", "_")}
                 for btn in result["interactive"]["buttons"]
@@ -390,14 +534,24 @@ async def _deliver_ai_response(
         raise
 
     if delivered_parts:
-        await _store_delivered_assistant_message(result, "\n".join(delivered_parts), inbound_job_id)
+        await _store_delivered_assistant_message(
+            result,
+            "\n".join(delivered_parts),
+            inbound_job_id,
+            interaction_type,
+        )
 
 
 async def _send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):
     return await send_with_delivery_record(send_func, inbound_job_id, lease_token, **kwargs)
 
 
-async def _store_delivered_assistant_message(result: dict, content: str, source_id: str) -> None:
+async def _store_delivered_assistant_message(
+    result: dict,
+    content: str,
+    source_id: str,
+    interaction_type: str = "private_message",
+) -> None:
     try:
         await conversations.store_message(
             customer_id=result["customer_id"],
@@ -406,6 +560,7 @@ async def _store_delivered_assistant_message(result: dict, content: str, source_
             channel="instagram",
             function_calls=result.get("function_calls"),
             source_id=source_id or None,
+            interaction_type=interaction_type,
         )
     except Exception:
         logger.exception("Failed to persist delivered Instagram response for job %s", source_id)

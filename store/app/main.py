@@ -188,8 +188,6 @@ def _validate_startup_config(config):
                 )
 
         if config.meta_instagram_context_enabled or getattr(config, "meta_story_context_enabled", False):
-            if whatsapp_backend != "kommo":
-                errors.append("Meta Instagram context requires WHATSAPP_BACKEND=kommo.")
             required_meta_context = {
                 "META_APP_SECRET": config.meta_app_secret,
                 "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,

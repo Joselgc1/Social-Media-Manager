@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 
-from app.config import get_config
+from app.config import channel_backend_for, get_config
 from app.integrations.meta_context.parser import parse_instagram_context_events
 from app.integrations.meta_context.service import (
     process_context_event,
@@ -54,6 +54,12 @@ async def handle_instagram_context(request: Request, background_tasks: Backgroun
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    if channel_backend_for("instagram", config) == "meta":
+        from app.webhooks.instagram import ingest_instagram_payload
+
+        await ingest_instagram_payload(payload)
+        return Response(content="EVENT_RECEIVED", status_code=200)
 
     for event in parse_instagram_context_events(payload):
         if event.event_type == "comment" and not config.meta_instagram_context_enabled:

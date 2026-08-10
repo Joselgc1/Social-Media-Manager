@@ -640,6 +640,19 @@ async def _claim_ready_job():
 
 async def _launch_salesbot_for_job(job: dict) -> None:
     processing_lease_id = job.get("processing_lease_id")
+    config = get_config()
+    if (
+        job.get("channel") == "instagram"
+        and getattr(config, "instagram_backend", None) == "meta"
+    ):
+        logger.info("Kommo Instagram job discarded because Instagram uses Meta: job_id=%s", job["id"])
+        await _mark_job(
+            job["id"],
+            "discarded",
+            "instagram_managed_by_meta",
+            processing_lease_id=processing_lease_id,
+        )
+        return
     if _job_interaction_type(job) == "instagram_comment":
         logger.info(
             "Kommo Instagram comment job will not launch Salesbot from backend: job_id=%s",
@@ -653,7 +666,6 @@ async def _launch_salesbot_for_job(job: dict) -> None:
         )
         return
 
-    config = get_config()
     try:
         if await _discard_private_job_if_superseded_by_recent_comment(job):
             return
@@ -860,6 +872,12 @@ async def _process_ready_job(job: dict) -> None:
     media_delivery_succeeded = False
     try:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
+        if (
+            job.get("channel") == "instagram"
+            and getattr(config, "instagram_backend", None) == "meta"
+        ):
+            await _continue_and_discard_job(client, job, "instagram_managed_by_meta")
+            return
         settings = await db.get_settings()
         contact = await _fetch_contact_for_job(client, job)
         lead_id = job.get("lead_id") or _single_contact_lead_id(contact)

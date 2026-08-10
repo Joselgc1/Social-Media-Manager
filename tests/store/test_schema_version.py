@@ -8,6 +8,8 @@ META_LEASE_COLUMNS = [
     {"column_name": "processing_lease_token"},
     {"column_name": "outbound_started_at"},
     {"column_name": "outbound_message_ids"},
+    {"column_name": "interaction_type"},
+    {"column_name": "integration_context"},
 ]
 
 
@@ -49,6 +51,7 @@ async def test_store_schema_version_accepts_consolidated_upgrade_version(monkeyp
                     {"version": 13},
                     {"version": 14},
                     {"version": 15},
+                    {"version": 16},
                 ],
                 META_LEASE_COLUMNS,
             ]
@@ -98,11 +101,12 @@ async def test_store_schema_version_rejects_historical_upgrade_without_meta_leas
                     {"version": 13},
                     {"version": 14},
                     {"version": 15},
+                    {"version": 16},
                 ],
                 [{"column_name": "outbound_started_at"}],
             ]
         ),
     )
 
-    with pytest.raises(RuntimeError, match="lease-fencing columns"):
+    with pytest.raises(RuntimeError, match="required Meta inbound columns"):
         await db.verify_schema_version()

@@ -155,6 +155,14 @@ async def send_private_reply(comment_id: str, text: str):
     return await _send(url, payload, config.instagram_access_token)
 
 
+async def reply_to_comment(comment_id: str, text: str):
+    """Publish a public reply beneath an Instagram comment."""
+    config = get_config()
+    url = f"{_graph_api_url(config)}/{comment_id}/replies"
+    payload = {"message": format_customer_text(text, "instagram")[:1000]}
+    return await _send(url, payload, config.instagram_access_token)
+
+
 # ── Ice Breakers ─────────────────────────────────────────────
 
 async def setup_ice_breakers(ig_user_id: str, ice_breakers: list[dict] | None = None):
@@ -213,7 +221,7 @@ async def subscribe_page_to_webhooks(page_id: str):
     url = f"{_graph_api_url(config)}/{page_id}/subscribed_apps"
 
     payload = {
-        "subscribed_fields": "messages,messaging_postbacks",
+        "subscribed_fields": "messages,messaging_postbacks,comments",
     }
 
     await _send(url, payload, config.instagram_access_token)

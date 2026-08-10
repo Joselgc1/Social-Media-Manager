@@ -243,13 +243,13 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 ### Kommo Mode
 
 - WhatsApp and Instagram DM text handling through channel-specific Kommo Salesbots.
-- Public Instagram comment replies use Kommo's native comment-triggered Salesbot flow; the authenticated widget callback creates a durable `instagram_comment` job directly.
+- Public Instagram comments are authoritative Meta webhook events. They create durable `instagram_comment` Meta jobs and replies are published through the Graph comment replies endpoint.
 - Interactive choices become numbered text; URL actions become text plus URLs.
 - Opted-in WhatsApp product images and catalog PDFs use Kommo Files API/cache plus Chats API; disabled media safely falls back to Salesbot behavior.
 - Product images and PDFs have independent rollout flags under a global media kill switch. PDF delivery remains WhatsApp-only.
 - Incoming Kommo `voice` and `audio` attachments in private WhatsApp and Instagram DMs are downloaded safely and transcribed before the AI turn. This path requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio is not transcribed.
 - Durable jobs and outbound records track `delivery_unknown` when Salesbot or Chats API acceptance cannot be confirmed; inspect Kommo before manual retry.
-- Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable job reconciliation discards the mirrored private-message job before the selected Instagram DM Salesbot can launch.
+- Legacy Kommo Instagram comment correlation remains in the codebase for phased cleanup, but Meta-native Instagram jobs no longer depend on a `kommo_message_job`.
 
 ## Telegram Admin Commands
 

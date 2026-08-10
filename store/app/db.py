@@ -26,7 +26,7 @@ from app.payment_methods import (
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_VERSION = 15
+EXPECTED_SCHEMA_VERSION = 16
 SLOW_DB_OPERATION_MS = 500.0
 
 _db: _InstrumentedDatabase | None = None
@@ -217,13 +217,13 @@ async def verify_schema_version() -> None:
 
     versions = {int(row["version"]) for row in rows}
     accepted_versions = (
-        {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
-        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+        {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
     )
     if versions not in accepted_versions:
         raise RuntimeError(
             f"Store database schema version mismatch: expected one of {[sorted(item) for item in accepted_versions]}, found {sorted(versions)}. "
-            "Apply Store migrations through store/migrations/015_conversation_interaction_scope.sql."
+            "Apply Store migrations through store/migrations/016_meta_inbound_instagram_context.sql."
         )
 
     required_meta_columns = {
@@ -231,6 +231,8 @@ async def verify_schema_version() -> None:
         "processing_lease_token",
         "outbound_started_at",
         "outbound_message_ids",
+        "interaction_type",
+        "integration_context",
     }
     column_rows = await fetch_all(
         """
@@ -242,9 +244,9 @@ async def verify_schema_version() -> None:
     missing_columns = required_meta_columns - actual_meta_columns
     if missing_columns:
         raise RuntimeError(
-            "Store database schema is missing Meta inbound lease-fencing columns: "
+            "Store database schema is missing required Meta inbound columns: "
             f"{', '.join(sorted(missing_columns))}. "
-            "Apply store/migrations/002_consolidated_upgrade.sql."
+            "Apply store/migrations/016_meta_inbound_instagram_context.sql."
         )
 
 

@@ -43,6 +43,8 @@ def _client(monkeypatch):
     app = FastAPI()
     app.include_router(webhook.router)
     config = SimpleNamespace(
+        whatsapp_backend="kommo",
+        instagram_backend="kommo",
         meta_instagram_context_enabled=True,
         instagram_verify_token="verify-token",
         meta_app_secret="context-secret",

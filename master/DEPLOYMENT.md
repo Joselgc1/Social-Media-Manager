@@ -349,7 +349,7 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), plus either the Meta section 1.7 or the Kommo migration guide, but for the new store's accounts:
 
-1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `python scripts/migrate.py` through schema version 15. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal migration runner.
+1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `python scripts/migrate.py` through schema version 16. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal migration runner.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
 4. **Channel backend:** choose either direct Meta credentials or Kommo channel/private integration credentials for this store.

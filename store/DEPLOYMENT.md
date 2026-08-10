@@ -360,7 +360,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 Only do this when `WHATSAPP_BACKEND=kommo`.
 
-1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 15.
+1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 16.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
 3. Create separate Instagram DM and WhatsApp Salesbots with their matching widget blocks. Route `success` to a channel-restricted Message step using `{{json.message}}`, `media` to a silent end, and `fail` to a silent end or human fallback.
 4. Create the public-comment Kommo Salesbot with Kommo's native `When a comment is received` trigger, the `Ask Eva AI for Instagram comments` widget step, and a Comment step with `{{json.message}}` on `success`.
@@ -845,7 +845,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 ### 10.6 Kommo Mode
 
 ```text
-[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 15
+[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 16
 [ ] Widget ZIP uploaded to private Kommo integration
 [ ] Dedicated Instagram DM and WhatsApp Salesbots contain their matching widget steps and success/media/fail exits
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>

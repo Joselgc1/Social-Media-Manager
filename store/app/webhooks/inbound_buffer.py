@@ -21,7 +21,7 @@ MAX_META_SEND_ATTEMPTS = 3
 MAX_CONCURRENT_INBOUND_PROCESSORS = 3
 _inbound_processor_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INBOUND_PROCESSORS)
 
-Processor = Callable[[str, str, str | None, dict, str, str], Awaitable[None]]
+Processor = Callable[[str, str, str | None, dict, str, str, str, dict], Awaitable[None]]
 
 
 def _merge_profile(current: dict, new_values: dict | None) -> dict:
@@ -45,12 +45,20 @@ async def enqueue_inbound_message(
     text: str,
     media_url: str | None = None,
     customer_profile: dict | None = None,
+    interaction_type: str = "private_message",
+    integration_context: dict | None = None,
 ) -> bool:
     """Persist one Meta delivery and extend its customer's debounce window."""
     if channel not in {"whatsapp", "instagram"}:
         raise ValueError("Unsupported inbound channel.")
     if not sender_id or not message_id:
         raise ValueError("Inbound messages require sender_id and message_id.")
+    if interaction_type not in {"private_message", "instagram_comment"}:
+        raise ValueError("Unsupported inbound interaction type.")
+    if channel != "instagram" and interaction_type != "private_message":
+        raise ValueError("Only Instagram supports non-private Meta interactions.")
+    integration_context = dict(integration_context or {})
+    mergeable = interaction_type == "private_message" and not integration_context
 
     async with db.get_db().transaction():
         await _lock_sender(channel, sender_id)
@@ -65,17 +73,23 @@ async def enqueue_inbound_message(
         if duplicate:
             return False
 
-        pending = await db.fetch_one(
-            """
-            SELECT id, message_parts, customer_profile
-            FROM meta_inbound_jobs
-            WHERE channel = :channel
-              AND sender_id = :sender_id
-              AND status = 'pending'
-            FOR UPDATE
-            """,
-            {"channel": channel, "sender_id": sender_id},
-        )
+        pending = None
+        if mergeable:
+            pending = await db.fetch_one(
+                """
+                SELECT id, message_parts, customer_profile
+                FROM meta_inbound_jobs
+                WHERE channel = :channel
+                  AND sender_id = :sender_id
+                  AND interaction_type = 'private_message'
+                  AND integration_context = '{}'::jsonb
+                  AND status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                {"channel": channel, "sender_id": sender_id},
+            )
         if pending:
             parts = _json_list(pending["message_parts"])
             parts.append(text)
@@ -104,11 +118,13 @@ async def enqueue_inbound_message(
                 """
                 INSERT INTO meta_inbound_jobs (
                     channel, sender_id, message_parts, media_url,
-                    customer_profile, available_at
+                    customer_profile, interaction_type, integration_context, available_at
                 )
                 VALUES (
                     :channel, :sender_id, CAST(:parts AS jsonb), :media_url,
-                    CAST(:profile AS jsonb), NOW() + (:delay * INTERVAL '1 second')
+                    CAST(:profile AS jsonb), :interaction_type,
+                    CAST(:integration_context AS jsonb),
+                    NOW() + (:delay * INTERVAL '1 second')
                 )
                 RETURNING id
                 """,
@@ -118,6 +134,8 @@ async def enqueue_inbound_message(
                     "parts": json.dumps([text], ensure_ascii=False),
                     "media_url": media_url,
                     "profile": json.dumps(customer_profile or {}, ensure_ascii=False),
+                    "interaction_type": interaction_type,
+                    "integration_context": json.dumps(integration_context, ensure_ascii=False),
                     "delay": MESSAGE_DEBOUNCE_SECONDS,
                 },
             )
@@ -181,6 +199,7 @@ async def recover_stale_inbound_jobs() -> int:
             stale_job = await db.fetch_one(
                 """
                 SELECT id, message_parts, media_url, customer_profile, attempt_count,
+                       interaction_type, integration_context,
                        outbound_started_at, outbound_message_ids, processing_lease_token
                 FROM meta_inbound_jobs
                 WHERE id = :job_id
@@ -226,15 +245,26 @@ async def recover_stale_inbound_jobs() -> int:
                 )
                 recovered += 1
                 continue
-            pending = await db.fetch_one(
-                """
-                SELECT id, message_parts, media_url, customer_profile
-                FROM meta_inbound_jobs
-                WHERE channel = :channel AND sender_id = :sender_id AND status = 'pending'
-                FOR UPDATE
-                """,
-                {"channel": channel, "sender_id": sender_id},
-            )
+            stale_context = _json_dict(_record_value(stale_job, "integration_context", {}))
+            pending = None
+            if (
+                _record_value(stale_job, "interaction_type", "private_message") == "private_message"
+                and not stale_context
+            ):
+                pending = await db.fetch_one(
+                    """
+                    SELECT id, message_parts, media_url, customer_profile
+                    FROM meta_inbound_jobs
+                    WHERE channel = :channel AND sender_id = :sender_id
+                      AND interaction_type = 'private_message'
+                      AND integration_context = '{}'::jsonb
+                      AND status = 'pending'
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    {"channel": channel, "sender_id": sender_id},
+                )
             if pending:
                 merged_parts = _json_list(stale_job["message_parts"]) + _json_list(pending["message_parts"])
                 merged_profile = _merge_profile(
@@ -326,7 +356,8 @@ async def _claim_due_job() -> dict | None:
                 attempt_count = attempt_count + 1, updated_at = NOW()
             WHERE id = :job_id AND status = 'pending'
             RETURNING id, channel, sender_id, message_parts, media_url,
-                      customer_profile, attempt_count, processing_lease_token
+                      customer_profile, interaction_type, integration_context,
+                      attempt_count, processing_lease_token
             """,
             {"job_id": str(candidate["id"]), "lease_token": lease_token},
         )
@@ -341,6 +372,12 @@ async def _process_claimed_job(job: dict) -> None:
         text = _combine_parts(_json_list(job["message_parts"]))
         if text:
             processor = _resolve_processor(job["channel"])
+            integration_context = _json_dict(job.get("integration_context"))
+            if job["channel"] == "instagram" and integration_context:
+                from app.integrations.meta_context.service import enrich_native_instagram_context
+
+                integration_context = await enrich_native_instagram_context(integration_context)
+                await _store_enriched_integration_context(job_id, lease_token, integration_context)
             await processor(
                 job["sender_id"],
                 text,
@@ -348,6 +385,8 @@ async def _process_claimed_job(job: dict) -> None:
                 _json_dict(job.get("customer_profile")),
                 job_id,
                 lease_token,
+                job.get("interaction_type") or "private_message",
+                integration_context,
             )
         completed = await db.fetch_one(
             """
@@ -412,6 +451,7 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
         current = await db.fetch_one(
             """
             SELECT id, message_parts, media_url, customer_profile,
+                   interaction_type, integration_context,
                    outbound_started_at, outbound_message_ids
             FROM meta_inbound_jobs
             WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
@@ -451,15 +491,26 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
                 {"job_id": str(current["id"]), "lease_token": lease_token},
             )
             return
-        pending = await db.fetch_one(
-            """
-            SELECT id, message_parts, media_url, customer_profile
-            FROM meta_inbound_jobs
-            WHERE channel = :channel AND sender_id = :sender_id AND status = 'pending'
-            FOR UPDATE
-            """,
-            {"channel": channel, "sender_id": sender_id},
-        )
+        current_context = _json_dict(_record_value(current, "integration_context", {}))
+        pending = None
+        if (
+            _record_value(current, "interaction_type", "private_message") == "private_message"
+            and not current_context
+        ):
+            pending = await db.fetch_one(
+                """
+                SELECT id, message_parts, media_url, customer_profile
+                FROM meta_inbound_jobs
+                WHERE channel = :channel AND sender_id = :sender_id
+                  AND interaction_type = 'private_message'
+                  AND integration_context = '{}'::jsonb
+                  AND status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                {"channel": channel, "sender_id": sender_id},
+            )
         if retry and pending:
             parts = _json_list(current["message_parts"]) + _json_list(pending["message_parts"])
             profile = _merge_profile(
@@ -562,11 +613,36 @@ async def _claim_sender_job(channel: str, sender_id: str) -> dict | None:
                 LIMIT 1
             )
             RETURNING id, channel, sender_id, message_parts, media_url,
-                      customer_profile, attempt_count, processing_lease_token
+                      customer_profile, interaction_type, integration_context,
+                      attempt_count, processing_lease_token
             """,
             {"channel": channel, "sender_id": sender_id, "lease_token": lease_token},
         )
         return dict(row) if row else None
+
+
+async def _store_enriched_integration_context(
+    job_id: str,
+    lease_token: str,
+    integration_context: dict,
+) -> None:
+    row = await db.fetch_one(
+        """
+        UPDATE meta_inbound_jobs
+        SET integration_context = CAST(:integration_context AS jsonb), updated_at = NOW()
+        WHERE id = :job_id
+          AND status = 'processing'
+          AND processing_lease_token = :lease_token
+        RETURNING id
+        """,
+        {
+            "job_id": job_id,
+            "lease_token": lease_token,
+            "integration_context": json.dumps(integration_context, ensure_ascii=False),
+        },
+    )
+    if not row:
+        raise RuntimeError("Meta inbound lease expired while enriching Instagram context.")
 
 
 async def mark_outbound_send_started(job_id: str, lease_token: str) -> bool:
