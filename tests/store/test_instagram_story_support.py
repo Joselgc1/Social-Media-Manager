@@ -465,6 +465,7 @@ async def test_human_mode_story_lifecycle_defers_suppression_until_after_context
 
     config = SimpleNamespace(
         meta_story_context_enabled=True,
+        meta_story_context_wait_seconds=3,
         instagram_story_context_ttl_hours=24,
         kommo_instagram_dm_salesbot_id=701,
         kommo_whatsapp_salesbot_id=702,
@@ -512,21 +513,23 @@ async def test_human_mode_story_lifecycle_defers_suppression_until_after_context
         "status": "processing",
         "processing_lease_id": "00000000-0000-0000-0000-000000000001",
         "lead_id": "100",
+        "talk_id": "300",
         "combined_message": "Precio?",
         "channel": "instagram",
         "interaction_type": "private_message",
     }
-    await jobs._launch_salesbot_for_job(base_job)
+    await jobs._prepare_direct_instagram_dm(base_job)
 
-    client.run_salesbot.assert_awaited_once_with("100", "leads", 701)
+    client.run_salesbot.assert_not_awaited()
     waiting_query, waiting_values = mock_db.fetch_one.await_args.args
     assert "suppress_after_context = :suppress_after_context" in waiting_query
+    assert "waiting_for_context" in waiting_query
+    assert "return_url" not in waiting_query
     assert waiting_values["suppress_after_context"] is True
     assert waiting_values["automation_block_reason"] == "kommo_ai_mode_human"
 
     story_b = _session_context(story_id="story-b", skus=["SKU-B"])
     ready_job = base_job | {
-        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
         "suppress_after_context": True,
         "automation_block_reason": "kommo_ai_mode_human",
         "instagram_content_context": {},
@@ -596,11 +599,8 @@ async def test_human_mode_story_lifecycle_defers_suppression_until_after_context
         source_id="kommo-job:job-1",
         interaction_type="private_message",
     )
-    client.continue_salesbot.assert_awaited_once_with(
-        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        data={"status": "fail", "message": ""},
-    )
-    discard_values = mock_db.fetch_one.await_args_list[-1].args[1]
+    client.continue_salesbot.assert_not_awaited()
+    discard_values = mock_db.execute.await_args_list[-1].args[1]
     assert discard_values["last_error"] == "kommo_ai_mode_human"
     for sender in meta_senders.values():
         sender.assert_not_awaited()
@@ -1153,7 +1153,12 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
     await jobs._process_ready_job({
         "id": "job-1",
         "processing_lease_id": "00000000-0000-0000-0000-000000000001",
-        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "return_url": (
+            None
+            if channel == "instagram" and interaction_type == "private_message"
+            else "https://acme.kommo.com/api/v4/salesbot/1/continue/2"
+        ),
+        "talk_id": "300" if channel == "instagram" and interaction_type == "private_message" else None,
         "combined_message": "Precio?",
         "channel": channel,
         "interaction_type": interaction_type,
@@ -1187,14 +1192,20 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
     if case == "public_comment":
         assert integration_context["public_comment_context"] == public_context
 
-    client.continue_salesbot.assert_awaited_once_with(
-        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        data={
-            "status": "success",
-            "delivery_mode": "salesbot",
-            "message": "Respuesta Kommo",
-        },
-    )
+    if channel == "instagram" and interaction_type == "private_message":
+        client.continue_salesbot.assert_not_awaited()
+        terminal_values = mock_db.execute.await_args_list[-1].args[1]
+        assert terminal_values["status"] == "failed"
+        assert terminal_values["last_error"] == "instagram_direct_delivery_not_implemented"
+    else:
+        client.continue_salesbot.assert_awaited_once_with(
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            data={
+                "status": "success",
+                "delivery_mode": "salesbot",
+                "message": "Respuesta Kommo",
+            },
+        )
     persist_meta_sender.assert_not_awaited()
     meta_send.assert_not_awaited()
 
@@ -1312,7 +1323,12 @@ async def test_suppressed_ready_job_applies_only_current_story_event_before_gate
     await jobs._process_ready_job({
         "id": "job-1",
         "processing_lease_id": "00000000-0000-0000-0000-000000000001",
-        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "return_url": (
+            None
+            if channel == "instagram" and interaction_type == "private_message"
+            else "https://acme.kommo.com/api/v4/salesbot/1/continue/2"
+        ),
+        "talk_id": "300" if channel == "instagram" and interaction_type == "private_message" else None,
         "combined_message": "Precio?",
         "channel": channel,
         "interaction_type": interaction_type,
@@ -1345,20 +1361,32 @@ async def test_suppressed_ready_job_applies_only_current_story_event_before_gate
         source_id="kommo-job:job-1",
         interaction_type=interaction_type,
     )
-    client.continue_salesbot.assert_awaited_once_with(
-        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        data={"status": "fail", "message": ""},
-    )
-    assert any(
-        values and values.get("last_error") == "kommo_ai_mode_human"
-        for _, values in (call.args for call in mock_db.fetch_one.await_args_list)
-    )
+    if channel == "instagram" and interaction_type == "private_message":
+        client.continue_salesbot.assert_not_awaited()
+        terminal_values = mock_db.execute.await_args_list[-1].args[1]
+        assert terminal_values["status"] == "discarded"
+        assert terminal_values["last_error"] == "kommo_ai_mode_human"
+    else:
+        client.continue_salesbot.assert_awaited_once_with(
+            "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+            data={"status": "fail", "message": ""},
+        )
+    if channel == "instagram" and interaction_type == "private_message":
+        assert any(
+            values and values.get("last_error") == "kommo_ai_mode_human"
+            for _, values in (call.args for call in mock_db.execute.await_args_list)
+        )
+    else:
+        assert any(
+            values and values.get("last_error") == "kommo_ai_mode_human"
+            for _, values in (call.args for call in mock_db.fetch_one.await_args_list)
+        )
     for sender in meta_senders.values():
         sender.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_meta(monkeypatch):
+async def test_story_reply_delivery_waits_for_direct_transport_and_never_uses_salesbot_or_meta(monkeypatch):
     from app.channels import instagram_sender
     from app.integrations.kommo import jobs
 
@@ -1421,7 +1449,8 @@ async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_m
     await jobs._process_ready_job({
         "id": "job-1",
         "processing_lease_id": "00000000-0000-0000-0000-000000000001",
-        "return_url": "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
+        "return_url": None,
+        "talk_id": "300",
         "combined_message": "Precio?",
         "channel": "instagram",
         "interaction_type": "private_message",
@@ -1429,10 +1458,10 @@ async def test_story_reply_delivery_continues_salesbot_and_never_sends_through_m
         "correlation_id": "corr-1",
     })
 
-    client.continue_salesbot.assert_awaited_once_with(
-        "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
-        data={"status": "success", "delivery_mode": "salesbot", "message": "Cuesta $25."},
-    )
+    client.continue_salesbot.assert_not_awaited()
+    terminal_values = mock_db.execute.await_args_list[-1].args[1]
+    assert terminal_values["status"] == "failed"
+    assert terminal_values["last_error"] == "instagram_direct_delivery_not_implemented"
     meta_send.assert_not_awaited()
     integration_context = jobs.generate_response.await_args.kwargs["integration_context"]
     assert integration_context["incoming_instagram_context"]["story_id"] == "story-1"

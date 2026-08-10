@@ -160,27 +160,32 @@ def test_kommo_mode_startup_validation_requires_kommo_credentials():
         _validate_startup_config(_base_config(channel_backend="kommo", kommo_integration_id=""))
 
 
-@pytest.mark.parametrize(
-    ("overrides", "expected"),
-    [
-        (
-            {"kommo_instagram_dm_salesbot_id": None, "kommo_salesbot_id": None},
-            "KOMMO_INSTAGRAM_DM_SALESBOT_ID",
-        ),
-        (
-            {"kommo_whatsapp_salesbot_id": None, "kommo_salesbot_id": None},
-            "KOMMO_WHATSAPP_SALESBOT_ID",
-        ),
-    ],
-)
-def test_kommo_mode_requires_dedicated_or_fallback_salesbot_id(overrides, expected):
+def test_kommo_mode_requires_whatsapp_dedicated_or_fallback_salesbot_id():
     from app.main import _validate_startup_config
 
-    with pytest.raises(RuntimeError, match=expected):
-        _validate_startup_config(_base_config(channel_backend="kommo", **overrides))
+    with pytest.raises(RuntimeError, match="KOMMO_WHATSAPP_SALESBOT_ID"):
+        _validate_startup_config(
+            _base_config(
+                channel_backend="kommo",
+                kommo_whatsapp_salesbot_id=None,
+                kommo_salesbot_id=None,
+            )
+        )
 
 
-def test_kommo_mode_accepts_legacy_salesbot_fallback_for_both_channels():
+def test_kommo_mode_startup_does_not_require_instagram_salesbot_id():
+    from app.main import _validate_startup_config
+
+    _validate_startup_config(
+        _base_config(
+            channel_backend="kommo",
+            kommo_instagram_dm_salesbot_id=None,
+            kommo_salesbot_id=None,
+        )
+    )
+
+
+def test_kommo_mode_accepts_legacy_salesbot_fallback_for_whatsapp():
     from app.main import _validate_startup_config
 
     _validate_startup_config(

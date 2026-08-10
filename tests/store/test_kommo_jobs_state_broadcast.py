@@ -123,6 +123,7 @@ class _CallbackCreateDB:
 class _LaunchSafetyDB:
     def __init__(self, *, comment_match=None):
         self.comment_match = comment_match
+        self.direct_prepared_status = None
         self.fetch_one_calls = []
         self.execute_calls = []
 
@@ -140,6 +141,18 @@ class _LaunchSafetyDB:
             return {"id": (values or {}).get("job_id")} if self.comment_match else None
         if "status = 'waiting_for_salesbot'" in query:
             return {"id": (values or {}).get("id"), "status": "waiting_for_salesbot", "lead_id": "100", "contact_id": "200", "channel": "instagram", "combined_message": "Precio?"}
+        if "SET status = CASE WHEN :wait_for_story_context" in query:
+            self.direct_prepared_status = "waiting_for_context" if (values or {}).get("wait_for_story_context") else "ready"
+            return {
+                "id": (values or {}).get("id"),
+                "status": self.direct_prepared_status,
+                "lead_id": "100",
+                "contact_id": "200",
+                "talk_id": "300",
+                "channel": "instagram",
+                "interaction_type": "private_message",
+                "combined_message": "Precio?",
+            }
         return None
 
     async def execute(self, query, values=None):
@@ -1464,17 +1477,20 @@ async def test_non_story_human_mode_keeps_early_suppression(
     client.run_salesbot = AsyncMock()
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
-    await jobs._launch_salesbot_for_job(
-        {
-            "id": "job",
-            "status": "processing",
-            "processing_lease_id": LEASE_ID,
-            "lead_id": "100",
-            "combined_message": "Hola",
-            "channel": channel,
-            "interaction_type": "private_message",
-        }
-    )
+    job = {
+        "id": "job",
+        "status": "processing",
+        "processing_lease_id": LEASE_ID,
+        "lead_id": "100",
+        "talk_id": "300",
+        "combined_message": "Hola",
+        "channel": channel,
+        "interaction_type": "private_message",
+    }
+    if channel == "instagram":
+        await jobs._prepare_direct_instagram_dm(job)
+    else:
+        await jobs._launch_salesbot_for_job(job)
 
     client.run_salesbot.assert_not_awaited()
     store_message.assert_awaited_once()
@@ -1493,12 +1509,14 @@ async def test_comment_callback_before_private_webhook_job_suppresses_launch(mon
     monkeypatch.setattr(jobs, "db", safety_db)
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: pytest.fail("private Salesbot must not launch"))
 
-    await jobs._launch_salesbot_for_job(
+    await jobs._prepare_direct_instagram_dm(
         {
             "id": "private-job",
             "status": "processing",
             "lead_id": "100",
             "contact_id": "200",
+            "talk_id": "300",
+            "processing_lease_id": LEASE_ID,
             "combined_message": "Precio?",
             "channel": "instagram",
             "origin": "instagram_business",
@@ -1591,7 +1609,15 @@ async def test_prelaunch_prefers_matched_meta_timestamp_over_delayed_callback(mo
 
 
 @pytest.mark.asyncio
-async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkeypatch):
+@pytest.mark.parametrize(
+    ("story_context_enabled", "expected_status"),
+    [(False, "ready"), (True, "waiting_for_context")],
+)
+async def test_instagram_dm_bypasses_salesbot_and_is_prepared(
+    monkeypatch,
+    story_context_enabled,
+    expected_status,
+):
     from app.integrations.kommo import jobs
 
     safety_db = _LaunchSafetyDB(comment_match=None)
@@ -1601,6 +1627,8 @@ async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkey
         jobs,
         "get_config",
         lambda: SimpleNamespace(
+            meta_story_context_enabled=story_context_enabled,
+            meta_story_context_wait_seconds=3,
             kommo_instagram_dm_salesbot_id=701,
             kommo_whatsapp_salesbot_id=702,
             kommo_salesbot_id=700,
@@ -1625,12 +1653,14 @@ async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkey
     client.run_salesbot = AsyncMock()
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
-    await jobs._launch_salesbot_for_job(
+    await jobs._prepare_direct_instagram_dm(
         {
             "id": "private-job",
             "status": "processing",
             "lead_id": "100",
             "contact_id": "200",
+            "talk_id": "300",
+            "processing_lease_id": LEASE_ID,
             "combined_message": "Precio?",
             "channel": "instagram",
             "origin": "instagram_business",
@@ -1639,23 +1669,78 @@ async def test_unrelated_instagram_dm_is_not_suppressed_by_comment_safety(monkey
         }
     )
 
-    client.run_salesbot.assert_awaited_once_with("100", "leads", 701)
+    client.run_salesbot.assert_not_awaited()
+    prepared_query, prepared_values = next(
+        (query, values)
+        for query, values in safety_db.fetch_one_calls
+        if "SET status = CASE WHEN :wait_for_story_context" in query
+    )
+    assert "return_url" not in prepared_query
+    assert prepared_values["wait_for_story_context"] is story_context_enabled
+    assert safety_db.direct_prepared_status == expected_status
     assert not any(call[1].get("last_error") == "superseded_by_instagram_comment" for call in safety_db.execute_calls)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("talk_id", [None, "", "0", "-1", "abc", True])
+async def test_instagram_dm_with_invalid_talk_id_fails_without_transport(monkeypatch, talk_id):
+    from app.integrations.kommo import jobs
+
+    mark_job = AsyncMock()
+    from_config = MagicMock()
+    monkeypatch.setattr(jobs, "_mark_job", mark_job)
+    monkeypatch.setattr(jobs.KommoClient, "from_config", from_config)
+
+    await jobs._prepare_direct_instagram_dm(
+        {
+            "id": "private-job",
+            "status": "processing",
+            "processing_lease_id": LEASE_ID,
+            "talk_id": talk_id,
+            "channel": "instagram",
+            "interaction_type": "private_message",
+        }
+    )
+
+    mark_job.assert_awaited_once_with(
+        "private-job",
+        "failed",
+        "missing_instagram_talk_id",
+        processing_lease_id=LEASE_ID,
+    )
+    from_config.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pending_processor_routes_only_instagram_private_messages_directly(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    claimed_jobs = [
+        {"id": "instagram-dm", "channel": "instagram", "interaction_type": "private_message"},
+        {"id": "whatsapp-dm", "channel": "whatsapp", "interaction_type": "private_message"},
+        None,
+    ]
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(channel_backend="kommo"))
+    monkeypatch.setattr(jobs, "_claim_due_pending_job", AsyncMock(side_effect=claimed_jobs))
+    direct = AsyncMock()
+    salesbot = AsyncMock()
+    monkeypatch.setattr(jobs, "_prepare_direct_instagram_dm", direct)
+    monkeypatch.setattr(jobs, "_launch_salesbot_for_job", salesbot)
+
+    assert await jobs.process_pending_jobs(limit=3) == 2
+    direct.assert_awaited_once_with(claimed_jobs[0])
+    salesbot.assert_awaited_once_with(claimed_jobs[1])
+
+
 @pytest.mark.parametrize(
-    ("channel", "instagram_id", "whatsapp_id", "fallback_id", "expected"),
+    ("whatsapp_id", "fallback_id", "expected"),
     [
-        ("instagram", 701, 702, 700, 701),
-        ("whatsapp", 701, 702, 700, 702),
-        ("instagram", None, 702, 700, 700),
-        ("whatsapp", 701, None, 700, 700),
+        (702, 700, 702),
+        (None, 700, 700),
     ],
 )
 def test_private_message_salesbot_id_routing(
     monkeypatch,
-    channel,
-    instagram_id,
     whatsapp_id,
     fallback_id,
     expected,
@@ -1666,17 +1751,15 @@ def test_private_message_salesbot_id_routing(
         jobs,
         "get_config",
         lambda: SimpleNamespace(
-            kommo_instagram_dm_salesbot_id=instagram_id,
             kommo_whatsapp_salesbot_id=whatsapp_id,
             kommo_salesbot_id=fallback_id,
         ),
     )
 
-    assert jobs._salesbot_id_for_channel(channel) == expected
+    assert jobs._salesbot_id_for_channel("whatsapp") == expected
 
 
-@pytest.mark.parametrize("channel", ["instagram", "whatsapp"])
-def test_private_message_salesbot_id_routing_requires_channel_configuration(monkeypatch, channel):
+def test_private_message_salesbot_id_routing_requires_whatsapp_configuration(monkeypatch):
     from app.integrations.kommo import jobs
     from app.integrations.kommo.client import KommoAPIError
 
@@ -1684,14 +1767,23 @@ def test_private_message_salesbot_id_routing_requires_channel_configuration(monk
         jobs,
         "get_config",
         lambda: SimpleNamespace(
-            kommo_instagram_dm_salesbot_id=None,
             kommo_whatsapp_salesbot_id=None,
             kommo_salesbot_id=None,
         ),
     )
 
-    with pytest.raises(KommoAPIError, match=f"not configured for {channel}"):
-        jobs._salesbot_id_for_channel(channel)
+    with pytest.raises(KommoAPIError, match="not configured for whatsapp"):
+        jobs._salesbot_id_for_channel("whatsapp")
+
+
+def test_instagram_salesbot_routing_is_rejected(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.client import KommoAPIError
+
+    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace())
+
+    with pytest.raises(KommoAPIError, match="do not use Salesbot"):
+        jobs._salesbot_id_for_channel("instagram")
 
 
 @pytest.mark.asyncio
@@ -3593,6 +3685,10 @@ async def test_ready_job_claim_creates_fence_before_ai_side_effects(monkeypatch)
     query = mock_db.fetch_one.await_args.args[0]
     assert "processing_lease_id = gen_random_uuid()" in query
     assert "ai_started_at = NOW()" in query
+    assert "candidate.return_url IS NOT NULL" in query
+    assert "candidate.channel = 'instagram'" in query
+    assert "candidate.interaction_type = 'private_message'" in query
+    assert "candidate.talk_id IS NOT NULL" in query
     assert "FOR UPDATE SKIP LOCKED" in query
 
 

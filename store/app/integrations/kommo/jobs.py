@@ -250,7 +250,10 @@ async def process_pending_jobs(limit: int = 10) -> int:
             break
         job_dict = dict(job)
         logger.info("Kommo pending job claimed: %s", _job_log_context(job_dict))
-        await _launch_salesbot_for_job(job_dict)
+        if _is_direct_instagram_dm(job_dict):
+            await _prepare_direct_instagram_dm(job_dict)
+        else:
+            await _launch_salesbot_for_job(job_dict)
         processed += 1
     return processed
 
@@ -418,7 +421,14 @@ async def recover_stale_jobs() -> dict:
     reset_processing = await db.execute(
         """
         UPDATE kommo_message_jobs
-        SET status = CASE WHEN return_url IS NULL THEN 'pending' ELSE 'ready' END,
+        SET status = CASE
+                WHEN channel = 'instagram'
+                     AND interaction_type = 'private_message'
+                     AND talk_id IS NOT NULL
+                THEN 'ready'
+                WHEN return_url IS NULL THEN 'pending'
+                ELSE 'ready'
+            END,
             processing_started_at = NULL,
             processing_lease_id = NULL,
             updated_at = NOW(),
@@ -620,13 +630,158 @@ async def _claim_ready_job():
             SELECT candidate.id
             FROM kommo_message_jobs candidate
             WHERE candidate.status = 'ready'
-              AND candidate.return_url IS NOT NULL
+              AND (
+                  candidate.return_url IS NOT NULL
+                  OR (
+                      candidate.channel = 'instagram'
+                      AND candidate.interaction_type = 'private_message'
+                      AND candidate.talk_id IS NOT NULL
+                  )
+              )
             ORDER BY candidate.updated_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
         RETURNING *
         """
+    )
+
+
+async def _prepare_direct_instagram_dm(job: dict) -> None:
+    processing_lease_id = job.get("processing_lease_id")
+    if not _is_valid_kommo_id(job.get("talk_id")):
+        logger.warning(
+            "Kommo direct Instagram job failed before preparation: job_id=%s reason=missing_instagram_talk_id",
+            job["id"],
+        )
+        await _mark_job(
+            job["id"],
+            "failed",
+            "missing_instagram_talk_id",
+            processing_lease_id=processing_lease_id,
+        )
+        return
+
+    config = get_config()
+    try:
+        if await _discard_private_job_if_superseded_by_recent_comment(job):
+            return
+        logger.info("Kommo direct Instagram preparation started: %s", _job_log_context(job))
+        settings = await db.get_settings()
+        client = KommoClient.from_config()
+        lead = await client.get_lead(job["lead_id"]) if job.get("lead_id") else None
+        ai_mode_enum = None
+        if lead:
+            ai_mode_enum, initialized_now = await ensure_ai_mode_initialized(client, str(job["lead_id"]), lead)
+            if initialized_now:
+                logger.info("Initialized Kommo AI Mode for lead %s", job["lead_id"])
+
+        profile = build_kommo_customer_profile(job=job, contact=None)
+        customer = await resolve_customer_from_kommo_job(job, lead=lead, profile=profile)
+        if ai_mode_enum is not None:
+            synced_customer = await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
+            if isinstance(synced_customer, dict):
+                customer.update(synced_customer)
+        ai_mode_enum = await _reactivate_expired_escalation_if_needed(customer, ai_mode_enum)
+
+        decision = evaluate_automation_state(
+            ai_enabled=bool(settings.get("ai_enabled", True)),
+            local_conversation_state=customer.get("conversation_state"),
+            kommo_ai_mode_enum_id=ai_mode_enum,
+            job_status=job.get("status"),
+        )
+        wait_for_story_context = bool(config.meta_story_context_enabled)
+        defer_suppression = not decision.allowed and wait_for_story_context
+        if not decision.allowed and not defer_suppression:
+            logger.info(
+                "Kommo direct Instagram job suppressed before preparation: job_id=%s reason=%s",
+                job["id"],
+                decision.reason,
+            )
+            await _store_user_message_if_suppressed(customer, job)
+            await _mark_job(
+                job["id"],
+                "discarded" if not decision.needs_ai_mode_initialization else "failed",
+                decision.reason,
+                processing_lease_id=processing_lease_id,
+            )
+            return
+        if defer_suppression:
+            logger.info(
+                "Kommo direct Instagram job suppression deferred until after Story context: job_id=%s reason=%s",
+                job["id"],
+                decision.reason,
+            )
+
+        if await _discard_private_job_if_superseded_by_recent_comment(job):
+            return
+        prepared_job = await _mark_direct_instagram_job_prepared(
+            job["id"],
+            processing_lease_id,
+            wait_for_story_context=wait_for_story_context,
+            story_context_wait_seconds=config.meta_story_context_wait_seconds,
+            suppress_after_context=defer_suppression,
+            automation_block_reason=decision.reason if defer_suppression else None,
+        )
+        if not prepared_job:
+            logger.info(
+                "Kommo direct Instagram preparation skipped because job was no longer processing: job_id=%s",
+                job["id"],
+            )
+            return
+        if await _discard_private_job_if_superseded_by_recent_comment(dict(prepared_job)):
+            return
+        logger.info(
+            "Kommo direct Instagram job prepared without Salesbot: %s",
+            _job_log_context(dict(prepared_job)),
+        )
+    except Exception as e:
+        logger.exception(
+            "Kommo direct Instagram preparation failed: job_id=%s error=%s",
+            job["id"],
+            sanitize_job_error(e),
+        )
+        await _mark_job(job["id"], "failed", sanitize_job_error(e), processing_lease_id=processing_lease_id)
+
+
+async def _mark_direct_instagram_job_prepared(
+    job_id: str,
+    processing_lease_id: str | None,
+    *,
+    wait_for_story_context: bool,
+    story_context_wait_seconds: int,
+    suppress_after_context: bool,
+    automation_block_reason: str | None,
+):
+    return await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs
+        SET status = CASE WHEN :wait_for_story_context THEN 'waiting_for_context' ELSE 'ready' END,
+            context_status = CASE WHEN :wait_for_story_context THEN 'pending' ELSE 'not_required' END,
+            context_deadline_at = CASE
+                WHEN :wait_for_story_context
+                THEN NOW() + (:story_context_wait_seconds * INTERVAL '1 second')
+                ELSE NULL
+            END,
+            suppress_after_context = :suppress_after_context,
+            automation_block_reason = :automation_block_reason,
+            processing_started_at = NULL,
+            processing_lease_id = NULL,
+            ai_started_at = NULL,
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'processing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+        RETURNING *
+        """,
+        {
+            "id": job_id,
+            "processing_lease_id": processing_lease_id,
+            "wait_for_story_context": wait_for_story_context,
+            "story_context_wait_seconds": story_context_wait_seconds,
+            "suppress_after_context": suppress_after_context,
+            "automation_block_reason": automation_block_reason,
+        },
     )
 
 
@@ -1055,6 +1210,18 @@ async def _process_ready_job(job: dict) -> None:
                 job["id"],
             )
             await _continue_and_discard_job(client, job, "empty_after_sanitization")
+            return
+        if _is_direct_instagram_dm(job):
+            logger.info(
+                "Kommo direct Instagram delivery deferred to Stage 2: job_id=%s",
+                job["id"],
+            )
+            await _mark_job(
+                job["id"],
+                "failed",
+                "instagram_direct_delivery_not_implemented",
+                processing_lease_id=job.get("processing_lease_id"),
+            )
             return
         delivery_result = await deliver_response(
             job=job,
@@ -1965,6 +2132,15 @@ async def _continue_and_discard_job(
     send_customer_fallback: bool = False,
     customer_message: str | None = None,
 ) -> None:
+    if _is_direct_instagram_dm(job):
+        await _mark_job(
+            job["id"],
+            "discarded",
+            reason,
+            processing_lease_id=job.get("processing_lease_id"),
+        )
+        return
+
     continuation_started = False
     try:
         if customer_message:
@@ -2608,12 +2784,26 @@ def _job_interaction_type(job: dict) -> str:
     return interaction_type if interaction_type in {"private_message", "instagram_comment"} else "private_message"
 
 
+def _is_direct_instagram_dm(job: dict) -> bool:
+    return (
+        job.get("channel") == "instagram"
+        and str(job.get("interaction_type") or "").strip().lower() == "private_message"
+    )
+
+
+def _is_valid_kommo_id(value) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    text = str(value).strip()
+    return text.isdigit() and int(text) > 0
+
+
 def _salesbot_id_for_channel(channel: str | None) -> int:
     config = get_config()
     normalized_channel = str(channel or "").strip().lower()
     if normalized_channel == "instagram":
-        salesbot_id = config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
-    elif normalized_channel == "whatsapp":
+        raise KommoAPIError("Instagram private messages do not use Salesbot")
+    if normalized_channel == "whatsapp":
         salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
     else:
         raise KommoAPIError("Unsupported Kommo private-message channel")

@@ -146,15 +146,7 @@ def _validate_startup_config(config):
                 errors.append(
                     "Kommo mode has missing or placeholder settings: " + ", ".join(missing_kommo)
                 )
-            instagram_salesbot_id = (
-                config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
-            )
             whatsapp_salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
-            if not _is_configured(instagram_salesbot_id):
-                errors.append(
-                    "Kommo Instagram DMs require KOMMO_INSTAGRAM_DM_SALESBOT_ID "
-                    "or fallback KOMMO_SALESBOT_ID."
-                )
             if not _is_configured(whatsapp_salesbot_id):
                 errors.append(
                     "Kommo WhatsApp requires KOMMO_WHATSAPP_SALESBOT_ID "
