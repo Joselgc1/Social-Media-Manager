@@ -49,6 +49,11 @@ def app(monkeypatch):
     monkeypatch.setattr(kommo, "get_config", lambda: _config())
     monkeypatch.setattr(kommo, "persist_salesbot_callback", AsyncMock(return_value={"status": "ready", "job_id": "job-1"}))
     monkeypatch.setattr(kommo, "process_ready_jobs", AsyncMock(return_value=1))
+    monkeypatch.setattr(
+        kommo,
+        "_event_log_context",
+        lambda event: {"type": event.event_type, "channel": event.channel},
+    )
     return app
 
 
@@ -98,7 +103,7 @@ async def test_salesbot_callback_accepts_urlencoded_body(client):
             {
                 "token": _token(),
                 "return_url": RETURN_URL,
-                "data": '{"message":"Hola secreta","lead_id":"100","origin":"whatsapp"}',
+                "data": '{"message":"Hola secreta","lead_id":"100","origin":"whatsapp","expected_channel":"whatsapp"}',
             }
         ),
         headers={"content-type": "application/x-www-form-urlencoded"},
@@ -114,7 +119,7 @@ async def test_salesbot_callback_accepts_multipart_body(client):
         files={
             "token": (None, _token()),
             "return_url": (None, RETURN_URL),
-            "data": (None, '{"lead_id":"100","origin":"whatsapp"}'),
+            "data": (None, '{"lead_id":"100","origin":"whatsapp","expected_channel":"whatsapp"}'),
         },
     )
     assert response.status_code == 200
@@ -123,26 +128,16 @@ async def test_salesbot_callback_accepts_multipart_body(client):
 
 @pytest.mark.asyncio
 async def test_salesbot_callback_accepts_json_string_data_field(client):
-    response = await _post(client, json=_json_body(data='{"lead_id":"100","origin":"whatsapp"}'))
+    response = await _post(
+        client,
+        json=_json_body(data='{"lead_id":"100","origin":"whatsapp","expected_channel":"whatsapp"}'),
+    )
     assert response.status_code == 200
     assert kommo.persist_salesbot_callback.await_args.args[0].origin == "whatsapp"
 
 
 @pytest.mark.asyncio
-async def test_salesbot_callback_accepts_comment_interaction_type(client):
-    response = await _post(client, json=_json_body(data={"lead_id": "100", "origin": "instagram", "interaction_type": "instagram_comment"}))
-    assert response.status_code == 200
-    assert kommo.persist_salesbot_callback.await_args.args[0].interaction_type == "instagram_comment"
-
-
-@pytest.mark.asyncio
-async def test_hybrid_mode_ignores_kommo_instagram_private_salesbot_callback(client, monkeypatch):
-    monkeypatch.setattr(
-        kommo,
-        "get_config",
-        lambda: _config(instagram_backend="meta"),
-    )
-
+async def test_salesbot_callback_ignores_non_whatsapp_callback(client):
     response = await _post(
         client,
         json=_json_body(
@@ -150,7 +145,6 @@ async def test_hybrid_mode_ignores_kommo_instagram_private_salesbot_callback(cli
                 "message": "Hola",
                 "lead_id": "100",
                 "origin": "instagram",
-                "expected_channel": "instagram",
             }
         ),
     )
@@ -158,49 +152,13 @@ async def test_hybrid_mode_ignores_kommo_instagram_private_salesbot_callback(cli
     assert response.status_code == 200
     assert response.json() == {
         "status": "ignored",
-        "reason": "instagram_managed_by_meta",
+        "reason": "unsupported_channel",
     }
     kommo.persist_salesbot_callback.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_hybrid_mode_ignores_kommo_instagram_comment_salesbot_callback(client, monkeypatch):
-    monkeypatch.setattr(
-        kommo,
-        "get_config",
-        lambda: _config(instagram_backend="meta"),
-    )
-
-    response = await _post(
-        client,
-        json=_json_body(
-            data={
-                "message": "Precio?",
-                "lead_id": "100",
-                "origin": "instagram",
-                "expected_channel": "instagram",
-                "interaction_type": "instagram_comment",
-                "comment_id": "comment-1",
-            }
-        ),
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "status": "ignored",
-        "reason": "instagram_managed_by_meta",
-    }
-    kommo.persist_salesbot_callback.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_hybrid_mode_keeps_kommo_whatsapp_salesbot_callback(client, monkeypatch):
-    monkeypatch.setattr(
-        kommo,
-        "get_config",
-        lambda: _config(instagram_backend="meta"),
-    )
-
+async def test_kommo_keeps_whatsapp_salesbot_callback(client):
     response = await _post(client, json=_json_body())
 
     assert response.status_code == 200
@@ -209,67 +167,33 @@ async def test_hybrid_mode_keeps_kommo_whatsapp_salesbot_callback(client, monkey
 
 
 @pytest.mark.asyncio
-async def test_salesbot_callback_logs_interaction_message_and_signed_entity(client, caplog):
+async def test_salesbot_callback_logs_whatsapp_message_and_signed_entity(client, caplog):
     with caplog.at_level("INFO", logger="app.webhooks.kommo"):
         response = await _post(
             client,
-            json=_json_body(data={"message": "Precio?", "lead_id": "100", "origin": "instagram", "interaction_type": "instagram_comment"}),
+            json=_json_body(),
         )
 
     assert response.status_code == 200
-    assert "interaction_type=instagram_comment" in caplog.text
+    assert "interaction_type=private_message" in caplog.text
     assert "message_text_resolved=True" in caplog.text
     assert "signed_entity_type=leads" in caplog.text
     assert "signed_entity_id=100" in caplog.text
-    assert "Precio?" not in caplog.text
+    assert "Hola secreta" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_mirrored_comment_general_webhook_creates_private_message_job_for_reconciliation(
-    client,
-    monkeypatch,
-    caplog,
-    sanitized_a105_native_instagram_comment_payload,
-):
-    record = AsyncMock(return_value={"status": "created", "job_id": "private-job"})
-    scheduled = AsyncMock()
-    monkeypatch.setattr(kommo, "record_incoming_event", record)
-    monkeypatch.setattr(kommo, "schedule_due_job_processing", scheduled)
-
-    with caplog.at_level("INFO", logger="app.webhooks.kommo"):
-        response = await client.post("/webhooks/kommo/events/secret-path", json=sanitized_a105_native_instagram_comment_payload)
-
-    assert response.status_code == 200
-    record.assert_awaited_once()
-    scheduled.assert_called_once()
-    event = record.await_args.args[0]
-    assert event.origin == "instagram_business"
-    assert event.message_type == "text"
-    assert event.talk_id == "105"
-    assert event.interaction_type == "private_message"
-    assert "Kommo native Instagram comment ignored by private-message webhook path" not in caplog.text
-    assert "Kommo webhook completed" in caplog.text
-    assert "statuses={'created': 1}" in caplog.text
-    assert "Precio?" not in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_hybrid_mode_ignores_kommo_instagram_general_webhook(
-    client,
-    monkeypatch,
-    sanitized_a105_native_instagram_comment_payload,
-):
-    monkeypatch.setattr(
-        kommo,
-        "get_config",
-        lambda: _config(instagram_backend="meta"),
-    )
+async def test_kommo_general_webhook_ignores_non_whatsapp_event(client, monkeypatch):
     record = AsyncMock()
     monkeypatch.setattr(kommo, "record_incoming_event", record)
 
     response = await client.post(
         "/webhooks/kommo/events/secret-path",
-        json=sanitized_a105_native_instagram_comment_payload,
+        json={
+            "message": {
+                "add": [{"id": "ig-1", "origin": "instagram", "text": "Hola"}]
+            }
+        },
     )
 
     assert response.status_code == 200
@@ -316,6 +240,7 @@ async def test_salesbot_callback_accepts_flattened_form_data_fields(client):
                 "data[lead_id]": "100",
                 "data[contact_id]": "200",
                 "data[origin]": "whatsapp",
+                "data[expected_channel]": "whatsapp",
             }
         ),
         headers={"content-type": "application/x-www-form-urlencoded"},
@@ -330,7 +255,12 @@ async def test_salesbot_callback_accepts_flattened_form_data_fields(client):
 async def test_salesbot_callback_falls_back_for_missing_or_wrong_content_type(client):
     response = await _post(
         client,
-        content=urlencode({"token": _token(), "return_url": RETURN_URL, "data[lead_id]": "100"}),
+        content=urlencode({
+            "token": _token(),
+            "return_url": RETURN_URL,
+            "data[lead_id]": "100",
+            "data[expected_channel]": "whatsapp",
+        }),
         headers={"content-type": "text/plain"},
     )
     assert response.status_code == 200

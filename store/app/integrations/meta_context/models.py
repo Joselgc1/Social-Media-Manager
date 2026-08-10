@@ -1,4 +1,4 @@
-"""Normalized models for context-only Instagram webhook events."""
+"""Normalized models for authoritative Meta Instagram events."""
 
 from datetime import UTC, datetime
 from typing import Literal

@@ -47,9 +47,7 @@ widget.get_settings = () => settings;
 widget.i18n = section => {{
     const translations = {{
      salesbot: {{
-      instagram_dm_handler_name: 'Ask Eva AI for Instagram DMs',
       whatsapp_handler_name: 'Ask Eva AI for WhatsApp',
-      instagram_comment_handler_name: 'Ask Eva AI for Instagram comments',
       webhook_url: 'Salesbot callback URL override',
       success_exit: 'AI response completed',
       media_exit: 'Media delivered by backend',
@@ -60,7 +58,7 @@ widget.i18n = section => {{
 }};
 console.warn = (message, details) => {{ warnings.push({{ message, details }}); }};
 
-function parseFlow(params, handlerCode = 'kommo_ai_instagram_dm') {{
+function parseFlow(params, handlerCode = 'kommo_ai_whatsapp') {{
   const source = widget.callbacks.onSalesbotDesignerSave(handlerCode, params);
   return JSON.parse(source);
 }}
@@ -85,8 +83,6 @@ settings = {{ backend_url: '{GLOBAL_URL}' }};
 const globalFlow = parseFlow({{}});
 const invalidBlockFallsBackToGlobalFlow = parseFlow({{ webhook_url: 'https://block.example/wrong/path' }});
 const blockOverrideFlow = parseFlow({{ webhook_url: '{BLOCK_URL}' }});
-const whatsappBlockFlow = parseFlow({{ webhook_url: '{BLOCK_URL}' }}, 'kommo_ai_whatsapp');
-const commentBlockFlow = parseFlow({{ webhook_url: '{BLOCK_URL}' }}, 'kommo_ai_instagram_comment');
 const directStringFlow = parseFlow({{ webhook_url: '{BLOCK_URL}' }});
 const nestedParamsFlow = parseFlow({{ params: {{ webhook_url: '{NESTED_URL}' }} }});
 const objectManualFlow = parseFlow({{ webhook_url: {{ value_manual: '{MANUAL_URL}' }} }});
@@ -110,8 +106,6 @@ console.log(JSON.stringify({{
   globalFlow,
   invalidBlockFallsBackToGlobalFlow,
   blockOverrideFlow,
-  whatsappBlockFlow,
-  commentBlockFlow,
   directStringFlow,
   nestedParamsFlow,
   objectManualFlow,
@@ -141,7 +135,7 @@ def _flow_exit_codes(flow: list[dict]) -> set[str]:
 def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     manifest = _source_manifest()
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.13"
+    assert manifest["widget"]["version"] == "1.2.14"
     assert manifest["locations"] == ["settings", "salesbot_designer"]
     assert manifest["settings"]["backend_url"] == {
         "name": "settings.backend_url",
@@ -151,14 +145,10 @@ def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     assert manifest["salesbot_designer"]["logo"] == "/widgets/__WIDGET_CODE__/images/logo_small.png"
     assert set(manifest["salesbot_designer"]) == {
         "logo",
-        "kommo_ai_instagram_dm",
         "kommo_ai_whatsapp",
-        "kommo_ai_instagram_comment",
     }
-    assert manifest["salesbot_designer"]["kommo_ai_instagram_dm"]["name"] == "salesbot.instagram_dm_handler_name"
     assert manifest["salesbot_designer"]["kommo_ai_whatsapp"]["name"] == "salesbot.whatsapp_handler_name"
-    assert manifest["salesbot_designer"]["kommo_ai_instagram_comment"]["name"] == "salesbot.instagram_comment_handler_name"
-    for handler_code in ("kommo_ai_instagram_dm", "kommo_ai_whatsapp", "kommo_ai_instagram_comment"):
+    for handler_code in ("kommo_ai_whatsapp",):
         webhook_url = manifest["salesbot_designer"][handler_code]["settings"]["webhook_url"]
         assert webhook_url == {
             "name": "salesbot.webhook_url",
@@ -177,9 +167,7 @@ def test_all_manifest_localization_keys_exist_in_both_locales():
     for locale in ("en", "es"):
         translations = json.loads((WIDGET_ROOT / "i18n" / f"{locale}.json").read_text(encoding="utf-8"))
         assert "backend_url" in translations["settings"]
-        assert "instagram_dm_handler_name" in translations["salesbot"]
         assert "whatsapp_handler_name" in translations["salesbot"]
-        assert "instagram_comment_handler_name" in translations["salesbot"]
         assert "webhook_url" in translations["salesbot"]
         assert translations["salesbot"]["success_exit"]
         assert translations["salesbot"]["media_exit"]
@@ -218,7 +206,7 @@ def test_widget_build_substitutes_widget_code_and_includes_expected_archive_cont
     assert "manifest.json" in names
     assert "__WIDGET_CODE__" not in json.dumps(manifest)
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.13"
+    assert manifest["widget"]["version"] == "1.2.14"
     assert "settings" in manifest
     assert {"settings", "salesbot_designer"}.issubset(set(manifest["locations"]))
     assert manifest["salesbot_designer"]["logo"] == "/widgets/social_media_manager_kommo_v2/images/logo_small.png"
@@ -274,7 +262,7 @@ def test_salesbot_save_fails_clearly_only_without_any_url_and_logs_safe_diagnost
     assert result["warnings"] == [
         {
             "message": "Kommo Salesbot widget configuration is invalid",
-            "details": {"handlerCode": "kommo_ai_instagram_dm", "parameterKeys": []},
+            "details": {"handlerCode": "kommo_ai_whatsapp", "parameterKeys": []},
         }
     ]
     assert "https://" not in json.dumps(result["warnings"])
@@ -294,7 +282,7 @@ def test_salesbot_script_uses_documented_widget_request_flow_and_matching_exits(
                 "contact_id": "{{contact.id}}",
                 "origin": "{{origin}}",
                 "interaction_type": "private_message",
-                "expected_channel": "instagram",
+                "expected_channel": "whatsapp",
             },
         },
     }
@@ -317,16 +305,4 @@ def test_salesbot_script_uses_documented_widget_request_flow_and_matching_exits(
     ]
     assert flow[1]["question"][2] == {"handler": "exits", "params": {"value": "fail"}}
     assert _flow_exit_codes(flow) == {exit_["code"] for exit_ in result["designerSettings"]["exits"]}
-    whatsapp_data = result["whatsappBlockFlow"][0]["question"][0]["params"]["data"]
-    assert whatsapp_data["interaction_type"] == "private_message"
-    assert whatsapp_data["expected_channel"] == "whatsapp"
-    comment_data = result["commentBlockFlow"][0]["question"][0]["params"]["data"]
-    assert comment_data["interaction_type"] == "instagram_comment"
-    assert "expected_channel" not in comment_data
-    assert comment_data["post_caption"] == "{{post.caption}}"
-    assert comment_data["product_sku"] == "{{product.sku}}"
-    assert comment_data["author_username"] == "{{author.username}}"
-    assert comment_data["author_profile_url"] == "{{author.profile_url}}"
-    assert comment_data["sender_username"] == "{{sender.username}}"
-    assert comment_data["sender_profile_url"] == "{{sender.profile_url}}"
     assert "{{lead.responsible.id}}" not in (WIDGET_ROOT / "script.js").read_text(encoding="utf-8")

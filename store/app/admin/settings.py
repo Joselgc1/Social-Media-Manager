@@ -428,10 +428,6 @@ async def kommo_status():
         "kommo_integration_secret_configured": bool(config.kommo_integration_secret),
         "kommo_salesbot_id": config.kommo_salesbot_id,
         "kommo_salesbot_id_configured": config.kommo_salesbot_id is not None,
-        "kommo_instagram_dm_salesbot_id": config.kommo_instagram_dm_salesbot_id,
-        "kommo_instagram_dm_salesbot_id_configured": (
-            config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
-        ) is not None,
         "kommo_whatsapp_salesbot_id": config.kommo_whatsapp_salesbot_id,
         "kommo_whatsapp_salesbot_id_configured": (
             config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
@@ -511,10 +507,6 @@ async def kommo_test():
         )
 
     salesbots = [("whatsapp", config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id)]
-    if channel_backend_for("instagram", config) == "kommo":
-        salesbots.append(
-            ("instagram_dm", config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id)
-        )
     for channel, salesbot_id in salesbots:
         salesbot_id_ok = isinstance(salesbot_id, int) and salesbot_id > 0
         checks.append({"name": f"{channel}_salesbot_id_format", "ok": salesbot_id_ok})
@@ -528,51 +520,19 @@ async def kommo_test():
 
 @router.get("/meta-instagram-context/status")
 async def meta_instagram_context_status():
-    """Safe context-provider diagnostics without payloads or credentials."""
+    """Safe Meta-native Instagram enrichment diagnostics."""
     config = get_config()
-    try:
-        from app.integrations.meta_context.service import diagnostics_summary
-
-        diagnostics = await diagnostics_summary()
-    except Exception:
-        logger.exception("Meta Instagram context diagnostics unavailable")
-        diagnostics = {
-            "last_meta_event": None,
-            "pending_event_count": 0,
-            "matched_event_count": 0,
-            "ambiguous_event_count": 0,
-            "timed_out_kommo_job_count": 0,
-            "story_events_received": 0,
-            "story_events_matched": 0,
-            "story_events_ambiguous": 0,
-            "story_events_expired": 0,
-            "story_correlation_timeouts": 0,
-            "story_mapping_resolved": 0,
-            "story_mapping_missing": 0,
-            "story_context_created": 0,
-            "story_context_reused": 0,
-            "story_context_expired": 0,
-            "receipt_level_text_matches": 0,
-            "last_meta_api_error": "Diagnostics unavailable",
-        }
     return {
-        "enabled": config.meta_instagram_context_enabled,
-        "story_enabled": config.meta_story_context_enabled,
+        "enabled": True,
         "whatsapp_backend": channel_backend_for("whatsapp", config),
-        "instagram_backend": channel_backend_for("instagram", config),
+        "instagram_backend": "meta",
         "meta_app_secret_configured": bool(config.meta_app_secret),
         "instagram_access_token_configured": bool(config.instagram_access_token),
         "instagram_verify_token_configured": bool(config.instagram_verify_token),
         "instagram_account_id_configured": bool(config.instagram_account_id),
         "graph_api_version": config.meta_graph_api_version,
-        "context_wait_seconds": config.meta_context_wait_seconds,
-        "match_window_seconds": config.meta_context_match_window_seconds,
-        "event_retention_hours": config.meta_context_event_retention_hours,
-        "story_context_wait_seconds": config.meta_story_context_wait_seconds,
-        "story_match_window_seconds": config.meta_story_context_match_window_seconds,
         "story_mapping_ttl_hours": config.instagram_story_mapping_ttl_hours,
         "story_context_ttl_hours": config.instagram_story_context_ttl_hours,
-        **diagnostics,
     }
 
 

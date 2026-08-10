@@ -4,7 +4,7 @@ How to deploy and manage multiple stores from a single Master Control Plane. Eac
 
 This guide has 7 parts. Part 1 sets up the master service infrastructure. Part 2 covers local testing. Part 3 deploys the master service. Part 4 shows how to add your first store. Part 5 covers adding subsequent stores and Railway credential deployment. Part 6 is the testing checklist. Part 7 is a quick reference.
 
-**Prerequisites:** You should already be familiar with deploying a single store. See [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md) for the per-store deployment process, including the choice between direct Meta mode and Kommo mode.
+**Prerequisites:** You should already be familiar with deploying a single store. See [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md) for the per-store deployment process, including the Meta or Kommo WhatsApp choice and the always-native Meta Instagram setup.
 
 ---
 
@@ -299,24 +299,25 @@ Click **"+ Add Credential"** and add each one:
 | `DEBUG` | `false` in production |
 | `TELEGRAM_BOT_TOKEN` | Optional Telegram bot token |
 | `TELEGRAM_ADMIN_CHAT_ID` | Optional Telegram admin chat ID |
-| `META_APP_SECRET` | Meta mode only |
-| `WHATSAPP_ACCESS_TOKEN` | Meta mode only |
-| `WHATSAPP_PHONE_NUMBER_ID` | Meta mode only |
-| `WHATSAPP_VERIFY_TOKEN` | Meta mode only |
-| `INSTAGRAM_ACCESS_TOKEN` | Optional Meta mode Instagram |
-| `INSTAGRAM_VERIFY_TOKEN` | Optional Meta mode Instagram |
-| `KOMMO_SUBDOMAIN` | Kommo mode only, subdomain only |
-| `KOMMO_ACCESS_TOKEN` | Kommo mode only |
-| `KOMMO_INTEGRATION_ID` | Kommo mode only |
-| `KOMMO_INTEGRATION_SECRET` | Kommo mode only |
-| `KOMMO_INSTAGRAM_DM_SALESBOT_ID` | Preferred Instagram DM Salesbot |
+| `META_APP_SECRET` | Required by enabled native Meta channels |
+| `WHATSAPP_ACCESS_TOKEN` | Meta WhatsApp only |
+| `WHATSAPP_PHONE_NUMBER_ID` | Meta WhatsApp only |
+| `WHATSAPP_VERIFY_TOKEN` | Meta WhatsApp only |
+| `INSTAGRAM_ACCESS_TOKEN` | Native Meta Instagram |
+| `INSTAGRAM_VERIFY_TOKEN` | Native Meta Instagram |
+| `INSTAGRAM_ACCOUNT_ID` | Native Meta Instagram account ID |
+| `META_GRAPH_API_VERSION` | Native Meta Instagram Graph version |
+| `KOMMO_SUBDOMAIN` | Kommo WhatsApp only, subdomain only |
+| `KOMMO_ACCESS_TOKEN` | Kommo WhatsApp only |
+| `KOMMO_INTEGRATION_ID` | Kommo WhatsApp only |
+| `KOMMO_INTEGRATION_SECRET` | Kommo WhatsApp only |
 | `KOMMO_WHATSAPP_SALESBOT_ID` | Preferred WhatsApp Salesbot |
-| `KOMMO_SALESBOT_ID` | Temporary fallback for either private-message channel |
-| `KOMMO_WEBHOOK_SECRET` | Kommo mode only |
-| `KOMMO_AI_MODE_FIELD_ID` | Kommo mode only |
-| `KOMMO_AI_ACTIVE_ENUM_ID` | Kommo mode only |
-| `KOMMO_AI_HUMAN_ENUM_ID` | Kommo mode only |
-| `KOMMO_AI_PAUSED_ENUM_ID` | Kommo mode only |
+| `KOMMO_SALESBOT_ID` | Legacy WhatsApp Salesbot fallback |
+| `KOMMO_WEBHOOK_SECRET` | Kommo WhatsApp only |
+| `KOMMO_AI_MODE_FIELD_ID` | Kommo WhatsApp only |
+| `KOMMO_AI_ACTIVE_ENUM_ID` | Kommo WhatsApp only |
+| `KOMMO_AI_HUMAN_ENUM_ID` | Kommo WhatsApp only |
+| `KOMMO_AI_PAUSED_ENUM_ID` | Kommo WhatsApp only |
 | `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` | Optional Kommo escalation assignee |
 | `KOMMO_CHATS_MEDIA_ENABLED` | Global Kommo WhatsApp media kill switch |
 | `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED` | Independent product-image rollout flag |
@@ -347,12 +348,12 @@ When Carlos's mom or sister wants their own store, follow these steps.
 
 ### 5.1 Set up external services for the new store
 
-Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), plus either the Meta section 1.7 or the Kommo migration guide, but for the new store's accounts:
+Follow **Parts 1.1 through 1.6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), configure native Meta Instagram through section 1.7 when enabled, and use the Kommo migration guide only when WhatsApp uses Kommo:
 
-1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `python scripts/migrate.py` through schema version 17. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal migration runner.
+1. **New Railway StorePostgres service** (e.g., "store-maria"). The Store pre-deploy command runs `python scripts/migrate.py` through schema version 18. Migration 018 deprecates but does not drop the legacy Instagram/Kommo correlation schema. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal migration runner.
 2. **New Google Sheets** catalog with their products. Share with the same service account, or create a new one.
 3. **New Telegram bot** via @BotFather for their admin notifications.
-4. **Channel backend:** choose either direct Meta credentials or Kommo channel/private integration credentials for this store.
+4. **Channels:** configure native Meta Instagram when enabled, and choose either direct Meta or Kommo credentials for WhatsApp.
 5. **Same or new LLM API keys** (they can share API keys or have their own).
 
 ### 5.2 Deploy a new Railway service
@@ -379,7 +380,7 @@ APP_BASE_URL=https://store-maria.railway.app
 AI_ORCHESTRATION_MODE=legacy            # Optional env default; DB setting wins
 ```
 
-For a Kommo store, replace the Meta WhatsApp values with the Kommo variables from [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md) and [`docs/KOMMO_MIGRATION.md`](../docs/KOMMO_MIGRATION.md). Make sure `KOMMO_SUBDOMAIN` is only the subdomain, not a full URL.
+For Kommo WhatsApp, replace only the Meta WhatsApp values with the Kommo variables from [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md) and [`docs/KOMMO_MIGRATION.md`](../docs/KOMMO_MIGRATION.md). Keep native Meta Instagram credentials. Make sure `KOMMO_SUBDOMAIN` is only the subdomain, not a full URL.
 
 Optionally, set `SYSTEM_PROMPT_OVERRIDE` to customize the legacy AI persona for this store. If not set, it uses the default `store/prompts/system_prompt.md` file.
 
@@ -387,11 +388,11 @@ Optionally, set `SYSTEM_PROMPT_OVERRIDE` to customize the legacy AI persona for 
 
 Follow **Parts 4 and 6** of [`store/DEPLOYMENT.md`](../store/DEPLOYMENT.md), using the new store's Railway URL:
 
-1. **Meta mode WhatsApp webhook:** `https://store-maria.railway.app/webhooks/whatsapp`
+1. **Meta WhatsApp webhook:** `https://store-maria.railway.app/webhooks/whatsapp`
 2. **Telegram webhook:** `POST https://store-maria.railway.app/admin/settings/telegram/setup-webhook`
-3. **Meta mode Instagram webhook** (after App Review): `https://store-maria.railway.app/webhooks/instagram`
-4. **Kommo mode Salesbot URL:** `https://store-maria.railway.app/webhooks/kommo/salesbot`
-5. **Kommo mode general webhook:** `https://store-maria.railway.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`
+3. **Native Meta Instagram webhook** (after App Review): `https://store-maria.railway.app/webhooks/instagram`
+4. **Kommo WhatsApp Salesbot URL:** `https://store-maria.railway.app/webhooks/kommo/salesbot`
+5. **Kommo WhatsApp general webhook:** `https://store-maria.railway.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`
 
 ### 5.4 Register in the master dashboard
 
@@ -530,6 +531,7 @@ curl "https://your-master-url/api/stores/STORE_ID/railway/status" \
 [ ] Store without LLM_MANAGED_EXTERNALLY -> LLM controls work as normal
 [ ] Store with WHATSAPP_BACKEND=meta -> native Meta WhatsApp routes are present
 [ ] Store with WHATSAPP_BACKEND=kommo -> Kommo webhook routes are present and native Meta WhatsApp is absent
+[ ] Store with Instagram enabled -> native Meta Instagram route is present regardless of WHATSAPP_BACKEND
 [ ] Kommo store -> GET /admin/settings/kommo/status returns sanitized diagnostics
 [ ] Kommo store -> POST /admin/settings/kommo/test verifies read-only Kommo API checks
 ```
@@ -673,8 +675,9 @@ Master Control Plane (1 deployment)
 
 Store A (1 deployment)                   Store B (1 deployment)
   ├── Own PostgreSQL database             ├── Own PostgreSQL database
-  ├── Own channel backend                ├── Own channel backend
+  ├── Own WhatsApp backend               ├── Own WhatsApp backend
   │   (Meta or Kommo)                    │   (Meta or Kommo)
+  ├── Native Meta Instagram              ├── Native Meta Instagram
   ├── Own Telegram bot                   ├── Own Telegram bot
   ├── Own Google Sheet catalog           ├── Own Google Sheet catalog
   ├── Own LLM API keys                   ├── Own LLM API keys

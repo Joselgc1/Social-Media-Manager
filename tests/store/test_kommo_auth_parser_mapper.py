@@ -226,26 +226,6 @@ def test_whatsapp_voice_attachment_preserves_type_and_url():
     assert event.media_url == "https://media.example/voice.ogg?signature=secret"
 
 
-@pytest.mark.parametrize("message_type", ["audio", "voice"])
-def test_instagram_audio_attachment_preserves_type_and_url(message_type):
-    event = normalize_kommo_webhook({
-        "message": {
-            "add": [{
-                "id": "audio-1",
-                "origin": "instagram",
-                "attachment": {
-                    "type": message_type,
-                    "link": "https://media.example/instagram.m4a",
-                },
-            }],
-        },
-    })[0]
-
-    assert event.channel == "instagram"
-    assert event.message_type == message_type
-    assert event.media_url == "https://media.example/instagram.m4a"
-
-
 @pytest.mark.parametrize("message_type", ["picture", "image"])
 def test_existing_image_attachment_preserves_url(message_type):
     event = normalize_kommo_webhook({
@@ -294,10 +274,10 @@ def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
     outgoing = normalize_kommo_webhook({
         "outgoing_message[add][0][id]": "out1",
         "outgoing_message[add][0][text]": "Hello",
-        "outgoing_message[add][0][origin]": "instagram",
+        "outgoing_message[add][0][origin]": "whatsapp",
     })[0]
     assert outgoing.event_type == "outgoing_message"
-    assert outgoing.channel == "instagram"
+    assert outgoing.channel == "whatsapp"
     assert outgoing.interaction_type == "private_message"
 
     lead = normalize_kommo_webhook({
@@ -311,10 +291,10 @@ def test_incoming_outgoing_lead_and_talk_normalization(monkeypatch):
     talk = normalize_kommo_webhook({
         "talk[add][0][talk_id]": "9",
         "talk[add][0][chat_id]": "chat",
-        "talk[add][0][origin]": "instagram",
+        "talk[add][0][origin]": "whatsapp",
     })[0]
     assert talk.event_type == "talk_added"
-    assert talk.channel == "instagram"
+    assert talk.channel == "whatsapp"
 
 
 def test_account_message_wrapper_normalization_from_real_kommo_payload():
@@ -349,7 +329,7 @@ def test_account_message_wrapper_normalization_from_real_kommo_payload():
     assert event.interaction_type == "private_message"
 
 
-def test_direct_json_account_message_normalization():
+def test_non_whatsapp_direct_json_message_is_marked_unsupported():
     event = normalize_kommo_webhook({
         "account": {"id": "1", "subdomain": "acme"},
         "message": {
@@ -367,79 +347,10 @@ def test_direct_json_account_message_normalization():
     assert event.event_type == "incoming_message"
     assert event.message_id == "m-json"
     assert event.lead_id == "101"
-    assert event.channel == "instagram"
+    assert event.channel is None
     assert event.author_id == "author-json"
     assert event.author_name == "Cliente JSON"
     assert event.interaction_type == "private_message"
-
-
-def test_documented_chats_api_payload_profile_link_can_supply_instagram_handle():
-    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
-
-    event = normalize_kommo_webhook({
-        "event_type": "new_message",
-        "payload": {
-            "timestamp": 1639604761,
-            "msgid": "msg-doc",
-            "conversation_id": "chat-doc",
-            "origin": "instagram",
-            "sender": {
-                "id": "client-doc",
-                "name": "Maria Cliente",
-                "profile_link": "https://www.instagram.com/maria.bonita/?hl=es",
-            },
-            "message": {"type": "text", "text": "Hola"},
-        },
-    })[0]
-
-    assert event.event_type == "incoming_message"
-    assert event.channel == "instagram"
-    assert event.author_type == "external"
-    assert event.author_profile_url is None
-    assert event.sender_profile_url == "https://www.instagram.com/maria.bonita/?hl=es"
-    profile = build_kommo_customer_profile(job=event.model_dump(), contact=None)
-    assert profile.instagram_handle == "maria.bonita"
-    assert profile.instagram_handle_source == "webhook_sender_profile_url"
-
-
-def test_native_instagram_general_webhook_has_no_documented_handle_fields(
-    sanitized_a105_native_instagram_comment_payload,
-):
-    from app.integrations.kommo.customer_profile import build_kommo_customer_profile
-
-    event = normalize_kommo_webhook(sanitized_a105_native_instagram_comment_payload)[0]
-
-    assert event.channel == "instagram"
-    assert event.author_username is None
-    assert event.author_profile_url is None
-    assert event.sender_username is None
-    assert event.sender_profile_url is None
-    profile = build_kommo_customer_profile(job=event.model_dump(), contact=None)
-    assert profile.instagram_handle is None
-
-
-def test_instagram_comment_mirror_uses_confirmed_private_message_shape(
-    sanitized_a105_native_instagram_comment_payload,
-):
-    native_event = normalize_kommo_webhook(sanitized_a105_native_instagram_comment_payload)[0]
-    comment_event = normalize_kommo_webhook({
-        "message[add][0][id]": "m-ig-comment",
-        "message[add][0][lead_id]": "100",
-        "message[add][0][origin]": "instagram",
-        "message[add][0][message_type]": "text",
-        "message[add][0][interaction_type]": "instagram_comment",
-        "message[add][0][type]": "incoming",
-    })[0]
-
-    assert native_event.channel == "instagram"
-    assert native_event.origin == "instagram_business"
-    assert native_event.message_type == "text"
-    assert native_event.talk_id == "105"
-    assert native_event.interaction_type == "private_message"
-    assert native_event.correlation_id == "kommo:private_message:chat-a105"
-    assert comment_event.channel == "instagram"
-    assert comment_event.interaction_type == "instagram_comment"
-    assert comment_event.correlation_id == "kommo:instagram_comment:100"
 
 
 def test_missing_optional_and_unknown_events_are_safe():
@@ -461,7 +372,7 @@ def test_salesbot_widget_data_ignores_unresolved_placeholders():
 
 def test_origin_mapping():
     assert origin_to_channel("whatsapp") == "whatsapp"
-    assert origin_to_channel("instagram") == "instagram"
+    assert origin_to_channel("instagram") is None
     assert origin_to_channel("telegram") is None
 
 

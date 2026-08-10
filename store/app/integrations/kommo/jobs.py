@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -12,9 +11,8 @@ from app import db
 from app.ai.engine import generate_response
 from app.ai.transcription import AudioTranscriptionError, transcribe_audio_url
 from app.config import channel_backend_for, get_config
-from app.crm import conversations, escalations, sessions
+from app.crm import conversations, escalations
 from app.crm.channel_mappings import (
-    persist_verified_meta_instagram_sender,
     resolve_customer_from_kommo_job,
     upsert_mapping,
 )
@@ -39,10 +37,7 @@ from app.integrations.kommo.text_sanitizer import (
     build_kommo_message_diagnostics,
     prepare_kommo_customer_message,
 )
-from app.integrations.meta_context.normalization import (
-    normalize_message_text,
-    normalized_text_hash,
-)
+from app.integrations.meta_context.normalization import normalized_text_hash
 from app.webhooks.inbound_buffer import MESSAGE_DEBOUNCE_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -70,34 +65,6 @@ UNSUPPORTED_ATTACHMENT_MESSAGE = (
     "No pude identificar el archivo que me enviaste. "
     "Por favor envíame una imagen del comprobante o escríbeme qué necesitas."
 )
-COMMENT_MIRROR_RECONCILIATION_SECONDS = 45
-COMMENT_MIRROR_AMBIGUITY_SECONDS = 1.0
-COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS = 5.0
-COMMENT_CALLBACK_DEDUP_SECONDS = 300
-COMMENT_PRIVATE_SUPERSEDED_REASON = "superseded_by_instagram_comment"
-_PUBLIC_COMMENT_CONTEXT_FIELDS = {
-    "post_id",
-    "comment_id",
-    "parent_comment_id",
-    "media_id",
-    "post_url",
-    "comment_url",
-    "post_caption",
-    "media_type",
-    "media_product_type",
-    "content_type",
-    "post_text",
-    "media_caption",
-    "product_name",
-    "post_product_name",
-    "product_sku",
-    "parent_sku",
-    "image_url",
-    "post_image_url",
-    "post_media_url",
-}
-
-
 def sanitize_job_error(error: Exception | str) -> str:
     return sanitize_kommo_error(error)
 
@@ -240,10 +207,7 @@ async def schedule_due_job_processing(delay_seconds: float | None = None) -> Non
 
 async def process_pending_jobs(limit: int = 10) -> int:
     config = get_config()
-    if not any(
-        channel_backend_for(channel, config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    ):
+    if channel_backend_for("whatsapp", config) != "kommo":
         return 0
     processed = 0
     for _ in range(limit):
@@ -261,10 +225,7 @@ async def process_pending_jobs(limit: int = 10) -> int:
 
 async def process_ready_jobs(limit: int = 5) -> int:
     config = get_config()
-    if not any(
-        channel_backend_for(channel, config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    ):
+    if channel_backend_for("whatsapp", config) != "kommo":
         return 0
     processed = 0
     for _ in range(limit):
@@ -280,7 +241,6 @@ async def process_ready_jobs(limit: int = 5) -> int:
 
 async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, claims: dict | None = None) -> dict:
     values = _callback_values(data, return_url, claims or {})
-    config = get_config()
     update_values = {
         "return_url": values["return_url"],
         "entity_id": values["entity_id"],
@@ -300,35 +260,11 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
         "sender_username": values["sender_username"],
         "sender_profile_url": values["sender_profile_url"],
     }
-    story_wait_enabled = bool(config.meta_story_context_enabled)
-    if story_wait_enabled:
-        update_values.update({
-            "story_context_enabled": True,
-            "story_context_wait_seconds": config.meta_story_context_wait_seconds,
-        })
-
-    status_sql = """CASE
-                WHEN :story_context_enabled
-                     AND job.channel = 'instagram'
-                     AND job.interaction_type = 'private_message'
-                THEN 'waiting_for_context'
-                ELSE 'ready'
-            END""" if story_wait_enabled else "'ready'"
-    story_context_sql = """
-            context_status = CASE
-                WHEN job.channel = 'instagram' AND job.interaction_type = 'private_message'
-                THEN 'pending' ELSE context_status END,
-            context_deadline_at = CASE
-                WHEN job.channel = 'instagram' AND job.interaction_type = 'private_message'
-                THEN NOW() + (:story_context_wait_seconds * INTERVAL '1 second')
-                ELSE context_deadline_at END,
-    """ if story_wait_enabled else ""
-
     job = await db.fetch_one(
-        f"""
+        """
         UPDATE kommo_message_jobs job
         SET return_url = :return_url,
-            status = {status_sql},
+            status = 'ready',
             processing_lease_id = NULL,
             ai_started_at = NULL,
             callback_claims = CAST(:callback_claims AS jsonb),
@@ -340,7 +276,6 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
             author_profile_url = COALESCE(:author_profile_url, author_profile_url),
             sender_username = COALESCE(:sender_username, sender_username),
             sender_profile_url = COALESCE(:sender_profile_url, sender_profile_url),
-            {story_context_sql}
             updated_at = NOW()
         WHERE job.id = (
             SELECT candidate.id
@@ -383,15 +318,7 @@ async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, c
     )
     if job:
         logger.info("Kommo Salesbot callback matched waiting job: %s", _job_log_context(dict(job)))
-        status = "waiting_for_context" if job["status"] == "waiting_for_context" else "ready"
-        return {"status": status, "job_id": str(job["id"])}
-
-    if values["interaction_type"] == "instagram_comment":
-        duplicate = await _find_job_for_callback_identity(values)
-        if duplicate:
-            logger.info("Kommo Salesbot comment callback ignored as duplicate for job: %s", _job_log_context(dict(duplicate)))
-            return {"status": "duplicate", "job_id": str(duplicate["id"])}
-        return await _create_ready_comment_job_from_callback(data, values)
+        return {"status": "ready", "job_id": str(job["id"])}
 
     if values["expected_channel"] and await _has_waiting_job_for_other_channel(values):
         logger.warning("Kommo Salesbot callback ignored: reason=expected_channel_mismatch")
@@ -640,36 +567,17 @@ async def _claim_ready_job():
 
 async def _launch_salesbot_for_job(job: dict) -> None:
     processing_lease_id = job.get("processing_lease_id")
-    config = get_config()
-    if (
-        job.get("channel") == "instagram"
-        and getattr(config, "instagram_backend", None) == "meta"
-    ):
-        logger.info("Kommo Instagram job discarded because Instagram uses Meta: job_id=%s", job["id"])
+    if job.get("channel") != "whatsapp":
+        logger.info("Non-WhatsApp Kommo job discarded: job_id=%s", job["id"])
         await _mark_job(
             job["id"],
             "discarded",
-            "instagram_managed_by_meta",
+            "unsupported_kommo_channel",
             processing_lease_id=processing_lease_id,
         )
         return
-    if _job_interaction_type(job) == "instagram_comment":
-        logger.info(
-            "Kommo Instagram comment job will not launch Salesbot from backend: job_id=%s",
-            job["id"],
-        )
-        await _mark_job(
-            job["id"],
-            "failed",
-            "instagram_comment_requires_native_salesbot_callback",
-            processing_lease_id=processing_lease_id,
-        )
-        return
-
     try:
-        if await _discard_private_job_if_superseded_by_recent_comment(job):
-            return
-        salesbot_id = _salesbot_id_for_channel(job.get("channel"))
+        salesbot_id = _whatsapp_salesbot_id()
         logger.info("Kommo Salesbot launch preparing job: %s", _job_log_context(job))
         settings = await db.get_settings()
         client = KommoClient.from_config()
@@ -694,13 +602,7 @@ async def _launch_salesbot_for_job(job: dict) -> None:
             kommo_ai_mode_enum_id=ai_mode_enum,
             job_status=job.get("status"),
         )
-        defer_suppression = (
-            not decision.allowed
-            and config.meta_story_context_enabled
-            and job.get("channel") == "instagram"
-            and _job_interaction_type(job) == "private_message"
-        )
-        if not decision.allowed and not defer_suppression:
+        if not decision.allowed:
             logger.info(
                 "Kommo job suppressed before Salesbot launch: job_id=%s reason=%s",
                 job["id"],
@@ -714,31 +616,18 @@ async def _launch_salesbot_for_job(job: dict) -> None:
                 processing_lease_id=processing_lease_id,
             )
             return
-        if defer_suppression:
-            logger.info(
-                "Kommo job suppression deferred until after Story context: job_id=%s reason=%s",
-                job["id"],
-                decision.reason,
-            )
-
         entity_id = job.get("lead_id") or job.get("contact_id")
         entity_type = "leads" if job.get("lead_id") else "contacts"
         if not entity_id:
             logger.warning("Kommo job failed before Salesbot launch: job_id=%s reason=missing_entity_id", job["id"])
             await _mark_job(job["id"], "failed", "missing_entity_id", processing_lease_id=processing_lease_id)
             return
-        if await _discard_private_job_if_superseded_by_recent_comment(job):
-            return
         waiting_job = await _mark_job_waiting_for_salesbot(
             job["id"],
             processing_lease_id,
-            suppress_after_context=defer_suppression,
-            automation_block_reason=decision.reason if defer_suppression else None,
         )
         if not waiting_job:
             logger.info("Kommo Salesbot launch skipped because job was no longer processing: job_id=%s", job["id"])
-            return
-        if await _discard_private_job_if_superseded_by_recent_comment(dict(waiting_job)):
             return
         logger.info("Kommo job waiting for Salesbot callback before launch: job_id=%s", job["id"])
         try:
@@ -872,11 +761,8 @@ async def _process_ready_job(job: dict) -> None:
     media_delivery_succeeded = False
     try:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
-        if (
-            job.get("channel") == "instagram"
-            and getattr(config, "instagram_backend", None) == "meta"
-        ):
-            await _continue_and_discard_job(client, job, "instagram_managed_by_meta")
+        if job.get("channel") != "whatsapp":
+            await _continue_and_discard_job(client, job, "unsupported_kommo_channel")
             return
         settings = await db.get_settings()
         contact = await _fetch_contact_for_job(client, job)
@@ -899,63 +785,6 @@ async def _process_ready_job(job: dict) -> None:
             "combined_message": effective_message_text,
             "media_url": _job_image_media_url(job),
         }
-        current_private_context = _job_instagram_content_context(job)
-        if (
-            job.get("channel") == "instagram"
-            and _job_interaction_type(job) == "private_message"
-            and current_private_context.get("source") == "story_reply"
-            and current_private_context.get("meta_sender_id")
-        ):
-            identity_result = await persist_verified_meta_instagram_sender(
-                customer_id=str(customer["id"]),
-                external_author_id=current_private_context["meta_sender_id"],
-            )
-            logger.info(
-                "Meta Instagram sender mapping result: status=%s",
-                identity_result.get("status"),
-            )
-            if identity_result.get("status") == "conflict":
-                current_private_context = {}
-                await db.execute(
-                    """
-                    UPDATE kommo_message_jobs
-                    SET instagram_content_context = '{}'::jsonb,
-                        updated_at = NOW()
-                    WHERE id = :id
-                    """,
-                    {"id": job["id"]},
-                )
-
-        incoming_instagram_context = {}
-        current_story_context = False
-        has_current_story_event = False
-        is_instagram_private_message = (
-            job.get("channel") == "instagram"
-            and _job_interaction_type(job) == "private_message"
-        )
-        if is_instagram_private_message:
-            has_current_story_event = bool(job.get("meta_context_event_id"))
-            if _is_resolved_story_context(current_private_context):
-                current_story_context = True
-                incoming_instagram_context = await sessions.store_instagram_content_context(
-                    str(customer["id"]),
-                    current_private_context,
-                    ttl_hours=config.instagram_story_context_ttl_hours,
-                )
-            elif has_current_story_event:
-                await sessions.clear_instagram_content_context(str(customer["id"]))
-
-        if job.get("suppress_after_context"):
-            suppression_reason = job.get("automation_block_reason") or "automation_suppressed_before_context"
-            logger.info(
-                "Kommo ready job honoring deferred suppression: job_id=%s reason=%s",
-                job["id"],
-                suppression_reason,
-            )
-            await _store_user_message_if_suppressed(customer, job)
-            await _continue_and_discard_job(client, job, suppression_reason)
-            return
-
         if ai_mode_enum is not None:
             synced_customer = await sync_local_state_from_ai_mode(customer["id"], ai_mode_enum)
             if isinstance(synced_customer, dict):
@@ -975,35 +804,10 @@ async def _process_ready_job(job: dict) -> None:
             await _continue_and_discard_job(client, job, before.reason)
             return
 
-        if (
-            is_instagram_private_message
-            and not current_story_context
-            and not has_current_story_event
-        ):
-            incoming_instagram_context = await sessions.load_active_instagram_content_context(
-                str(customer["id"])
-            )
-            if incoming_instagram_context:
-                await db.execute(
-                    """
-                    UPDATE kommo_message_jobs
-                    SET instagram_content_context = CAST(:context AS jsonb),
-                        updated_at = NOW()
-                    WHERE id = :id AND status = 'processing'
-                    """,
-                    {
-                        "id": job["id"],
-                        "context": json.dumps(
-                            incoming_instagram_context | {"context_usage": "reused"},
-                            ensure_ascii=False,
-                        ),
-                    },
-                )
-
         sender_id = _local_sender_id(job)
         media_url = job.get("media_url")
         result = await generate_response(
-            channel=job.get("channel") or "whatsapp",
+            channel="whatsapp",
             sender_id=sender_id,
             message_text=job["combined_message"],
             media_url=media_url,
@@ -1016,11 +820,8 @@ async def _process_ready_job(job: dict) -> None:
                 "chat_id": job.get("chat_id"),
                 "talk_id": job.get("talk_id"),
                 "author_id": job.get("author_id"),
-                "interaction_type": _job_interaction_type(job),
+                "interaction_type": "private_message",
                 "media_url_is_direct": bool(media_url),
-                "public_comment_context": _job_public_comment_context(job),
-                "incoming_instagram_context": incoming_instagram_context,
-                "current_story_context": current_story_context,
             },
             persist_assistant_message=False,
             message_source_id=_conversation_source_id(job),
@@ -1029,7 +830,7 @@ async def _process_ready_job(job: dict) -> None:
             await upsert_mapping(
                 customer_id=result["customer_id"],
                 provider="kommo",
-                channel=job.get("channel") or "whatsapp",
+                channel="whatsapp",
                 external_contact_id=job.get("contact_id"),
                 external_lead_id=lead_id,
                 external_chat_id=job.get("chat_id"),
@@ -1325,342 +1126,6 @@ async def _has_waiting_job_for_other_channel(values: dict) -> bool:
     return job is not None
 
 
-async def _create_ready_comment_job_from_callback(data: SalesbotWidgetData, values: dict) -> dict:
-    message = _callback_comment_text(data)
-    public_comment_context = _public_comment_context_from_callback(data)
-    logger.info(
-        "Kommo native comment callback ready job creation started: interaction_type=instagram_comment "
-        "message_text_resolved=%s context_keys=%s signed_entity_type=%s signed_entity_id=%s",
-        True,
-        sorted(public_comment_context.keys()),
-        values["entity_type"],
-        values["entity_id"],
-    )
-    external_message_id, correlation_id = _comment_callback_ids(values, message)
-    normalized_message = _normalize_reconciliation_message(message)
-    message_hash = _message_hash(normalized_message)
-    config = get_config()
-    context_enabled = bool(getattr(config, "meta_instagram_context_enabled", False))
-    initial_status = "waiting_for_context" if context_enabled else "ready"
-    context_status = "pending" if context_enabled else "not_required"
-    job_values = {
-        "correlation_id": correlation_id,
-        "external_message_id": external_message_id,
-        "lead_id": values["entity_id"] if values["entity_type"] == "leads" else None,
-        "contact_id": values["entity_id"] if values["entity_type"] == "contacts" else None,
-        "origin": _instagram_callback_origin(data.origin),
-        "channel": "instagram",
-        "interaction_type": "instagram_comment",
-        "combined_message": message,
-        "return_url": values["return_url"],
-        "callback_claims": values["callback_claims"],
-        "public_comment_context": json.dumps(public_comment_context, ensure_ascii=False) if public_comment_context else None,
-        "salesbot_token_jti": values["salesbot_token_jti"],
-        "salesbot_account_id": values["salesbot_account_id"],
-        "salesbot_user_id": values["salesbot_user_id"],
-        "salesbot_client_uuid": values["salesbot_client_uuid"],
-        "author_username": values["author_username"],
-        "author_profile_url": values["author_profile_url"],
-        "sender_username": values["sender_username"],
-        "sender_profile_url": values["sender_profile_url"],
-        "initial_status": initial_status,
-        "context_status": context_status,
-        "context_wait_seconds": getattr(config, "meta_context_wait_seconds", 10),
-    }
-
-    async with db.get_db().transaction():
-        await db.execute(
-            """
-            SELECT pg_advisory_xact_lock(hashtext(:dedupe_key)),
-                   pg_advisory_xact_lock(hashtext(:reconciliation_key))
-            """,
-            {
-                "dedupe_key": external_message_id,
-                "reconciliation_key": _comment_reconciliation_key(values, message_hash),
-            },
-        )
-        await _discard_recent_private_jobs_superseded_by_comment_callback(
-            values=values,
-            normalized_message=normalized_message,
-            comment_event_timestamp=values["salesbot_token_iat"],
-        )
-        duplicate = await _find_duplicate_comment_callback_job(
-            external_message_id=external_message_id,
-            salesbot_token_jti=values["salesbot_token_jti"],
-            salesbot_token_iat_text=values["salesbot_token_iat_text"],
-            entity_type=values["entity_type"],
-            entity_id=values["entity_id"],
-            return_url=values["return_url"],
-            normalized_message=normalized_message,
-        )
-        if duplicate:
-            logger.info("Kommo native comment callback ignored as duplicate for job: %s", _job_log_context(dict(duplicate)))
-            return {"status": "duplicate", "job_id": str(duplicate["id"])}
-
-        job = await db.fetch_one(
-            """
-            INSERT INTO kommo_message_jobs (
-                correlation_id, external_message_id, lead_id, contact_id, origin, channel,
-                author_username, author_profile_url, sender_username, sender_profile_url,
-                interaction_type, combined_message, return_url, status, buffer_expires_at,
-                context_status, context_deadline_at,
-                callback_claims, public_comment_context, salesbot_token_jti, salesbot_account_id,
-                salesbot_user_id, salesbot_client_uuid
-            ) VALUES (
-                :correlation_id, :external_message_id, :lead_id, :contact_id, :origin, :channel,
-                :author_username, :author_profile_url, :sender_username, :sender_profile_url,
-                :interaction_type, :combined_message, :return_url, :initial_status, NOW(),
-                :context_status,
-                CASE WHEN :context_status = 'pending'
-                    THEN NOW() + (:context_wait_seconds * INTERVAL '1 second')
-                    ELSE NULL
-                END,
-                CAST(:callback_claims AS jsonb), CAST(:public_comment_context AS jsonb), :salesbot_token_jti, :salesbot_account_id,
-                :salesbot_user_id, :salesbot_client_uuid
-            )
-            RETURNING *
-            """,
-            job_values,
-        )
-        if not job:
-            raise RuntimeError("comment_callback_job_insert_failed")
-        await _record_callback_receipt(job_values, str(job["id"]))
-
-    logger.info(
-        "Kommo native comment callback created comment job: %s",
-        _job_log_context(dict(job)),
-    )
-    return {"status": initial_status, "job_id": str(job["id"])}
-
-
-async def _discard_recent_private_jobs_superseded_by_comment_callback(
-    *,
-    values: dict,
-    normalized_message: str,
-    comment_event_timestamp: float,
-) -> int:
-    if not normalized_message:
-        return 0
-    window_seconds = _comment_mirror_window_seconds()
-    normalized_hash = normalized_text_hash(normalized_message)
-    rows = await db.fetch_all(
-        f"""
-        SELECT private_job.id,
-               ABS(EXTRACT(EPOCH FROM (
-                   COALESCE(receipt.received_at, receipt.created_at, private_job.created_at)
-                   - COALESCE(meta_event.event_timestamp, to_timestamp(:comment_event_timestamp))
-               ))) AS timestamp_delta_seconds,
-               CASE
-                   WHEN receipt.received_at IS NOT NULL THEN 'receipt_received_at'
-                   WHEN receipt.created_at IS NOT NULL THEN 'receipt_created_at'
-                   ELSE 'job_created_at'
-               END AS private_timestamp_source,
-               CASE
-                   WHEN meta_event.event_timestamp IS NOT NULL THEN 'meta_event_timestamp'
-                   ELSE 'salesbot_iat'
-               END AS comment_timestamp_source
-        FROM kommo_message_jobs private_job
-        LEFT JOIN LATERAL (
-            SELECT event.event_timestamp
-            FROM meta_instagram_context_events event
-            WHERE event.event_type = 'comment'
-              AND event.matched_kommo_job_id = private_job.id
-              AND event.normalized_text_hash = :normalized_text_hash
-            ORDER BY event.event_timestamp ASC, event.id ASC
-            LIMIT 1
-        ) meta_event ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT receipt_row.received_at, receipt_row.created_at
-            FROM kommo_message_receipts receipt_row
-            WHERE receipt_row.job_id = private_job.id
-              AND receipt_row.channel = 'instagram'
-              AND receipt_row.interaction_type = 'private_message'
-              AND receipt_row.normalized_text_hash = :normalized_text_hash
-            ORDER BY ABS(EXTRACT(EPOCH FROM (
-                         COALESCE(receipt_row.received_at, receipt_row.created_at)
-                         - COALESCE(meta_event.event_timestamp, to_timestamp(:comment_event_timestamp))
-                     ))) ASC,
-                     receipt_row.created_at ASC,
-                     receipt_row.id ASC
-            LIMIT 1
-        ) receipt ON TRUE
-        WHERE private_job.interaction_type = 'private_message'
-          AND private_job.channel = 'instagram'
-          AND private_job.status IN (
-              'pending', 'prepared', 'processing', 'waiting_for_salesbot',
-              'waiting_for_context', 'ready'
-          )
-          AND private_job.continuation_payload IS NULL
-          AND private_job.assistant_message_persisted_at IS NULL
-          AND {_signed_entity_match_sql('private_job')}
-          AND {_normalized_message_sql('private_job.combined_message')} = :normalized_message
-          AND ABS(EXTRACT(EPOCH FROM (
-              COALESCE(receipt.received_at, receipt.created_at, private_job.created_at)
-              - COALESCE(meta_event.event_timestamp, to_timestamp(:comment_event_timestamp))
-          ))) <= :window_seconds
-        ORDER BY timestamp_delta_seconds ASC, private_job.created_at ASC, private_job.id ASC
-        FOR UPDATE OF private_job SKIP LOCKED
-        """,
-        {
-            "entity_type": values["entity_type"],
-            "entity_id": values["entity_id"],
-            "normalized_message": normalized_message,
-            "normalized_text_hash": normalized_hash,
-            "comment_event_timestamp": comment_event_timestamp,
-            "window_seconds": window_seconds,
-        },
-    )
-    candidate = _unique_best_mirror_candidate(rows)
-    if not candidate:
-        if rows:
-            logger.info(
-                "Kommo private Instagram mirror reconciliation left ambiguous candidates untouched: count=%s entity_type=%s entity_id=%s",
-                len(rows),
-                values["entity_type"],
-                values["entity_id"],
-            )
-        return 0
-    discarded = await db.fetch_one(
-        """
-        UPDATE kommo_message_jobs
-        SET status = 'discarded',
-            last_error = :reason,
-            processing_started_at = NULL,
-            processing_lease_id = NULL,
-            completed_at = NOW(),
-            updated_at = NOW()
-        WHERE id = CAST(:job_id AS uuid)
-          AND status IN (
-              'pending', 'prepared', 'processing', 'waiting_for_salesbot',
-              'waiting_for_context', 'ready'
-          )
-          AND continuation_payload IS NULL
-          AND assistant_message_persisted_at IS NULL
-        RETURNING id
-        """,
-        {"job_id": str(candidate["id"]), "reason": COMMENT_PRIVATE_SUPERSEDED_REASON},
-    )
-    if discarded:
-        logger.info(
-            "Kommo private Instagram mirror discarded after native comment callback: job_id=%s entity_type=%s entity_id=%s timestamp_delta_seconds=%s reason=%s",
-            candidate["id"],
-            values["entity_type"],
-            values["entity_id"],
-            candidate["timestamp_delta_seconds"],
-            COMMENT_PRIVATE_SUPERSEDED_REASON,
-        )
-        return 1
-    return 0
-
-
-def _unique_best_mirror_candidate(rows) -> dict | None:
-    candidates = [dict(row) for row in rows or []]
-    if not candidates:
-        return None
-    candidates.sort(
-        key=lambda candidate: (
-            float(candidate["timestamp_delta_seconds"]),
-            str(candidate["id"]),
-        )
-    )
-    best = candidates[0]
-    best_delta = float(best["timestamp_delta_seconds"])
-    if best.get("comment_timestamp_source") == "meta_event_timestamp":
-        return best
-    if len(candidates) > 1:
-        next_delta = float(candidates[1]["timestamp_delta_seconds"])
-        if next_delta - best_delta <= COMMENT_MIRROR_AMBIGUITY_SECONDS:
-            return None
-    if (
-        best.get("comment_timestamp_source") != "meta_event_timestamp"
-        and best_delta > COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS
-    ):
-        return None
-    if (
-        best.get("private_timestamp_source") == "job_created_at"
-        and best_delta > COMMENT_MIRROR_FALLBACK_MAX_DELTA_SECONDS
-    ):
-        return None
-    return best
-
-
-async def _find_duplicate_comment_callback_job(
-    *,
-    external_message_id: str,
-    salesbot_token_jti: str | None,
-    salesbot_token_iat_text: str,
-    entity_type: str,
-    entity_id: str,
-    return_url: str,
-    normalized_message: str,
-):
-    return await db.fetch_one(
-        f"""
-        SELECT *
-        FROM kommo_message_jobs
-        WHERE interaction_type = 'instagram_comment'
-          AND (
-              external_message_id = :external_message_id
-              OR (
-                  CAST(:salesbot_token_jti AS text) IS NOT NULL
-                  AND salesbot_token_jti = CAST(:salesbot_token_jti AS text)
-                  AND (
-                       callback_claims ->> 'iat' = :salesbot_token_iat_text
-                  )
-              )
-              OR (
-                  created_at >= NOW() - (:dedup_seconds * INTERVAL '1 second')
-                  AND {_signed_entity_match_sql()}
-                  AND {_normalized_message_sql('combined_message')} = :normalized_message
-                  AND (
-                      return_url = :return_url
-                      AND callback_claims ->> 'iat' = :salesbot_token_iat_text
-                  )
-              )
-          )
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        {
-            "external_message_id": external_message_id,
-            "salesbot_token_jti": salesbot_token_jti,
-            "salesbot_token_iat_text": salesbot_token_iat_text,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "return_url": return_url,
-            "normalized_message": normalized_message,
-            "dedup_seconds": COMMENT_CALLBACK_DEDUP_SECONDS,
-        },
-    )
-
-
-async def _record_callback_receipt(values: dict, job_id: str) -> None:
-    await db.execute(
-        """
-        INSERT INTO kommo_message_receipts (
-            external_message_id, job_id, correlation_id, lead_id, contact_id, origin,
-            channel, interaction_type, receipt_status, message_text, normalized_text_hash
-        ) VALUES (
-            :external_message_id, :job_id, :correlation_id, :lead_id, :contact_id, :origin,
-            :channel, :interaction_type, 'created', :message_text, :normalized_text_hash
-        )
-        ON CONFLICT (external_message_id) DO NOTHING
-        """,
-        {
-            "external_message_id": values["external_message_id"],
-            "job_id": job_id,
-            "correlation_id": values["correlation_id"],
-            "lead_id": values["lead_id"],
-            "contact_id": values["contact_id"],
-            "origin": values["origin"],
-            "channel": values["channel"],
-            "interaction_type": values["interaction_type"],
-            "message_text": values["combined_message"],
-            "normalized_text_hash": normalized_text_hash(values["combined_message"]),
-        },
-    )
-
-
 def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) -> dict:
     entity_type = claims.get("entity_type")
     entity_id = _claim_as_str(claims, "entity_id")
@@ -1677,10 +1142,8 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
     if token_iat <= 0:
         raise ValueError("invalid_signed_issued_at")
     interaction_type = data.interaction_type or "private_message"
-    if _has_public_comment_context(data) and interaction_type != "instagram_comment":
-        raise ValueError("comment_callback_interaction_type_mismatch")
-    if interaction_type == "instagram_comment" and data.expected_channel not in {None, "instagram"}:
-        raise ValueError("comment_callback_expected_channel_mismatch")
+    if interaction_type != "private_message":
+        raise ValueError("unsupported_interaction_type")
     return {
         "return_url": return_url,
         "entity_id": entity_id,
@@ -1702,30 +1165,6 @@ def _callback_values(data: SalesbotWidgetData, return_url: str, claims: dict) ->
     }
 
 
-def _callback_comment_text(data: SalesbotWidgetData) -> str:
-    text = str(data.message or "").strip()
-    if not text or (text.startswith("{{") and text.endswith("}}")):
-        raise ValueError("missing_comment_message")
-    return text
-
-
-def _public_comment_context_from_callback(data: SalesbotWidgetData) -> dict:
-    raw = data.model_dump(exclude_none=True)
-    return {
-        key: cleaned
-        for key, value in raw.items()
-        if key in _PUBLIC_COMMENT_CONTEXT_FIELDS
-        if (cleaned := _clean_public_comment_context_value(value))
-    }
-
-
-def _clean_public_comment_context_value(value) -> str:
-    text = " ".join(str(value or "").split()).strip()
-    if not text or (text.startswith("{{") and text.endswith("}}")):
-        return ""
-    return text[:1000]
-
-
 def _clean_widget_text(value) -> str:
     text = " ".join(str(value or "").split()).strip()
     if not text or (text.startswith("{{") and text.endswith("}}")):
@@ -1736,227 +1175,6 @@ def _clean_widget_text(value) -> str:
 def _clean_widget_id(value) -> str | None:
     text = _clean_widget_text(value)
     return text or None
-
-
-def _has_public_comment_context(data: SalesbotWidgetData) -> bool:
-    raw = data.model_dump(exclude_none=True)
-    return any(
-        key in _PUBLIC_COMMENT_CONTEXT_FIELDS and _clean_public_comment_context_value(value)
-        for key, value in raw.items()
-    )
-
-
-def _comment_callback_ids(values: dict, message: str) -> tuple[str, str]:
-    normalized_message = _normalize_reconciliation_message(message)
-    stable = "|".join(
-        str(part or "")
-        for part in (
-            values.get("salesbot_account_id"),
-            values.get("entity_type"),
-            values.get("entity_id"),
-            values.get("return_url"),
-            values.get("salesbot_token_jti"),
-            values.get("salesbot_token_iat_text") or values.get("salesbot_token_iat"),
-            _message_hash(normalized_message),
-        )
-    )
-    digest = hashlib.sha256(stable.encode("utf-8")).hexdigest()
-    external_message_id = f"kommo:instagram_comment_callback:{digest}"
-    correlation_id = f"kommo:instagram_comment:{digest[:32]}"
-    return external_message_id, correlation_id
-
-
-async def _discard_private_job_if_superseded_by_recent_comment(job: dict) -> bool:
-    if not _is_instagram_private_message_job(job):
-        return False
-    normalized_message = _normalize_reconciliation_message(job.get("combined_message"))
-    if not normalized_message:
-        return False
-    entity_sql, entity_values = _job_entity_match(job)
-    message_hash = normalized_text_hash(normalized_message)
-    window_seconds = _comment_mirror_window_seconds()
-    lock_values = _job_reconciliation_values(job, normalized_message)
-    async with db.get_db().transaction():
-        await db.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(:reconciliation_key))",
-            {"reconciliation_key": _comment_reconciliation_key(lock_values, _message_hash(normalized_message))},
-        )
-        match = await db.fetch_one(
-            f"""
-            SELECT candidate.id,
-                   candidate.correlation_timestamp,
-                   candidate.timestamp_source,
-                   ABS(EXTRACT(EPOCH FROM (
-                       candidate.correlation_timestamp - CAST(:private_created_at AS timestamptz)
-                   ))) AS timestamp_delta_seconds
-            FROM (
-                SELECT comment_job.id,
-                       COALESCE(
-                           matched_meta_event.event_timestamp,
-                           to_timestamp(
-                               CASE
-                                   WHEN comment_job.callback_claims ->> 'iat' ~ '^[0-9]+(\\.[0-9]+)?$'
-                                   THEN CAST(comment_job.callback_claims ->> 'iat' AS double precision)
-                                   ELSE NULL
-                               END
-                           ),
-                           comment_job.created_at
-                       ) AS correlation_timestamp,
-                       CASE
-                           WHEN matched_meta_event.event_timestamp IS NOT NULL THEN 'meta_event_timestamp'
-                           WHEN comment_job.callback_claims ->> 'iat' ~ '^[0-9]+(\\.[0-9]+)?$' THEN 'salesbot_iat'
-                           ELSE 'comment_job_created_at'
-                       END AS timestamp_source
-                FROM kommo_message_jobs comment_job
-                LEFT JOIN LATERAL (
-                    SELECT event.event_timestamp
-                    FROM meta_instagram_context_events event
-                    WHERE event.event_type = 'comment'
-                      AND event.matched_kommo_job_id = comment_job.id
-                      AND event.normalized_text_hash = :normalized_text_hash
-                    ORDER BY event.event_timestamp ASC, event.id ASC
-                    LIMIT 1
-                ) matched_meta_event ON TRUE
-                WHERE comment_job.interaction_type = 'instagram_comment'
-                  AND comment_job.channel = 'instagram'
-                  AND comment_job.status NOT IN ('discarded', 'failed')
-                  AND {entity_sql}
-                  AND {_normalized_message_sql('comment_job.combined_message')} = :normalized_message
-                UNION ALL
-                SELECT meta_event.id, meta_event.event_timestamp, 'meta_event_timestamp'
-                FROM meta_instagram_context_events meta_event
-                WHERE meta_event.event_type = 'comment'
-                  AND meta_event.matched_kommo_job_id = CAST(:job_id AS uuid)
-                  AND meta_event.normalized_text_hash = :normalized_text_hash
-            ) candidate
-            WHERE ABS(EXTRACT(EPOCH FROM (
-                candidate.correlation_timestamp - CAST(:private_created_at AS timestamptz)
-            ))) <= :window_seconds
-            ORDER BY timestamp_delta_seconds ASC, candidate.id ASC
-            LIMIT 1
-            """,
-            entity_values
-            | {
-                "job_id": str(job["id"]),
-                "private_created_at": job.get("created_at"),
-                "normalized_message": normalized_message,
-                "normalized_text_hash": message_hash,
-                "window_seconds": window_seconds,
-            },
-        )
-        if not match:
-            return False
-        discarded = await db.fetch_one(
-            """
-            UPDATE kommo_message_jobs
-            SET status = 'discarded',
-                last_error = :reason,
-                processing_started_at = NULL,
-                processing_lease_id = NULL,
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE id = CAST(:job_id AS uuid)
-              AND status IN (
-                  'pending', 'prepared', 'processing', 'waiting_for_salesbot',
-                  'waiting_for_context', 'ready'
-              )
-              AND continuation_payload IS NULL
-              AND assistant_message_persisted_at IS NULL
-            RETURNING id
-            """,
-            {"job_id": str(job["id"]), "reason": COMMENT_PRIVATE_SUPERSEDED_REASON},
-        )
-        if not discarded:
-            return False
-    logger.info(
-        "Kommo Instagram private-message job discarded before Salesbot launch because native comment job exists: job_id=%s comment_job_id=%s reason=%s",
-        job.get("id"),
-        match["id"],
-        COMMENT_PRIVATE_SUPERSEDED_REASON,
-    )
-    return True
-
-
-def _is_instagram_private_message_job(job: dict) -> bool:
-    origin = str(job.get("origin") or "").lower()
-    return _job_interaction_type(job) == "private_message" and (
-        job.get("channel") == "instagram" or "instagram" in origin
-    )
-
-
-def _normalize_reconciliation_message(value) -> str:
-    return normalize_message_text(value)
-
-
-def _message_hash(normalized_message: str) -> str:
-    return hashlib.sha256((normalized_message or "").encode("utf-8")).hexdigest()
-
-
-def _comment_reconciliation_key(values: dict, message_hash: str) -> str:
-    return ":".join(
-        str(part or "")
-        for part in (
-            "kommo-comment-reconcile",
-            values.get("entity_type"),
-            values.get("entity_id"),
-            message_hash,
-        )
-    )
-
-
-def _normalized_message_sql(column: str) -> str:
-    return f"LOWER(REGEXP_REPLACE(BTRIM(COALESCE({column}, '')), '\\s+', ' ', 'g'))"
-
-
-def _signed_entity_match_sql(alias: str | None = None) -> str:
-    prefix = f"{alias}." if alias else ""
-    return f"""
-    (
-        (:entity_type = 'leads' AND {prefix}lead_id = :entity_id)
-        OR (:entity_type = 'contacts' AND {prefix}contact_id = :entity_id)
-    )
-    """
-
-
-def _job_entity_match(job: dict) -> tuple[str, dict]:
-    clauses = []
-    values = {}
-    if job.get("lead_id"):
-        clauses.append("comment_job.lead_id = CAST(:lead_id AS text)")
-        values["lead_id"] = job.get("lead_id")
-    if job.get("contact_id"):
-        clauses.append("comment_job.contact_id = CAST(:contact_id AS text)")
-        values["contact_id"] = job.get("contact_id")
-    if clauses:
-        return f"({' OR '.join(clauses)})", values
-    return "FALSE", {}
-
-
-def _job_reconciliation_values(job: dict, normalized_message: str) -> dict:
-    if job.get("lead_id"):
-        entity_type, entity_id = "leads", job.get("lead_id")
-    else:
-        entity_type, entity_id = "contacts", job.get("contact_id")
-    return {
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "normalized_message": normalized_message,
-    }
-
-
-def _comment_mirror_window_seconds() -> int:
-    configured = getattr(get_config(), "meta_context_match_window_seconds", None)
-    try:
-        return max(5, min(int(configured), 300))
-    except (TypeError, ValueError):
-        return COMMENT_MIRROR_RECONCILIATION_SECONDS
-
-
-def _instagram_callback_origin(origin: str | None) -> str:
-    text = str(origin or "").strip()
-    if not text or (text.startswith("{{") and text.endswith("}}")):
-        return "instagram"
-    return text
 
 
 def _safe_claims(claims: dict) -> dict:
@@ -2615,11 +1833,6 @@ def _job_log_context(job: dict) -> dict:
         "has_message": bool(job.get("combined_message")),
         "has_media": bool(job.get("media_url")),
         "has_return_url": bool(job.get("return_url")),
-        "has_public_comment_context": bool(_job_public_comment_context(job)),
-        "context_status": job.get("context_status"),
-        "has_meta_context_event": bool(job.get("meta_context_event_id")),
-        "context_correlation_score": job.get("context_correlation_score"),
-        "context_deadline_at": _timestamp_for_log(job.get("context_deadline_at")),
         "attempt_count": job.get("attempt_count"),
         "seconds_until_due": float(job["seconds_until_due"]) if job.get("seconds_until_due") is not None else None,
         "salesbot_launched_at": _timestamp_for_log(job.get("salesbot_launched_at")),
@@ -2630,57 +1843,15 @@ def _job_log_context(job: dict) -> dict:
 
 
 def _job_interaction_type(job: dict) -> str:
-    interaction_type = str(job.get("interaction_type") or "private_message").strip().lower()
-    return interaction_type if interaction_type in {"private_message", "instagram_comment"} else "private_message"
+    return "private_message"
 
 
-def _salesbot_id_for_channel(channel: str | None) -> int:
+def _whatsapp_salesbot_id() -> int:
     config = get_config()
-    normalized_channel = str(channel or "").strip().lower()
-    if normalized_channel == "instagram":
-        salesbot_id = config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
-    elif normalized_channel == "whatsapp":
-        salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
-    else:
-        raise KommoAPIError("Unsupported Kommo private-message channel")
+    salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
     if not isinstance(salesbot_id, int) or isinstance(salesbot_id, bool) or salesbot_id <= 0:
-        raise KommoAPIError(f"Kommo Salesbot ID is not configured for {normalized_channel}")
+        raise KommoAPIError("Kommo Salesbot ID is not configured for WhatsApp")
     return salesbot_id
-
-
-def _job_public_comment_context(job: dict) -> dict:
-    context = job.get("public_comment_context")
-    if isinstance(context, dict):
-        return context
-    if isinstance(context, str) and context.strip():
-        try:
-            loaded = json.loads(context)
-        except json.JSONDecodeError:
-            return {}
-        return loaded if isinstance(loaded, dict) else {}
-    return {}
-
-
-def _job_instagram_content_context(job: dict) -> dict:
-    context = job.get("instagram_content_context")
-    if isinstance(context, dict):
-        return context
-    if isinstance(context, str) and context.strip():
-        try:
-            loaded = json.loads(context)
-        except json.JSONDecodeError:
-            return {}
-        return loaded if isinstance(loaded, dict) else {}
-    return {}
-
-
-def _is_resolved_story_context(context: dict) -> bool:
-    return bool(
-        context.get("source") == "story_reply"
-        and context.get("mapping_status") == "resolved"
-        and context.get("story_id")
-        and context.get("product_skus")
-    )
 
 
 def _timestamp_for_log(value) -> str | None:

@@ -117,10 +117,7 @@ async def sync_escalation_to_kommo(
     lead_id: str | None = None,
 ) -> None:
     config = get_config()
-    if not any(
-        channel_backend_for(channel, config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    ):
+    if channel_backend_for("whatsapp", config) != "kommo":
         return
 
     try:

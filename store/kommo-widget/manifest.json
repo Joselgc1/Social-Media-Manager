@@ -3,7 +3,7 @@
     "name": "widget.name",
     "description": "widget.description",
     "short_description": "widget.short_description",
-    "version": "1.2.13",
+    "version": "1.2.14",
     "interface_version": 2,
     "init_once": true,
     "locale": ["en", "es"],
@@ -30,30 +30,8 @@
   },
   "salesbot_designer": {
     "logo": "/widgets/__WIDGET_CODE__/images/logo_small.png",
-    "kommo_ai_instagram_dm": {
-      "name": "salesbot.instagram_dm_handler_name",
-      "settings": {
-        "webhook_url": {
-          "name": "salesbot.webhook_url",
-          "default_value": "",
-          "type": "url",
-          "manual": true
-        }
-      }
-    },
     "kommo_ai_whatsapp": {
       "name": "salesbot.whatsapp_handler_name",
-      "settings": {
-        "webhook_url": {
-          "name": "salesbot.webhook_url",
-          "default_value": "",
-          "type": "url",
-          "manual": true
-        }
-      }
-    },
-    "kommo_ai_instagram_comment": {
-      "name": "salesbot.instagram_comment_handler_name",
       "settings": {
         "webhook_url": {
           "name": "salesbot.webhook_url",

@@ -60,7 +60,6 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
             "inventory_reservation_cleanup",
             "meta_inbound_job_processor",
             "meta_inbound_job_cleanup",
-            "meta_instagram_context_processor",
             "kommo_job_processor",
         ):
             if scheduler.get_job(job_id):
@@ -147,14 +146,8 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
     )
 
     channel_config = get_config()
-    meta_channels_enabled = any(
-        channel_backend_for(channel, channel_config) == "meta"
-        for channel in ("whatsapp", "instagram")
-    )
-    kommo_channels_enabled = any(
-        channel_backend_for(channel, channel_config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    )
+    meta_channels_enabled = True  # Instagram is always Meta-native.
+    kommo_channels_enabled = channel_backend_for("whatsapp", channel_config) == "kommo"
     if outbound_processing_enabled and meta_channels_enabled:
         scheduler.add_job(
             _process_meta_inbound_jobs,
@@ -178,27 +171,6 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
             name="Process durable Kommo Salesbot jobs",
             replace_existing=True,
         )
-    context_config = get_config()
-    context_processing_enabled = (
-        outbound_processing_enabled
-        and channel_backend_for("instagram", context_config) == "kommo"
-        and (
-            getattr(context_config, "meta_instagram_context_enabled", False) is True
-            or getattr(context_config, "meta_story_context_enabled", False) is True
-        )
-        and getattr(context_config, "outbound_processing_enabled", True) is True
-    )
-    if context_processing_enabled:
-        scheduler.add_job(
-            _process_meta_context_jobs,
-            trigger=IntervalTrigger(seconds=15),
-            id="meta_instagram_context_processor",
-            name="Process Meta Instagram context events",
-            replace_existing=True,
-        )
-    elif scheduler.get_job("meta_instagram_context_processor"):
-        scheduler.remove_job("meta_instagram_context_processor")
-
     scheduler.start()
     asyncio.create_task(_sync_scheduler_config())
     logger.info("Background scheduler started (outbound_processing_enabled=%s).", outbound_processing_enabled)
@@ -348,40 +320,10 @@ async def _process_kommo_jobs():
         from app.integrations.kommo.jobs import process_pending_jobs, process_ready_jobs, recover_stale_jobs
 
         await recover_stale_jobs()
-        config = get_config()
-        if not (
-            getattr(config, "meta_instagram_context_enabled", False)
-            or getattr(config, "meta_story_context_enabled", False)
-        ):
-            from app.integrations.meta_context.correlation import release_timed_out_context_jobs
-
-            await release_timed_out_context_jobs(limit=10)
         await process_pending_jobs(limit=10)
         await process_ready_jobs(limit=5)
     except Exception as e:
         logger.error(f"Kommo job processor failed: {e}")
-
-
-async def _process_meta_context_jobs():
-    config = get_config()
-    if not (
-        _outbound_processing_enabled
-        and channel_backend_for("instagram", config) == "kommo"
-        and (
-            getattr(config, "meta_instagram_context_enabled", False) is True
-            or getattr(config, "meta_story_context_enabled", False) is True
-        )
-        and getattr(config, "outbound_processing_enabled", True) is True
-    ):
-        return
-    try:
-        from app.integrations.meta_context.correlation import process_waiting_context_jobs
-        from app.integrations.meta_context.service import process_pending_context_events
-
-        await process_pending_context_events(limit=10)
-        await process_waiting_context_jobs(limit=10)
-    except Exception:
-        logger.exception("Meta Instagram context processor failed")
 
 
 async def _process_meta_inbound_jobs():

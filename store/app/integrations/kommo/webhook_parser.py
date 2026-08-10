@@ -69,14 +69,12 @@ def origin_to_channel(origin: str | None) -> str | None:
     normalized = (origin or "").lower()
     if "whatsapp" in normalized or normalized in {"wa", "waba"}:
         return "whatsapp"
-    if "instagram" in normalized or normalized in {"ig", "inst"}:
-        return "instagram"
     return None
 
 
 def normalize_interaction_type(value: Any) -> str | None:
     text = str(value or "").strip().lower()
-    return text if text in {"private_message", "instagram_comment"} else None
+    return text if text == "private_message" else None
 
 
 def _message_event(
@@ -98,7 +96,6 @@ def _message_event(
     if str(attachment_type or "").strip().lower() in INCOMING_MEDIA_TYPES:
         media_url = _string_or_none(attachment.get("link"))
     explicit_interaction_type = normalize_interaction_type(item.get("interaction_type")) or default_interaction_type
-    comment_fields = _comment_fields(item)
     return NormalizedKommoEvent(
         event_type=event_type,
         message_id=_string_or_none(item.get("id")),
@@ -119,7 +116,6 @@ def _message_event(
         **_profile_identity_fields(author=author, sender=sender, item=item),
         created_at=_timestamp(item.get("created_at")),
         media_url=media_url,
-        **comment_fields,
     )
 
 
@@ -153,7 +149,6 @@ def _chat_api_message_event(
         **_profile_identity_fields(author={}, sender=sender, item=wrapper),
         created_at=_timestamp(wrapper.get("timestamp") or data.get("time")),
         media_url=_string_or_none(message.get("media")),
-        **_chat_api_comment_fields(message),
     )
 
 
@@ -189,44 +184,11 @@ def _chat_api_payload_event(
         **_profile_identity_fields(author={}, sender=sender, item=payload),
         created_at=_timestamp(payload.get("timestamp")),
         media_url=_string_or_none(message.get("media")),
-        **_chat_api_comment_fields(message),
     )
 
 
 def _infer_interaction_type(channel: str | None, message_type: str | None) -> str:
-    if channel == "instagram" and str(message_type or "").strip().lower() == "comment":
-        return "instagram_comment"
     return "private_message"
-
-
-def _comment_fields(item: dict[str, Any]) -> dict[str, str | None]:
-    comment = item.get("comment") if isinstance(item.get("comment"), dict) else {}
-    post = item.get("post") if isinstance(item.get("post"), dict) else {}
-    media = item.get("media") if isinstance(item.get("media"), dict) else {}
-    return {
-        "post_id": _first_string(item.get("post_id"), post.get("id"), post.get("post_id")),
-        "comment_id": _first_string(item.get("comment_id"), comment.get("id"), comment.get("comment_id")),
-        "parent_comment_id": _first_string(
-            item.get("parent_comment_id"),
-            comment.get("parent_id"),
-            comment.get("parent_comment_id"),
-        ),
-        "media_id": _first_string(item.get("media_id"), media.get("id"), post.get("media_id")),
-        "post_url": _first_string(item.get("post_url"), post.get("url"), post.get("link"), media.get("permalink")),
-        "comment_url": _first_string(item.get("comment_url"), comment.get("url"), comment.get("link")),
-    }
-
-
-def _chat_api_comment_fields(message: dict[str, Any]) -> dict[str, str | None]:
-    post = message.get("post") if isinstance(message.get("post"), dict) else {}
-    return {
-        "post_id": _first_string(post.get("id")),
-        "comment_id": None,
-        "parent_comment_id": None,
-        "media_id": None,
-        "post_url": _first_string(post.get("url")),
-        "comment_url": None,
-    }
 
 
 def _profile_identity_fields(

@@ -27,7 +27,7 @@ def _lead_with_ai_mode(enum_id: int) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_admin_activation_syncs_kommo_before_local_update_and_history_clear(monkeypatch):
+async def test_whatsapp_admin_activation_syncs_kommo_before_local_update_and_history_clear(monkeypatch):
     from app.admin import customer_activation
 
     events = []
@@ -57,14 +57,14 @@ async def test_admin_activation_syncs_kommo_before_local_update_and_history_clea
 
     monkeypatch.setattr(customer_activation.escalations, "mark_customer_active_for_admin", AsyncMock(side_effect=mark_active))
 
-    result = await customer_activation.activate_customer_for_admin({"id": "customer"}, channel="instagram")
+    result = await customer_activation.activate_customer_for_admin({"id": "customer"}, channel="whatsapp")
 
     assert result.status == "activated"
     assert result.kommo_lead_id == "100"
     assert events == [
         ("kommo_update", "100", 222),
         ("kommo_get", "100"),
-        ("local_reactivate", "customer", "instagram"),
+        ("local_reactivate", "customer", "whatsapp"),
     ]
 
 
@@ -144,7 +144,7 @@ async def test_hybrid_instagram_resume_does_not_sync_whatsapp_kommo(monkeypatch)
     monkeypatch.setattr(
         customer_activation,
         "get_config",
-        lambda: _kommo_config(whatsapp_backend="kommo", instagram_backend="meta"),
+        lambda: _kommo_config(whatsapp_backend="kommo"),
     )
     get_mapping = AsyncMock()
     monkeypatch.setattr(customer_activation, "get_mapping_by_customer", get_mapping)

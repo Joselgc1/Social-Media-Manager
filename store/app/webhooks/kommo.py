@@ -13,7 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from app import db
-from app.config import channel_backend_for, get_config
+from app.config import get_config
 from app.crm.channel_mappings import lookup_by_lead_id
 from app.integrations.kommo.auth import (
     KommoAuthError,
@@ -32,7 +32,6 @@ from app.integrations.kommo.jobs import (
 from app.integrations.kommo.models import SalesbotWidgetRequest
 from app.integrations.kommo.state import sync_local_state_from_ai_mode
 from app.integrations.kommo.webhook_parser import normalize_kommo_webhook, parse_nested_form
-from app.integrations.meta_context.correlation import schedule_context_job_processing
 from app.request_limits import limiter
 
 logger = logging.getLogger(__name__)
@@ -73,34 +72,18 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
     for event in events:
         logger.debug("Kommo event received: %s", _event_log_context(event))
         if event.event_type == "incoming_message":
-            if event.interaction_type == "instagram_comment":
-                logger.debug(
-                    "Kommo native Instagram comment ignored by private-message webhook path: %s",
-                    _event_log_context(event),
-                )
-                continue
             if event.author_type and event.author_type != "external":
                 logger.debug(
                     "Kommo incoming message ignored because author is not external: %s",
                     _event_log_context(event),
                 )
                 continue
-            if event.channel not in {"whatsapp", "instagram"}:
+            if event.channel != "whatsapp":
                 logger.debug(
                     "Kommo incoming message ignored for unsupported origin: %s",
                     event.origin or "unknown",
                 )
                 continue
-            if (
-                event.channel == "instagram"
-                and channel_backend_for("instagram", config) == "meta"
-            ):
-                logger.info(
-                    "Kommo Instagram private message ignored because Instagram uses Meta: %s",
-                    _event_log_context(event),
-                )
-                continue
-
             incoming_count += 1
             persistence_started = time.perf_counter()
             with db.collect_query_timings() as event_timings:
@@ -174,9 +157,9 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
         claims.get("entity_type"),
         claims.get("entity_id"),
     )
-    if _is_meta_managed_instagram_callback(callback.data, config):
-        logger.info("Kommo Instagram callback ignored because Instagram uses Meta")
-        return {"status": "ignored", "reason": "instagram_managed_by_meta"}
+    if callback.data.expected_channel != "whatsapp":
+        logger.info("Rejected non-WhatsApp Kommo Salesbot callback")
+        return {"status": "ignored", "reason": "unsupported_channel"}
 
     try:
         result = await persist_salesbot_callback(callback.data, return_url, claims)
@@ -186,24 +169,7 @@ async def handle_kommo_salesbot(request: Request, background_tasks: BackgroundTa
 
     if getattr(config, "outbound_processing_enabled", True) and result.get("status") == "ready":
         background_tasks.add_task(process_ready_jobs, 3)
-    elif (
-        getattr(config, "outbound_processing_enabled", True)
-        and result.get("status") == "waiting_for_context"
-    ):
-        background_tasks.add_task(schedule_context_job_processing, result["job_id"])
-
     return {"status": "accepted"}
-
-
-def _is_meta_managed_instagram_callback(data, config) -> bool:
-    if channel_backend_for("instagram", config) != "meta":
-        return False
-    origin = str(data.origin or "").strip().lower()
-    return (
-        data.expected_channel == "instagram"
-        or (data.interaction_type or "private_message") == "instagram_comment"
-        or "instagram" in origin
-    )
 
 
 async def parse_salesbot_callback_request(request: Request) -> SalesbotWidgetRequest:

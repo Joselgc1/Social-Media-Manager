@@ -6,7 +6,7 @@ import re
 
 from app.channels.text_formatting import format_customer_text
 
-_SUPPORTED_CHANNELS = {"whatsapp", "instagram"}
+_SUPPORTED_CHANNELS = {"whatsapp"}
 _EMOJI_MODES = {"preserve", "safe", "strip"}
 _COMMON_EMOJI_REPLACEMENTS = {
     "❤": "♡",
@@ -47,8 +47,6 @@ def prepare_kommo_customer_message(
     destination_channel = channel if channel in _SUPPORTED_CHANNELS else "whatsapp"
     emoji_mode = _emoji_mode_for_channel(destination_channel, settings or {})
     message = format_customer_text(text, destination_channel)
-    if interaction_type == "instagram_comment":
-        message = _format_public_comment_message(message)
     if emoji_mode == "strip":
         message = strip_emoji_characters(message)
     elif emoji_mode == "safe":
@@ -68,7 +66,7 @@ def build_kommo_message_diagnostics(
     mode = _normalize_emoji_mode(emoji_mode)
     return {
         "channel": channel if channel in _SUPPORTED_CHANNELS else "unknown",
-        "interaction_type": interaction_type if interaction_type in {"private_message", "instagram_comment"} else "private_message",
+        "interaction_type": "private_message",
         "message_length": len(text),
         "newline_count": text.count("\n"),
         "non_ascii_present": any(ord(char) > 127 for char in text),
@@ -129,12 +127,6 @@ def _cleanup_emoji_spacing(text: str) -> str:
 
 def contains_emoji(text: str) -> bool:
     return any(_is_emoji_codepoint(ord(char)) for char in text or "")
-
-
-def _format_public_comment_message(text: str) -> str:
-    message = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", text or "", flags=re.MULTILINE)
-    message = re.sub(r"\s+", " ", message.replace("*", " ")).strip()
-    return message[:297].rstrip() + "..." if len(message) > 300 else message
 
 
 def _setting_enabled(value) -> bool:

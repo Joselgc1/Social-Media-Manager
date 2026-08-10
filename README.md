@@ -1,12 +1,12 @@
 # VS Chatbot - AI Sales Assistant
 
-AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, dynamic store-defined payment methods, database-backed exchange-rate settings, sortable dashboard tables, and a dark mode admin dashboard. Channel transport can run in direct Meta mode or Kommo mode.
+AI-powered sales chatbot for Instagram DMs and WhatsApp, built for a Venezuelan Victoria's Secret resale business. Supports both OpenAI and Anthropic as LLM providers, with hot-swapping from the admin panel. Features a PDF product catalog, global AI pause/resume, per-customer escalation, customer address memory, admin tag management, dynamic store-defined payment methods, database-backed exchange-rate settings, sortable dashboard tables, and a dark mode admin dashboard. Instagram always uses native Meta webhooks and Graph API delivery; WhatsApp can use direct Meta or Kommo.
 
 The sales flow is tuned for Venezuelan operations: shipments are offered through `MRW` or `Zoom` with `cobro a destino`, owners can update the daily accepted exchange rate from the store dashboard, and the customer-facing catalog PDF does not expose internal SKU or stock columns.
 
 Dashboard-managed runtime settings live in each store's `settings` table. That includes shared AI configuration, `ai_orchestration_mode`, and master-managed scheduler timings such as `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`, and the daily cron times. Store payment methods are persisted separately in the same table under `payment_methods` and are managed only from the store dashboard. When a store is connected to `master/`, both dashboards read and write the shared AI rows, and the master dashboard manages the scheduler rows.
 
-**Multi-store support:** A Master Control Plane (`master/`) lets you manage multiple independent store deployments from a single dashboard — each with its own database, API keys, channel backend, and Telegram bot. See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the multi-store setup guide.
+**Multi-store support:** A Master Control Plane (`master/`) lets you manage multiple independent store deployments from a single dashboard, each with its own database, API keys, WhatsApp backend, native Meta Instagram connection, and Telegram bot. See [master/DEPLOYMENT.md](master/DEPLOYMENT.md) for the multi-store setup guide.
 
 ## Documentation Index
 
@@ -72,13 +72,13 @@ ngrok http 8000
 
 | Goal | Guide |
 | :--- | :---- |
-| Deploy one store in direct Meta mode | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) |
-| Deploy one store in Kommo mode | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) plus [`docs/KOMMO_MIGRATION.md`](docs/KOMMO_MIGRATION.md) |
+| Deploy one store with Meta WhatsApp | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) |
+| Deploy one store with Kommo WhatsApp | [`store/DEPLOYMENT.md`](store/DEPLOYMENT.md) plus [`docs/KOMMO_MIGRATION.md`](docs/KOMMO_MIGRATION.md) |
 | Manage multiple stores from one dashboard | [`master/DEPLOYMENT.md`](master/DEPLOYMENT.md) |
 | Build/upload the Kommo Salesbot widget | [`store/kommo-widget/README.md`](store/kommo-widget/README.md) |
 | Back up, restore, migrate, roll back, and review retention | [`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md) |
 
-Use `WHATSAPP_BACKEND=meta` for direct Meta WhatsApp webhooks. Use `WHATSAPP_BACKEND=kommo` when Kommo owns WhatsApp. Configure Instagram independently with `INSTAGRAM_BACKEND`; `CHANNEL_BACKEND` remains a deprecated environment alias for existing deployments.
+Use `WHATSAPP_BACKEND=meta` for direct Meta WhatsApp webhooks or `WHATSAPP_BACKEND=kommo` when Kommo owns WhatsApp. Instagram is always native Meta and has no backend selector. `CHANNEL_BACKEND` remains a deprecated WhatsApp environment alias for existing deployments.
 
 ## Railway PostgreSQL
 
@@ -97,8 +97,9 @@ Set `Store.DATABASE_URL=${{StorePostgres.DATABASE_URL}}` and `Master.DATABASE_UR
 ## Architecture
 
 ```txt
-Customer (WhatsApp or Instagram DM)
-    -> Meta webhook or Kommo official channel integration
+WhatsApp customer
+    -> Meta webhook or Kommo official WhatsApp integration
+        -> durable meta_inbound_jobs or kommo_message_jobs
         -> Normalize message (text, buttons, images, ice breakers, postbacks)
         -> Inbound buffer and deterministic guards
         -> AI Engine
@@ -108,9 +109,13 @@ Customer (WhatsApp or Instagram DM)
             -> Direct SDK provider call (OpenAI or Anthropic)
             -> Tool executor with per-agent allowlists
             -> Response
-        -> Send reply via Meta API or Kommo Salesbot
-            -> WhatsApp: text, interactive buttons, templates
-            -> Instagram DM: text, quick replies, and a product image when available
+        -> Send WhatsApp reply via Meta API or Kommo Salesbot/Chats API
+
+Instagram customer or commenter
+    -> Meta webhook
+    -> durable meta_inbound_jobs
+    -> AI engine or deterministic public-comment handler
+    -> Meta Graph API
 
 Store DB settings (source of truth for runtime settings)
     -> Store dashboard reads/writes locally
@@ -120,31 +125,30 @@ Store DB settings (source of truth for runtime settings)
 
 ## Webhook Endpoints
 
-Registered channel endpoints depend on `WHATSAPP_BACKEND` and `INSTAGRAM_BACKEND`.
+WhatsApp endpoint registration depends on `WHATSAPP_BACKEND`. Instagram's native Meta endpoint is independent of the WhatsApp transport.
 
-Meta mode:
+Instagram endpoint (when Instagram is enabled):
 
 | Method | Path                   | Purpose                        |
 | :----- | :--------------------- | :----------------------------- |
-| GET    | `/webhooks/whatsapp`   | WhatsApp webhook verification  |
-| POST   | `/webhooks/whatsapp`   | Receive WhatsApp messages      |
 | GET    | `/webhooks/instagram`  | Instagram webhook verification |
-| POST   | `/webhooks/instagram`  | Receive Instagram DMs          |
+| POST   | `/webhooks/instagram`  | Receive Instagram DMs/comments |
 
-Kommo mode:
+Meta WhatsApp endpoint (only with `WHATSAPP_BACKEND=meta`):
+
+| Method | Path                   | Purpose                       |
+| :----- | :--------------------- | :---------------------------- |
+| GET    | `/webhooks/whatsapp`   | WhatsApp webhook verification |
+| POST   | `/webhooks/whatsapp`   | Receive WhatsApp messages     |
+
+Kommo WhatsApp endpoints:
 
 | Method | Path                                      | Purpose                                  |
 | :----- | :---------------------------------------- | :--------------------------------------- |
 | POST   | `/webhooks/kommo/events/{webhook_secret}` | Receive Kommo general webhook events     |
 | POST   | `/webhooks/kommo/salesbot`                | Receive Salesbot `widget_request` calls  |
 
-Optional signed Meta context alongside Kommo:
-
-| Method   | Path                                  | Purpose                                      |
-| :------- | :------------------------------------ | :------------------------------------------- |
-| GET/POST | `/webhooks/meta/instagram-context`    | Verify/receive comment or Story context only |
-
-This supplemental route is registered only in Kommo mode when `META_INSTAGRAM_CONTEXT_ENABLED=true` or `META_STORY_CONTEXT_ENABLED=true`. Kommo still sends every reply.
+Kommo endpoints process WhatsApp only. Instagram never uses these routes.
 
 ## Admin Endpoints
 
@@ -207,7 +211,7 @@ curl -X POST "http://localhost:8000/admin/settings/switch-provider?provider=open
 
 ## Instagram Setup (after Meta App Review approval)
 
-This section applies to `WHATSAPP_BACKEND=meta`. For Kommo mode, see [docs/KOMMO_MIGRATION.md](docs/KOMMO_MIGRATION.md).
+Instagram setup is required regardless of `WHATSAPP_BACKEND`. See the full [native Meta Instagram guide](store/INSTAGRAM%20DEPLOY.md).
 
 ```bash
 # 1. Subscribe your Facebook Page to messaging webhooks (once)
@@ -240,16 +244,16 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 - Message deletions (acknowledged)
 - Postbacks from buttons
 
-### Kommo Mode
+### Kommo WhatsApp Mode
 
-- WhatsApp and Instagram DM text handling through channel-specific Kommo Salesbots.
-- Public Instagram comments are authoritative Meta webhook events. They create durable `instagram_comment` Meta jobs and replies are published through the Graph comment replies endpoint.
+- WhatsApp text handling through the WhatsApp Kommo Salesbot and durable `kommo_message_jobs`.
+- Instagram DMs and comments remain native Meta events in durable `meta_inbound_jobs`; replies use Graph API.
 - Interactive choices become numbered text; URL actions become text plus URLs.
 - Opted-in WhatsApp product images and catalog PDFs use Kommo Files API/cache plus Chats API; disabled media safely falls back to Salesbot behavior.
 - Product images and PDFs have independent rollout flags under a global media kill switch. PDF delivery remains WhatsApp-only.
-- Incoming Kommo `voice` and `audio` attachments in private WhatsApp and Instagram DMs are downloaded safely and transcribed before the AI turn. This path requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio is not transcribed.
+- Incoming Kommo WhatsApp `voice` and `audio` attachments are downloaded safely and transcribed before the AI turn. Native Meta Instagram audio is also durably transcribed. Both paths require `OPENAI_API_KEY` even when Anthropic is the active chat provider.
 - Durable jobs and outbound records track `delivery_unknown` when Salesbot or Chats API acceptance cannot be confirmed; inspect Kommo before manual retry.
-- Legacy Kommo Instagram comment correlation remains in the codebase for phased cleanup, but Meta-native Instagram jobs no longer depend on a `kommo_message_job`.
+- Migration 018 deprecates but does not drop the legacy Instagram/Kommo correlation schema; it is historical only and Meta-native Instagram jobs never depend on a `kommo_message_job`.
 
 ## Telegram Admin Commands
 
@@ -302,7 +306,7 @@ These values are stored in the store database and can be changed without redeplo
 - `max_conversation_history`, `ai_enabled`, `ai_orchestration_mode`
 - `catalog_refresh_minutes`, `broadcast_check_interval_minutes`, `catalog_pdf_interval_hours`
 - `token_reminder_hour`, `token_reminder_minute`, `daily_analytics_hour`, `daily_analytics_minute`
-- `kommo_emoji_mode_whatsapp`, `kommo_emoji_mode_instagram`, `kommo_strip_emoji`
+- `kommo_emoji_mode_whatsapp`, `kommo_strip_emoji`
 - `store_phone_number`
 
 Store-only payment methods are persisted separately under `payment_methods` in the same `settings` table. They are edited only from the store dashboard through `GET/PUT /admin/settings/payment-methods`, and the bot uses the configured method names plus their stored instructions at checkout. Scheduler timings are edited only from the master dashboard.
@@ -363,7 +367,7 @@ Transcript regression tests live in `tests/store/test_ai_transcript_regressions.
 - **CORS:** Restricted to the app's own origin (`APP_BASE_URL`).
 - **Security headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Strict-Transport-Security` (production), `Content-Security-Policy` (production).
 - **Error sanitization:** Unhandled exceptions return a generic 500 in production; full errors only shown in debug mode.
-- **Production startup validation:** In `store/`, production boot fails fast if `ADMIN_PASSWORD` or all LLM keys are missing. Meta mode requires WhatsApp Meta credentials. Kommo mode requires the Kommo private integration, private-message Salesbot, webhook secret, and AI Mode field/enum variables. Instagram and Telegram remain optional, but if either Meta Instagram or Telegram is enabled it must be fully configured.
+- **Production startup validation:** In `store/`, production boot fails fast if `ADMIN_PASSWORD` or all LLM keys are missing. Meta WhatsApp requires WhatsApp Meta credentials. Kommo WhatsApp requires the Kommo private integration, WhatsApp Salesbot, webhook secret, and AI Mode field/enum variables. Instagram and Telegram are independently optional, but each must be fully configured when enabled.
 - **Log redaction:** Normal webhook logging uses masked sender IDs and avoids logging raw customer message text or tool arguments at `INFO`.
 - **Inbound debounce:** Rapid consecutive inbound messages from the same customer are buffered briefly and grouped into a single AI turn, so the bot does not answer twice when the user is still typing follow-up context.
 
@@ -383,8 +387,9 @@ Master Control Plane (1 deployment, port 9000)
 
 Store A (port 8000)          Store B (port 8001)          Store C ...
   ├── Own PostgreSQL database  ├── Own PostgreSQL database
-  ├── Own channel backend      ├── Own channel backend
+  ├── Own WhatsApp backend     ├── Own WhatsApp backend
   │   (Meta or Kommo)          │   (Meta or Kommo)
+  ├── Native Meta Instagram    ├── Native Meta Instagram
   ├── Own Telegram bot         ├── Own Telegram bot
   ├── Own Google Sheet         ├── Own Google Sheet
   └── Own admin dashboard      └── Own admin dashboard
@@ -437,7 +442,6 @@ KOMMO_SUBDOMAIN=
 KOMMO_ACCESS_TOKEN=
 KOMMO_INTEGRATION_ID=
 KOMMO_INTEGRATION_SECRET=
-KOMMO_INSTAGRAM_DM_SALESBOT_ID=
 KOMMO_WHATSAPP_SALESBOT_ID=
 KOMMO_SALESBOT_ID=
 KOMMO_WEBHOOK_SECRET=

@@ -9,9 +9,7 @@
     "backend_url": "URL callback de Salesbot"
   },
   "salesbot": {
-    "instagram_dm_handler_name": "Consultar a Eva AI para DMs de Instagram",
     "whatsapp_handler_name": "Consultar a Eva AI para WhatsApp",
-    "instagram_comment_handler_name": "Consultar a Eva AI en comentarios de Instagram",
     "webhook_url": "URL alternativa del callback de Salesbot",
     "success_exit": "Respuesta de AI completada",
     "media_exit": "Contenido multimedia enviado por el backend",

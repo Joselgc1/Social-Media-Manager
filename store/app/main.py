@@ -114,8 +114,6 @@ def _validate_startup_config(config):
             errors.append("Required settings are missing or placeholders: " + ", ".join(invalid_core))
 
         whatsapp_backend = channel_backend_for("whatsapp", config)
-        instagram_backend = channel_backend_for("instagram", config)
-
         if whatsapp_backend == "meta":
             required_whatsapp = {
                 "META_APP_SECRET": config.meta_app_secret,
@@ -130,7 +128,7 @@ def _validate_startup_config(config):
                     + ", ".join(missing_whatsapp)
                 )
 
-        if "kommo" in {whatsapp_backend, instagram_backend}:
+        if whatsapp_backend == "kommo":
             from app.integrations.kommo.auth import KommoAuthError, kommo_account_hostname
 
             required_kommo = {
@@ -149,60 +147,33 @@ def _validate_startup_config(config):
                 errors.append(
                     "Kommo mode has missing or placeholder settings: " + ", ".join(missing_kommo)
                 )
-            whatsapp_salesbot_id = config.kommo_whatsapp_salesbot_id
-            if instagram_backend != "meta":
-                whatsapp_salesbot_id = whatsapp_salesbot_id or config.kommo_salesbot_id
-            if instagram_backend == "kommo" and not _is_configured(
-                config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id
-            ):
+            whatsapp_salesbot_id = config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
+            if whatsapp_backend == "kommo" and not _is_configured(whatsapp_salesbot_id):
                 errors.append(
-                    "Kommo Instagram DMs require KOMMO_INSTAGRAM_DM_SALESBOT_ID "
+                    "Kommo WhatsApp requires KOMMO_WHATSAPP_SALESBOT_ID "
                     "or fallback KOMMO_SALESBOT_ID."
                 )
-            if whatsapp_backend == "kommo" and not _is_configured(whatsapp_salesbot_id):
-                message = "Kommo WhatsApp requires KOMMO_WHATSAPP_SALESBOT_ID"
-                if instagram_backend != "meta":
-                    message += " or fallback KOMMO_SALESBOT_ID"
-                errors.append(message + ".")
             if not missing_kommo:
                 try:
                     kommo_account_hostname(config.kommo_subdomain)
                 except KommoAuthError as e:
                     errors.append(f"KOMMO_SUBDOMAIN is invalid: {e}")
 
-        if instagram_backend == "meta":
-            required_meta_instagram = {
-                "META_APP_SECRET": config.meta_app_secret,
-                "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
-                "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
-                "INSTAGRAM_ACCOUNT_ID": config.instagram_account_id,
-                "META_GRAPH_API_VERSION": config.meta_graph_api_version,
-            }
-            missing_meta_instagram = [
-                name for name, value in required_meta_instagram.items() if not _is_configured(value)
-            ]
-            if missing_meta_instagram:
-                errors.append(
-                    "Meta Instagram is enabled but missing or placeholder: "
-                    + ", ".join(missing_meta_instagram)
-                )
-
-        if config.meta_instagram_context_enabled or getattr(config, "meta_story_context_enabled", False):
-            required_meta_context = {
-                "META_APP_SECRET": config.meta_app_secret,
-                "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
-                "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
-                "INSTAGRAM_ACCOUNT_ID": config.instagram_account_id,
-                "META_GRAPH_API_VERSION": config.meta_graph_api_version,
-            }
-            missing_meta_context = [
-                name for name, value in required_meta_context.items() if not _is_configured(value)
-            ]
-            if missing_meta_context:
-                errors.append(
-                    "Meta Instagram context is enabled but missing or placeholder: "
-                    + ", ".join(missing_meta_context)
-                )
+        required_meta_instagram = {
+            "META_APP_SECRET": config.meta_app_secret,
+            "INSTAGRAM_ACCESS_TOKEN": config.instagram_access_token,
+            "INSTAGRAM_VERIFY_TOKEN": config.instagram_verify_token,
+            "INSTAGRAM_ACCOUNT_ID": config.instagram_account_id,
+            "META_GRAPH_API_VERSION": config.meta_graph_api_version,
+        }
+        missing_meta_instagram = [
+            name for name, value in required_meta_instagram.items() if not _is_configured(value)
+        ]
+        if missing_meta_instagram:
+            errors.append(
+                "Meta Instagram is required but missing or placeholder: "
+                + ", ".join(missing_meta_instagram)
+            )
 
         optional_integrations = {
             "Telegram": {
@@ -230,14 +201,13 @@ def _log_kommo_startup_config_summary(config) -> None:
     logger.info(
         "Kommo startup config summary: whatsapp_backend=%s kommo_subdomain=%s "
         "integration_id_present=%s integration_secret_present=%s integration_secret_length=%s "
-        "instagram_dm_salesbot_configured=%s whatsapp_salesbot_configured=%s "
+        "whatsapp_salesbot_configured=%s "
         "legacy_salesbot_fallback_configured=%s",
         channel_backend_for("whatsapp", config),
         config.kommo_subdomain or "",
         bool(config.kommo_integration_id),
         bool(config.kommo_integration_secret),
         len(config.kommo_integration_secret or ""),
-        bool(config.kommo_instagram_dm_salesbot_id or config.kommo_salesbot_id),
         bool(config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id),
         bool(config.kommo_salesbot_id),
     )
@@ -245,26 +215,19 @@ def _log_kommo_startup_config_summary(config) -> None:
 
 def _include_channel_routers(fastapi_app: FastAPI, config):
     whatsapp_backend = channel_backend_for("whatsapp", config)
-    instagram_backend = channel_backend_for("instagram", config)
-
-    if "kommo" in {whatsapp_backend, instagram_backend}:
+    if whatsapp_backend == "kommo":
         from app.webhooks.kommo import router as kommo_router
 
         fastapi_app.include_router(kommo_router)
-        if config.meta_instagram_context_enabled or getattr(config, "meta_story_context_enabled", False):
-            from app.webhooks.meta_instagram_context import router as meta_context_router
-
-            fastapi_app.include_router(meta_context_router)
 
     if whatsapp_backend == "meta":
         from app.webhooks.whatsapp import router as whatsapp_router
 
         fastapi_app.include_router(whatsapp_router)
 
-    if instagram_backend == "meta":
-        from app.webhooks.instagram import router as instagram_router
+    from app.webhooks.instagram import router as instagram_router
 
-        fastapi_app.include_router(instagram_router)
+    fastapi_app.include_router(instagram_router)
 
 
 # ── Lifespan (startup + shutdown) ────────────────────────────
@@ -474,17 +437,8 @@ async def health():
             "instagram_backend": channel_backend_for("instagram", config),
             "whatsapp": bool(config.whatsapp_access_token) if channel_backend_for("whatsapp", config) == "meta" else False,
             "instagram": bool(config.instagram_access_token) if channel_backend_for("instagram", config) == "meta" else False,
-            "kommo": "kommo" in {
-                channel_backend_for("whatsapp", config),
-                channel_backend_for("instagram", config),
-            },
+            "kommo": channel_backend_for("whatsapp", config) == "kommo",
             "whatsapp_via_kommo": channel_backend_for("whatsapp", config) == "kommo",
-            "instagram_via_kommo": channel_backend_for("instagram", config) == "kommo",
-            "meta_instagram_context": bool(
-                getattr(config, "meta_instagram_context_enabled", False)
-                or getattr(config, "meta_story_context_enabled", False)
-            ),
-            "meta_story_context": bool(getattr(config, "meta_story_context_enabled", False)),
         },
         "providers": providers,
         "active_provider": active_provider,

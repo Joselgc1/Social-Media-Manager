@@ -63,6 +63,9 @@ META_INBOUND_INSTAGRAM_CONTEXT_MIGRATION_PATH = (
 META_INSTAGRAM_OPERATIONS_MIGRATION_PATH = (
     Path(__file__).resolve().parents[1] / "migrations" / "017_meta_instagram_operations.sql"
 )
+RETIRE_KOMMO_INSTAGRAM_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1] / "migrations" / "018_retire_kommo_instagram.sql"
+)
 ADVISORY_LOCK_KEY = 891_014_001
 
 
@@ -110,6 +113,9 @@ async def run_migration(database_url: str | None = None) -> None:
     meta_instagram_operations_migration_sql = META_INSTAGRAM_OPERATIONS_MIGRATION_PATH.read_text(
         encoding="utf-8"
     )
+    retire_kommo_instagram_migration_sql = RETIRE_KOMMO_INSTAGRAM_MIGRATION_PATH.read_text(
+        encoding="utf-8"
+    )
     connection = await asyncpg.connect(database_url)
     try:
         await connection.execute("SELECT pg_advisory_lock($1)", ADVISORY_LOCK_KEY)
@@ -130,6 +136,7 @@ async def run_migration(database_url: str | None = None) -> None:
             await connection.execute(conversation_interaction_scope_migration_sql)
             await connection.execute(meta_inbound_instagram_context_migration_sql)
             await connection.execute(meta_instagram_operations_migration_sql)
+            await connection.execute(retire_kommo_instagram_migration_sql)
         finally:
             await connection.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
     finally:

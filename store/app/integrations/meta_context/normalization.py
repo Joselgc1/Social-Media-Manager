@@ -1,4 +1,4 @@
-"""Shared normalization for Meta and Kommo comment correlation."""
+"""Stable text and Instagram identity normalization helpers."""
 
 import hashlib
 import re

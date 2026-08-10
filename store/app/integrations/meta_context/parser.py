@@ -1,4 +1,4 @@
-"""Parse context-only Meta Instagram comment and Story-reply webhooks."""
+"""Parse authoritative Meta Instagram comment and Story-reply events."""
 
 import hashlib
 import json

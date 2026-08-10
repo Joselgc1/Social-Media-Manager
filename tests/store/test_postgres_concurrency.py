@@ -13,7 +13,6 @@ import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import databases
@@ -203,11 +202,6 @@ async def test_concurrent_ready_workers_claim_each_job_at_most_once_with_distinc
 async def test_duplicate_salesbot_callback_race_has_one_effective_transition(monkeypatch):
     from app.integrations.kommo import jobs
 
-    monkeypatch.setattr(
-        jobs,
-        "get_config",
-        lambda: SimpleNamespace(meta_story_context_enabled=False, meta_instagram_context_enabled=False),
-    )
     await db.execute(
         """
         INSERT INTO kommo_message_jobs (

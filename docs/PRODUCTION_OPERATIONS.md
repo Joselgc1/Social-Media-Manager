@@ -20,9 +20,9 @@ The store scheduler runs `sensitive_data_retention` daily at 03:30 UTC. Cleanup 
 | Order payment proof and raw transaction details | 90 days after the order's last update when payment is terminal | Clear URL, raw reference, amount, currency, and timestamps; retain anti-replay hashes |
 | Terminal order shipping addresses | 365 days after order creation | Clear address and city |
 | Inactive customer saved addresses | 365 days | Clear unless the customer has a pending order |
-| Meta completed/failed jobs and receipts | 7 days | Delete through the existing Meta queue cleanup |
-| Expired Meta Instagram context events | At event expiry | Redact message text, sender ID, and username |
-| Kommo sent/discarded/failed payloads and callback claims | 7 days | Redact message, primary media URL, return URL, claims, contexts, and continuation payloads; ordered `inbound_attachments` remain until job deletion |
+| Meta completed/failed jobs and receipts | 7 days | Delete through the existing Meta queue cleanup; this includes native Instagram jobs |
+| Legacy Instagram/Kommo correlation records | Historical only | Migration 018 deprecates but does not drop this schema; live processing must not create or depend on these records |
+| Kommo WhatsApp sent/discarded/failed payloads and callback claims | 7 days | Redact message, primary media URL, return URL, claims, and continuation payloads; ordered `inbound_attachments` remain until job deletion |
 | Kommo sent/discarded/failed jobs | 30 days | Delete |
 | Kommo receipts | 30 days | Delete |
 | Kommo `delivery_unknown` payloads | 90 days | Redact the implemented payload fields and retain minimal job status for manual reconciliation; ordered `inbound_attachments` are not currently cleared |
@@ -66,7 +66,7 @@ Back up these secrets separately:
 1. Confirm the backup checksums and record the current commit SHA.
 2. Confirm no broadcast is `sending` and reconcile Kommo `delivery_unknown` jobs.
 3. Pause deploys and scheduled traffic. Keep the store single-instance.
-4. Run the service migration runner for the normal deployment path. The Store runner applies its sequence through version 17; the Master runner applies its baseline. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal runner.
+4. Run the service migration runner for the normal deployment path. The Store runner applies its sequence through version 18 (`018_retire_kommo_instagram.sql`); the Master runner applies its baseline. Migration 018 deprecates but does not drop legacy Instagram/Kommo correlation schema. It fails closed while launched or uncertain legacy Instagram Kommo jobs remain, so disable legacy Instagram Kommo ingress and let the old deployment drain them before retrying. Use `002_consolidated_upgrade.sql` only for a documented pre-consolidation recovery case, then rerun the normal runner.
 5. Query `schema_migrations` and let the matching application revision validate the complete accepted version set; do not rely only on `MAX(version)`.
 6. Deploy the matching application revision.
 7. Verify `/health`, login, a read-only dashboard query, catalog loading, and one test conversation.
@@ -96,7 +96,7 @@ After restore:
 
 1. Verify checksums and `schema_migrations`.
 2. Run row-count and foreign-key sanity checks for customers, orders, settings, jobs, and stores.
-3. Start one application instance against the restored database with `OUTBOUND_PROCESSING_ENABLED=false`. This disables scheduled and manually triggered broadcasts, Meta/Kommo accelerators and job processing, Salesbot callback continuations, and inventory reservation cleanup. Inbound webhooks may be recorded but will not send replies.
+3. Start one application instance against the restored database with `OUTBOUND_PROCESSING_ENABLED=false`. This disables scheduled and manually triggered broadcasts, native Meta and Kommo WhatsApp accelerators/job processing, Salesbot callback continuations, and inventory reservation cleanup. Inbound webhooks may be recorded but will not send replies.
 4. Run health and read-only smoke tests.
 5. Point Railway `DATABASE_URL` to the restored database only after approval.
 6. Use the master credential deploy flow so master and Railway retain the same authoritative store URL.

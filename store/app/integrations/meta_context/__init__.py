@@ -1,1 +1,1 @@
-"""Context-only Meta Instagram integration used alongside Kommo."""
+"""Meta-native Instagram event parsing and content enrichment."""

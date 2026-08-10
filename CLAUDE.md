@@ -51,7 +51,7 @@ curl -X POST http://localhost:8000/test/chat \
 
 ### Minimal .env for local testing
 
-For local debug, either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` plus `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, and `PRODUCT_SHEET_ID` are the core minimum. Meta, Kommo, and Telegram fields may stay empty when `DEBUG=true` unless you are testing that channel. In production (`DEBUG=false`), startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters, at least one real LLM key, and credentials for `WHATSAPP_BACKEND` and `INSTAGRAM_BACKEND`. `CHANNEL_BACKEND` remains a deprecated alias for `WHATSAPP_BACKEND`. Telegram is optional but requires `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
+For local debug, either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` plus `DATABASE_URL`, `GOOGLE_SHEETS_CREDENTIALS_B64`, and `PRODUCT_SHEET_ID` are the core minimum. Meta, Kommo, and Telegram fields may stay empty when `DEBUG=true` unless you are testing that channel. In production (`DEBUG=false`), startup validation requires a non-placeholder `ADMIN_PASSWORD` of at least 12 characters, at least one real LLM key, and credentials for the selected `WHATSAPP_BACKEND`. Instagram always uses native Meta and must be fully configured when enabled. `CHANNEL_BACKEND` remains a deprecated alias for `WHATSAPP_BACKEND`. Telegram is optional but requires `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` together.
 
 ## Development workflow
 
@@ -131,20 +131,20 @@ When adding new models, update BOTH files:
 
 **Entry point:** `store/app/main.py` — FastAPI app with lifespan that connects DB, initializes LLM providers, loads product catalog from Google Sheets, and starts the APScheduler background scheduler.
 
-**Webhook channels:** WhatsApp (`store/app/webhooks/whatsapp.py`), Instagram (`store/app/webhooks/instagram.py`), Kommo (`store/app/webhooks/kommo.py` when a channel uses Kommo), Telegram admin bot (`store/app/admin/telegram_bot.py` at `/webhooks/telegram`).
+**Webhook channels:** WhatsApp (`store/app/webhooks/whatsapp.py` in Meta mode), Instagram (`store/app/webhooks/instagram.py`, always native Meta), Kommo WhatsApp (`store/app/webhooks/kommo.py`), Telegram admin bot (`store/app/admin/telegram_bot.py` at `/webhooks/telegram`).
 
-**Channel provider switches:** `WHATSAPP_BACKEND` selects Meta or Kommo for WhatsApp. `INSTAGRAM_BACKEND` independently selects Meta or Kommo for Instagram and defaults to the WhatsApp value when omitted. Hybrid production uses `WHATSAPP_BACKEND=kommo` and `INSTAGRAM_BACKEND=meta`, registering Kommo for WhatsApp and native Meta Instagram without enabling native Meta WhatsApp.
+**Channel provider switch:** `WHATSAPP_BACKEND` selects Meta or Kommo for WhatsApp. Instagram has no provider switch: it always registers native Meta Instagram without enabling native Meta WhatsApp. Production uses Kommo WhatsApp plus native Meta Instagram.
 
-**Request flow (WhatsApp/Instagram):**
+**Native Meta request flow:**
 
-1. Meta sends webhook → `store/app/webhooks/{whatsapp,instagram}.py` normalizes the message
+1. Meta sends a WhatsApp (when selected) or Instagram webhook → `store/app/webhooks/{whatsapp,instagram}.py` normalizes and durably commits the message to `meta_inbound_jobs`
 2. Normalized message → `store/app/ai/engine.py` (central orchestrator)
 3. Engine applies pause/escalation/hostility/payment-proof guards, resolves `ai_orchestration_mode`, and either uses legacy, shadow, or multi-agent orchestration
 4. In multi-agent mode, deterministic route guards run first; `store/app/ai/llm_router.py` is used only for ambiguous messages
 5. The selected agent prompt is composed from `store/prompts/shared/` plus `store/prompts/agents/`, direct SDK providers are called, and `store/app/ai/runner.py` enforces per-agent tool allowlists
 6. Response sent back via `store/app/channels/{whatsapp,instagram}_sender.py`
 
-In Kommo mode, Kommo sends general WhatsApp webhooks to `store/app/webhooks/kommo.py`; the app persists durable jobs, launches the private-message Salesbot, receives the Salesbot `widget_request` callback, runs the existing AI engine, then posts a data-only Salesbot continuation (`data.status`, `data.message`) to the validated Kommo `return_url`. Native Meta Instagram messaging and comment events use the durable `meta_inbound_jobs` queue. Public replies are posted through Graph `/{comment_id}/replies`.
+In Kommo WhatsApp mode, Kommo sends general WhatsApp webhooks to `store/app/webhooks/kommo.py`; the app persists `kommo_message_jobs`, launches the WhatsApp Salesbot, receives the Salesbot `widget_request` callback, runs the existing AI engine, then posts a data-only Salesbot continuation (`data.status`, `data.message`) to the validated Kommo `return_url`. Native Meta Instagram messaging and comment events always use `meta_inbound_jobs`. Private replies use the Meta sender and public replies use Graph `/{comment_id}/replies`. Instagram never creates a Kommo job or uses a Salesbot.
 
 **Key modules:**
 
@@ -169,7 +169,7 @@ In Kommo mode, Kommo sends general WhatsApp webhooks to `store/app/webhooks/komm
 
 **Database:** PostgreSQL. Railway runs `store/scripts/migrate.py` as a pre-deploy command; it applies the idempotent Store migrations. Use `store/migrations/002_consolidated_upgrade.sql` only for a pre-consolidation recovery case. `schema_migrations` records the version and startup rejects incompatible schemas. Tables include customers, conversations, orders, broadcasts, settings, usage_log, ai_run_logs, daily_analytics, product_analytics, conversation_sessions, customer_channel_mappings, meta_inbound_jobs, meta_inbound_receipts, kommo_message_jobs, kommo_message_receipts, `instagram_content`, and `instagram_content_products`.
 
-**Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. Channel vars are `WHATSAPP_BACKEND` and `INSTAGRAM_BACKEND`; `CHANNEL_BACKEND` is a deprecated WhatsApp alias. Kommo env vars include `KOMMO_SUBDOMAIN`, `KOMMO_ACCESS_TOKEN`, `KOMMO_INTEGRATION_ID`, `KOMMO_INTEGRATION_SECRET`, `KOMMO_INSTAGRAM_DM_SALESBOT_ID`, `KOMMO_WHATSAPP_SALESBOT_ID`, `KOMMO_SALESBOT_ID`, `KOMMO_WEBHOOK_SECRET`, and AI Mode field/enum IDs.
+**Config:** `store/app/config.py` uses pydantic-settings to load from `store/.env`. All secrets are env vars. `WHATSAPP_BACKEND` selects the WhatsApp transport; `CHANNEL_BACKEND` is a deprecated WhatsApp alias. Instagram is always Meta-native. Kommo WhatsApp env vars include `KOMMO_SUBDOMAIN`, `KOMMO_ACCESS_TOKEN`, `KOMMO_INTEGRATION_ID`, `KOMMO_INTEGRATION_SECRET`, `KOMMO_WHATSAPP_SALESBOT_ID`, legacy WhatsApp fallback `KOMMO_SALESBOT_ID`, `KOMMO_WEBHOOK_SECRET`, and AI Mode field/enum IDs.
 
 ### Master Control Plane (`master/`)
 
@@ -228,8 +228,8 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 - Store-dashboard manual reactivation in Kommo mode must sync Kommo first: set lead `AI Mode` to `AI Active`, re-read and verify the enum, then set local `conversation_state='active'` and clear local history. Single-customer failures return sanitized `502`; resolve-all reports per-customer `activated`, `local_only`, or `failed`.
 - Kommo Salesbot callbacks include a JWT and `return_url`. Validate HS256 or HS512 with `KOMMO_INTEGRATION_SECRET`, expiration, issuer/subdomain, and `client_uid`/`client_uuid` when present. Validate `return_url` strictly against `https://{KOMMO_SUBDOMAIN}.kommo.com` with no userinfo, IPs, localhost, deceptive suffixes, redirects, or unexpected ports before posting the Salesbot continuation.
 - Kommo jobs are durable in `kommo_message_jobs`. Do not depend only on `BackgroundTasks`, `asyncio.create_task`, or in-memory buffers. The in-process task may accelerate handling after DB commit, but PostgreSQL is the source of truth. Ready jobs should attempt a Salesbot continuation even on discard/error paths; `delivery_unknown` means a continuation was attempted but Kommo acceptance could not be confirmed and must be manually reconciled before retrying.
-- Kommo private WhatsApp and Instagram DM `voice`/`audio` attachments are persisted in arrival order and transcribed with OpenAI `gpt-4o-mini-transcribe` before AI execution. This requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio remains placeholder-only.
-- Meta inbound jobs carry `interaction_type`: `private_message` for DMs and `instagram_comment` for public replies, plus durable `integration_context`. Native Meta comment IDs provide idempotency; comments are enriched and mapped without Kommo correlation. Public comment replies are deterministic: only price/availability are answered from resolved content mappings. A single mapped product can be answered directly; multiple mappings require clarification or a confident explicit product reference. Other public comments return the DM/WhatsApp fallback based on `store_phone_number`. Legacy Kommo Instagram correlation remains in place only for later cleanup.
+- Kommo private WhatsApp `voice`/`audio` attachments are persisted in arrival order and transcribed with OpenAI `gpt-4o-mini-transcribe` before AI execution. This requires `OPENAI_API_KEY` even when Anthropic is the active chat provider.
+- Meta inbound jobs carry `interaction_type`: `private_message` for DMs and `instagram_comment` for public replies, plus durable `integration_context`. Native Meta comment IDs provide idempotency; comments are enriched and mapped without Kommo correlation. Public comment replies are deterministic: only price/availability are answered from resolved content mappings. A single mapped product can be answered directly; multiple mappings require clarification or a confident explicit product reference. Other public comments return the DM/WhatsApp fallback based on `store_phone_number`. Migration 018 deprecates but does not drop the legacy Instagram/Kommo correlation schema; it is historical and must not be used by live processing.
 - Native Meta Instagram `audio` attachments are persisted in ordered `meta_inbound_jobs.inbound_attachments` metadata and transcribed with OpenAI before AI execution. Audio URLs never enter image analysis. This requires `OPENAI_API_KEY` even when Anthropic is the active chat provider.
 - Native Instagram outgoing echoes are classified using accepted Meta outbound message IDs. Unknown outgoing echoes are treated as manual administrator replies, stored as assistant-role messages with `author_type='human'`, and place the customer in an indefinite manual escalation. Instagram Resume AI preserves conversation history but resets workflow/session state; WhatsApp/Kommo retains clean-chat reset behavior. Native Instagram escalations do not auto-expire.
 - Customer shipping addresses are saved on the customer record after order creation (`last_shipping_address`, `last_shipping_city`, `last_shipping_method`). The AI offers to reuse the saved address for returning customers.
@@ -251,16 +251,15 @@ Separate FastAPI service for managing multiple store deployments. Has its own da
 ### Store app (port 8000)
 
 ```text
-Webhooks:       Meta mode: GET/POST /webhooks/whatsapp, /webhooks/instagram
-                Kommo mode: POST /webhooks/kommo/events/{webhook_secret}, POST /webhooks/kommo/salesbot
-                Optional Kommo context: GET/POST /webhooks/meta/instagram-context
+Webhooks:       Instagram always: GET/POST /webhooks/instagram
+                Meta WhatsApp: GET/POST /webhooks/whatsapp
+                Kommo WhatsApp: POST /webhooks/kommo/events/{webhook_secret}, POST /webhooks/kommo/salesbot
                 Telegram: POST /webhooks/telegram
 Health:         GET /, GET /health
 Settings:       GET /admin/settings/, GET /admin/settings/providers, PUT /admin/settings/{key}
                 GET /admin/settings/payment-methods, PUT /admin/settings/payment-methods
                 GET/PUT /admin/settings/shipping-policy, PUT /admin/settings/batch
                 GET /admin/settings/kommo/status, POST /admin/settings/kommo/test
-                GET /admin/settings/meta-instagram-context/status
                 POST /admin/settings/switch-provider, GET /admin/settings/usage-summary
                 GET /admin/settings/stats/conversations, POST /admin/settings/telegram/setup-webhook
                 POST /admin/settings/instagram/setup-ice-breakers, POST /admin/settings/instagram/subscribe-page
@@ -328,7 +327,7 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 - **Orchestration rollout:** Keep production stores on `legacy` until transcript regressions and `shadow` logs look clean. Roll back by setting `ai_orchestration_mode=legacy` in the store DB from either dashboard.
 - **Telegram webhook:** Must be registered once via `POST /admin/settings/telegram/setup-webhook` before the Telegram bot responds. This sets the webhook URL using `APP_BASE_URL` and registers `TELEGRAM_WEBHOOK_SECRET` as Telegram's `secret_token`; inbound updates are rejected unless their secret header matches.
 - **Catalog refresh:** The Google Sheets catalog is loaded into memory at startup and refreshed periodically by APScheduler. A stale catalog won't update until the next refresh cycle or a server restart.
-- **Migrations are explicit and versioned:** Railway pre-deploy runs `store/scripts/migrate.py` and `master/scripts/migrate.py`. The Store runner applies its normal sequence through `017_meta_instagram_operations.sql` and requires schema version 17; the Master runner applies its `001` baseline. Use `002_consolidated_upgrade.sql` only for a pre-consolidation recovery case, then rerun the normal migration runner. Startup validates the complete supported `schema_migrations` set.
+- **Migrations are explicit and versioned:** Railway pre-deploy runs `store/scripts/migrate.py` and `master/scripts/migrate.py`. The Store runner applies its normal sequence through `018_retire_kommo_instagram.sql` and requires schema version 18; the Master runner applies its `001` baseline. Migration 018 deprecates but does not drop legacy Instagram/Kommo correlation schema. Use `002_consolidated_upgrade.sql` only for a pre-consolidation recovery case, then rerun the normal migration runner. Startup validates the complete supported `schema_migrations` set.
 - **Database connection:** Use Railway service reference variables for each service's own `DATABASE_URL`. Master stores a resolved Store PostgreSQL URL, not a literal Railway reference expression.
 - **OpenAI max_tokens:** Newer OpenAI models (gpt-5.x) require `max_completion_tokens` instead of `max_tokens`. This is already handled in `openai_provider.py`.
 - **Master background jobs use asyncio, not APScheduler.** The master runs health checks and idle store DB pool cleanup with `asyncio.create_task` and `asyncio.sleep`, unlike the store app which uses APScheduler.
@@ -340,4 +339,4 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 - **Cost endpoints support `?days=N`.** Both `GET /api/stores/{id}/llm-usage` and `GET /api/stores/llm-costs/aggregate` accept `?days=1` (today, default), `?days=7`, or `?days=30`. Max 90 days. The cutoff is computed in Python and passed as a query parameter to avoid SQL dialect issues across managed PostgreSQL instances.
 - **Master dashboard credential grouping.** API keys (OPENAI/ANTHROPIC) have a dedicated panel with status badges. Other credentials are grouped by category: Channel Backend, Kommo, Meta Channels, Telegram, Infrastructure, Customization, Other. The grouping is purely frontend — the backend stores all credentials the same way.
 - **Kommo widget package.** `store/kommo-widget/` contains the private Salesbot widget. Build it with `python3 build_widget.py --widget-code <kommo-widget-code>`; upload the generated ZIP manually. The widget uses `widget_request`, then `goto` question step `1`, and no secrets or production domains. Configure the callback once in integration settings as `backend_url`; the Salesbot block URL is optional and only overrides the global URL when valid. The widget exposes `success`, `media`, and `fail` exits. Increment `widget.version` for every upload, then disable/re-enable the integration or refresh Kommo and hard refresh the browser if stale widget fields remain. A bad first upload may require a fresh widget code/private integration per Kommo widget update behavior.
-- **Unsupported or gated in Kommo mode:** WhatsApp product images and catalog PDFs require the global and media-specific Chats API flags; Instagram rich media remains on Salesbot. Automatic human takeover from outgoing/native phone replies and Kommo broadcasts from this backend remain unsupported. Verify production Salesbot, comment, and media delivery in a real development account before rollout.
+- **Unsupported or gated in Kommo WhatsApp mode:** WhatsApp product images and catalog PDFs require the global and media-specific Chats API flags. Automatic human takeover from outgoing/native phone replies and Kommo broadcasts from this backend remain unsupported. Verify production WhatsApp Salesbot and media delivery in a real development account before rollout. Instagram is unaffected and remains native Meta.

@@ -573,7 +573,7 @@ async def test_cmd_settings_is_concise_owner_summary_without_secrets():
     assert "multi\\_agent" in result
     assert "36,50" in result
     assert "WhatsApp: kommo" in result
-    assert "Instagram: kommo" in result
+    assert "Instagram: meta" in result
     assert "media en chats" in result
     assert "PDF de catálogo" in result
     assert "openai_api_key" not in result

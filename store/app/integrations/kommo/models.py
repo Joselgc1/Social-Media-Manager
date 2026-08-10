@@ -8,8 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 KommoEntityType = Literal["leads", "contacts"]
-KommoChannel = Literal["whatsapp", "instagram"]
-KommoInteractionType = Literal["private_message", "instagram_comment"]
+KommoChannel = Literal["whatsapp"]
+KommoInteractionType = Literal["private_message"]
 KommoEventType = Literal[
     "incoming_message",
     "outgoing_message",
@@ -57,7 +57,7 @@ class NormalizedKommoEvent(BaseModel):
     text: str | None = None
     message_type: str | None = None
     origin: str | None = None
-    channel: KommoChannel | None = None
+    channel: str | None = None
     author_id: str | None = None
     author_name: str | None = None
     author_type: str | None = None
@@ -69,12 +69,6 @@ class NormalizedKommoEvent(BaseModel):
     ai_mode_enum_id: int | None = None
     media_url: str | None = None
     interaction_type: KommoInteractionType = "private_message"
-    post_id: str | None = None
-    comment_id: str | None = None
-    parent_comment_id: str | None = None
-    media_id: str | None = None
-    post_url: str | None = None
-    comment_url: str | None = None
 
     @property
     def stable_entity_id(self) -> str | None:
@@ -116,25 +110,6 @@ class SalesbotWidgetData(BaseModel):
     sender_profile_url: str | None = None
     interaction_type: KommoInteractionType | None = None
     expected_channel: KommoChannel | None = None
-    post_id: str | None = None
-    comment_id: str | None = None
-    parent_comment_id: str | None = None
-    media_id: str | None = None
-    post_url: str | None = None
-    comment_url: str | None = None
-    post_caption: str | None = None
-    media_type: str | None = None
-    media_product_type: str | None = None
-    content_type: str | None = None
-    post_text: str | None = None
-    media_caption: str | None = None
-    product_name: str | None = None
-    post_product_name: str | None = None
-    product_sku: str | None = None
-    parent_sku: str | None = None
-    image_url: str | None = None
-    post_image_url: str | None = None
-    post_media_url: str | None = None
 
     @field_validator(
         "lead_id",
@@ -146,25 +121,6 @@ class SalesbotWidgetData(BaseModel):
         "author_profile_url",
         "sender_username",
         "sender_profile_url",
-        "post_id",
-        "comment_id",
-        "parent_comment_id",
-        "media_id",
-        "post_url",
-        "comment_url",
-        "post_caption",
-        "media_type",
-        "media_product_type",
-        "content_type",
-        "post_text",
-        "media_caption",
-        "product_name",
-        "post_product_name",
-        "product_sku",
-        "parent_sku",
-        "image_url",
-        "post_image_url",
-        "post_media_url",
         mode="before",
     )
     @classmethod
@@ -184,7 +140,7 @@ class SalesbotWidgetData(BaseModel):
         text = str(value).strip().lower()
         if text.startswith("{{") and text.endswith("}}"):
             return None
-        if text in {"private_message", "instagram_comment"}:
+        if text == "private_message":
             return text
 
     @field_validator("expected_channel", mode="before")
@@ -226,15 +182,6 @@ class PersistentKommoJob(BaseModel):
     message_type: str | None = None
     inbound_attachments: list[dict] = Field(default_factory=list)
     return_url: str | None = None
-    public_comment_context: dict | None = None
-    meta_context_event_id: str | None = None
-    context_status: Literal[
-        "not_required", "pending", "matched", "ambiguous", "timed_out"
-    ] = "not_required"
-    context_deadline_at: datetime | None = None
-    context_correlation_score: int | None = None
-    suppress_after_context: bool = False
-    automation_block_reason: str | None = None
     status: KommoJobStatus
     attempt_count: int = 0
     last_error: str | None = None

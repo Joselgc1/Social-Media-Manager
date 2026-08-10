@@ -494,7 +494,7 @@ function renderStoreDetail(store, stats, creds) {
 // ── Grouped Credentials ────────────────────────────────────
 const CRED_GROUPS = [
     { name: 'LLM API Keys', test: k => /^(OPENAI_API_KEY|ANTHROPIC_API_KEY)$/.test(k) },
-    { name: 'Channel Providers', test: k => /^(WHATSAPP_BACKEND|INSTAGRAM_BACKEND|CHANNEL_BACKEND)$/.test(k) },
+    { name: 'Channel Providers', test: k => /^(WHATSAPP_BACKEND|CHANNEL_BACKEND)$/.test(k) },
     { name: 'Kommo', test: k => /^KOMMO_/.test(k) },
     { name: 'Meta Channels', test: k => /^(WHATSAPP_|INSTAGRAM_|META_)/.test(k) },
     { name: 'Telegram', test: k => /^TELEGRAM_/.test(k) },
@@ -657,18 +657,14 @@ async function confirmDeleteStore(storeId, name) {
 // ── Credential Modals ───────────────────────────────────────
 function showAddCredentialModal(storeId) {
     const commonKeys = [
-        'WHATSAPP_BACKEND', 'INSTAGRAM_BACKEND',
+        'WHATSAPP_BACKEND',
         'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DATABASE_URL',
         'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_VERIFY_TOKEN',
         'META_APP_SECRET', 'INSTAGRAM_ACCESS_TOKEN', 'INSTAGRAM_VERIFY_TOKEN',
-        'INSTAGRAM_ACCOUNT_ID', 'META_GRAPH_API_VERSION', 'META_INSTAGRAM_CONTEXT_ENABLED',
-        'META_CONTEXT_WAIT_SECONDS', 'META_CONTEXT_MATCH_WINDOW_SECONDS',
-        'META_CONTEXT_EVENT_RETENTION_HOURS',
-        'META_STORY_CONTEXT_ENABLED', 'META_STORY_CONTEXT_WAIT_SECONDS',
-        'META_STORY_CONTEXT_MATCH_WINDOW_SECONDS', 'INSTAGRAM_STORY_MAPPING_TTL_HOURS',
+        'INSTAGRAM_ACCOUNT_ID', 'META_GRAPH_API_VERSION', 'INSTAGRAM_STORY_MAPPING_TTL_HOURS',
         'INSTAGRAM_STORY_CONTEXT_TTL_HOURS',
         'KOMMO_SUBDOMAIN', 'KOMMO_ACCESS_TOKEN', 'KOMMO_INTEGRATION_ID',
-        'KOMMO_INTEGRATION_SECRET', 'KOMMO_INSTAGRAM_DM_SALESBOT_ID',
+        'KOMMO_INTEGRATION_SECRET',
         'KOMMO_WHATSAPP_SALESBOT_ID', 'KOMMO_SALESBOT_ID', 'KOMMO_WEBHOOK_SECRET',
         'KOMMO_AI_MODE_FIELD_ID', 'KOMMO_AI_ACTIVE_ENUM_ID', 'KOMMO_AI_HUMAN_ENUM_ID',
         'KOMMO_AI_PAUSED_ENUM_ID', 'KOMMO_DEFAULT_RESPONSIBLE_USER_ID',

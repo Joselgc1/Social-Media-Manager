@@ -1,5 +1,3 @@
-import json
-from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -50,46 +48,17 @@ class _DBHandle:
 @pytest.mark.parametrize(
     ("media_product_type", "media_type", "permalink", "expected"),
     [
-        # Meta's explicit Reel classification takes priority.
         ("REELS", "VIDEO", "https://www.instagram.com/p/ABC123/", "reel"),
-
-        # A normal feed video remains a post.
         (None, "VIDEO", "https://www.instagram.com/p/ABC123/", "post"),
-
-        # Carousel classification comes from media_type.
-        (
-            None,
-            "CAROUSEL_ALBUM",
-            "https://www.instagram.com/p/ABC123/",
-            "carousel",
-        ),
-
-        # A Reel permalink is sufficient when media_product_type is absent.
-        (None, "VIDEO", "https://www.instagram.com/reel/Reel_123/", "reel"),
+        (None, "CAROUSEL_ALBUM", "https://www.instagram.com/p/ABC123/", "carousel"),
         (None, None, "https://www.instagram.com/reel/Reel_123/", "reel"),
-
-        # Explicit feed metadata identifies a post.
         ("FEED", None, "https://www.instagram.com/p/ABC123/", "post"),
-
-        # Generic image and video media identify normal posts after
-        # Reel and carousel checks.
         (None, "IMAGE", None, "post"),
-        (None, "VIDEO", None, "post"),
-
-        # A /p/ URL without Meta media metadata is ambiguous because it
-        # may represent either a regular post or a carousel.
         (None, None, "https://www.instagram.com/p/ABC123/", None),
-
-        # No usable metadata means no classification.
         (None, None, None, None),
     ],
 )
-def test_detects_instagram_content_type(
-    media_product_type,
-    media_type,
-    permalink,
-    expected,
-):
+def test_detects_instagram_content_type(media_product_type, media_type, permalink, expected):
     from app.integrations.meta_context.service import detect_instagram_content_type
 
     assert detect_instagram_content_type(
@@ -103,19 +72,15 @@ def test_detects_instagram_content_type(
 async def test_meta_media_client_fetches_read_only_fields_without_token_in_url(monkeypatch):
     from app.integrations.meta_context import client
 
-    fake = _HTTPClient(
-        _Response(
-            payload={
-                "id": "media-1",
-                "permalink": "https://www.instagram.com/reel/ABC123/",
-                "caption": "Nueva colección",
-                "media_type": "VIDEO",
-                "media_product_type": "REELS",
-                "timestamp": "2026-07-30T10:00:00Z",
-                "thumbnail_url": "https://cdn.example/thumb.jpg",
-            }
-        )
-    )
+    fake = _HTTPClient(_Response(payload={
+        "id": "media-1",
+        "permalink": "https://www.instagram.com/reel/ABC123/",
+        "caption": "Nueva coleccion",
+        "media_type": "VIDEO",
+        "media_product_type": "REELS",
+        "timestamp": "2026-07-30T10:00:00Z",
+        "thumbnail_url": "https://cdn.example/thumb.jpg",
+    }))
     monkeypatch.setattr(client.httpx, "AsyncClient", lambda **_kwargs: fake)
 
     result = await client.MetaContextClient("secret-token", "v21.0").get_media("media-1")
@@ -134,146 +99,89 @@ async def test_meta_media_client_fetches_read_only_fields_without_token_in_url(m
     ("response", "error", "expected"),
     [
         (_Response(status_code=500), None, "status 500"),
-        (
-            None,
-            httpx.ReadTimeout("timeout", request=httpx.Request("GET", "https://graph.facebook.com")),
-            "timed out",
-        ),
+        (None, httpx.ReadTimeout("timeout", request=httpx.Request("GET", "https://graph.facebook.com")), "timed out"),
     ],
 )
 async def test_meta_media_client_returns_safe_api_errors(monkeypatch, response, error, expected):
     from app.integrations.meta_context import client
 
-    fake = _HTTPClient(response=response, error=error)
-    monkeypatch.setattr(client.httpx, "AsyncClient", lambda **_kwargs: fake)
-
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _HTTPClient(response=response, error=error),
+    )
     with pytest.raises(client.MetaContextAPIError, match=expected):
         await client.MetaContextClient("secret-token", "v21.0").get_media("media-1")
 
 
 @pytest.mark.asyncio
-async def test_existing_permalink_mapping_backfills_carousel_parent_media(monkeypatch):
+@pytest.mark.parametrize(
+    ("media_id", "permalink", "media_type", "media_product_type", "expected_type"),
+    [
+        ("media-1", "https://instagram.com/p/ABC123/?utm_source=test", "CAROUSEL_ALBUM", None, "carousel"),
+        ("reel-1", "https://instagram.com/reel/Reel_123/?igsh=test", "VIDEO", "REELS", "reel"),
+    ],
+)
+async def test_existing_permalink_mapping_backfills_native_media_fields(
+    monkeypatch, media_id, permalink, media_type, media_product_type, expected_type
+):
     from app.integrations.meta_context import service
     from app.integrations.meta_context.models import MetaMediaDetails
 
     mock_db = MagicMock()
-    mock_db.fetch_all = AsyncMock(
-        return_value=[
-            {
-                "id": "content-1",
-                "media_id": None,
-                "normalized_permalink": "https://www.instagram.com/p/ABC123/",
-                "shortcode": "ABC123",
-            }
-        ]
-    )
+    mock_db.fetch_all = AsyncMock(return_value=[{
+        "id": "content-1",
+        "media_id": None,
+        "normalized_permalink": "https://www.instagram.com/p/ABC123/" if expected_type == "carousel" else "https://www.instagram.com/reel/Reel_123/",
+        "shortcode": "ABC123" if expected_type == "carousel" else "Reel_123",
+    }])
     mock_db.fetch_one = AsyncMock(return_value={"id": "content-1"})
     mock_db.execute = AsyncMock(return_value="UPDATE 1")
     mock_db.get_db = MagicMock(return_value=_DBHandle())
     monkeypatch.setattr(service, "db", mock_db)
 
-    result = await service.backfill_instagram_mapping(
-        MetaMediaDetails(
-            id="media-1",
-            permalink="https://instagram.com/p/ABC123/?utm_source=test",
-            caption="Caption snapshot",
-            media_type="CAROUSEL_ALBUM",
-        )
-    )
+    result = await service.backfill_instagram_mapping(MetaMediaDetails(
+        id=media_id,
+        permalink=permalink,
+        caption="Caption snapshot",
+        media_type=media_type,
+        media_product_type=media_product_type,
+    ))
 
     assert result == {"status": "backfilled", "content_id": "content-1"}
-    values = mock_db.fetch_one.await_args.args[1]
-    query = mock_db.fetch_one.await_args.args[0]
-    assert values["media_id"] == "media-1"
+    query, values = mock_db.fetch_one.await_args.args
+    assert values["media_id"] == media_id
     assert values["caption_snapshot"] == "Caption snapshot"
-    assert values["content_type"] == "carousel"
+    assert values["content_type"] == expected_type
     assert "content_type" in query
 
 
 @pytest.mark.asyncio
-async def test_incomplete_meta_data_preserves_existing_carousel_type(monkeypatch):
+async def test_incomplete_meta_data_preserves_existing_content_type(monkeypatch):
     from app.integrations.meta_context import service
     from app.integrations.meta_context.models import MetaMediaDetails
 
     mock_db = MagicMock()
-    mock_db.fetch_all = AsyncMock(
-        return_value=[
-            {
-                "id": "content-carousel",
-                "media_id": None,
-                "normalized_permalink": "https://www.instagram.com/p/ABC123/",
-                "shortcode": "ABC123",
-            }
-        ]
-    )
+    mock_db.fetch_all = AsyncMock(return_value=[{
+        "id": "content-carousel",
+        "media_id": None,
+        "normalized_permalink": "https://www.instagram.com/p/ABC123/",
+        "shortcode": "ABC123",
+    }])
     mock_db.fetch_one = AsyncMock(return_value={"id": "content-carousel"})
     mock_db.get_db = MagicMock(return_value=_DBHandle())
     monkeypatch.setattr(service, "db", mock_db)
 
-    result = await service.backfill_instagram_mapping(
-        MetaMediaDetails(
-            id="media-carousel",
-            permalink="https://www.instagram.com/p/ABC123/",
-            caption="Carousel caption",
-            media_type=None,
-            media_product_type=None,
-        )
-    )
+    result = await service.backfill_instagram_mapping(MetaMediaDetails(
+        id="media-carousel",
+        permalink="https://www.instagram.com/p/ABC123/",
+        caption="Carousel caption",
+    ))
 
-    assert result == {
-        "status": "backfilled",
-        "content_id": "content-carousel",
-    }
-
+    assert result == {"status": "backfilled", "content_id": "content-carousel"}
     update_query, update_values = mock_db.fetch_one.await_args.args
-
-    # The detector cannot distinguish a normal post from a carousel based
-    # only on a /p/ URL.
     assert update_values["content_type"] is None
-
-    # PostgreSQL must retain the existing stored value when the new
-    # classification is unknown.
-    assert (
-        "content_type = COALESCE(:content_type, content_type)"
-        in update_query
-    )
-
-
-@pytest.mark.asyncio
-async def test_existing_reel_mapping_backfills_media_id_caption_and_content_type(monkeypatch):
-    from app.integrations.meta_context import service
-    from app.integrations.meta_context.models import MetaMediaDetails
-
-    mock_db = MagicMock()
-    mock_db.fetch_all = AsyncMock(
-        return_value=[
-            {
-                "id": "content-reel",
-                "media_id": None,
-                "normalized_permalink": "https://www.instagram.com/reel/Reel_123/",
-                "shortcode": "Reel_123",
-            }
-        ]
-    )
-    mock_db.fetch_one = AsyncMock(return_value={"id": "content-reel"})
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    monkeypatch.setattr(service, "db", mock_db)
-
-    result = await service.backfill_instagram_mapping(
-        MetaMediaDetails(
-            id="reel-media-1",
-            permalink="https://instagram.com/reel/Reel_123/?igsh=test",
-            caption="Reel caption",
-            media_type="VIDEO",
-            media_product_type="REELS",
-        )
-    )
-
-    assert result == {"status": "backfilled", "content_id": "content-reel"}
-    values = mock_db.fetch_one.await_args.args[1]
-    assert values["media_id"] == "reel-media-1"
-    assert values["caption_snapshot"] == "Reel caption"
-    assert values["content_type"] == "reel"
+    assert "content_type = COALESCE(:content_type, content_type)" in update_query
 
 
 @pytest.mark.asyncio
@@ -282,652 +190,22 @@ async def test_mapping_with_different_media_id_records_conflict_without_update(m
     from app.integrations.meta_context.models import MetaMediaDetails
 
     mock_db = MagicMock()
-    mock_db.fetch_all = AsyncMock(
-        return_value=[
-            {
-                "id": "content-1",
-                "media_id": "different-media",
-                "normalized_permalink": "https://www.instagram.com/p/ABC123/",
-                "shortcode": "ABC123",
-            }
-        ]
-    )
+    mock_db.fetch_all = AsyncMock(return_value=[{
+        "id": "content-1",
+        "media_id": "different-media",
+        "normalized_permalink": "https://www.instagram.com/p/ABC123/",
+        "shortcode": "ABC123",
+    }])
     mock_db.fetch_one = AsyncMock()
     mock_db.execute = AsyncMock()
     mock_db.get_db = MagicMock(return_value=_DBHandle())
     monkeypatch.setattr(service, "db", mock_db)
 
-    result = await service.backfill_instagram_mapping(
-        MetaMediaDetails(
-            id="media-1",
-            permalink="https://www.instagram.com/p/ABC123/",
-        )
-    )
+    result = await service.backfill_instagram_mapping(MetaMediaDetails(
+        id="media-1",
+        permalink="https://www.instagram.com/p/ABC123/",
+    ))
 
     assert result == {"status": "conflict", "reason": "mapping_has_different_media_id"}
     mock_db.fetch_one.assert_not_awaited()
     mock_db.execute.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_media_enrichment_updates_event_then_runs_correlation(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-    from app.integrations.meta_context.models import MetaMediaDetails
-
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(return_value={"id": "event-1", "media_id": "media-1", "media_permalink": None})
-    mock_db.fetch_all = AsyncMock(return_value=[])
-    mock_db.execute = AsyncMock()
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    monkeypatch.setattr(service, "db", mock_db)
-    client = MagicMock()
-    client.get_media = AsyncMock(
-        return_value=MetaMediaDetails(
-            id="media-1",
-            permalink="https://www.instagram.com/p/ABC123/",
-            caption="Caption",
-            timestamp=datetime.now(UTC),
-        )
-    )
-    monkeypatch.setattr(service.MetaContextClient, "from_config", lambda: client)
-    correlate = AsyncMock(return_value={"status": "pending"})
-    monkeypatch.setattr(correlation, "correlate_meta_event", correlate)
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", AsyncMock())
-
-    result = await service.process_context_event("event-1")
-
-    assert result == {"status": "pending"}
-    assert any("media_permalink = :media_permalink" in call.args[0] for call in mock_db.execute.await_args_list)
-    correlate.assert_awaited_once_with("event-1")
-
-
-@pytest.mark.asyncio
-async def test_media_api_failure_does_not_block_correlation(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(
-        return_value={"id": "event-1", "media_id": "media-1", "media_permalink": None}
-    )
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    client = MagicMock()
-    client.get_media = AsyncMock(side_effect=service.MetaContextAPIError("request timed out"))
-    monkeypatch.setattr(service.MetaContextClient, "from_config", lambda: client)
-    correlate = AsyncMock(return_value={"status": "matched", "job_id": "job-1"})
-    monkeypatch.setattr(correlation, "correlate_meta_event", correlate)
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=False))
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", AsyncMock())
-
-    result = await service.process_context_event("event-1")
-
-    assert result == {"status": "matched", "job_id": "job-1"}
-    correlate.assert_awaited_once_with("event-1")
-    assert "meta_api_error" in mock_db.execute.await_args.args[1]["details"]
-
-
-@pytest.mark.asyncio
-async def test_already_enriched_event_retries_incomplete_mapping_backfill(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-
-    event = {
-        "id": "event-1",
-        "media_id": "media-1",
-        "media_permalink": "https://www.instagram.com/p/ABC123/",
-        "media_caption": "Caption",
-        "correlation_details": {"mapping_error": "Mapping backfill failed"},
-    }
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(side_effect=[event, {"id": "content-1"}])
-    mock_db.fetch_all = AsyncMock(
-        return_value=[
-            {
-                "id": "content-1",
-                "media_id": None,
-                "normalized_permalink": "https://www.instagram.com/p/ABC123/",
-                "shortcode": "ABC123",
-            }
-        ]
-    )
-    mock_db.execute = AsyncMock()
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    monkeypatch.setattr(service, "db", mock_db)
-    correlate = AsyncMock(return_value={"status": "pending"})
-    monkeypatch.setattr(correlation, "correlate_meta_event", correlate)
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=False))
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", AsyncMock())
-
-    result = await service.process_context_event("event-1")
-
-    assert result == {"status": "pending"}
-    assert any("UPDATE instagram_content" in call.args[0] for call in mock_db.fetch_one.await_args_list)
-    assert any(
-        '"mapping_status": "backfilled"' in call.args[1]["details"]
-        for call in mock_db.execute.await_args_list
-        if "details" in call.args[1]
-    )
-    correlate.assert_awaited_once_with("event-1")
-
-
-@pytest.mark.asyncio
-async def test_mapping_backfill_failure_does_not_block_correlation(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-
-    event = {
-        "id": "event-1",
-        "media_id": "media-1",
-        "media_permalink": "https://www.instagram.com/p/ABC123/",
-        "media_caption": "Caption",
-        "correlation_details": {},
-    }
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(return_value=event)
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    correlate = AsyncMock(return_value={"status": "matched", "job_id": "job-1"})
-    monkeypatch.setattr(correlation, "correlate_meta_event", correlate)
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=False))
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", AsyncMock())
-    monkeypatch.setattr(
-        service,
-        "backfill_instagram_mapping",
-        AsyncMock(side_effect=RuntimeError("database unavailable")),
-    )
-
-    result = await service.process_context_event("event-1")
-
-    assert result == {"status": "matched", "job_id": "job-1"}
-    correlate.assert_awaited_once_with("event-1")
-    assert "mapping_error" in mock_db.execute.await_args.args[1]["details"]
-
-
-@pytest.mark.asyncio
-async def test_late_media_enrichment_updates_already_matched_kommo_context(monkeypatch):
-    from app.integrations.meta_context import service
-
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(return_value={"id": "job-1"})
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-
-    updated = await service._update_matched_job_context(
-        "event-1",
-        {
-            "media_id": "media-1",
-            "media_permalink": "https://www.instagram.com/reel/Reel_123/",
-            "media_caption": "Caption",
-            "media_type": "VIDEO",
-            "media_product_type": "REELS",
-        },
-    )
-
-    assert updated is True
-    query, values = mock_db.fetch_one.await_args.args
-    assert "event.matched_kommo_job_id = job.id" in query
-    assert json.loads(values["context"]) == {
-        "media_id": "media-1",
-        "post_id": "media-1",
-        "post_url": "https://www.instagram.com/reel/Reel_123/",
-        "post_caption": "Caption",
-        "media_type": "VIDEO",
-        "media_product_type": "REELS",
-        "content_type": "reel",
-    }
-    assert '"job_context_enriched": true' in mock_db.execute.await_args.args[1]["details"]
-
-
-@pytest.mark.asyncio
-async def test_correlation_runs_before_media_api_enrichment(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-    from app.integrations.meta_context.models import MetaMediaDetails
-
-    calls = []
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(
-        return_value={"id": "event-1", "media_id": "media-1", "media_permalink": None}
-    )
-    mock_db.fetch_all = AsyncMock(return_value=[])
-    mock_db.execute = AsyncMock()
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    monkeypatch.setattr(service, "db", mock_db)
-
-    async def correlate_first(_event_id):
-        calls.append("correlate")
-        return {"status": "pending"}
-
-    async def enrich_second(_media_id):
-        calls.append("enrich")
-        return MetaMediaDetails(
-            id="media-1",
-            permalink="https://www.instagram.com/p/ABC123/",
-        )
-
-    client = MagicMock()
-    client.get_media = enrich_second
-    monkeypatch.setattr(correlation, "correlate_meta_event", correlate_first)
-    monkeypatch.setattr(service.MetaContextClient, "from_config", lambda: client)
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=False))
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", AsyncMock())
-
-    await service.process_context_event("event-1")
-
-    assert calls == ["correlate", "enrich"]
-
-
-@pytest.mark.asyncio
-async def test_incomplete_meta_data_does_not_overwrite_job_content_type(monkeypatch):
-    from app.integrations.meta_context import service
-
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(return_value={"id": "job-1"})
-    monkeypatch.setattr(service, "db", mock_db)
-
-    merge_details = AsyncMock()
-    monkeypatch.setattr(service, "_merge_event_details", merge_details)
-
-    result = await service._update_matched_job_context(
-        "event-1",
-        {
-            "media_id": "media-1",
-            "media_permalink": "https://www.instagram.com/p/ABC123/",
-            "media_caption": "Existing carousel",
-            "media_type": None,
-            "media_product_type": None,
-        },
-    )
-
-    assert result is True
-
-    _, values = mock_db.fetch_one.await_args.args
-    context = json.loads(values["context"])
-
-    assert context["media_id"] == "media-1"
-    assert context["post_id"] == "media-1"
-    assert context["post_url"] == "https://www.instagram.com/p/ABC123/"
-
-    # Because the type cannot be determined, it must not be included in
-    # the JSON merge. Any existing content_type in the job context will
-    # therefore remain unchanged.
-    assert "content_type" not in context
-
-    merge_details.assert_awaited_once_with(
-        "event-1",
-        {"job_context_enriched": True},
-    )
-
-
-@pytest.mark.asyncio
-async def test_matched_events_remain_eligible_for_late_enrichment_retry(monkeypatch):
-    from app.integrations.meta_context import service
-
-    mock_db = MagicMock()
-    mock_db.fetch_all = AsyncMock(return_value=[])
-    monkeypatch.setattr(service, "db", mock_db)
-    monkeypatch.setattr(
-        service,
-        "get_config",
-        lambda: MagicMock(meta_instagram_context_enabled=True),
-    )
-
-    assert await service.process_pending_context_events(limit=10) == 0
-
-    query = mock_db.fetch_all.await_args.args[0]
-    assert "correlation_status = 'matched'" in query
-    assert "media_permalink IS NULL" in query
-    assert "job_context_enriched" in query
-    assert "mapping_next_retry_at" in query
-    assert "expires_at > NOW()" in query
-
-
-@pytest.mark.asyncio
-async def test_mapping_not_found_records_delayed_retry(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-
-    event = {
-        "id": "event-1",
-        "media_id": "media-1",
-        "media_permalink": "https://www.instagram.com/p/ABC123/",
-        "correlation_details": {},
-    }
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(return_value=event)
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    monkeypatch.setattr(
-        correlation,
-        "correlate_meta_event",
-        AsyncMock(return_value={"status": "pending"}),
-    )
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", AsyncMock())
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=False))
-    monkeypatch.setattr(
-        service,
-        "backfill_instagram_mapping",
-        AsyncMock(return_value={"status": "not_found"}),
-    )
-
-    await service.process_context_event("event-1")
-
-    query, values = next(
-        call.args
-        for call in mock_db.execute.await_args_list
-        if "mapping_next_retry_at" in call.args[0]
-    )
-    assert "'mapping_status', 'not_found'" in query
-    assert values["retry_minutes"] == 30
-
-
-@pytest.mark.asyncio
-async def test_mapping_not_found_does_not_retry_before_next_retry_at(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-
-    event = {
-        "id": "event-1",
-        "media_id": "media-1",
-        "media_permalink": "https://www.instagram.com/p/ABC123/",
-        "correlation_details": {
-            "mapping_status": "not_found",
-            "mapping_next_retry_at": (datetime.now(UTC) + timedelta(minutes=29)).isoformat(),
-        },
-    }
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(return_value=event)
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    monkeypatch.setattr(
-        correlation,
-        "correlate_meta_event",
-        AsyncMock(return_value={"status": "pending"}),
-    )
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", AsyncMock())
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=False))
-    backfill = AsyncMock()
-    monkeypatch.setattr(service, "backfill_instagram_mapping", backfill)
-
-    await service.process_context_event("event-1")
-
-    backfill.assert_not_awaited()
-
-
-def test_mapping_not_found_retry_becomes_due_after_delay():
-    from app.integrations.meta_context import service
-
-    assert service._mapping_retry_is_due(
-        {
-            "mapping_status": "not_found",
-            "mapping_next_retry_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
-        }
-    )
-
-
-@pytest.mark.asyncio
-async def test_media_id_mapping_is_applied_atomically_before_job_becomes_ready(monkeypatch):
-    from app.integrations.meta_context import service
-
-    mock_db = MagicMock()
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    mock_db.fetch_one = AsyncMock(
-        side_effect=[
-            {
-                "event_id": "event-1",
-                "media_id": "media-1",
-                "media_permalink": None,
-                "media_caption": None,
-                "correlation_details": {},
-                "job_id": "job-1",
-                "public_comment_context": {},
-            },
-            {"id": "job-1"},
-        ]
-    )
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    resolve = AsyncMock(
-        return_value={
-            "status": "resolved",
-            "content_id": "content-1",
-            "product_skus": ["SKU-1", "SKU-2"],
-        }
-    )
-    monkeypatch.setattr(service, "resolve_content_product_mapping", resolve)
-
-    result = await service.resolve_and_release_matched_job("event-1", force=True)
-
-    assert result == {
-        "status": "ready",
-        "mapping_status": "resolved",
-        "job_id": "job-1",
-    }
-    resolve.assert_awaited_once_with(media_id="media-1", permalink=None)
-    release_query, release_values = mock_db.fetch_one.await_args_list[1].args
-    assert "status = 'ready'" in release_query
-    assert json.loads(release_values["context"]) == {
-        "media_id": "media-1",
-        "post_id": "media-1",
-        "product_skus": ["SKU-1", "SKU-2"],
-        "mapping_status": "resolved",
-    }
-
-
-@pytest.mark.asyncio
-async def test_permalink_only_mapping_is_applied_before_job_becomes_ready(monkeypatch):
-    from app.integrations.meta_context import service
-
-    mock_db = MagicMock()
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    mock_db.fetch_one = AsyncMock(
-        side_effect=[
-            {
-                "event_id": "event-1",
-                "media_id": "media-1",
-                "media_permalink": "https://www.instagram.com/p/ABC123/",
-                "media_caption": "Caption",
-                "correlation_details": {},
-                "job_id": "job-1",
-                "public_comment_context": {},
-            },
-            {"id": "job-1"},
-        ]
-    )
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    resolve = AsyncMock(
-        return_value={
-            "status": "resolved",
-            "product_skus": ["SKU-2"],
-            "product_sku": "SKU-2",
-        }
-    )
-    monkeypatch.setattr(service, "resolve_content_product_mapping", resolve)
-
-    result = await service.resolve_and_release_matched_job("event-1", force=True)
-
-    assert result["status"] == "ready"
-    resolve.assert_awaited_once_with(
-        media_id="media-1",
-        permalink="https://www.instagram.com/p/ABC123/",
-    )
-    release_values = mock_db.fetch_one.await_args_list[1].args[1]
-    assert json.loads(release_values["context"]) == {
-        "media_id": "media-1",
-        "post_id": "media-1",
-        "post_url": "https://www.instagram.com/p/ABC123/",
-        "post_caption": "Caption",
-        "mapping_status": "resolved",
-        "product_skus": ["SKU-2"],
-        "product_sku": "SKU-2",
-    }
-
-
-@pytest.mark.asyncio
-async def test_unmapped_product_gate_ignores_callback_sku_and_schedules_long_retry(monkeypatch):
-    from app.integrations.meta_context import service
-
-    mock_db = MagicMock()
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    mock_db.fetch_one = AsyncMock(
-        return_value={
-            "event_id": "event-1",
-            "media_id": "media-1",
-            "media_permalink": "https://www.instagram.com/p/ABC123/",
-            "media_caption": None,
-            "correlation_details": {},
-            "job_id": "job-1",
-            "public_comment_context": {
-                "product_sku": "UNTRUSTED-SKU",
-                "product_skus": ["UNTRUSTED-SKU"],
-            },
-        }
-    )
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    resolve = AsyncMock(return_value={"status": "not_found"})
-    monkeypatch.setattr(
-        service,
-        "resolve_content_product_mapping",
-        resolve,
-    )
-
-    result = await service.resolve_and_release_matched_job("event-1", force=True)
-
-    assert result == {"status": "waiting", "mapping_status": "not_found"}
-    resolve.assert_awaited_once()
-    assert mock_db.fetch_one.await_count == 1
-    retry_query, retry_values = mock_db.execute.await_args.args
-    assert "mapping_next_retry_at" in retry_query
-    assert retry_values["retry_minutes"] == 30
-
-
-@pytest.mark.asyncio
-async def test_late_enrichment_retries_mapping_gate_before_product_processing(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-    from app.integrations.meta_context.models import MetaMediaDetails
-
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(
-        return_value={"id": "event-1", "media_id": "media-1", "media_permalink": None}
-    )
-    mock_db.fetch_all = AsyncMock(return_value=[])
-    mock_db.execute = AsyncMock()
-    mock_db.get_db = MagicMock(return_value=_DBHandle())
-    monkeypatch.setattr(service, "db", mock_db)
-    monkeypatch.setattr(
-        correlation,
-        "correlate_meta_event",
-        AsyncMock(return_value={"status": "matched", "event_id": "event-1"}),
-    )
-    gate = AsyncMock(
-        side_effect=[
-            {"status": "waiting", "mapping_status": "not_found"},
-            {"status": "ready", "mapping_status": "resolved", "job_id": "job-1"},
-        ]
-    )
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", gate)
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=True))
-    monkeypatch.setattr(
-        service,
-        "backfill_instagram_mapping",
-        AsyncMock(return_value={"status": "backfilled", "content_id": "content-1"}),
-    )
-    client = MagicMock()
-    client.get_media = AsyncMock(
-        return_value=MetaMediaDetails(
-            id="media-1",
-            permalink="https://www.instagram.com/p/ABC123/",
-            caption="Caption",
-        )
-    )
-    monkeypatch.setattr(service.MetaContextClient, "from_config", lambda: client)
-
-    await service.process_context_event("event-1")
-
-    assert gate.await_args_list[0].kwargs == {"force": True}
-    assert gate.await_args_list[1].kwargs == {"force": True}
-
-
-@pytest.mark.asyncio
-async def test_graph_success_without_permalink_does_not_force_tight_mapping_retry(monkeypatch):
-    from app.integrations.meta_context import correlation, service
-    from app.integrations.meta_context.models import MetaMediaDetails
-
-    mock_db = MagicMock()
-    mock_db.fetch_one = AsyncMock(
-        return_value={
-            "id": "event-1",
-            "media_id": "media-1",
-            "media_permalink": None,
-            "correlation_details": {
-                "mapping_status": "not_found",
-                "mapping_next_retry_at": (
-                    datetime.now(UTC) + timedelta(minutes=29)
-                ).isoformat(),
-            },
-        }
-    )
-    mock_db.execute = AsyncMock()
-    monkeypatch.setattr(service, "db", mock_db)
-    monkeypatch.setattr(
-        correlation,
-        "correlate_meta_event",
-        AsyncMock(return_value={"status": "pending"}),
-    )
-    gate = AsyncMock(return_value={"status": "waiting", "mapping_status": "not_found"})
-    monkeypatch.setattr(service, "resolve_and_release_matched_job", gate)
-    monkeypatch.setattr(service, "_update_matched_job_context", AsyncMock(return_value=False))
-    client = MagicMock()
-    client.get_media = AsyncMock(return_value=MetaMediaDetails(id="media-1", permalink=None))
-    monkeypatch.setattr(service.MetaContextClient, "from_config", lambda: client)
-
-    await service.process_context_event("event-1")
-
-    assert [call.kwargs for call in gate.await_args_list] == [
-        {"force": False},
-        {"force": False},
-    ]
-    assert any(
-        '"media_enrichment_status": "succeeded"' in call.args[1].get("details", "")
-        for call in mock_db.execute.await_args_list
-    )
-
-
-@pytest.mark.asyncio
-async def test_story_diagnostics_return_expected_keys_and_use_story_queries(monkeypatch):
-    from app.integrations.meta_context import service
-
-    story_metrics = {
-        "story_events_received": 10,
-        "story_events_matched": 7,
-        "story_events_ambiguous": 1,
-        "story_events_expired": 2,
-        "story_mapping_resolved": 6,
-        "story_mapping_missing": 1,
-        "story_context_created": 5,
-        "receipt_level_text_matches": 4,
-    }
-    story_jobs = {
-        "story_correlation_timeouts": 3,
-        "story_context_reused": 2,
-    }
-    mock_db = MagicMock()
-    mock_db.fetch_all = AsyncMock(return_value=[{"correlation_status": "matched", "cnt": 7}])
-    mock_db.fetch_one = AsyncMock(
-        side_effect=[
-            {"id": "event-1"},
-            {"cnt": 1},
-            story_metrics,
-            story_jobs,
-            {"cnt": 2},
-            {"error": None},
-        ]
-    )
-    monkeypatch.setattr(service, "db", mock_db)
-
-    result = await service.diagnostics_summary()
-
-    assert {key: result[key] for key in story_metrics} == story_metrics
-    assert {key: result[key] for key in story_jobs} == story_jobs
-    assert result["story_context_expired"] == 2
-    queries = [call.args[0] for call in mock_db.fetch_one.await_args_list]
-    assert any("text_match_source' = 'receipt'" in query for query in queries)
-    assert any("instagram_content_context ->> 'context_usage' = 'reused'" in query for query in queries)
-    assert any("instagram_context_expires_at <= NOW()" in query for query in queries)

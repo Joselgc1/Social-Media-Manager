@@ -1,6 +1,6 @@
 # VS Chatbot: Complete Deployment and Testing Guide
 
-Everything you need to go from a fresh laptop to a fully operational AI chatbot handling real customer messages on WhatsApp and Instagram, with broadcast campaigns, an admin dashboard, payment screenshot recognition, and analytics. The store can run in direct Meta mode or Kommo mode.
+Everything you need to go from a fresh laptop to a fully operational AI chatbot handling real customer messages on WhatsApp and Instagram, with broadcast campaigns, an admin dashboard, payment screenshot recognition, and analytics. Instagram always uses native Meta; WhatsApp can use direct Meta or Kommo.
 
 Important business behavior baked into the current system:
 
@@ -21,7 +21,7 @@ The guide has 11 parts:
 - Part 10: The full testing checklist.
 - Part 11: A quick reference of all endpoints and commands.
 
-**Estimated total time:** 3-5 hours for the core store system. Direct Meta Instagram can add 1-4 weeks for Meta App Review. Kommo mode avoids direct Meta app review but requires Kommo channel, private widget, Salesbot, and webhook setup.
+**Estimated total time:** 3-5 hours for the core store system. Native Meta Instagram can add 1-4 weeks for Meta App Review. Kommo WhatsApp requires a Kommo channel, private widget, Salesbot, and webhook setup but does not replace Instagram's Meta setup.
 
 > **Running multiple stores?** This guide covers deploying a single store. For managing multiple stores from a centralized dashboard, see [master/DEPLOYMENT.md](../master/DEPLOYMENT.md).
 
@@ -31,7 +31,7 @@ The guide has 11 parts:
 
 ## Part 1: External Accounts and API Keys
 
-You need the core service accounts before touching the code. Then choose one customer-channel backend: direct Meta or Kommo.
+You need the core service accounts before touching the code. Then choose a WhatsApp backend: direct Meta or Kommo. Instagram remains native Meta in both cases.
 
 ### 1.1 Railway PostgreSQL Database
 
@@ -41,7 +41,7 @@ In the Railway project, add a PostgreSQL service named `StorePostgres`. Deploy t
 DATABASE_URL=${{StorePostgres.DATABASE_URL}}
 ```
 
-`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The runner applies the normal migration sequence through Store schema version `14`; a failure blocks the deployment. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`. Do not run individual SQL files for a normal install or upgrade.
+`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The runner applies the normal migration sequence through Store schema version `18`; a failure blocks the deployment. Migration 018 deprecates but does not drop the legacy Instagram/Kommo correlation schema. It also blocks deployment while launched or uncertain legacy Instagram Kommo jobs remain; disable legacy Instagram Kommo ingress, let the old deployment drain those jobs, and retry. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`. Do not run individual SQL files for a normal install or upgrade.
 
 Back up before changing an existing database. See [Railway PostgreSQL Deployment](../docs/RAILWAY_POSTGRES.md) for Store/Master setup, legacy recovery migrations, backup, and cutover instructions.
 
@@ -145,18 +145,18 @@ Now get the admin's chat ID. Search for **@userinfobot** on Telegram and send it
 
 Send a message to your bot (search for it by username, click **Start**). This is necessary so the bot has permission to message you.
 
-### 1.6 Choose a Channel Backend
+### 1.6 Choose a WhatsApp Backend
 
-Set exactly one channel backend per store:
-
-
-| Backend | Use When                                                                       | Webhooks                                                      | Sends Replies Through |
-| ------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------- | --------------------- |
-| `meta`  | You want direct WhatsApp Cloud API and Instagram Messaging API control.        | `/webhooks/whatsapp`, `/webhooks/instagram`                   | Meta Graph API        |
-| `kommo` | You want Kommo to own WhatsApp/Instagram channel connections and shared inbox. | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | Kommo Salesbot        |
+Set exactly one WhatsApp backend per store:
 
 
-For new direct-Meta stores, continue with section 1.7. For Kommo stores, skip direct Meta setup and follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) after the core PostgreSQL, LLM, Google Sheets, and Telegram setup is complete.
+| Backend | Use When                                                   | WhatsApp Webhooks                                             | Sends WhatsApp Replies Through |
+| ------- | ---------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------ |
+| `meta`  | You want direct WhatsApp Cloud API control.                 | `/webhooks/whatsapp`                                          | Meta Graph API                 |
+| `kommo` | You want Kommo to own WhatsApp and its shared inbox.        | `/webhooks/kommo/events/{secret}`, `/webhooks/kommo/salesbot` | Kommo Salesbot/Chats API       |
+
+
+All stores need the Instagram portion of section 1.7 when Instagram is enabled. Meta WhatsApp stores also configure the WhatsApp product. Kommo WhatsApp stores follow [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md) for WhatsApp after the core setup, while following [`INSTAGRAM DEPLOY.md`](INSTAGRAM%20DEPLOY.md) separately for Instagram.
 
 ### 1.7 Meta Developer App (WhatsApp + Instagram APIs)
 
@@ -242,7 +242,7 @@ DEBUG=true
 AI_ORCHESTRATION_MODE=legacy
 ```
 
-For Kommo local testing, replace the Meta channel variables with:
+For Kommo WhatsApp local testing, replace the Meta WhatsApp variables with the following while retaining native Meta Instagram variables when Instagram is enabled:
 
 ```bash
 WHATSAPP_BACKEND=kommo
@@ -250,25 +250,14 @@ KOMMO_SUBDOMAIN=your-account-subdomain
 KOMMO_ACCESS_TOKEN=...
 KOMMO_INTEGRATION_ID=...
 KOMMO_INTEGRATION_SECRET=...
-KOMMO_INSTAGRAM_DM_SALESBOT_ID=123456
 KOMMO_WHATSAPP_SALESBOT_ID=234567
-KOMMO_SALESBOT_ID=                 # Temporary fallback during migration
+KOMMO_SALESBOT_ID=                 # Legacy WhatsApp fallback
 KOMMO_WEBHOOK_SECRET=your-random-path-secret
 KOMMO_AI_MODE_FIELD_ID=111
 KOMMO_AI_ACTIVE_ENUM_ID=222
 KOMMO_AI_HUMAN_ENUM_ID=333
 KOMMO_AI_PAUSED_ENUM_ID=444
 KOMMO_DEFAULT_RESPONSIBLE_USER_ID=
-# Optional signed Meta context webhook; Kommo still sends every response
-META_INSTAGRAM_CONTEXT_ENABLED=false
-META_CONTEXT_WAIT_SECONDS=10
-META_CONTEXT_MATCH_WINDOW_SECONDS=45
-META_CONTEXT_EVENT_RETENTION_HOURS=24
-META_STORY_CONTEXT_ENABLED=false
-META_STORY_CONTEXT_WAIT_SECONDS=3
-META_STORY_CONTEXT_MATCH_WINDOW_SECONDS=45
-INSTAGRAM_STORY_MAPPING_TTL_HOURS=24
-INSTAGRAM_STORY_CONTEXT_TTL_HOURS=24
 ```
 
 `KOMMO_SUBDOMAIN` is the account subdomain only, for example `acme`, not `https://acme.kommo.com`.
@@ -356,19 +345,18 @@ Click **Verify and Save**. Subscribe to the `messages` field.
 
 Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within seconds.
 
-### 4.2 Kommo Mode: General Webhook and Salesbot
+### 4.2 Kommo WhatsApp: General Webhook and Salesbot
 
 Only do this when `WHATSAPP_BACKEND=kommo`.
 
-1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 17.
+1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 18.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
-3. Create separate Instagram DM and WhatsApp Salesbots with their matching widget blocks. Route `success` to a channel-restricted Message step using `{{json.message}}`, `media` to a silent end, and `fail` to a silent end or human fallback.
-4. Create the public-comment Kommo Salesbot with Kommo's native `When a comment is received` trigger, the `Ask Eva AI for Instagram comments` widget step, and a Comment step with `{{json.message}}` on `success`.
-5. Register a Kommo general webhook at `https://abc123.ngrok-free.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`.
-6. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
-7. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
+3. Create one WhatsApp Salesbot with the matching widget block. Route `success` to a WhatsApp-restricted Message step using `{{json.message}}`, `media` to a silent end, and `fail` to a silent end or human fallback.
+4. Register a Kommo general webhook at `https://abc123.ngrok-free.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`.
+5. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
+6. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
 
-Instagram public comments should use the native comment-triggered Salesbot. Kommo can also mirror those comments through the general webhook as `origin=instagram_business`, `message_type=text`; the backend reconciles the authenticated comment callback against any recent matching private-message mirror and discards the mirror before the private-message Salesbot is launched.
+Do not connect Instagram to Kommo. Instagram DMs and comments must continue through `/webhooks/instagram`, durable `meta_inbound_jobs`, and Meta Graph API delivery.
 
 The complete Kommo setup is documented in [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md).
 
@@ -410,16 +398,24 @@ Minimum production variables shared by both backends:
 | `STORE_NAME`, `OWNER_NAME`, `APP_BASE_URL`, `DEBUG` | Store metadata/runtime                                                |
 
 
+Additional variables for native Meta Instagram when Instagram is enabled:
+
+
+| Variable                    | Notes                                    |
+| --------------------------- | ---------------------------------------- |
+| `META_APP_SECRET`           | Webhook signature verification           |
+| `INSTAGRAM_ACCESS_TOKEN`    | Native Instagram Graph API token         |
+| `INSTAGRAM_VERIFY_TOKEN`    | Instagram webhook verification token     |
+| `INSTAGRAM_ACCOUNT_ID`      | Managed Instagram Professional account   |
+| `META_GRAPH_API_VERSION`    | Tested Graph API version, such as `vXX.X` |
+
 Additional variables for `WHATSAPP_BACKEND=meta`:
 
-
-| Variable                                           | Notes                                                |
-| -------------------------------------------------- | ---------------------------------------------------- |
-| `META_APP_SECRET`                                  | Used for webhook signature verification              |
-| `WHATSAPP_ACCESS_TOKEN`                            | WhatsApp Cloud API token                             |
-| `WHATSAPP_PHONE_NUMBER_ID`                         | WhatsApp sender phone number ID                      |
-| `WHATSAPP_VERIFY_TOKEN`                            | Meta webhook verification token                      |
-| `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_VERIFY_TOKEN` | Optional, but all-or-nothing if Instagram is enabled |
+| Variable                     | Notes                            |
+| ---------------------------- | -------------------------------- |
+| `WHATSAPP_ACCESS_TOKEN`      | WhatsApp Cloud API token         |
+| `WHATSAPP_PHONE_NUMBER_ID`   | WhatsApp sender phone number ID  |
+| `WHATSAPP_VERIFY_TOKEN`      | WhatsApp webhook verify token    |
 
 
 Additional variables for `WHATSAPP_BACKEND=kommo`:
@@ -431,9 +427,8 @@ Additional variables for `WHATSAPP_BACKEND=kommo`:
 | `KOMMO_ACCESS_TOKEN`                | Long-lived private integration token       |
 | `KOMMO_INTEGRATION_ID`              | Private integration ID/client UUID         |
 | `KOMMO_INTEGRATION_SECRET`          | JWT validation secret                      |
-| `KOMMO_INSTAGRAM_DM_SALESBOT_ID`    | Preferred Instagram DM Salesbot            |
 | `KOMMO_WHATSAPP_SALESBOT_ID`        | Preferred WhatsApp Salesbot                |
-| `KOMMO_SALESBOT_ID`                 | Temporary fallback for a missing dedicated ID |
+| `KOMMO_SALESBOT_ID`                 | Legacy fallback for the WhatsApp Salesbot  |
 | `KOMMO_WEBHOOK_SECRET`              | Random path secret for general webhook URL |
 | `KOMMO_AI_MODE_FIELD_ID`            | Lead field ID for AI Mode                  |
 | `KOMMO_AI_ACTIVE_ENUM_ID`           | Enum ID for AI Active                      |
@@ -446,18 +441,7 @@ Additional variables for `WHATSAPP_BACKEND=kommo`:
 | `KOMMO_CHATS_API_MONTHLY_LIMIT`     | Optional local monitoring value; not enforcement |
 | `KOMMO_CHATS_PDF_ATTACHMENT_TYPE`   | Must be `file` before PDF delivery is enabled |
 
-Optional Meta Instagram context alongside Kommo requires `META_INSTAGRAM_CONTEXT_ENABLED=true`,
-`META_APP_SECRET`, `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_VERIFY_TOKEN`, `INSTAGRAM_ACCOUNT_ID`, and
-`META_GRAPH_API_VERSION`. `META_CONTEXT_WAIT_SECONDS` controls only the brief Kommo fallback wait,
-`META_CONTEXT_MATCH_WINDOW_SECONDS` limits timestamp matching, and
-`META_CONTEXT_EVENT_RETENTION_HOURS` controls event retry/diagnostic retention (default 24 hours).
-Configure Meta to call `GET/POST /webhooks/meta/instagram-context`; do not reuse the direct Meta route.
-
-Optional Story context uses the same route with `META_STORY_CONTEXT_ENABLED=true`,
-`META_STORY_CONTEXT_WAIT_SECONDS`, `META_STORY_CONTEXT_MATCH_WINDOW_SECONDS`,
-`INSTAGRAM_STORY_MAPPING_TTL_HOURS`, and `INSTAGRAM_STORY_CONTEXT_TTL_HOURS`. It also requires Meta
-to deliver the appropriate `messages` Story-reply payload and permissions. Either comment or Story
-context enables the supplemental route; Kommo remains the only response transport.
+Meta calls `GET/POST /webhooks/instagram` independently of `WHATSAPP_BACKEND`; see [`INSTAGRAM DEPLOY.md`](INSTAGRAM%20DEPLOY.md).
 
 
 Deploy this store as a **single instance / single worker**. The scheduler runs in-process, so multiple app instances would duplicate scheduled jobs and broadcast checks.
@@ -474,15 +458,21 @@ After logging in, go to **Configuración** and add the payment methods you want 
 
 ### 5.3 Switch Channel Webhooks to Railway
 
-For Meta mode, update the Meta Developer App webhook URL:
+Always update the enabled native Instagram webhook to:
+
+```text
+https://vs-chatbot-production.up.railway.app/webhooks/instagram
+```
+
+For Meta WhatsApp, update the WhatsApp webhook URL:
 
 ```text
 https://vs-chatbot-production.up.railway.app/webhooks/whatsapp
 ```
 
-For Kommo mode, update:
+For Kommo WhatsApp, update:
 
-- Salesbot widget URL in both the private-message Salesbot and native comment-triggered Salesbot: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/salesbot`
+- WhatsApp Salesbot widget URL: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/salesbot`
 - General webhook URL: `https://vs-chatbot-production.up.railway.app/webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>`
 
 ---
@@ -518,9 +508,9 @@ Test:
 
 
 
-### 6.2 Instagram in Meta Mode (After App Review)
+### 6.2 Native Meta Instagram (After App Review)
 
-This section applies when `INSTAGRAM_BACKEND=meta`.
+This section applies whenever Instagram is enabled, regardless of the WhatsApp backend.
 
 Submit for App Review requesting `instagram_business_basic`, `instagram_business_manage_messages`, and `human_agent`. Include a screencast, privacy policy, and app icon. This takes 1–4 weeks.
 
@@ -748,7 +738,7 @@ Agent and tool locations:
 [ ] Send /start to Telegram bot -> command menu appears
 [ ] WHATSAPP_BACKEND=meta -> /webhooks/whatsapp is registered
 [ ] WHATSAPP_BACKEND=kommo -> Kommo webhooks are registered and /webhooks/whatsapp is absent
-[ ] Meta context enabled with Kommo -> /webhooks/meta/instagram-context is also registered
+[ ] Instagram enabled -> /webhooks/instagram is registered regardless of WHATSAPP_BACKEND
 [ ] GET /test/ui with DEBUG=false -> 404 (test endpoints disabled in production)
 [ ] GET /test/ui with DEBUG=true from direct loopback and no forwarding headers -> test page loads
 ```
@@ -771,7 +761,8 @@ Agent and tool locations:
 [ ] "Muestrame el catalogo" in Meta WhatsApp -> PDF catalog sent
 [ ] Same request in opted-in Kommo WhatsApp with all PDF flags and type=file -> PDF sent through Chats API
 [ ] Same request in Instagram DM -> WhatsApp handoff; no Instagram PDF attachment
-[ ] Kommo WhatsApp or Instagram DM voice note -> transcribed before the AI turn when OPENAI_API_KEY is configured
+[ ] Kommo WhatsApp voice note -> transcribed before the AI turn when OPENAI_API_KEY is configured
+[ ] Native Meta Instagram voice note -> transcribed before the AI turn when OPENAI_API_KEY is configured
 [ ] Repeat order -> AI offers saved address: "¿misma dirección de la última vez?"
 [ ] Set product Stock=0 in Sheets, ask for it -> "Out of stock" + alternatives
 [ ] Ask for a product or category not present in the Sheet -> Politely declines and suggests the closest available catalog alternatives
@@ -785,14 +776,15 @@ Agent and tool locations:
 
 ### 10.3 Instagram Conversations (After App Review)
 
-For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, test that Instagram DMs enter Kommo and are answered through the Salesbot flow.
+Test native Instagram Messaging API behavior regardless of the WhatsApp backend. Instagram must never enter Kommo.
 
 ```text
 [ ] Ice Breakers appear on first DM open
 [ ] Tapping an Ice Breaker triggers appropriate response
 [ ] Regular DM gets same quality as WhatsApp
 [ ] Quick Replies appear for choices (IG equivalent of WA buttons)
-[ ] Direct Meta Story reply is received; in Kommo mode, mapped Story context is correlated only when the supplemental Meta Story listener and mapping are active
+[ ] Native Meta Story reply is received when the required field and permissions are active
+[ ] Instagram DMs/comments create meta_inbound_jobs and no kommo_message_jobs
 [ ] Long messages split correctly at sentence boundaries
 ```
 
@@ -842,12 +834,12 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 
 
 
-### 10.6 Kommo Mode
+### 10.6 Kommo WhatsApp Mode
 
 ```text
-[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 17
+[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 18
 [ ] Widget ZIP uploaded to private Kommo integration
-[ ] Dedicated Instagram DM and WhatsApp Salesbots contain their matching widget steps and success/media/fail exits
+[ ] WhatsApp Salesbot contains its matching widget step and success/media/fail exits
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>
 [ ] POST /admin/settings/kommo/test with auth -> read-only checks pass
 [ ] WhatsApp message appears in Kommo inbox and creates a Kommo job
@@ -906,10 +898,11 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 
 ```text
 Webhooks (no admin auth, verified by channel-specific secret/signature):
-  Meta mode:
-    GET/POST  /webhooks/whatsapp
+  Instagram always when enabled:
     GET/POST  /webhooks/instagram
-  Kommo mode:
+  Meta WhatsApp mode:
+    GET/POST  /webhooks/whatsapp
+  Kommo WhatsApp mode:
     POST      /webhooks/kommo/events/{webhook_secret}
     POST      /webhooks/kommo/salesbot
   Always available:
@@ -936,7 +929,6 @@ Settings (require ADMIN_PASSWORD via Bearer header or session cookie):
   POST /admin/settings/telegram/setup-webhook
   POST /admin/settings/instagram/setup-ice-breakers
   POST /admin/settings/instagram/subscribe-page
-  GET  /admin/settings/meta-instagram-context/status
 
 Instagram content mappings (require admin auth):
   GET  /admin/instagram-content/products
@@ -1039,7 +1031,7 @@ Testing (DEBUG=true, direct loopback only, forwarding headers rejected):
 - **Kommo Salesbot callbacks return 401**
   Verify `KOMMO_INTEGRATION_SECRET`, `KOMMO_INTEGRATION_ID`, `KOMMO_SUBDOMAIN`, and the widget request JWT. Confirm the Salesbot widget URL points to `/webhooks/kommo/salesbot`.
 - **Kommo jobs stuck in `waiting_for_salesbot`**
-  The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. If this repeats, verify the matching channel-specific widget block, HTTPS callback, and `KOMMO_INSTAGRAM_DM_SALESBOT_ID` or `KOMMO_WHATSAPP_SALESBOT_ID` (with `KOMMO_SALESBOT_ID` only as fallback). Public Instagram comments use Kommo's native comment trigger and do not create backend-launched waits.
+  The backend marks stale waits as failed after about 3 minutes so new inbound messages can retry. If this repeats, verify the WhatsApp widget block, HTTPS callback, and `KOMMO_WHATSAPP_SALESBOT_ID` (with `KOMMO_SALESBOT_ID` only as a legacy WhatsApp fallback). Instagram does not use Kommo jobs.
 - **Kommo image payment screenshots are ignored**
   Direct media downloads are intentionally limited to trusted Meta/Instagram/Kommo hosts over HTTPS, with redirects disabled and a 5 MB size limit. Some Kommo media payloads may need manual production validation.
 - **Kommo WhatsApp catalog requests do not send PDFs**

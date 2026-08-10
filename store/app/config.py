@@ -17,10 +17,6 @@ class Settings(BaseSettings):
         default="meta",
         validation_alias=AliasChoices("WHATSAPP_BACKEND", "CHANNEL_BACKEND"),
     )
-    # Optional per-channel override. When omitted, Instagram keeps the legacy
-    # behavior and uses WHATSAPP_BACKEND.
-    instagram_backend: Literal["meta", "kommo"] | None = None
-
     # --- Meta APIs (optional for local testing without webhooks) ---
     meta_app_secret: str = ""
     whatsapp_access_token: str = ""
@@ -30,13 +26,6 @@ class Settings(BaseSettings):
     instagram_verify_token: str = ""
     instagram_account_id: str = ""
     meta_graph_api_version: str = "v21.0"
-    meta_instagram_context_enabled: bool = False
-    meta_context_wait_seconds: int = Field(default=10, ge=1, le=60)
-    meta_context_match_window_seconds: int = Field(default=45, ge=5, le=300)
-    meta_context_event_retention_hours: int = Field(default=24, ge=1, le=168)
-    meta_story_context_enabled: bool = False
-    meta_story_context_wait_seconds: int = Field(default=3, ge=1, le=60)
-    meta_story_context_match_window_seconds: int = Field(default=45, ge=5, le=300)
     instagram_story_mapping_ttl_hours: int = Field(default=24, ge=1, le=168)
     instagram_story_context_ttl_hours: int = Field(default=24, ge=1, le=168)
 
@@ -45,7 +34,6 @@ class Settings(BaseSettings):
     kommo_access_token: str = ""
     kommo_integration_id: str = ""
     kommo_integration_secret: str = ""
-    kommo_instagram_dm_salesbot_id: int | None = None
     kommo_whatsapp_salesbot_id: int | None = None
     kommo_salesbot_id: int | None = None
     kommo_webhook_secret: str = ""
@@ -130,7 +118,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "kommo_salesbot_id",
-        "kommo_instagram_dm_salesbot_id",
         "kommo_whatsapp_salesbot_id",
         "kommo_ai_mode_field_id",
         "kommo_ai_active_enum_id",
@@ -155,13 +142,13 @@ def get_config() -> Settings:
 
 
 def channel_backend_for(channel: str, config=None) -> str:
-    """Resolve a channel provider, tolerating legacy config-like objects."""
+    """Resolve the fixed Instagram provider or configured WhatsApp provider."""
     config = config or get_config()
+    if channel == "instagram":
+        return "meta"
     whatsapp_backend = getattr(
         config,
         "whatsapp_backend",
         getattr(config, "channel_backend", "meta"),
     )
-    if channel == "instagram":
-        return getattr(config, "instagram_backend", None) or whatsapp_backend
     return whatsapp_backend

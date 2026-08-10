@@ -73,6 +73,56 @@ async def test_normal_instagram_dm_uses_private_message_job(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attachment_type", "attachment_id", "url", "expected_text"),
+    [
+        ("image", "image-1", "https://cdn.example/photo.jpg", "una imagen"),
+        (
+            "audio",
+            "voice-1",
+            "https://cdn.example/voice.ogg",
+            "[Inbound audio:voice-1 pending transcription]",
+        ),
+    ],
+    ids=["image", "voice"],
+)
+async def test_native_instagram_media_attachment_is_durably_ingested(
+    monkeypatch, attachment_type, attachment_id, url, expected_text
+):
+    from app.webhooks import instagram
+
+    enqueue = AsyncMock(return_value=True)
+    monkeypatch.setattr(instagram, "enqueue_inbound_message", enqueue)
+
+    await instagram.ingest_instagram_payload({
+        "object": "instagram",
+        "entry": [{
+            "id": "ig-account",
+            "messaging": [{
+                "sender": {"id": "ig-user"},
+                "message": {
+                    "mid": f"mid-{attachment_id}",
+                    "attachments": [{
+                        "id": attachment_id,
+                        "type": attachment_type,
+                        "payload": {"url": url},
+                    }],
+                },
+            }],
+        }],
+    })
+
+    values = enqueue.await_args.kwargs
+    assert expected_text in values["text"]
+    assert values["inbound_attachments"] == [{
+        "external_message_id": attachment_id,
+        "message_type": attachment_type,
+        "media_url": url,
+    }]
+    assert values["media_url"] == (url if attachment_type == "image" else None)
+
+
+@pytest.mark.asyncio
 async def test_public_comment_persists_authoritative_meta_context(monkeypatch):
     from app.webhooks import instagram
 
@@ -319,6 +369,159 @@ async def test_public_comment_response_uses_comment_endpoint_not_dm(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_paused_instagram_response_sends_and_persists_nothing(monkeypatch):
+    from app.webhooks import instagram
+
+    monkeypatch.setattr(
+        instagram,
+        "generate_response",
+        AsyncMock(return_value={"paused": True, "escalated": False, "customer_id": "customer-1"}),
+    )
+    send = AsyncMock()
+    store = AsyncMock()
+    monkeypatch.setattr(instagram, "_send_with_delivery_record", send)
+    monkeypatch.setattr(instagram, "_store_delivered_assistant_message", store)
+
+    await instagram._deliver_ai_response(
+        "ig-user", "Hola", inbound_job_id="job-1", lease_token="lease-1"
+    )
+
+    send.assert_not_awaited()
+    store.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_outbound_echo_records_manual_takeover(monkeypatch):
+    from app.webhooks import instagram
+
+    monkeypatch.setattr(
+        instagram,
+        "get_config",
+        lambda: SimpleNamespace(instagram_account_id="ig-account"),
+    )
+    monkeypatch.setattr(
+        instagram,
+        "is_recorded_meta_outbound_message",
+        AsyncMock(return_value=False),
+    )
+    customer = {"id": "customer-1"}
+    with (
+        patch(
+            "app.crm.channel_mappings.resolve_meta_instagram_customer",
+            AsyncMock(return_value=customer),
+        ),
+        patch("app.crm.conversations.store_message", AsyncMock()) as store,
+        patch("app.crm.escalations.escalate_customer_manually", AsyncMock()) as escalate,
+    ):
+        await instagram._process_event({
+            "sender": {"id": "ig-account"},
+            "recipient": {"id": "ig-user"},
+            "message": {"mid": "manual-mid-1", "text": "Te atiendo personalmente", "is_echo": True},
+        })
+
+    store.assert_awaited_once_with(
+        customer_id="customer-1",
+        role="assistant",
+        author_type="human",
+        content="Te atiendo personalmente",
+        channel="instagram",
+        source_id="meta-echo:manual-mid-1",
+        provider_message_id="manual-mid-1",
+        interaction_type="private_message",
+    )
+    escalate.assert_awaited_once_with("customer-1", channel="instagram")
+
+
+@pytest.mark.asyncio
+async def test_instagram_resume_is_local_and_never_queries_kommo(monkeypatch):
+    from app.admin import customer_activation
+
+    monkeypatch.setattr(
+        customer_activation,
+        "get_config",
+        lambda: SimpleNamespace(whatsapp_backend="kommo"),
+    )
+    get_mapping = AsyncMock()
+    activate = AsyncMock(return_value={"id": "customer-1", "conversation_state": "active"})
+    monkeypatch.setattr(customer_activation, "get_mapping_by_customer", get_mapping)
+    monkeypatch.setattr(
+        customer_activation.escalations,
+        "mark_customer_active_for_admin",
+        activate,
+    )
+
+    result = await customer_activation.activate_customer_for_admin({
+        "id": "customer-1",
+        "channel": "instagram",
+    })
+
+    assert result.status == "local_only"
+    get_mapping.assert_not_awaited()
+    activate.assert_awaited_once_with("customer-1", channel=None)
+
+
+@pytest.mark.asyncio
+async def test_instagram_known_send_failure_retries_safely_and_records_meta_id(monkeypatch):
+    from app.channels.meta_errors import MetaSendError
+    from app.webhooks import inbound_buffer
+
+    send = AsyncMock(side_effect=[
+        MetaSendError("rate limited", retryable=True),
+        {"messages": [{"id": "ig-mid-out-1"}]},
+    ])
+    mark = AsyncMock(return_value=True)
+    record = AsyncMock()
+    sleep = AsyncMock()
+    monkeypatch.setattr(inbound_buffer, "mark_outbound_send_started", mark)
+    monkeypatch.setattr(inbound_buffer, "record_outbound_message", record)
+    monkeypatch.setattr(inbound_buffer.asyncio, "sleep", sleep)
+
+    response = await inbound_buffer.send_with_delivery_record(
+        send, "ig-job-1", "lease-1", to="ig-user", text="Hola"
+    )
+
+    assert response == {"messages": [{"id": "ig-mid-out-1"}]}
+    assert send.await_count == 2
+    sleep.assert_awaited_once_with(1)
+    mark.assert_awaited_once_with("ig-job-1", "lease-1")
+    record.assert_awaited_once_with("ig-job-1", "lease-1", response)
+
+
+@pytest.mark.asyncio
+async def test_instagram_delivery_failure_is_not_persisted_as_delivered(monkeypatch):
+    from app.channels.meta_errors import MetaSendError
+    from app.webhooks import instagram
+
+    monkeypatch.setattr(
+        instagram,
+        "generate_response",
+        AsyncMock(return_value={
+            "text": "Respuesta",
+            "customer_id": "customer-1",
+            "paused": False,
+            "escalated": False,
+        }),
+    )
+    monkeypatch.setattr(
+        instagram,
+        "_send_with_delivery_record",
+        AsyncMock(side_effect=MetaSendError("rejected", retryable=False)),
+    )
+    notify = AsyncMock()
+    store = AsyncMock()
+    monkeypatch.setattr(instagram, "_notify_delivery_failure", notify)
+    monkeypatch.setattr(instagram, "_store_delivered_assistant_message", store)
+
+    with pytest.raises(MetaSendError, match="rejected"):
+        await instagram._deliver_ai_response(
+            "ig-user", "Hola", inbound_job_id="job-1", lease_token="lease-1"
+        )
+
+    notify.assert_awaited_once()
+    store.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_instagram_comment_sender_uses_public_replies_endpoint(monkeypatch):
     from app.channels import instagram_sender
 
@@ -376,28 +579,36 @@ def test_meta_inbound_context_migration_is_new_and_scope_aware():
     assert "meta_inbound_instagram_context_migration_sql" in runner
 
 
-@pytest.mark.asyncio
-async def test_hybrid_mode_discards_preexisting_kommo_instagram_job(monkeypatch):
-    from app.integrations.kommo import jobs
+def test_instagram_architecture_is_native_meta_regardless_of_whatsapp_backend():
+    from app.config import channel_backend_for
 
-    mark = AsyncMock()
-    monkeypatch.setattr(jobs, "_mark_job", mark)
-    monkeypatch.setattr(
-        jobs,
-        "get_config",
-        lambda: SimpleNamespace(whatsapp_backend="kommo", instagram_backend="meta"),
+    assert channel_backend_for("instagram", SimpleNamespace(whatsapp_backend="kommo")) == "meta"
+    assert channel_backend_for("instagram", SimpleNamespace(whatsapp_backend="meta")) == "meta"
+
+    instagram_source = Path("store/app/webhooks/instagram.py").read_text(encoding="utf-8")
+    main_source = Path("store/app/main.py").read_text(encoding="utf-8")
+    assert "app.integrations.kommo" not in instagram_source
+    assert "from app.webhooks.instagram import router as instagram_router" in main_source
+    assert "fastapi_app.include_router(instagram_router)" in main_source
+
+
+def test_migration_018_drains_only_safe_legacy_work_and_preserves_history():
+    migration = Path("store/migrations/018_retire_kommo_instagram.sql").read_text(
+        encoding="utf-8"
     )
 
-    await jobs._launch_salesbot_for_job({
-        "id": "legacy-job",
-        "channel": "instagram",
-        "interaction_type": "private_message",
-        "processing_lease_id": "lease-1",
-    })
-
-    mark.assert_awaited_once_with(
-        "legacy-job",
-        "discarded",
-        "instagram_managed_by_meta",
-        processing_lease_id="lease-1",
-    )
+    assert "WHERE channel = 'instagram'" in migration
+    assert "status IN ('pending', 'prepared')" in migration
+    assert "salesbot_launched_at IS NULL" in migration
+    assert "return_url IS NULL" in migration
+    assert "ai_started_at IS NULL" in migration
+    assert "RAISE EXCEPTION" in migration
+    assert "disable Instagram Kommo ingress" in migration
+    assert "'ready', 'processing', 'continuing'" in migration
+    assert "status = 'processing'" not in migration
+    assert "SET correlation_status = 'expired'" in migration
+    assert "WHERE correlation_status IN ('pending', 'ambiguous')" in migration
+    assert "instagram_transport_is_meta_native" in migration
+    assert "DROP TABLE" not in migration.upper()
+    assert "DELETE FROM meta_instagram_context_events" not in migration
+    assert "(18, 'retire_kommo_instagram')" in migration

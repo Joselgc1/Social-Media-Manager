@@ -102,18 +102,6 @@ def test_kommo_formatter_uses_safe_emoji_mode_by_default():
     assert diagnostics["kommo_strip_emoji_applied"] is False
 
 
-def test_kommo_instagram_formatter_removes_emoji_even_when_preserve_is_configured():
-    message, diagnostics = prepare_kommo_customer_message(
-        "¡Hola! **Oferta** 💕",
-        "instagram",
-        {"kommo_emoji_mode_instagram": "preserve"},
-    )
-
-    assert message == "¡Hola! Oferta"
-    assert diagnostics["emoji_present"] is False
-    assert diagnostics["kommo_emoji_mode"] == "preserve"
-
-
 def test_kommo_formatter_strips_emoji_without_replacement_characters():
     message, diagnostics = prepare_kommo_customer_message(
         "¡Hola **bella** 💕",
@@ -138,21 +126,6 @@ def test_legacy_kommo_strip_emoji_overrides_per_channel_mode():
 
     assert message == "¡Hola"
     assert diagnostics["kommo_emoji_mode"] == "strip"
-
-
-def test_public_comment_formatter_removes_markdown_newlines_and_truncates():
-    message, diagnostics = prepare_kommo_customer_message(
-        "**Tenemos pijamas disponibles**\n- Escríbenos por DM para tallas y compra. " + "x" * 400,
-        "instagram",
-        {"kommo_emoji_mode_instagram": "preserve"},
-        interaction_type="instagram_comment",
-    )
-
-    assert "**" not in message
-    assert "\n" not in message
-    assert len(message) <= 300
-    assert diagnostics["interaction_type"] == "instagram_comment"
-    assert diagnostics["channel"] == "instagram"
 
 
 def test_safe_emoji_normalization_preserves_accents_punctuation_and_urls():
