@@ -253,6 +253,150 @@ async def test_duplicate_salesbot_callback_race_has_one_effective_transition(mon
     assert await _count("SELECT COUNT(*) AS count FROM kommo_message_jobs WHERE correlation_id = 'callback-race'") == 1
 
 
+async def _create_processing_instagram_mirror() -> tuple[str, str]:
+    row = await db.fetch_one(
+        """
+        INSERT INTO kommo_message_jobs (
+            correlation_id, external_message_id, lead_id, contact_id, channel,
+            interaction_type, combined_message, talk_id, status, buffer_expires_at,
+            processing_started_at, processing_lease_id
+        ) VALUES (
+            'instagram-mirror-race', 'instagram-mirror-message', '910001', '910002',
+            'instagram', 'private_message', 'Precio?', '310001', 'processing', NOW(),
+            NOW(), gen_random_uuid()
+        )
+        RETURNING id, processing_lease_id
+        """
+    )
+    assert row is not None
+    return str(row["id"]), str(row["processing_lease_id"])
+
+
+@pytest.mark.asyncio
+async def test_comment_discard_wins_before_direct_delivery_fence(monkeypatch):
+    from app.integrations.kommo import delivery, jobs
+
+    job_id, lease_id = await _create_processing_instagram_mirror()
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(meta_context_match_window_seconds=45),
+    )
+    real_fetch_all = db.fetch_all
+    job_locked = asyncio.Event()
+    allow_discard = asyncio.Event()
+
+    async def pause_after_candidate_lock(query, values=None):
+        rows = await real_fetch_all(query, values)
+        if "FOR UPDATE OF private_job SKIP LOCKED" in query:
+            job_locked.set()
+            await allow_discard.wait()
+        return rows
+
+    monkeypatch.setattr(jobs.db, "fetch_all", pause_after_candidate_lock)
+
+    async def reconcile():
+        async with db.get_db().transaction():
+            return await jobs._discard_recent_private_jobs_superseded_by_comment_callback(
+                values={"entity_type": "leads", "entity_id": "910001"},
+                normalized_message="precio?",
+                comment_event_timestamp=datetime.now(UTC).timestamp(),
+            )
+
+    reconciliation = asyncio.create_task(reconcile())
+    await asyncio.wait_for(job_locked.wait(), timeout=2)
+    claim = asyncio.create_task(
+        delivery._claim_delivery(
+            job_id=job_id,
+            media_type="text",
+            request_fingerprint="comment-wins-fingerprint",
+            attachment_metadata={"delivery_type": "text"},
+            processing_lease_id=lease_id,
+            require_direct_instagram_fence=True,
+        )
+    )
+    await asyncio.sleep(0.05)
+    allow_discard.set()
+
+    assert await reconciliation == 1
+    with pytest.raises(delivery.KommoDeliveryAbortedError):
+        await claim
+    job = await db.fetch_one(
+        "SELECT status, processing_lease_id FROM kommo_message_jobs WHERE id = CAST(:id AS uuid)",
+        {"id": job_id},
+    )
+    assert job["status"] == "discarded"
+    assert job["processing_lease_id"] is None
+    assert await _count(
+        "SELECT COUNT(*) AS count FROM kommo_outbound_deliveries WHERE job_id = CAST(:id AS uuid)",
+        {"id": job_id},
+    ) == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_delivery_fence_wins_before_comment_reconciliation(monkeypatch):
+    from app.integrations.kommo import delivery, jobs
+
+    job_id, lease_id = await _create_processing_instagram_mirror()
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(meta_context_match_window_seconds=45),
+    )
+    real_fetch_one = db.fetch_one
+    fence_established = asyncio.Event()
+    release_fence = asyncio.Event()
+
+    async def pause_with_fence_held(query, values=None):
+        row = await real_fetch_one(query, values)
+        if "UPDATE kommo_outbound_deliveries" in query and "SET status = 'sending'" in query:
+            fence_established.set()
+            await release_fence.wait()
+        return row
+
+    monkeypatch.setattr(delivery.db, "fetch_one", pause_with_fence_held)
+    claim = asyncio.create_task(
+        delivery._claim_delivery(
+            job_id=job_id,
+            media_type="text",
+            request_fingerprint="delivery-wins-fingerprint",
+            attachment_metadata={"delivery_type": "text"},
+            processing_lease_id=lease_id,
+            require_direct_instagram_fence=True,
+        )
+    )
+    await asyncio.wait_for(fence_established.wait(), timeout=2)
+
+    async with db.get_db().transaction():
+        skipped_while_locked = await jobs._discard_recent_private_jobs_superseded_by_comment_callback(
+            values={"entity_type": "leads", "entity_id": "910001"},
+            normalized_message="precio?",
+            comment_event_timestamp=datetime.now(UTC).timestamp(),
+        )
+    assert skipped_while_locked == 0
+    release_fence.set()
+    assert (await claim).status == "sending"
+
+    async with db.get_db().transaction():
+        protected_after_commit = await jobs._discard_recent_private_jobs_superseded_by_comment_callback(
+            values={"entity_type": "leads", "entity_id": "910001"},
+            normalized_message="precio?",
+            comment_event_timestamp=datetime.now(UTC).timestamp(),
+        )
+    assert protected_after_commit == 0
+    job = await db.fetch_one(
+        "SELECT status, processing_lease_id FROM kommo_message_jobs WHERE id = CAST(:id AS uuid)",
+        {"id": job_id},
+    )
+    outbound = await db.fetch_one(
+        "SELECT status FROM kommo_outbound_deliveries WHERE job_id = CAST(:id AS uuid)",
+        {"id": job_id},
+    )
+    assert job["status"] == "processing"
+    assert str(job["processing_lease_id"]) == lease_id
+    assert outbound["status"] == "sending"
+
+
 @pytest.mark.asyncio
 async def test_same_payment_proof_concurrently_is_accepted_once_and_replayed_once(monkeypatch):
     from app.crm import orders

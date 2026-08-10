@@ -408,6 +408,7 @@ async def kommo_status():
         logger.warning("Kommo media usage diagnostics unavailable: %s", e)
         media_usage = {
             "attempted_requests": 0,
+            "text_requests": 0,
             "product_image_requests": 0,
             "catalog_pdf_requests": 0,
             "accepted_or_confirmed_deliveries": 0,
@@ -428,6 +429,8 @@ async def kommo_status():
         "kommo_salesbot_id": config.kommo_salesbot_id,
         "kommo_salesbot_id_configured": config.kommo_salesbot_id is not None,
         "kommo_instagram_dm_transport": "chats_api",
+        "kommo_instagram_dm_scope_required": "Sending to external chats",
+        "kommo_instagram_dm_scope_verification": "manual_unverified",
         "kommo_whatsapp_salesbot_id": config.kommo_whatsapp_salesbot_id,
         "kommo_whatsapp_salesbot_id_configured": (
             config.kommo_whatsapp_salesbot_id or config.kommo_salesbot_id
@@ -507,9 +510,29 @@ async def kommo_test():
         "name": "whatsapp_salesbot_id_format",
         "ok": isinstance(whatsapp_salesbot_id, int) and whatsapp_salesbot_id > 0,
     })
-    checks.append({"name": "instagram_dm_transport", "ok": True, "transport": "chats_api"})
+    checks.append({
+        "name": "instagram_dm_transport",
+        "ok": False,
+        "transport": "chats_api",
+        "scope_required": "Sending to external chats",
+        "scope_verification": "manual_unverified",
+        "automatic_check": False,
+        "salesbot_fallback": False,
+    })
 
-    return {"channel_backend": config.channel_backend, "ok": all(item["ok"] for item in checks), "checks": checks}
+    automatic_checks_ok = all(
+        item["ok"] for item in checks if item.get("automatic_check", True)
+    )
+    manual_checks_required = [
+        item["name"] for item in checks if not item.get("automatic_check", True)
+    ]
+    return {
+        "channel_backend": config.channel_backend,
+        "ok": automatic_checks_ok and not manual_checks_required,
+        "automatic_checks_ok": automatic_checks_ok,
+        "manual_checks_required": manual_checks_required,
+        "checks": checks,
+    }
 
 
 @router.get("/meta-instagram-context/status")

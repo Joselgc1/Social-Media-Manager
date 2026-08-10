@@ -19,6 +19,7 @@ DIRECT_INSTAGRAM_JOB = {
     **JOB,
     "channel": "instagram",
     "interaction_type": "private_message",
+    "processing_lease_id": "00000000-0000-0000-0000-000000000001",
 }
 FILE_UUID = "367b9f38-5f01-4cea-947e-dfab47aea522"
 VERSION_UUID = "43de3be7-307b-4766-a23e-5e88211b9a8d"
@@ -143,11 +144,14 @@ async def test_direct_instagram_text_uses_durable_chats_delivery(monkeypatch):
     claim_values = delivery._claim_delivery.await_args.kwargs
     assert claim_values["job_id"] == DIRECT_INSTAGRAM_JOB["id"]
     assert claim_values["media_type"] == "text"
+    assert claim_values["processing_lease_id"] == DIRECT_INSTAGRAM_JOB["processing_lease_id"]
+    assert claim_values["require_direct_instagram_fence"] is True
     assert len(claim_values["request_fingerprint"]) == 64
     assert claim_values["attachment_metadata"] == {
         "delivery_type": "text",
         "talk_id": "105",
         "text_hash": delivery.hashlib.sha256(b"Respuesta final").hexdigest(),
+        "delivery_purpose": "response",
     }
     accepted_values = delivery.db.fetch_one.await_args.args[1]
     assert accepted_values["provider_message_id"] == "instagram-message"
@@ -169,10 +173,17 @@ def test_direct_text_fingerprint_is_deterministic_and_transport_specific():
         talk_id="105",
         text_hash=delivery.hashlib.sha256(b"Otra respuesta").hexdigest(),
     )
+    fallback = delivery._text_request_fingerprint(
+        job_id=JOB["id"],
+        talk_id="105",
+        text_hash=text_hash,
+        delivery_purpose="fallback",
+    )
 
     assert first == duplicate
     assert first != changed_talk
     assert first != changed_text
+    assert first != fallback
 
 
 @pytest.mark.asyncio
@@ -945,6 +956,96 @@ async def test_claim_existing_delivery_uses_only_query_specific_parameters(monke
 
 
 @pytest.mark.asyncio
+async def test_direct_claim_aborts_when_processing_lease_was_lost(monkeypatch):
+    database = _TransactionDB()
+    execute = AsyncMock()
+    fetch_one = AsyncMock(return_value=None)
+    monkeypatch.setattr(delivery.db, "get_db", lambda: database)
+    monkeypatch.setattr(delivery.db, "execute", execute)
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    with pytest.raises(delivery.KommoDeliveryAbortedError, match="processing lease was lost"):
+        await delivery._claim_delivery(
+            job_id=DIRECT_INSTAGRAM_JOB["id"],
+            media_type="text",
+            request_fingerprint="fingerprint",
+            attachment_metadata={"delivery_type": "text"},
+            processing_lease_id=DIRECT_INSTAGRAM_JOB["processing_lease_id"],
+            require_direct_instagram_fence=True,
+        )
+
+    lock_query, lock_values = fetch_one.await_args.args
+    assert "status = 'processing'" in lock_query
+    assert "processing_lease_id = CAST(:processing_lease_id AS uuid)" in lock_query
+    assert "channel = 'instagram'" in lock_query
+    assert "interaction_type = 'private_message'" in lock_query
+    assert "FOR UPDATE" in lock_query
+    assert lock_values["processing_lease_id"] == DIRECT_INSTAGRAM_JOB["processing_lease_id"]
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_claim_locks_job_before_establishing_sending_fence(monkeypatch):
+    database = _TransactionDB()
+    execute = AsyncMock()
+    fetch_one = AsyncMock(
+        side_effect=[
+            {"id": DIRECT_INSTAGRAM_JOB["id"]},
+            None,
+            {"status": "sending", "provider_message_id": None},
+        ]
+    )
+    monkeypatch.setattr(delivery.db, "get_db", lambda: database)
+    monkeypatch.setattr(delivery.db, "execute", execute)
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    claim = await delivery._claim_delivery(
+        job_id=DIRECT_INSTAGRAM_JOB["id"],
+        media_type="text",
+        request_fingerprint="fingerprint",
+        attachment_metadata={"delivery_type": "text"},
+        processing_lease_id=DIRECT_INSTAGRAM_JOB["processing_lease_id"],
+        require_direct_instagram_fence=True,
+    )
+
+    assert claim == delivery._DeliveryClaim("sending", None, True)
+    assert "FROM kommo_message_jobs" in fetch_one.await_args_list[0].args[0]
+    assert "FOR UPDATE" in fetch_one.await_args_list[0].args[0]
+    conflict_query = fetch_one.await_args_list[1].args[0]
+    assert "request_fingerprint IS DISTINCT FROM" in conflict_query
+    assert "send_attempt_count" in conflict_query
+    assert "status IN ('sending', 'accepted', 'confirmed', 'delivery_unknown')" in conflict_query
+    assert "INSERT INTO kommo_outbound_deliveries" in execute.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_direct_fallback_claim_aborts_after_another_send_began(monkeypatch):
+    database = _TransactionDB()
+    execute = AsyncMock()
+    fetch_one = AsyncMock(
+        side_effect=[
+            {"id": DIRECT_INSTAGRAM_JOB["id"]},
+            {"id": "original-delivery"},
+        ]
+    )
+    monkeypatch.setattr(delivery.db, "get_db", lambda: database)
+    monkeypatch.setattr(delivery.db, "execute", execute)
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    with pytest.raises(delivery.KommoDeliveryAbortedError, match="another customer send"):
+        await delivery._claim_delivery(
+            job_id=DIRECT_INSTAGRAM_JOB["id"],
+            media_type="text",
+            request_fingerprint="fallback-fingerprint",
+            attachment_metadata={"delivery_type": "text", "delivery_purpose": "fallback"},
+            processing_lease_id=DIRECT_INSTAGRAM_JOB["processing_lease_id"],
+            require_direct_instagram_fence=True,
+        )
+
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_success_persists_provider_message_id_and_accepted_status(monkeypatch):
     fetch_one = AsyncMock(return_value={"provider_message_id": "message-1"})
     monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
@@ -1186,6 +1287,7 @@ async def test_monthly_usage_counts_possible_sends_conservatively(monkeypatch):
     fetch_one = AsyncMock(
         return_value={
             "attempted_requests": 9,
+            "text_requests": 2,
             "product_image_requests": 6,
             "catalog_pdf_requests": 3,
             "accepted_or_confirmed_deliveries": 5,
@@ -1199,6 +1301,7 @@ async def test_monthly_usage_counts_possible_sends_conservatively(monkeypatch):
 
     assert summary == {
         "attempted_requests": 9,
+        "text_requests": 2,
         "product_image_requests": 6,
         "catalog_pdf_requests": 3,
         "accepted_or_confirmed_deliveries": 5,
@@ -1211,6 +1314,7 @@ async def test_monthly_usage_counts_possible_sends_conservatively(monkeypatch):
     }
     query = fetch_one.await_args.args[0]
     assert "SUM(send_attempt_count)" in query
+    assert "media_type = 'text'" in query
     assert "attachment_metadata->>'send_attempt_count'" in query
     assert "attachment_metadata->>'send_attempt_month'" in query
     assert "status IN ('sending', 'accepted', 'confirmed', 'failed', 'delivery_unknown')" in query
@@ -1252,7 +1356,8 @@ async def test_kommo_status_exposes_safe_media_flags_and_usage(monkeypatch):
     )
     usage = {
         "attempted_requests": 25,
-        "product_image_requests": 25,
+        "text_requests": 20,
+        "product_image_requests": 5,
         "catalog_pdf_requests": 0,
         "accepted_or_confirmed_deliveries": 24,
         "failed_deliveries": 0,
@@ -1269,6 +1374,8 @@ async def test_kommo_status_exposes_safe_media_flags_and_usage(monkeypatch):
     status = await admin_settings.kommo_status()
 
     assert status["kommo_instagram_dm_transport"] == "chats_api"
+    assert status["kommo_instagram_dm_scope_required"] == "Sending to external chats"
+    assert status["kommo_instagram_dm_scope_verification"] == "manual_unverified"
     assert status["kommo_chats_media_enabled"] is True
     assert status["kommo_chats_product_images_enabled"] is True
     assert status["kommo_chats_catalog_pdf_enabled"] is False
@@ -1276,3 +1383,47 @@ async def test_kommo_status_exposes_safe_media_flags_and_usage(monkeypatch):
     assert status["kommo_chats_api_monthly_usage"] == usage
     assert "super-secret-token-value" not in str(status)
     delivery.monthly_usage_summary.assert_awaited_once_with(100)
+
+
+@pytest.mark.asyncio
+async def test_kommo_test_reports_instagram_scope_as_manual_unverified(monkeypatch):
+    from app.admin import settings as admin_settings
+
+    config = SimpleNamespace(
+        channel_backend="kommo",
+        kommo_ai_mode_field_id=10,
+        kommo_ai_active_enum_id=11,
+        kommo_ai_human_enum_id=12,
+        kommo_ai_paused_enum_id=13,
+        kommo_default_responsible_user_id=14,
+        kommo_whatsapp_salesbot_id=15,
+        kommo_salesbot_id=None,
+    )
+    client = SimpleNamespace(
+        get_account=AsyncMock(return_value={"id": 1}),
+        get_lead_custom_field=AsyncMock(
+            return_value={"enums": [{"id": 11}, {"id": 12}, {"id": 13}]}
+        ),
+        get_user=AsyncMock(return_value={"id": 14}),
+    )
+    monkeypatch.setattr(admin_settings, "get_config", lambda: config)
+    monkeypatch.setattr(
+        "app.integrations.kommo.client.KommoClient.from_config",
+        lambda: client,
+    )
+
+    result = await admin_settings.kommo_test()
+
+    transport = next(check for check in result["checks"] if check["name"] == "instagram_dm_transport")
+    assert transport == {
+        "name": "instagram_dm_transport",
+        "ok": False,
+        "transport": "chats_api",
+        "scope_required": "Sending to external chats",
+        "scope_verification": "manual_unverified",
+        "automatic_check": False,
+        "salesbot_fallback": False,
+    }
+    assert result["automatic_checks_ok"] is True
+    assert result["manual_checks_required"] == ["instagram_dm_transport"]
+    assert result["ok"] is False

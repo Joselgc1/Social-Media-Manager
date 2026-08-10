@@ -21,6 +21,7 @@ from app.crm.channel_mappings import (
 from app.integrations.kommo.client import KommoAPIError, KommoClient, sanitize_kommo_error
 from app.integrations.kommo.customer_profile import build_kommo_customer_profile
 from app.integrations.kommo.delivery import (
+    KommoDeliveryAbortedError,
     KommoDeliveryStateError,
     KommoDeliveryUnknownError,
     KommoPartialDeliveryError,
@@ -951,6 +952,8 @@ async def _process_ready_job(job: dict) -> None:
     client = KommoClient.from_config()
     continuation_started = False
     media_delivery_succeeded = False
+    direct_delivery_attempted = False
+    customer = None
     try:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
         settings = await db.get_settings()
@@ -966,6 +969,7 @@ async def _process_ready_job(job: dict) -> None:
                 job,
                 "unsupported_attachment",
                 customer_message=UNSUPPORTED_ATTACHMENT_MESSAGE,
+                customer=customer,
             )
             return
         effective_message_text = await _effective_customer_message(job)
@@ -1157,6 +1161,7 @@ async def _process_ready_job(job: dict) -> None:
             )
             await _continue_and_discard_job(client, job, "empty_after_sanitization")
             return
+        direct_delivery_attempted = _is_direct_instagram_dm(job)
         delivery_result = await deliver_response(
             job=job,
             result=result,
@@ -1265,7 +1270,19 @@ async def _process_ready_job(job: dict) -> None:
         if e.retryable and int(job.get("attempt_count") or 0) < MAX_JOB_ATTEMPTS:
             await _retry_ready_job(job, error)
         else:
-            await _fail_ready_job(client, job, error)
+            await _fail_ready_job(client, job, error, customer=customer)
+    except KommoDeliveryAbortedError as e:
+        logger.info(
+            "Kommo direct Instagram delivery aborted before network send: job_id=%s reason=%s",
+            job["id"],
+            sanitize_job_error(e),
+        )
+        await _mark_job(
+            job["id"],
+            "failed",
+            sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
     except KommoPartialDeliveryError as e:
         logger.warning(
             "Kommo media response partially delivered: job_id=%s delivered_count=%s",
@@ -1307,12 +1324,24 @@ async def _process_ready_job(job: dict) -> None:
         )
     except KommoAPIError as e:
         logger.warning("Kommo ready job API error: job_id=%s error=%s", job["id"], sanitize_job_error(e))
-        if not continuation_started and not media_delivery_succeeded and job.get("return_url"):
+        if (
+            not continuation_started
+            and not media_delivery_succeeded
+            and (
+                job.get("return_url")
+                or (
+                    _is_direct_instagram_dm(job)
+                    and not direct_delivery_attempted
+                    and customer is not None
+                )
+            )
+        ):
             await _continue_and_discard_job(
                 client,
                 job,
                 sanitize_job_error(e),
                 send_customer_fallback=True,
+                customer=customer,
             )
             return
         await _mark_job(
@@ -1327,12 +1356,24 @@ async def _process_ready_job(job: dict) -> None:
         )
     except Exception as e:
         logger.exception("Kommo ready job failed: job_id=%s error=%s", job["id"], sanitize_job_error(e))
-        if not continuation_started and not media_delivery_succeeded and job.get("return_url"):
+        if (
+            not continuation_started
+            and not media_delivery_succeeded
+            and (
+                job.get("return_url")
+                or (
+                    _is_direct_instagram_dm(job)
+                    and not direct_delivery_attempted
+                    and customer is not None
+                )
+            )
+        ):
             await _continue_and_discard_job(
                 client,
                 job,
                 sanitize_job_error(e),
                 send_customer_fallback=True,
+                customer=customer,
             )
             return
         await _mark_job(
@@ -1630,6 +1671,13 @@ async def _discard_recent_private_jobs_superseded_by_comment_callback(
           )
           AND continuation_payload IS NULL
           AND assistant_message_persisted_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM kommo_outbound_deliveries outbound
+              WHERE outbound.job_id = kommo_message_jobs.id
+                AND outbound.transport = 'chats_api'
+                AND outbound.status IN ('sending', 'accepted', 'confirmed', 'delivery_unknown')
+          )
         RETURNING id
         """,
         {"job_id": str(candidate["id"]), "reason": COMMENT_PRIVATE_SUPERSEDED_REASON},
@@ -1956,6 +2004,13 @@ async def _discard_private_job_if_superseded_by_recent_comment(job: dict) -> boo
               )
               AND continuation_payload IS NULL
               AND assistant_message_persisted_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM kommo_outbound_deliveries outbound
+                  WHERE outbound.job_id = kommo_message_jobs.id
+                    AND outbound.transport = 'chats_api'
+                    AND outbound.status IN ('sending', 'accepted', 'confirmed', 'delivery_unknown')
+              )
             RETURNING id
             """,
             {"job_id": str(job["id"]), "reason": COMMENT_PRIVATE_SUPERSEDED_REASON},
@@ -2084,14 +2139,74 @@ async def _continue_and_discard_job(
     *,
     send_customer_fallback: bool = False,
     customer_message: str | None = None,
+    customer: dict | None = None,
 ) -> None:
     if _is_direct_instagram_dm(job):
-        await _mark_job(
-            job["id"],
-            "discarded",
-            reason,
-            processing_lease_id=job.get("processing_lease_id"),
-        )
+        direct_message = customer_message
+        if not direct_message and send_customer_fallback:
+            direct_message = CUSTOMER_DELIVERY_FAILURE_MESSAGE
+        if not direct_message:
+            await _mark_job(
+                job["id"],
+                "discarded",
+                reason,
+                processing_lease_id=job.get("processing_lease_id"),
+            )
+            return
+        try:
+            delivery_result = await deliver_response(
+                job={**job, "direct_delivery_purpose": "fallback"},
+                result={},
+                customer_text=direct_message,
+                client=client,
+            )
+            if customer:
+                await _store_assistant_message_after_delivery(
+                    customer,
+                    job,
+                    {},
+                    delivery_result.customer_text,
+                    expected_job_status="processing",
+                )
+            if not await _mark_direct_job_discarded_after_delivery(
+                job["id"],
+                job.get("processing_lease_id"),
+                reason,
+                delivery_result.provider_message_ids,
+            ):
+                raise KommoDeliveryStateError(
+                    "Kommo direct Instagram fallback could not be finalized after acceptance"
+                )
+        except KommoDeliveryAbortedError as error:
+            logger.info(
+                "Kommo direct Instagram fallback aborted before network send: job_id=%s reason=%s",
+                job["id"],
+                sanitize_job_error(error),
+            )
+            await _mark_job(
+                job["id"],
+                "failed",
+                sanitize_job_error(error),
+                processing_lease_id=job.get("processing_lease_id"),
+            )
+        except (
+            KommoDeliveryUnknownError,
+            KommoPartialDeliveryError,
+            KommoDeliveryStateError,
+        ) as error:
+            await _mark_job(
+                job["id"],
+                "delivery_unknown",
+                sanitize_job_error(error),
+                processing_lease_id=job.get("processing_lease_id"),
+            )
+        except Exception as error:
+            await _mark_job(
+                job["id"],
+                "failed",
+                sanitize_job_error(error),
+                processing_lease_id=job.get("processing_lease_id"),
+            )
         return
 
     continuation_started = False
@@ -2220,7 +2335,30 @@ async def _retry_ready_job(job: dict, error: str) -> None:
     )
 
 
-async def _fail_ready_job(client: KommoClient, job: dict, error: str) -> None:
+async def _fail_ready_job(
+    client: KommoClient,
+    job: dict,
+    error: str,
+    *,
+    customer: dict | None = None,
+) -> None:
+    if _is_direct_instagram_dm(job):
+        if customer is None:
+            await _mark_job(
+                job["id"],
+                "failed",
+                error,
+                processing_lease_id=job.get("processing_lease_id"),
+            )
+            return
+        await _continue_and_discard_job(
+            client,
+            job,
+            error,
+            send_customer_fallback=True,
+            customer=customer,
+        )
+        return
     if job.get("return_url"):
         continuation_data, message_diagnostics = _failure_continuation_data(job)
         if await _mark_job_continuing(job["id"], job.get("processing_lease_id"), continuation_data):
@@ -2303,6 +2441,42 @@ async def _mark_direct_job_sent(
     )
     if updated:
         logger.info("Kommo direct Instagram delivery accepted: job_id=%s", job_id)
+    return bool(updated)
+
+
+async def _mark_direct_job_discarded_after_delivery(
+    job_id: str,
+    processing_lease_id: str | None,
+    reason: str | None,
+    provider_message_ids: list[str],
+) -> bool:
+    updated = await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs
+        SET status = 'discarded',
+            last_error = :last_error,
+            continuation_response = CAST(:delivery_response AS jsonb),
+            processing_started_at = NULL,
+            processing_lease_id = NULL,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'processing'
+          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+        RETURNING id
+        """,
+        {
+            "id": job_id,
+            "processing_lease_id": processing_lease_id,
+            "last_error": sanitize_job_error(reason) if reason else None,
+            "delivery_response": json.dumps(
+                {
+                    "transport": "chats_api",
+                    "provider_message_ids": provider_message_ids,
+                }
+            ),
+        },
+    )
     return bool(updated)
 
 

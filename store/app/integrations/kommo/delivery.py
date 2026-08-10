@@ -38,6 +38,10 @@ class KommoDeliveryStateError(RuntimeError):
     """Raised when an earlier paid send cannot safely be repeated."""
 
 
+class KommoDeliveryAbortedError(RuntimeError):
+    """Raised when a direct job loses authorization before any network send."""
+
+
 class KommoDeliveryUnknownError(KommoAPIError):
     """Raised when a paid send may have succeeded and must not be repeated."""
 
@@ -158,6 +162,8 @@ async def deliver_response(
                 media_type=media.media_type,
                 request_fingerprint=request_fingerprint,
                 attachment_metadata=metadata,
+                processing_lease_id=job.get("processing_lease_id"),
+                require_direct_instagram_fence=direct_instagram,
             )
             status = claim.status
             if status in {"accepted", "confirmed"}:
@@ -214,10 +220,12 @@ async def _deliver_direct_text(
         raise KommoAPIError("Kommo direct text delivery requires a durable job ID")
     talk_id = _validated_talk_id(job.get("talk_id"))
     text_hash = hashlib.sha256(customer_text.encode()).hexdigest()
+    delivery_purpose = str(job.get("direct_delivery_purpose") or "response")
     request_fingerprint = _text_request_fingerprint(
         job_id=job_id,
         talk_id=talk_id,
         text_hash=text_hash,
+        delivery_purpose=delivery_purpose,
     )
     claim = await _claim_delivery(
         job_id=job_id,
@@ -227,7 +235,10 @@ async def _deliver_direct_text(
             "delivery_type": "text",
             "talk_id": talk_id,
             "text_hash": text_hash,
+            "delivery_purpose": delivery_purpose,
         },
+        processing_lease_id=job.get("processing_lease_id"),
+        require_direct_instagram_fence=True,
     )
     if claim.status in {"accepted", "confirmed"}:
         provider_message_id = claim.provider_message_id
@@ -499,11 +510,18 @@ def _request_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _text_request_fingerprint(*, job_id: str, talk_id: str, text_hash: str) -> str:
+def _text_request_fingerprint(
+    *,
+    job_id: str,
+    talk_id: str,
+    text_hash: str,
+    delivery_purpose: str = "response",
+) -> str:
     logical_send = {
         "job_id": job_id,
         "talk_id": talk_id,
         "delivery_type": "text",
+        "delivery_purpose": delivery_purpose,
         "text_hash": text_hash,
     }
     encoded = json.dumps(logical_send, sort_keys=True, separators=(",", ":")).encode()
@@ -516,7 +534,11 @@ async def _claim_delivery(
     media_type: str,
     request_fingerprint: str,
     attachment_metadata: dict,
+    processing_lease_id: str | None = None,
+    require_direct_instagram_fence: bool = False,
 ):
+    if require_direct_instagram_fence and not processing_lease_id:
+        raise KommoDeliveryAbortedError("Kommo direct delivery requires an active processing lease")
     insert_values = {
         "job_id": job_id,
         "media_type": media_type,
@@ -533,6 +555,47 @@ async def _claim_delivery(
         "request_fingerprint": request_fingerprint,
     }
     async with db.get_db().transaction():
+        if require_direct_instagram_fence:
+            locked_job = await db.fetch_one(
+                """
+                SELECT id
+                FROM kommo_message_jobs
+                WHERE id = CAST(:job_id AS uuid)
+                  AND status = 'processing'
+                  AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+                  AND channel = 'instagram'
+                  AND interaction_type = 'private_message'
+                FOR UPDATE
+                """,
+                {
+                    "job_id": job_id,
+                    "processing_lease_id": processing_lease_id,
+                },
+            )
+            if not locked_job:
+                raise KommoDeliveryAbortedError(
+                    "Kommo direct delivery aborted because its processing lease was lost"
+                )
+            conflicting_delivery = await db.fetch_one(
+                """
+                SELECT id
+                FROM kommo_outbound_deliveries
+                WHERE job_id = CAST(:job_id AS uuid)
+                  AND transport = 'chats_api'
+                  AND request_fingerprint IS DISTINCT FROM :request_fingerprint
+                  AND (
+                      status IN ('sending', 'accepted', 'confirmed', 'delivery_unknown')
+                      OR attachment_metadata->>'send_attempt_count' ~ '^[1-9][0-9]*$'
+                  )
+                LIMIT 1
+                FOR UPDATE
+                """,
+                existing_values,
+            )
+            if conflicting_delivery:
+                raise KommoDeliveryAbortedError(
+                    "Kommo direct delivery aborted because another customer send already began"
+                )
         await db.execute(
             """
             INSERT INTO kommo_outbound_deliveries (
@@ -785,6 +848,10 @@ async def monthly_usage_summary(monthly_limit: int | None) -> dict:
         SELECT
             COALESCE(SUM(send_attempt_count), 0) AS attempted_requests,
             COALESCE(
+                SUM(send_attempt_count) FILTER (WHERE media_type = 'text'),
+                0
+            ) AS text_requests,
+            COALESCE(
                 SUM(send_attempt_count) FILTER (WHERE media_type = 'product_image'),
                 0
             ) AS product_image_requests,
@@ -802,6 +869,7 @@ async def monthly_usage_summary(monthly_limit: int | None) -> dict:
     utilization = round((attempted / monthly_limit) * 100, 1) if monthly_limit else None
     return {
         "attempted_requests": attempted,
+        "text_requests": int(row["text_requests"] or 0) if row else 0,
         "product_image_requests": int(row["product_image_requests"] or 0) if row else 0,
         "catalog_pdf_requests": int(row["catalog_pdf_requests"] or 0) if row else 0,
         "accepted_or_confirmed_deliveries": (

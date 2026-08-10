@@ -103,8 +103,10 @@ Grant only the scopes needed for this integration:
 - Users read when `KOMMO_DEFAULT_RESPONSIBLE_USER_ID` is used.
 - Notes write for escalation notes.
 - Salesbot/bot execution access according to Kommo permissions.
-- `Sending to external chats` for opted-in Chats API media delivery.
+- `Sending to external chats` for every direct Instagram private-message reply and for opted-in Chats API media delivery.
 - `Access to files` for image and PDF uploads to Kommo Drive.
+
+`Sending to external chats` is mandatory even when Instagram product images are disabled because every Instagram DM text reply uses `POST /api/v4/talks/{talk_id}/send_message`. After adding this scope, an existing private integration authorization may need to be granted access again in Kommo. Verify the grant manually before production rollout: the read-only `/admin/settings/kommo/test` endpoint cannot prove send permission without sending a real message. A `403` from Kommo is terminal for that attempt and must not fall back to Salesbot; direct Instagram intentionally has no Salesbot fallback.
 
 ## Long-Lived Token Creation
 
@@ -273,7 +275,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 [ ] Instagram DMs contain a valid talk_id and receive direct Chats API replies without Salesbot
 [ ] Comment Salesbot ends with a Comment step using {{json.message}}
 [ ] General webhook points to https://<store-domain>/webhooks/kommo/events/<secret>
-[ ] /admin/settings/kommo/test passes with admin auth
+[ ] /admin/settings/kommo/test automatic checks pass with admin auth and the mandatory sending scope is reported as manual/unverified
 [ ] A real WhatsApp or Instagram DM produces one customer reply through Kommo
 [ ] A real Instagram comment creates the authoritative native-comment job; any general-webhook private-message mirror is discarded as superseded before direct Instagram processing
 [ ] AI Mode=Human suppresses future AI replies
@@ -355,7 +357,9 @@ The Files and Chats transport supports enabled product images for WhatsApp and I
 The Kommo private integration requires these additional scopes before the transport can be exercised:
 
 - `Access to files` for the Files API.
-- `Sending to external chats` for the Chats API add-on.
+- `Sending to external chats` for all direct Instagram DM text and enabled Chats API media sends.
+
+Adding a scope to an existing integration may require granting access again in Kommo. This authorization must be verified manually with a development conversation before production. If Kommo returns `403`, restore the missing scope; do not add or expect an Instagram Salesbot fallback.
 
 Enable the global flag and each media-specific flag only after development-account validation. `KOMMO_CHATS_PDF_ATTACHMENT_TYPE` defaults to empty; PDF sending remains blocked until it is explicitly configured as `file`. The code and automated tests accept only `file`; verify a real PDF in the development account before production. Do not introduce undocumented attachment types.
 
@@ -417,16 +421,16 @@ Authenticated endpoints:
 
 They return booleans, timestamps, counts, and sanitized errors only. They do not return tokens, secrets, JWTs, phone numbers, full messages, or raw payloads.
 
-`GET /admin/settings/kommo/status` also reports current-calendar-month Chats API media attempts, product-image and catalog-PDF request counts, final-state accepted/confirmed, failed, and `delivery_unknown` delivery counts, the configured monitoring allowance, estimated remaining requests, utilization percentage, and warning level. Each claimed send increments transport-only attempt metadata; `sending` and `delivery_unknown` attempts count conservatively because the request may already have reached Kommo. Final-state delivery counts describe current durable records rather than every historical retry outcome. These values are local estimates from `kommo_outbound_deliveries`, not Kommo billing records, and do not enforce a hard quota. Direct manual calls such as `verify_kommo_media.py --send` do not have a durable job row and are not included in this local estimate; account for them separately and use Kommo as the billing source of truth.
+`GET /admin/settings/kommo/status` also reports current-calendar-month Chats API attempts, including separate text, product-image, and catalog-PDF request counts, final-state accepted/confirmed, failed, and `delivery_unknown` delivery counts, the configured monitoring allowance, estimated remaining requests, utilization percentage, and warning level. `attempted_requests` is the authoritative local total and includes text plus media attempts. Each claimed send increments transport-only attempt metadata; `sending` and `delivery_unknown` attempts count conservatively because the request may already have reached Kommo. Final-state delivery counts describe current durable records rather than every historical retry outcome. These values are local estimates from `kommo_outbound_deliveries`, not Kommo billing records, and do not enforce a hard quota. Direct manual calls such as `verify_kommo_media.py --send` do not have a durable job row and are not included in this local estimate; account for them separately and use Kommo as the billing source of truth.
 
 ## Staged Media Rollout
 
 1. Run `python3 store/scripts/migrate.py` and confirm Store schema version 15 is accepted.
 2. Deploy with `KOMMO_CHATS_MEDIA_ENABLED=false`, `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false`, and `KOMMO_CHATS_CATALOG_PDF_ENABLED=false`.
-3. Verify `POST /admin/settings/kommo/test` succeeds.
+3. Verify the automatic checks in `POST /admin/settings/kommo/test` succeed and note its separate `manual_unverified` `Sending to external chats` check.
 4. Run `KOMMO_CHATS_MEDIA_ENABLED=true python3 store/scripts/verify_kommo_media.py --talk-id DEVELOPMENT_TALK_ID --send` against a development talk. The command-scoped global override enables the low-level diagnostic while the deployed media-specific flags remain false; `--send` makes one real metered Chats API request.
 5. Enable `KOMMO_CHATS_MEDIA_ENABLED=true` and `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=true`; leave PDF disabled.
-6. Test a text-only reply and a real product-image reply end to end. Confirm text uses Salesbot and the image uses one Chats API request with its caption.
+6. Test an Instagram text-only reply and a real Instagram product-image reply end to end. Confirm both use the originating `talk_id` through Chats API and neither uses Salesbot. Recheck the private integration authorization if either returns `403`.
 7. Verify conversation history, `kommo_outbound_deliveries`, and that outgoing webhook events created no duplicate AI jobs.
 8. Set `KOMMO_CHATS_PDF_ATTACHMENT_TYPE=file` and enable `KOMMO_CHATS_CATALOG_PDF_ENABLED=true`.
 9. Test a real PDF plus text delivery and confirm it uses one Chats API request.

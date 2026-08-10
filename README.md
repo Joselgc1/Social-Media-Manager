@@ -244,12 +244,14 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 
 - WhatsApp text handling through the configured Kommo Salesbot.
 - Instagram DM text and enabled product images are delivered directly through Kommo Talks/Chats API using the originating `talk_id`; there is intentionally no Instagram DM Salesbot fallback.
+- The Kommo private integration's `Sending to external chats` permission is mandatory for every Instagram DM text reply as well as opted-in Chats API media. Existing authorizations may need access granted again after adding the scope; verify it manually before production because the read-only diagnostic cannot test sends. A missing-scope `403` never falls back to Salesbot.
 - Public Instagram comment replies use Kommo's native comment-triggered Salesbot flow; the authenticated widget callback creates a durable `instagram_comment` job directly.
 - Interactive choices become numbered text; URL actions become text plus URLs.
 - Opted-in WhatsApp product images and catalog PDFs use Kommo Files API/cache plus Chats API; disabled WhatsApp media safely falls back to Salesbot behavior.
 - Product images can be enabled for WhatsApp and Instagram under the global media kill switch. Catalog PDF delivery remains strictly WhatsApp-only.
 - Incoming Kommo `voice` and `audio` attachments in private WhatsApp and Instagram DMs are downloaded safely and transcribed before the AI turn. This path requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio is not transcribed.
 - Durable jobs and outbound records track `delivery_unknown` when Salesbot or Chats API acceptance cannot be confirmed; inspect Kommo before manual retry.
+- Chats API diagnostics count direct Instagram text under `text_requests`; `attempted_requests` remains the authoritative total across text and media and is monitoring-only.
 - Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable reconciliation discards the mirrored private-message job before direct Instagram processing.
 
 ## Telegram Admin Commands

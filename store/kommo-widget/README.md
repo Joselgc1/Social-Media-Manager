@@ -39,6 +39,8 @@ The installed widget is used by the WhatsApp and public-comment Salesbot flows. 
 
 Instagram DMs do not use this widget or any Salesbot. They enter through the general Kommo webhook and are delivered directly through Kommo Talks/Chats API using the persisted `talk_id`.
 
+The private integration must have `Sending to external chats` for every Instagram DM reply, including text-only replies. Adding the scope may require granting integration access again. Verify it manually in a development conversation before production; a missing-scope `403` has no Instagram Salesbot fallback.
+
 The Instagram-comment widget block sends optional post/product placeholders such as post caption, product SKU, product name, and media URL. The backend ignores unresolved placeholders and answers only price/availability. A mapping may contain multiple products: generic questions request clarification, while a confident explicit reference can select one mapped product.
 
 If invalid manifests were previously uploaded first and Kommo continues using stale metadata, create a fresh private integration or regenerate the Widget code/key before uploading the corrected archive, following Kommo's widget update behavior.

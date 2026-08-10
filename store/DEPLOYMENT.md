@@ -367,6 +367,8 @@ Only do this when `CHANNEL_BACKEND=kommo`.
 6. Subscribe to incoming message, outgoing message, lead edited, talk added, and talk edited events.
 7. Confirm `GET /admin/settings/kommo/status` and `POST /admin/settings/kommo/test` work with admin auth.
 
+The Kommo private integration must have `Sending to external chats` for every direct Instagram DM reply, including text-only replies, and for opted-in Chats API media. Existing authorizations may need access granted again after this scope is added. `/admin/settings/kommo/test` is intentionally read-only and reports this scope as a required manual check; verify it with a development Instagram conversation before production. Direct Instagram has no Salesbot fallback, including when Kommo returns `403` for a missing scope.
+
 Instagram public comments should use the native comment-triggered Salesbot. Kommo can also mirror those comments through the general webhook as `origin=instagram_business`, `message_type=text`; the backend reconciles the authenticated comment callback against any recent matching private-message mirror and discards the mirror before direct Instagram processing.
 
 The complete Kommo setup is documented in [docs/KOMMO_MIGRATION.md](../docs/KOMMO_MIGRATION.md).
@@ -846,9 +848,12 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 15
 [ ] Widget ZIP uploaded to private Kommo integration
 [ ] WhatsApp Salesbot contains its widget step and success/media/fail exits
+[ ] Private integration has `Sending to external chats`; access was granted again if the scope was added after initial authorization
+[ ] POST /admin/settings/kommo/test reports the Instagram sending scope as manual/unverified rather than automatically passed
 [ ] Instagram DM webhook jobs contain `talk_id` and direct text/product-image replies reach the same Kommo conversation without Salesbot
+[ ] A development Instagram text reply proves the sending scope before production; a 403 does not fall back to Salesbot
 [ ] General webhook points to /webhooks/kommo/events/<KOMMO_WEBHOOK_SECRET>
-[ ] POST /admin/settings/kommo/test with auth -> read-only checks pass
+[ ] POST /admin/settings/kommo/test with auth -> automatic read-only checks pass; mandatory sending scope remains a separate manual check
 [ ] WhatsApp message appears in Kommo inbox and creates a Kommo job
 [ ] WhatsApp customer receives AI response through Kommo Salesbot
 [ ] Lead AI Mode=Human -> local customer becomes escalated and AI stops
