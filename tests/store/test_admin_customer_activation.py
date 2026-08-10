@@ -138,6 +138,34 @@ async def test_admin_activation_in_meta_backend_is_local_only_without_mapping_lo
 
 
 @pytest.mark.asyncio
+async def test_hybrid_instagram_resume_does_not_sync_whatsapp_kommo(monkeypatch):
+    from app.admin import customer_activation
+
+    monkeypatch.setattr(
+        customer_activation,
+        "get_config",
+        lambda: _kommo_config(whatsapp_backend="kommo", instagram_backend="meta"),
+    )
+    get_mapping = AsyncMock()
+    monkeypatch.setattr(customer_activation, "get_mapping_by_customer", get_mapping)
+    activate = AsyncMock(return_value={"id": "customer", "conversation_state": "active"})
+    monkeypatch.setattr(
+        customer_activation.escalations,
+        "mark_customer_active_for_admin",
+        activate,
+    )
+
+    result = await customer_activation.activate_customer_for_admin({
+        "id": "customer",
+        "channel": "instagram",
+    })
+
+    assert result.status == "local_only"
+    get_mapping.assert_not_awaited()
+    activate.assert_awaited_once_with("customer", channel=None)
+
+
+@pytest.mark.asyncio
 async def test_resolve_customer_returns_502_for_kommo_activation_failure(monkeypatch):
     from app.admin import settings
 

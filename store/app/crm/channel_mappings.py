@@ -14,15 +14,20 @@ from app.integrations.kommo.customer_profile import (
 )
 
 
-async def get_mapping_by_customer(customer_id: str, provider: str = "kommo") -> dict | None:
+async def get_mapping_by_customer(
+    customer_id: str,
+    provider: str = "kommo",
+    channel: str | None = None,
+) -> dict | None:
     row = await db.fetch_one(
         """
         SELECT * FROM customer_channel_mappings
         WHERE customer_id = :customer_id AND provider = :provider
+          AND (CAST(:channel AS text) IS NULL OR channel = CAST(:channel AS text))
         ORDER BY updated_at DESC
         LIMIT 1
         """,
-        {"customer_id": customer_id, "provider": provider},
+        {"customer_id": customer_id, "provider": provider, "channel": channel},
     )
     return dict(row) if row else None
 
@@ -69,6 +74,7 @@ async def persist_verified_meta_instagram_sender(
     *,
     customer_id: str,
     external_author_id: str,
+    external_origin: str = "story_reply",
 ) -> dict:
     """Bind one signed Meta Instagram sender to one customer without reassignment."""
     customer_id = str(customer_id).strip()
@@ -124,16 +130,73 @@ async def persist_verified_meta_instagram_sender(
             INSERT INTO customer_channel_mappings (
                 customer_id, provider, channel, external_author_id, external_origin
             ) VALUES (
-                :customer_id, 'meta', 'instagram', :external_author_id, 'story_reply'
+                :customer_id, 'meta', 'instagram', :external_author_id, :external_origin
             )
             ON CONFLICT DO NOTHING
             RETURNING id
             """,
-            {"customer_id": customer_id, "external_author_id": external_author_id},
+            {
+                "customer_id": customer_id,
+                "external_author_id": external_author_id,
+                "external_origin": external_origin,
+            },
         )
         if inserted:
             return {"status": "created", "mapping_id": str(inserted["id"])}
-        return {"status": "conflict"}
+    return {"status": "conflict"}
+
+
+async def resolve_meta_instagram_customer(
+    sender_id: str,
+    *,
+    display_name: str | None = None,
+    instagram_handle: str | None = None,
+) -> dict:
+    """Resolve one signed Meta sender through its immutable mapping."""
+    sender_id = str(sender_id or "").strip()
+    if not sender_id:
+        raise ValueError("Meta Instagram sender ID is required")
+
+    mapping = await lookup_by_provider("meta", "instagram", sender_id)
+    if mapping:
+        row = await db.fetch_one(
+            "SELECT * FROM customers WHERE id = :id",
+            {"id": mapping["customer_id"]},
+        )
+        if row:
+            customer = dict(row)
+            return await customers.get_or_create_customer(
+                channel=customer["channel"],
+                platform_id=customer["platform_id"],
+                display_name=display_name,
+                instagram_handle=instagram_handle,
+                allow_platform_phone_fallback=False,
+            )
+
+    customer = await customers.get_or_create_customer(
+        channel="instagram",
+        platform_id=sender_id,
+        display_name=display_name,
+        instagram_handle=instagram_handle,
+        allow_platform_phone_fallback=False,
+    )
+    result = await persist_verified_meta_instagram_sender(
+        customer_id=str(customer["id"]),
+        external_author_id=sender_id,
+        external_origin="meta_native",
+    )
+    if result.get("status") != "conflict":
+        return customer
+
+    mapping = await lookup_by_provider("meta", "instagram", sender_id)
+    if mapping:
+        row = await db.fetch_one(
+            "SELECT * FROM customers WHERE id = :id",
+            {"id": mapping["customer_id"]},
+        )
+        if row:
+            return dict(row)
+    raise RuntimeError("Meta Instagram sender mapping conflict")
 
 
 async def upsert_mapping(

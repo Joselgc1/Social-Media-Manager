@@ -168,7 +168,7 @@ KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 
 ## Database Migration
 
-Run `python3 store/scripts/migrate.py` through Railway pre-deploy or against the intended database. The current Store schema version is `16`. The runner applies the fresh baseline and every normal numbered migration through `016_meta_inbound_instagram_context.sql`; `002_consolidated_upgrade.sql` is a manual pre-consolidation recovery migration and is not part of the normal runner. Migration 015 isolates private-message and Instagram-comment history; 016 adds durable Meta Instagram interaction scope and integration context. Let `store/app/db.py` validate the complete migration set rather than checking only `MAX(version)`.
+Run `python3 store/scripts/migrate.py` through Railway pre-deploy or against the intended database. The current Store schema version is `17`. The runner applies every normal numbered migration through `017_meta_instagram_operations.sql`; `002_consolidated_upgrade.sql` remains a manual recovery migration. Migration 016 adds durable Meta Instagram interaction context; 017 adds native audio attachment metadata and human/AI message provenance.
 
 ## Widget Build
 
@@ -259,7 +259,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ```text
 [ ] Store Railway root directory is store/
-[ ] python3 store/scripts/migrate.py completed and store/app/db.py accepts the complete migration set through version 16
+[ ] python3 store/scripts/migrate.py completed and store/app/db.py accepts the complete migration set through version 17
 [ ] WHATSAPP_BACKEND=kommo is set in the store environment
 [ ] All required KOMMO_* variables are set
 [ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL
@@ -417,7 +417,7 @@ They return booleans, timestamps, counts, and sanitized errors only. They do not
 
 ## Staged Media Rollout
 
-1. Run `python3 store/scripts/migrate.py` and confirm Store schema version 16 is accepted.
+1. Run `python3 store/scripts/migrate.py` and confirm Store schema version 17 is accepted.
 2. Deploy with `KOMMO_CHATS_MEDIA_ENABLED=false`, `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false`, and `KOMMO_CHATS_CATALOG_PDF_ENABLED=false`.
 3. Verify `POST /admin/settings/kommo/test` succeeds.
 4. Run `KOMMO_CHATS_MEDIA_ENABLED=true python3 store/scripts/verify_kommo_media.py --talk-id DEVELOPMENT_TALK_ID --send` against a development talk. The command-scoped global override enables the low-level diagnostic while the deployed media-specific flags remain false; `--send` makes one real metered Chats API request.

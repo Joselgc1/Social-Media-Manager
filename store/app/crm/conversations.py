@@ -24,6 +24,8 @@ async def store_message(
     source_id: str | None = None,
     attachments: list[dict] | None = None,
     interaction_type: str = PRIVATE_MESSAGE_SCOPE,
+    author_type: str | None = None,
+    provider_message_id: str | None = None,
 ):
     """
     Store a single message in the conversation history.
@@ -40,15 +42,18 @@ async def store_message(
     """
     semantic_attachments = _normalize_semantic_attachments(attachments)
     interaction_scope = _normalize_interaction_type(interaction_type)
+    message_author = author_type or ("customer" if role == "user" else "ai")
+    if message_author not in {"customer", "ai", "human"}:
+        raise ValueError("Unsupported conversation author type")
     await db.execute(
         """
         INSERT INTO conversations (
             customer_id, role, content, channel, interaction_type, media_url,
-            attachments, function_calls, source_id
+            attachments, function_calls, source_id, author_type, provider_message_id
         )
         VALUES (
             :cid, :role, :content, :channel, :interaction_type, :media,
-            CAST(:attachments AS jsonb), :fc, :source_id
+            CAST(:attachments AS jsonb), :fc, :source_id, :author_type, :provider_message_id
         )
         ON CONFLICT (channel, role, source_id) WHERE source_id IS NOT NULL DO NOTHING
         """,
@@ -66,6 +71,8 @@ async def store_message(
             ),
             "fc": json.dumps(function_calls) if function_calls else None,
             "source_id": source_id,
+            "author_type": message_author,
+            "provider_message_id": provider_message_id,
         },
     )
 
@@ -88,7 +95,7 @@ async def get_history(
     interaction_scope = _normalize_interaction_type(interaction_type)
     rows = await db.fetch_all(
         """
-        SELECT role, content, attachments
+        SELECT role, content, attachments, author_type
         FROM conversations
         WHERE customer_id = :cid
           AND interaction_type = :interaction_type
@@ -218,7 +225,7 @@ async def get_recent_summary(
     interaction_scope = _normalize_interaction_type(interaction_type)
     rows = await db.fetch_all(
         """
-        SELECT role, content, created_at
+        SELECT role, content, author_type, created_at
         FROM conversations
         WHERE customer_id = :cid
           AND interaction_type = :interaction_type
@@ -230,7 +237,13 @@ async def get_recent_summary(
 
     lines = []
     for row in reversed(rows):
-        prefix = "Cliente" if row["role"] == "user" else "Eva"
+        if row["role"] == "user":
+            prefix = "Cliente"
+        else:
+            try:
+                prefix = "Equipo" if row["author_type"] == "human" else "Eva"
+            except (KeyError, IndexError):
+                prefix = "Eva"
         lines.append(f"[{prefix}]: {row['content']}")
 
     return "\n".join(lines) if lines else "(Sin mensajes previos)"

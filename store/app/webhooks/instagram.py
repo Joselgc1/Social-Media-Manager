@@ -37,7 +37,12 @@ from app.crm import conversations
 from app.integrations.meta_context.models import MetaInstagramContextEvent
 from app.integrations.meta_context.parser import parse_instagram_context_events
 from app.request_limits import limiter
-from app.webhooks.inbound_buffer import enqueue_inbound_message, send_with_delivery_record
+from app.webhooks.inbound_buffer import (
+    enqueue_inbound_message,
+    inbound_audio_placeholder,
+    is_recorded_meta_outbound_message,
+    send_with_delivery_record,
+)
 from app.webhooks.meta_security import verify_meta_signature
 
 logger = logging.getLogger(__name__)
@@ -169,6 +174,7 @@ async def _enqueue_context_event(event: MetaInstagramContextEvent) -> None:
         customer_profile={
             "display_name": event.sender_username,
             "instagram_handle": event.sender_username,
+            "identity_provider": "meta",
         },
         interaction_type=interaction_type,
         integration_context=context,
@@ -230,10 +236,20 @@ async def _process_event(
     sender_profile = {
         "display_name": (sender.get("name") or sender.get("username") or "").strip() or None,
         "instagram_handle": (sender.get("username") or "").strip().lstrip("@") or None,
+        "identity_provider": "meta",
     }
 
-    # Skip echo messages (messages we sent, echoed back to us)
-    if event.get("message", {}).get("is_echo"):
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    config = get_config()
+    is_outbound = bool(
+        message.get("is_echo")
+        or message.get("is_self")
+        or event.get("is_echo")
+        or event.get("is_self")
+        or sender_id == getattr(config, "instagram_account_id", "")
+    )
+    if is_outbound:
+        await _process_outbound_echo(event)
         return
 
     # Skip read receipts
@@ -277,6 +293,47 @@ async def _process_event(
     logger.debug(f"Instagram: unhandled event type from {sender_id}")
 
 
+async def _process_outbound_echo(event: dict) -> None:
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    message_id = str(message.get("mid") or message.get("message_id") or "").strip()
+    if message_id and await is_recorded_meta_outbound_message("instagram", message_id):
+        logger.debug("Ignored Instagram echo for backend outbound message")
+        return
+
+    config = get_config()
+    recipient = event.get("recipient") if isinstance(event.get("recipient"), dict) else {}
+    recipient_id = str(recipient.get("id") or "").strip()
+    if not recipient_id or recipient_id == getattr(config, "instagram_account_id", ""):
+        logger.warning("Ignored Instagram outgoing echo without customer recipient identity")
+        return
+
+    text = str(message.get("text") or "").strip()
+    if not text and message.get("attachments"):
+        text = "[El equipo envió un archivo por Instagram.]"
+    if not text:
+        return
+
+    from app.crm import escalations
+    from app.crm.channel_mappings import resolve_meta_instagram_customer
+
+    customer = await resolve_meta_instagram_customer(recipient_id)
+    await conversations.store_message(
+        customer_id=str(customer["id"]),
+        role="assistant",
+        author_type="human",
+        content=text,
+        channel="instagram",
+        source_id=f"meta-echo:{message_id}" if message_id else _event_fingerprint(event),
+        provider_message_id=message_id or None,
+        interaction_type=conversations.PRIVATE_MESSAGE_SCOPE,
+    )
+    await escalations.escalate_customer_manually(
+        str(customer["id"]),
+        channel="instagram",
+    )
+    logger.info("Instagram manual administrator message recorded; AI paused for customer")
+
+
 async def _process_message(
     sender_id: str,
     message: dict,
@@ -287,6 +344,7 @@ async def _process_message(
     """Process a regular text or media message."""
     text = ""
     media_url = None
+    inbound_attachments = []
 
     # Quick Reply callback (user tapped a Quick Reply pill)
     if "quick_reply" in message:
@@ -297,34 +355,59 @@ async def _process_message(
     elif "text" in message:
         text = message["text"]
 
-    # Attachments (images, audio, video, shares)
-    elif "attachments" in message:
-        for attachment in message["attachments"]:
+    # Attachments may accompany text and must retain their arrival order.
+    attachment_texts = []
+    if "attachments" in message:
+        for index, attachment in enumerate(message["attachments"]):
             att_type = attachment.get("type", "")
+            payload = attachment.get("payload", {}) or {}
+            attachment_url = payload.get("url")
+            attachment_id = str(
+                attachment.get("id") or payload.get("id") or f"{message_id}:{index}"
+            )
 
             if att_type == "image":
-                media_url = attachment.get("payload", {}).get("url")
-                text = "El cliente envió una imagen."
+                media_url = attachment_url
+                attachment_texts.append("El cliente envió una imagen.")
+                if attachment_url:
+                    inbound_attachments.append({
+                        "external_message_id": attachment_id,
+                        "message_type": "image",
+                        "media_url": attachment_url,
+                    })
 
             elif att_type == "story_mention":
-                text = "El cliente te mencionó en su historia de Instagram."
+                attachment_texts.append("El cliente te mencionó en su historia de Instagram.")
 
             elif att_type == "story_reply":
-                text = message.get("reply_to", {}).get("story", {}).get("text", "")
-                if not text:
-                    text = "El cliente respondió a tu historia."
+                story_text = message.get("reply_to", {}).get("story", {}).get("text", "")
+                attachment_texts.append(story_text or "El cliente respondió a tu historia.")
 
-            elif att_type in ("audio", "video", "file"):
-                media_url = attachment.get("payload", {}).get("url")
-                text = f"[El cliente envió un archivo de tipo: {att_type}]"
+            elif att_type == "audio":
+                attachment_texts.append(inbound_audio_placeholder(attachment_id))
+                if attachment_url:
+                    inbound_attachments.append({
+                        "external_message_id": attachment_id,
+                        "message_type": "audio",
+                        "media_url": attachment_url,
+                    })
+
+            elif att_type in ("video", "file"):
+                attachment_texts.append(f"[El cliente envió un archivo de tipo: {att_type}]")
 
             elif att_type == "share":
                 # Shared a post, reel, or profile
-                share_url = attachment.get("payload", {}).get("url", "")
-                text = f"El cliente compartió un enlace: {share_url}" if share_url else "El cliente compartió contenido."
+                share_url = payload.get("url", "")
+                attachment_texts.append(
+                    f"El cliente compartió un enlace: {share_url}"
+                    if share_url
+                    else "El cliente compartió contenido."
+                )
 
             else:
-                text = f"[Contenido de tipo no soportado: {att_type}]"
+                attachment_texts.append(f"[Contenido de tipo no soportado: {att_type}]")
+
+    text = "\n".join(part for part in [text, *attachment_texts] if part).strip()
 
     if not text.strip():
         return
@@ -342,6 +425,7 @@ async def _process_message(
         media_url,
         sender_profile,
         integration_context=integration_context,
+        inbound_attachments=inbound_attachments,
     )
 
 
@@ -404,6 +488,7 @@ async def _route_to_ai(
     media_url: str | None = None,
     sender_profile: dict | None = None,
     integration_context: dict | None = None,
+    inbound_attachments: list[dict] | None = None,
 ):
     await enqueue_inbound_message(
         channel="instagram",
@@ -414,6 +499,7 @@ async def _route_to_ai(
         customer_profile=sender_profile or {},
         interaction_type=(integration_context or {}).get("interaction_type", "private_message"),
         integration_context=integration_context,
+        inbound_attachments=inbound_attachments,
     )
 
 

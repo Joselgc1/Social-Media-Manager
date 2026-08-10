@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 from app import db
+from app.ai.transcription import AudioTranscriptionError, transcribe_audio_url
 from app.channels.meta_errors import MetaSendError
 from app.config import get_config
 
@@ -37,6 +38,32 @@ def _combine_parts(parts: list[str]) -> str:
     return "\n".join(cleaned)
 
 
+def inbound_audio_placeholder(attachment_id: str) -> str:
+    return f"[Inbound audio:{attachment_id} pending transcription]"
+
+
+def _merge_inbound_attachments(current: list, new_values: list | None) -> list[dict]:
+    merged = []
+    seen = set()
+    for attachment in [*(current or []), *(new_values or [])]:
+        if not isinstance(attachment, dict):
+            continue
+        attachment_id = str(attachment.get("external_message_id") or "").strip()
+        message_type = str(attachment.get("message_type") or "").strip().lower()
+        media_url = str(attachment.get("media_url") or "").strip()
+        if not attachment_id or message_type not in {"audio", "voice", "image"} or not media_url:
+            continue
+        if attachment_id in seen:
+            continue
+        seen.add(attachment_id)
+        merged.append({
+            "external_message_id": attachment_id,
+            "message_type": message_type,
+            "media_url": media_url,
+        })
+    return merged
+
+
 async def enqueue_inbound_message(
     *,
     channel: str,
@@ -47,6 +74,7 @@ async def enqueue_inbound_message(
     customer_profile: dict | None = None,
     interaction_type: str = "private_message",
     integration_context: dict | None = None,
+    inbound_attachments: list[dict] | None = None,
 ) -> bool:
     """Persist one Meta delivery and extend its customer's debounce window."""
     if channel not in {"whatsapp", "instagram"}:
@@ -58,6 +86,7 @@ async def enqueue_inbound_message(
     if channel != "instagram" and interaction_type != "private_message":
         raise ValueError("Only Instagram supports non-private Meta interactions.")
     integration_context = dict(integration_context or {})
+    inbound_attachments = _merge_inbound_attachments([], inbound_attachments)
     mergeable = interaction_type == "private_message" and not integration_context
 
     async with db.get_db().transaction():
@@ -77,7 +106,7 @@ async def enqueue_inbound_message(
         if mergeable:
             pending = await db.fetch_one(
                 """
-                SELECT id, message_parts, customer_profile
+                SELECT id, message_parts, customer_profile, inbound_attachments
                 FROM meta_inbound_jobs
                 WHERE channel = :channel
                   AND sender_id = :sender_id
@@ -94,6 +123,10 @@ async def enqueue_inbound_message(
             parts = _json_list(pending["message_parts"])
             parts.append(text)
             profile = _merge_profile(_json_dict(pending["customer_profile"]), customer_profile)
+            attachments = _merge_inbound_attachments(
+                _json_list(_record_value(pending, "inbound_attachments", [])),
+                inbound_attachments,
+            )
             job_id = str(pending["id"])
             await db.execute(
                 """
@@ -101,6 +134,7 @@ async def enqueue_inbound_message(
                 SET message_parts = CAST(:parts AS jsonb),
                     media_url = COALESCE(:media_url, media_url),
                     customer_profile = CAST(:profile AS jsonb),
+                    inbound_attachments = CAST(:inbound_attachments AS jsonb),
                     available_at = NOW() + (:delay * INTERVAL '1 second'),
                     updated_at = NOW()
                 WHERE id = :job_id
@@ -109,6 +143,7 @@ async def enqueue_inbound_message(
                     "parts": json.dumps(parts, ensure_ascii=False),
                     "media_url": media_url,
                     "profile": json.dumps(profile, ensure_ascii=False),
+                    "inbound_attachments": json.dumps(attachments, ensure_ascii=False),
                     "delay": MESSAGE_DEBOUNCE_SECONDS,
                     "job_id": job_id,
                 },
@@ -118,13 +153,15 @@ async def enqueue_inbound_message(
                 """
                 INSERT INTO meta_inbound_jobs (
                     channel, sender_id, message_parts, media_url,
-                    customer_profile, interaction_type, integration_context, available_at
+                    customer_profile, interaction_type, integration_context,
+                    available_at, inbound_attachments
                 )
                 VALUES (
                     :channel, :sender_id, CAST(:parts AS jsonb), :media_url,
                     CAST(:profile AS jsonb), :interaction_type,
                     CAST(:integration_context AS jsonb),
-                    NOW() + (:delay * INTERVAL '1 second')
+                    NOW() + (:delay * INTERVAL '1 second'),
+                    CAST(:inbound_attachments AS jsonb)
                 )
                 RETURNING id
                 """,
@@ -136,6 +173,7 @@ async def enqueue_inbound_message(
                     "profile": json.dumps(customer_profile or {}, ensure_ascii=False),
                     "interaction_type": interaction_type,
                     "integration_context": json.dumps(integration_context, ensure_ascii=False),
+                    "inbound_attachments": json.dumps(inbound_attachments, ensure_ascii=False),
                     "delay": MESSAGE_DEBOUNCE_SECONDS,
                 },
             )
@@ -199,7 +237,7 @@ async def recover_stale_inbound_jobs() -> int:
             stale_job = await db.fetch_one(
                 """
                 SELECT id, message_parts, media_url, customer_profile, attempt_count,
-                       interaction_type, integration_context,
+                       interaction_type, integration_context, inbound_attachments,
                        outbound_started_at, outbound_message_ids, processing_lease_token
                 FROM meta_inbound_jobs
                 WHERE id = :job_id
@@ -253,7 +291,7 @@ async def recover_stale_inbound_jobs() -> int:
             ):
                 pending = await db.fetch_one(
                     """
-                    SELECT id, message_parts, media_url, customer_profile
+                    SELECT id, message_parts, media_url, customer_profile, inbound_attachments
                     FROM meta_inbound_jobs
                     WHERE channel = :channel AND sender_id = :sender_id
                       AND interaction_type = 'private_message'
@@ -271,12 +309,17 @@ async def recover_stale_inbound_jobs() -> int:
                     _json_dict(stale_job["customer_profile"]),
                     _json_dict(pending["customer_profile"]),
                 )
+                merged_attachments = _merge_inbound_attachments(
+                    _json_list(_record_value(stale_job, "inbound_attachments", [])),
+                    _json_list(_record_value(pending, "inbound_attachments", [])),
+                )
                 await db.execute(
                     """
                     UPDATE meta_inbound_jobs
                     SET message_parts = CAST(:parts AS jsonb),
                         media_url = COALESCE(media_url, :stale_media_url),
                         customer_profile = CAST(:profile AS jsonb),
+                        inbound_attachments = CAST(:inbound_attachments AS jsonb),
                         available_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :pending_id
@@ -285,6 +328,7 @@ async def recover_stale_inbound_jobs() -> int:
                         "parts": json.dumps(merged_parts, ensure_ascii=False),
                         "stale_media_url": stale_job["media_url"],
                         "profile": json.dumps(merged_profile, ensure_ascii=False),
+                        "inbound_attachments": json.dumps(merged_attachments, ensure_ascii=False),
                         "pending_id": str(pending["id"]),
                     },
                 )
@@ -357,7 +401,7 @@ async def _claim_due_job() -> dict | None:
             WHERE id = :job_id AND status = 'pending'
             RETURNING id, channel, sender_id, message_parts, media_url,
                       customer_profile, interaction_type, integration_context,
-                      attempt_count, processing_lease_token
+                      inbound_attachments, attempt_count, processing_lease_token
             """,
             {"job_id": str(candidate["id"]), "lease_token": lease_token},
         )
@@ -373,6 +417,15 @@ async def _process_claimed_job(job: dict) -> None:
         if text:
             processor = _resolve_processor(job["channel"])
             integration_context = _json_dict(job.get("integration_context"))
+            media_url = job.get("media_url")
+            if job["channel"] == "instagram":
+                text, media_url, attachment_context = await _prepare_instagram_attachments(
+                    text,
+                    _json_list(job.get("inbound_attachments")),
+                    media_url,
+                )
+                if attachment_context:
+                    integration_context["inbound_attachments"] = attachment_context
             if job["channel"] == "instagram" and integration_context:
                 from app.integrations.meta_context.service import enrich_native_instagram_context
 
@@ -381,7 +434,7 @@ async def _process_claimed_job(job: dict) -> None:
             await processor(
                 job["sender_id"],
                 text,
-                job.get("media_url"),
+                media_url,
                 _json_dict(job.get("customer_profile")),
                 job_id,
                 lease_token,
@@ -408,6 +461,40 @@ async def _process_claimed_job(job: dict) -> None:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
+
+
+async def _prepare_instagram_attachments(
+    text: str,
+    inbound_attachments: list,
+    legacy_media_url: str | None,
+) -> tuple[str, str | None, list[dict]]:
+    attachments = _merge_inbound_attachments([], inbound_attachments)
+    if not attachments:
+        return text, legacy_media_url, []
+
+    effective_text = text
+    image_url = None
+    context = []
+    for attachment in attachments:
+        attachment_id = attachment["external_message_id"]
+        message_type = attachment["message_type"]
+        if message_type == "image":
+            image_url = attachment["media_url"]
+            context.append({"type": "image", "external_message_id": attachment_id})
+            continue
+
+        transcription = await transcribe_audio_url(attachment["media_url"])
+        placeholder = inbound_audio_placeholder(attachment_id)
+        if placeholder in effective_text:
+            effective_text = effective_text.replace(placeholder, transcription, 1)
+        else:
+            effective_text = f"{effective_text}\n{transcription}".strip()
+        context.append({
+            "type": "audio",
+            "external_message_id": attachment_id,
+            "transcribed": True,
+        })
+    return effective_text, image_url, context
 
 
 async def _process_claimed_with_slot(job: dict) -> None:
@@ -444,6 +531,8 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
     sender_id = job["sender_id"]
     lease_token = str(job.get("processing_lease_token") or "")
     retry = int(job.get("attempt_count") or 0) < MAX_PROCESSING_ATTEMPTS
+    if isinstance(error, AudioTranscriptionError) and not error.retryable:
+        retry = False
     known_safe_send_failure = isinstance(error, MetaSendError) and error.retryable
     error_name = type(error).__name__[:100] if isinstance(error, Exception) else str(error)[:100]
     async with db.get_db().transaction():
@@ -451,7 +540,7 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
         current = await db.fetch_one(
             """
             SELECT id, message_parts, media_url, customer_profile,
-                   interaction_type, integration_context,
+                   interaction_type, integration_context, inbound_attachments,
                    outbound_started_at, outbound_message_ids
             FROM meta_inbound_jobs
             WHERE id = :job_id AND status = 'processing' AND processing_lease_token = :lease_token
@@ -499,7 +588,7 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
         ):
             pending = await db.fetch_one(
                 """
-                SELECT id, message_parts, media_url, customer_profile
+                SELECT id, message_parts, media_url, customer_profile, inbound_attachments
                 FROM meta_inbound_jobs
                 WHERE channel = :channel AND sender_id = :sender_id
                   AND interaction_type = 'private_message'
@@ -517,12 +606,17 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
                 _json_dict(current["customer_profile"]),
                 _json_dict(pending["customer_profile"]),
             )
+            attachments = _merge_inbound_attachments(
+                _json_list(_record_value(current, "inbound_attachments", [])),
+                _json_list(_record_value(pending, "inbound_attachments", [])),
+            )
             await db.execute(
                 """
                 UPDATE meta_inbound_jobs
                 SET message_parts = CAST(:parts AS jsonb),
                     media_url = COALESCE(media_url, :failed_media_url),
                     customer_profile = CAST(:profile AS jsonb),
+                    inbound_attachments = CAST(:inbound_attachments AS jsonb),
                     available_at = NOW() + INTERVAL '30 seconds', updated_at = NOW()
                 WHERE id = :pending_id
                 """,
@@ -530,6 +624,7 @@ async def _requeue_failed_job(job: dict, error: Exception | str) -> None:
                     "parts": json.dumps(parts, ensure_ascii=False),
                     "failed_media_url": current["media_url"],
                     "profile": json.dumps(profile, ensure_ascii=False),
+                    "inbound_attachments": json.dumps(attachments, ensure_ascii=False),
                     "pending_id": str(pending["id"]),
                 },
             )
@@ -614,7 +709,7 @@ async def _claim_sender_job(channel: str, sender_id: str) -> dict | None:
             )
             RETURNING id, channel, sender_id, message_parts, media_url,
                       customer_profile, interaction_type, integration_context,
-                      attempt_count, processing_lease_token
+                      inbound_attachments, attempt_count, processing_lease_token
             """,
             {"channel": channel, "sender_id": sender_id, "lease_token": lease_token},
         )
@@ -683,6 +778,24 @@ async def record_outbound_message(job_id: str, lease_token: str, response: dict 
             "message_ids": json.dumps(message_ids),
         },
     )
+
+
+async def is_recorded_meta_outbound_message(channel: str, message_id: str) -> bool:
+    """Return whether a Meta message ID was accepted by this backend."""
+    if not message_id:
+        return False
+    row = await db.fetch_one(
+        """
+        SELECT id
+        FROM meta_inbound_jobs
+        WHERE channel = :channel
+          AND outbound_message_ids @> CAST(:message_ids AS jsonb)
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        {"channel": channel, "message_ids": json.dumps([message_id])},
+    )
+    return bool(row)
 
 
 async def send_with_delivery_record(send_func, inbound_job_id: str, lease_token: str, **kwargs):

@@ -590,7 +590,11 @@ async def test_explicit_human_request_escalates_before_router_or_llm(engine_harn
 
     assert response["escalated"] is True
     assert "persona del equipo" in response["text"]
-    engine.escalations.escalate_customer_automatically.assert_awaited_once_with("customer-1", settings=engine_harness.settings)
+    engine.escalations.escalate_customer_automatically.assert_awaited_once_with(
+        "customer-1",
+        settings=engine_harness.settings,
+        channel="whatsapp",
+    )
     engine.notify_escalation.assert_awaited_once()
     engine_harness.provider.chat.assert_not_awaited()
     engine.conversations.get_history.assert_not_awaited()
@@ -602,7 +606,11 @@ async def test_hostile_message_escalates_before_normal_llm_flow(engine_harness):
 
     assert response["escalated"] is True
     assert "persona del equipo" in response["text"]
-    engine.escalations.escalate_customer_automatically.assert_awaited_once_with("customer-1", settings=engine_harness.settings)
+    engine.escalations.escalate_customer_automatically.assert_awaited_once_with(
+        "customer-1",
+        settings=engine_harness.settings,
+        channel="whatsapp",
+    )
     engine.notify_escalation.assert_awaited_once()
     engine_harness.provider.chat.assert_not_awaited()
     engine.conversations.get_history.assert_not_awaited()

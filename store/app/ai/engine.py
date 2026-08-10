@@ -207,13 +207,25 @@ async def generate_response(
     else:
         customer = None
     if not customer:
-        customer = await customers.get_or_create_customer(
-            channel=channel,
-            platform_id=sender_id,
-            display_name=(customer_profile or {}).get("display_name"),
-            phone=(customer_profile or {}).get("phone"),
-            instagram_handle=(customer_profile or {}).get("instagram_handle"),
-        )
+        if (
+            channel == "instagram"
+            and (customer_profile or {}).get("identity_provider") == "meta"
+        ):
+            from app.crm.channel_mappings import resolve_meta_instagram_customer
+
+            customer = await resolve_meta_instagram_customer(
+                sender_id,
+                display_name=(customer_profile or {}).get("display_name"),
+                instagram_handle=(customer_profile or {}).get("instagram_handle"),
+            )
+        else:
+            customer = await customers.get_or_create_customer(
+                channel=channel,
+                platform_id=sender_id,
+                display_name=(customer_profile or {}).get("display_name"),
+                phone=(customer_profile or {}).get("phone"),
+                instagram_handle=(customer_profile or {}).get("instagram_handle"),
+            )
 
     # ── 2b. Check if AI is paused (globally or per-customer) ─
     ai_enabled = not guards.is_ai_paused(settings)
@@ -293,7 +305,11 @@ async def generate_response(
             source_id=message_source_id,
             interaction_type=interaction_type,
         )
-        await escalations.escalate_customer_automatically(customer["id"], settings=settings)
+        await escalations.escalate_customer_automatically(
+            customer["id"],
+            settings=settings,
+            channel=channel,
+        )
         summary = await conversations.get_recent_summary(
             customer["id"],
             limit=5,
@@ -395,7 +411,11 @@ async def generate_response(
             source_id=message_source_id,
             interaction_type=interaction_type,
         )
-        await escalations.escalate_customer_automatically(customer["id"], settings=settings)
+        await escalations.escalate_customer_automatically(
+            customer["id"],
+            settings=settings,
+            channel=channel,
+        )
         summary = await conversations.get_recent_summary(
             customer["id"],
             limit=5,

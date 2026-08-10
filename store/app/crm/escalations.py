@@ -73,11 +73,17 @@ async def escalate_customer_automatically(
     *,
     settings: dict | None = None,
     now: datetime | None = None,
+    channel: str | None = None,
 ) -> dict | None:
     """Mark an AI-created escalation without overwriting manual/external pauses."""
     now = _utc_now(now)
     settings = settings if settings is not None else await db.get_settings()
     expires_at = automatic_expiration_from_settings(settings, now=now)
+    if (
+        channel == "instagram"
+        and channel_backend_for("instagram", get_config()) == "meta"
+    ):
+        expires_at = None
     row = await db.fetch_one(
         """
         UPDATE customers
@@ -234,7 +240,18 @@ async def mark_customer_active_for_admin(customer_id: str, *, channel: str | Non
         {"id": str(customer_id), "channel": channel},
     )
     if updated:
-        await reset_customer_context(str(customer_id))
+        try:
+            updated_channel = str(updated["channel"] or channel or "")
+        except KeyError:
+            updated_channel = str(channel or "")
+        preserve_history = (
+            updated_channel == "instagram"
+            and channel_backend_for("instagram", get_config()) == "meta"
+        )
+        await reset_customer_context(
+            str(customer_id),
+            preserve_history=preserve_history,
+        )
     _log_escalation(
         customer_id=str(customer_id),
         source=None,
@@ -352,9 +369,14 @@ async def process_expired_automatic_escalations(
     }
 
 
-async def reset_customer_context(customer_id: str) -> None:
+async def reset_customer_context(
+    customer_id: str,
+    *,
+    preserve_history: bool = False,
+) -> None:
     """Apply the same clean-chat reset used when an admin resumes AI."""
-    await conversations.clear_history(customer_id)
+    if not preserve_history:
+        await conversations.clear_history(customer_id)
     await sessions.reset_session(customer_id)
 
 
@@ -375,7 +397,7 @@ async def _reactivate_expired_locked(customer: dict, *, now: datetime) -> Reacti
     provider = "meta"
     kommo_lead_id = None
     try:
-        provider, kommo_lead_id = await _reactivate_delivery_provider_if_needed(customer_id)
+        provider, kommo_lead_id = await _reactivate_delivery_provider_if_needed(customer)
     except ProviderReactivationError as e:
         _log_escalation(
             customer_id=customer_id,
@@ -423,7 +445,13 @@ async def _reactivate_expired_locked(customer: dict, *, now: datetime) -> Reacti
         )
         return ReactivationResult(customer_id, "skipped", "stale_state", provider=provider, kommo_lead_id=kommo_lead_id)
 
-    await reset_customer_context(customer_id)
+    await reset_customer_context(
+        customer_id,
+        preserve_history=(
+            str(_record_channel(updated) or customer.get("channel") or "") == "instagram"
+            and channel_backend_for("instagram", get_config()) == "meta"
+        ),
+    )
     _log_escalation(
         customer_id=customer_id,
         source=ESCALATION_SOURCE_AUTOMATIC,
@@ -442,15 +470,14 @@ async def _reactivate_expired_locked(customer: dict, *, now: datetime) -> Reacti
     )
 
 
-async def _reactivate_delivery_provider_if_needed(customer_id: str) -> tuple[str, str | None]:
+async def _reactivate_delivery_provider_if_needed(customer: dict) -> tuple[str, str | None]:
     config = get_config()
-    if not any(
-        channel_backend_for(channel, config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    ):
+    customer_id = str(customer["id"])
+    channel = str(customer.get("channel") or "")
+    if channel_backend_for(channel, config) != "kommo":
         return "meta", None
 
-    mapping = await get_mapping_by_customer(customer_id, provider="kommo")
+    mapping = await get_mapping_by_customer(customer_id, provider="kommo", channel=channel)
     if not mapping or not mapping.get("external_lead_id"):
         return "meta", None
 
@@ -484,12 +511,25 @@ def _quick_skip_reason(customer: dict, now: datetime) -> str | None:
         return "not_escalated"
     if customer.get("escalation_source") != ESCALATION_SOURCE_AUTOMATIC:
         return "not_automatic"
+    if (
+        customer.get("channel") == "instagram"
+        and channel_backend_for("instagram", get_config()) == "meta"
+    ):
+        return "native_instagram_manual_resume_required"
     expires_at = _coerce_datetime(customer.get("escalation_expires_at"))
     if expires_at is None:
         return "no_expiration"
     if expires_at > now:
         return "not_expired"
     return None
+
+
+def _record_channel(record) -> str | None:
+    try:
+        value = record["channel"]
+    except (KeyError, TypeError):
+        return None
+    return str(value) if value else None
 
 
 def _coerce_datetime(value: Any) -> datetime | None:

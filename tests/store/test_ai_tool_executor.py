@@ -317,7 +317,7 @@ async def test_executor_escalation_notifies_owner_and_sets_state(monkeypatch):
     assert result["status"] == "escalated"
     notify_escalation.assert_awaited_once()
     assert notify_escalation.await_args.kwargs["customer_platform_id"] == "584121234567"
-    escalate.assert_awaited_once_with("customer-1")
+    escalate.assert_awaited_once_with("customer-1", channel="whatsapp")
 
 
 @pytest.mark.asyncio

@@ -152,6 +152,7 @@ async def test_verified_meta_sender_mapping_is_created_with_conflict_safe_constr
     assert insert_values == {
         "customer_id": "customer-1",
         "external_author_id": "meta-sender-1",
+        "external_origin": "story_reply",
     }
 
 

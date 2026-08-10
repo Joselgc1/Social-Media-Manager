@@ -33,9 +33,16 @@ class ManualActivationError(RuntimeError):
 async def activate_customer_for_admin(customer: dict, *, channel: str | None = None) -> ManualActivationResult:
     """Reactivate a customer from the admin UI, syncing Kommo first when needed."""
     customer_id = str(customer["id"])
-    kommo_lead_id = await _sync_kommo_ai_active_if_needed(customer_id)
+    customer_channel = str(channel or customer.get("channel") or "")
+    kommo_lead_id = await _sync_kommo_ai_active_if_needed(
+        customer_id,
+        customer_channel,
+    )
 
-    updated = await escalations.mark_customer_active_for_admin(customer_id, channel=channel)
+    updated = await escalations.mark_customer_active_for_admin(
+        customer_id,
+        channel=channel,
+    )
 
     return ManualActivationResult(
         customer_id=customer_id,
@@ -45,15 +52,19 @@ async def activate_customer_for_admin(customer: dict, *, channel: str | None = N
     )
 
 
-async def _sync_kommo_ai_active_if_needed(customer_id: str) -> str | None:
+async def _sync_kommo_ai_active_if_needed(
+    customer_id: str,
+    channel: str,
+) -> str | None:
     config = get_config()
-    if not any(
-        channel_backend_for(channel, config) == "kommo"
-        for channel in ("whatsapp", "instagram")
-    ):
+    if channel_backend_for(channel, config) != "kommo":
         return None
 
-    mapping = await get_mapping_by_customer(customer_id, provider="kommo")
+    mapping = await get_mapping_by_customer(
+        customer_id,
+        provider="kommo",
+        channel=channel,
+    )
     if not mapping or not mapping.get("external_lead_id"):
         return None
 

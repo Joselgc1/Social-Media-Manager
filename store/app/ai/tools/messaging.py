@@ -55,7 +55,10 @@ async def escalate_to_human(args: dict, context: ToolExecutionContext) -> dict:
         urgency=args.get("urgency", "medium"),
         conversation_summary=summary,
     )
-    await escalations.escalate_customer_automatically(customer_id)
+    await escalations.escalate_customer_automatically(
+        customer_id,
+        channel=context.channel,
+    )
     await _sync_kommo_escalation_if_needed(
         channel=context.channel,
         customer_id=customer_id,

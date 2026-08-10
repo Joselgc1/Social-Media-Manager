@@ -261,13 +261,18 @@ async def test_blocked_customers_are_never_reactivated(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manual_reactivation_clears_escalation_metadata_and_resets_context(monkeypatch):
+async def test_instagram_manual_reactivation_preserves_history_and_resets_session(monkeypatch):
     from app.crm import escalations
 
     active = _active_customer()
     mock_db = _install_escalation_db(monkeypatch, escalations, fetch_one_side_effect=[active])
     monkeypatch.setattr(escalations.conversations, "clear_history", AsyncMock())
     monkeypatch.setattr(escalations.sessions, "reset_session", AsyncMock())
+    monkeypatch.setattr(
+        escalations,
+        "get_config",
+        lambda: SimpleNamespace(whatsapp_backend="kommo", instagram_backend="meta"),
+    )
 
     result = await escalations.mark_customer_active_for_admin("customer-1", channel="instagram")
 
@@ -278,6 +283,26 @@ async def test_manual_reactivation_clears_escalation_metadata_and_resets_context
     assert "escalation_source = NULL" in query
     assert "escalated_at = NULL" in query
     assert "escalation_expires_at = NULL" in query
+    escalations.conversations.clear_history.assert_not_awaited()
+    escalations.sessions.reset_session.assert_awaited_once_with("customer-1")
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_manual_reactivation_keeps_clean_chat_reset(monkeypatch):
+    from app.crm import escalations
+
+    active = _active_customer(channel="whatsapp")
+    _install_escalation_db(monkeypatch, escalations, fetch_one_side_effect=[active])
+    monkeypatch.setattr(escalations.conversations, "clear_history", AsyncMock())
+    monkeypatch.setattr(escalations.sessions, "reset_session", AsyncMock())
+    monkeypatch.setattr(
+        escalations,
+        "get_config",
+        lambda: SimpleNamespace(whatsapp_backend="kommo", instagram_backend="meta"),
+    )
+
+    await escalations.mark_customer_active_for_admin("customer-1", channel="whatsapp")
+
     escalations.conversations.clear_history.assert_awaited_once_with("customer-1")
     escalations.sessions.reset_session.assert_awaited_once_with("customer-1")
 

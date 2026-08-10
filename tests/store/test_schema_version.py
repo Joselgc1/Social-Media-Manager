@@ -10,6 +10,7 @@ META_LEASE_COLUMNS = [
     {"column_name": "outbound_message_ids"},
     {"column_name": "interaction_type"},
     {"column_name": "integration_context"},
+    {"column_name": "inbound_attachments"},
 ]
 
 
@@ -52,6 +53,7 @@ async def test_store_schema_version_accepts_consolidated_upgrade_version(monkeyp
                     {"version": 14},
                     {"version": 15},
                     {"version": 16},
+                    {"version": 17},
                 ],
                 META_LEASE_COLUMNS,
             ]
@@ -102,6 +104,7 @@ async def test_store_schema_version_rejects_historical_upgrade_without_meta_leas
                     {"version": 14},
                     {"version": 15},
                     {"version": 16},
+                    {"version": 17},
                 ],
                 [{"column_name": "outbound_started_at"}],
             ]
