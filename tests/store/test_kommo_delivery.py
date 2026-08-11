@@ -927,7 +927,7 @@ async def test_in_flight_or_unknown_fingerprint_never_resends(monkeypatch, statu
 
 
 @pytest.mark.asyncio
-async def test_claim_retries_prepared_and_definitive_failed_only(monkeypatch):
+async def test_claim_scopes_provider_id_retry_block_to_direct_instagram(monkeypatch):
     database = _TransactionDB()
     execute = AsyncMock()
     fetch_one = AsyncMock(return_value={"status": "sending", "provider_message_id": None})
@@ -945,7 +945,9 @@ async def test_claim_retries_prepared_and_definitive_failed_only(monkeypatch):
     assert claim.status == "sending"
     assert claim.send_allowed is True
     update_query = fetch_one.await_args_list[0].args[0]
-    assert "status IN ('prepared', 'failed')" in update_query
+    assert "status = 'prepared'" in update_query
+    assert "NOT :require_direct_instagram_fence" in update_query
+    assert "provider_message_id IS NULL" in update_query
     assert "delivery_unknown" not in update_query
     assert "send_attempt_count" in update_query
     assert "send_attempt_month" in update_query
@@ -954,6 +956,7 @@ async def test_claim_retries_prepared_and_definitive_failed_only(monkeypatch):
         "job_id",
         "request_fingerprint",
         "attachment_metadata",
+        "require_direct_instagram_fence",
     }
     assert "media_type" not in fetch_one.await_args_list[0].args[1]
 
@@ -1288,29 +1291,6 @@ async def test_delivery_result_semantic_attachments_exclude_drive_identifiers(mo
     assert VERSION_UUID not in serialized
     assert "drive_uuid" not in serialized
     assert "image_url" not in serialized
-
-
-@pytest.mark.asyncio
-async def test_outgoing_confirmation_moves_only_accepted_chats_delivery(monkeypatch):
-    confirmed = AsyncMock(return_value={"id": "delivery-1"})
-    monkeypatch.setattr(delivery.db, "fetch_one", confirmed)
-
-    assert await delivery.confirm_outbound_delivery("message-1") is True
-
-    query, values = confirmed.await_args.args
-    assert "transport = 'chats_api'" in query
-    assert "status = 'accepted'" in query
-    assert "status = 'confirmed'" in query
-    assert "confirmed_at = COALESCE(confirmed_at, NOW())" in query
-    assert values == {"provider_message_id": "message-1"}
-
-
-@pytest.mark.asyncio
-async def test_unknown_outgoing_confirmation_is_harmless(monkeypatch):
-    monkeypatch.setattr(delivery.db, "fetch_one", AsyncMock(return_value=None))
-
-    assert await delivery.confirm_outbound_delivery("unknown-message") is False
-    assert await delivery.confirm_outbound_delivery(None) is False
 
 
 @pytest.mark.asyncio

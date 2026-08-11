@@ -575,7 +575,11 @@ CREATE TABLE IF NOT EXISTS kommo_message_jobs (
     salesbot_client_uuid TEXT,
     continuation_payload JSONB,
     continuation_response JSONB,
-    assistant_message_persisted_at TIMESTAMPTZ
+    assistant_message_persisted_at TIMESTAMPTZ,
+    pending_assistant_message JSONB,
+    delivery_wait_started_at TIMESTAMPTZ,
+    delivery_reconcile_after_at TIMESTAMPTZ,
+    delivery_reconcile_attempt_count INTEGER NOT NULL DEFAULT 0
 );
 
 ALTER TABLE kommo_message_jobs
@@ -601,7 +605,11 @@ ALTER TABLE kommo_message_jobs
     ADD COLUMN IF NOT EXISTS salesbot_client_uuid TEXT,
     ADD COLUMN IF NOT EXISTS continuation_payload JSONB,
     ADD COLUMN IF NOT EXISTS continuation_response JSONB,
-    ADD COLUMN IF NOT EXISTS assistant_message_persisted_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS assistant_message_persisted_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS pending_assistant_message JSONB,
+    ADD COLUMN IF NOT EXISTS delivery_wait_started_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS delivery_reconcile_after_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS delivery_reconcile_attempt_count INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE kommo_message_jobs
     DROP CONSTRAINT IF EXISTS kommo_message_jobs_status_check;
@@ -613,6 +621,7 @@ ALTER TABLE kommo_message_jobs
             'prepared',
             'waiting_for_salesbot',
             'waiting_for_context',
+            'waiting_for_delivery',
             'ready',
             'processing',
             'continuing',
@@ -644,13 +653,16 @@ CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_lead_status
 DROP INDEX IF EXISTS uq_kommo_message_jobs_active_salesbot;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_active_salesbot
     ON kommo_message_jobs(correlation_id)
-    WHERE status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing');
+    WHERE status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'waiting_for_delivery', 'ready', 'processing', 'continuing');
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_message_jobs_pending_correlation
     ON kommo_message_jobs(correlation_id)
     WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_delivery_unknown
     ON kommo_message_jobs(status, updated_at DESC)
     WHERE status = 'delivery_unknown';
+CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_delivery_reconcile
+    ON kommo_message_jobs(delivery_reconcile_after_at, created_at)
+    WHERE status = 'waiting_for_delivery';
 CREATE INDEX IF NOT EXISTS idx_kommo_message_jobs_salesbot_token_jti
     ON kommo_message_jobs(salesbot_token_jti)
     WHERE salesbot_token_jti IS NOT NULL;
@@ -667,6 +679,8 @@ COMMENT ON TABLE kommo_message_jobs IS 'Durable Kommo inbound jobs. Failed jobs 
 COMMENT ON COLUMN kommo_message_jobs.continuation_payload IS 'Last Salesbot continuation payload attempted for this job.';
 COMMENT ON COLUMN kommo_message_jobs.continuation_response IS 'Sanitized Salesbot continuation response when Kommo accepted the request.';
 COMMENT ON COLUMN kommo_message_jobs.assistant_message_persisted_at IS 'Set after the delivered Kommo continuation has been persisted as assistant conversation history. Used to make retries idempotent.';
+COMMENT ON COLUMN kommo_message_jobs.pending_assistant_message IS 'Assistant history payload held until direct Instagram delivery is confirmed.';
+COMMENT ON COLUMN kommo_message_jobs.delivery_wait_started_at IS 'Time when a direct Instagram Chats API message was accepted for asynchronous delivery.';
 COMMENT ON COLUMN kommo_message_jobs.interaction_type IS 'private_message for WhatsApp/Instagram DMs, instagram_comment for public Instagram comment replies through Kommo native comment-triggered Salesbot callbacks.';
 COMMENT ON COLUMN kommo_message_jobs.suppress_after_context IS 'When true, Story context is applied after callback but AI execution remains suppressed.';
 COMMENT ON COLUMN kommo_message_jobs.automation_block_reason IS 'Durable pre-Salesbot automation block reason used after Story context correlation.';

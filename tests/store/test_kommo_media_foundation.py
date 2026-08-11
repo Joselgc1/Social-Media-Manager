@@ -637,6 +637,42 @@ async def test_send_talk_message_posts_text_only_to_exact_talk(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_talk_message_delivery_status_returns_exact_provider_status():
+    client = KommoClient(subdomain="acme", access_token="token")
+    client._request = AsyncMock(
+        return_value={
+            "_embedded": {
+                "messages": [{"id": MESSAGE_UUID, "delivery_status": "seen"}]
+            }
+        }
+    )
+
+    status = await client.get_talk_message_delivery_status("128", MESSAGE_UUID)
+
+    assert status == "seen"
+
+    client._request.assert_awaited_once_with(
+        "GET",
+        "/api/v4/talks/128/messages?limit=250",
+        idempotent=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_talk_message_delivery_status_returns_error_without_treating_it_as_http_failure():
+    client = KommoClient(subdomain="acme", access_token="token")
+    client._request = AsyncMock(
+        return_value={
+            "_embedded": {
+                "messages": [{"id": MESSAGE_UUID, "delivery_status": "error"}]
+            }
+        }
+    )
+
+    assert await client.get_talk_message_delivery_status("128", MESSAGE_UUID) == "error"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "attachment",
     [

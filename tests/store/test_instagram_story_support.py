@@ -1101,12 +1101,10 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
             provider_message_ids=["instagram-message"],
         )
     )
-    direct_history = AsyncMock()
-    direct_sent = AsyncMock(return_value=True)
+    direct_waiting = AsyncMock(return_value=True)
     if is_direct_instagram:
         monkeypatch.setattr(jobs, "deliver_response", direct_delivery)
-        monkeypatch.setattr(jobs, "_store_assistant_message_after_delivery", direct_history)
-        monkeypatch.setattr(jobs, "_mark_direct_job_sent", direct_sent)
+        monkeypatch.setattr(jobs, "_mark_direct_job_waiting_for_delivery", direct_waiting)
 
     client = MagicMock()
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
@@ -1158,13 +1156,14 @@ async def test_ready_job_story_context_lifecycle(monkeypatch, case):
         client.continue_salesbot.assert_not_awaited()
         direct_delivery.assert_awaited_once()
         assert direct_delivery.await_args.kwargs["job"]["talk_id"] == "300"
-        direct_history.assert_awaited_once()
-        assert direct_history.await_args.kwargs["expected_job_status"] == "processing"
-        direct_sent.assert_awaited_once_with(
+        direct_waiting.assert_awaited_once()
+        assert direct_waiting.await_args.args[:4] == (
             "job-1",
             "00000000-0000-0000-0000-000000000001",
+            "300",
             ["instagram-message"],
         )
+        assert direct_waiting.await_args.args[4]["content"] == "Respuesta Kommo"
     else:
         client.continue_salesbot.assert_awaited_once_with(
             "https://acme.kommo.com/api/v4/salesbot/1/continue/2",
@@ -1417,11 +1416,9 @@ async def test_story_reply_delivery_waits_for_direct_transport_and_never_uses_sa
             provider_message_ids=["instagram-message"],
         )
     )
-    direct_history = AsyncMock()
-    direct_sent = AsyncMock(return_value=True)
+    direct_waiting = AsyncMock(return_value=True)
     monkeypatch.setattr(jobs, "deliver_response", direct_delivery)
-    monkeypatch.setattr(jobs, "_store_assistant_message_after_delivery", direct_history)
-    monkeypatch.setattr(jobs, "_mark_direct_job_sent", direct_sent)
+    monkeypatch.setattr(jobs, "_mark_direct_job_waiting_for_delivery", direct_waiting)
 
     client = MagicMock()
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
@@ -1442,12 +1439,14 @@ async def test_story_reply_delivery_waits_for_direct_transport_and_never_uses_sa
 
     client.continue_salesbot.assert_not_awaited()
     direct_delivery.assert_awaited_once()
-    direct_history.assert_awaited_once()
-    direct_sent.assert_awaited_once_with(
+    direct_waiting.assert_awaited_once()
+    assert direct_waiting.await_args.args[:4] == (
         "job-1",
         "00000000-0000-0000-0000-000000000001",
+        "300",
         ["instagram-message"],
     )
+    assert direct_waiting.await_args.args[4]["content"] == "Cuesta $25."
     meta_send.assert_not_awaited()
     integration_context = jobs.generate_response.await_args.kwargs["integration_context"]
     assert integration_context["incoming_instagram_context"]["story_id"] == "story-1"

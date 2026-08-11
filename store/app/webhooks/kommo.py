@@ -21,11 +21,11 @@ from app.integrations.kommo.auth import (
     validate_salesbot_jwt,
     validate_webhook_secret,
 )
-from app.integrations.kommo.delivery import confirm_outbound_delivery
 from app.integrations.kommo.jobs import (
     persist_salesbot_callback,
     process_ready_jobs,
     record_incoming_event,
+    request_delivery_reconciliation,
     sanitize_job_error,
     schedule_due_job_processing,
 )
@@ -121,10 +121,11 @@ async def handle_kommo_events(webhook_secret: str, request: Request):
             continue
 
         if event.event_type == "outgoing_message":
-            confirmed = await confirm_outbound_delivery(event.message_id)
+            requested = await request_delivery_reconciliation(event.message_id)
             logger.debug(
-                "Kommo outgoing message reconciled without auto-reply: matched=%s context=%s",
-                confirmed,
+                "Kommo outgoing message queued for delivery reconciliation without auto-reply: "
+                "matched=%s context=%s",
+                requested,
                 _event_log_context(event),
             )
             continue

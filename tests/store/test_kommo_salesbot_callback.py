@@ -189,9 +189,9 @@ async def test_outgoing_webhook_only_reconciles_existing_delivery(
     matched,
     origin,
 ):
-    confirm = AsyncMock(return_value=matched)
+    request_reconciliation = AsyncMock(return_value=matched)
     record = AsyncMock()
-    monkeypatch.setattr(kommo, "confirm_outbound_delivery", confirm)
+    monkeypatch.setattr(kommo, "request_delivery_reconciliation", request_reconciliation)
     monkeypatch.setattr(kommo, "record_incoming_event", record)
 
     response = await client.post(
@@ -210,7 +210,7 @@ async def test_outgoing_webhook_only_reconciles_existing_delivery(
     )
 
     assert response.status_code == 200
-    confirm.assert_awaited_once_with("provider-message-1")
+    request_reconciliation.assert_awaited_once_with("provider-message-1")
     record.assert_not_awaited()
 
 

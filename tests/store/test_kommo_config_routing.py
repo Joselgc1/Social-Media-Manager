@@ -421,10 +421,16 @@ async def test_normal_kommo_processor_releases_old_context_jobs_after_feature_di
     recover = AsyncMock()
     pending = AsyncMock()
     ready = AsyncMock()
+    delivery_waiting = AsyncMock()
     release = AsyncMock()
     monkeypatch.setattr(kommo_jobs, "recover_stale_jobs", recover)
     monkeypatch.setattr(kommo_jobs, "process_pending_jobs", pending)
     monkeypatch.setattr(kommo_jobs, "process_ready_jobs", ready)
+    monkeypatch.setattr(
+        kommo_jobs,
+        "process_waiting_for_delivery_jobs",
+        delivery_waiting,
+    )
     monkeypatch.setattr(correlation, "release_timed_out_context_jobs", release)
     monkeypatch.setattr(
         scheduler,
@@ -436,3 +442,4 @@ async def test_normal_kommo_processor_releases_old_context_jobs_after_feature_di
 
     release.assert_awaited_once_with(limit=10)
     ready.assert_awaited_once_with(limit=5)
+    delivery_waiting.assert_awaited_once_with(limit=10)

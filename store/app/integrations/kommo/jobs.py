@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 MAX_JOB_ATTEMPTS = 3
 STALE_PROCESSING_MINUTES = 5
 STALE_WAITING_MINUTES = 3
+DELIVERY_RECONCILE_INTERVAL_SECONDS = 15
 CUSTOMER_DELIVERY_FAILURE_MESSAGE = (
     "Disculpa, tuve un problema al enviarte el archivo. "
     "Por favor inténtalo de nuevo en unos minutos."
@@ -60,6 +61,7 @@ _ACTIVE_SALESBOT_STATUSES = {
     "prepared",
     "waiting_for_salesbot",
     "waiting_for_context",
+    "waiting_for_delivery",
     "ready",
     "processing",
     "continuing",
@@ -272,6 +274,312 @@ async def process_ready_jobs(limit: int = 5) -> int:
         await _process_ready_job(job_dict)
         processed += 1
     return processed
+
+
+async def process_waiting_for_delivery_jobs(limit: int = 10) -> int:
+    """Reconcile accepted direct Instagram messages without ever resending them."""
+    if get_config().channel_backend != "kommo":
+        return 0
+    processed = 0
+    for _ in range(limit):
+        job = await _claim_waiting_for_delivery_job()
+        if not job:
+            break
+        await _reconcile_waiting_for_delivery_job(dict(job))
+        processed += 1
+    return processed
+
+
+async def request_delivery_reconciliation(provider_message_id: str | None) -> bool:
+    """Make a known direct Instagram delivery eligible for scheduler reconciliation."""
+    message_id = str(provider_message_id or "").strip()
+    if not message_id:
+        return False
+    updated = await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs job
+        SET delivery_reconcile_after_at = NOW(),
+            updated_at = NOW()
+        FROM kommo_outbound_deliveries outbound
+        WHERE outbound.job_id = job.id
+          AND outbound.transport = 'chats_api'
+          AND outbound.provider_message_id = :provider_message_id
+          AND job.status = 'waiting_for_delivery'
+          AND job.channel = 'instagram'
+          AND job.interaction_type = 'private_message'
+        RETURNING job.id
+        """,
+        {"provider_message_id": message_id},
+    )
+    return bool(updated)
+
+
+async def _claim_waiting_for_delivery_job():
+    return await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs job
+        SET delivery_reconcile_after_at = NOW() + (:interval_seconds * INTERVAL '1 second'),
+            delivery_reconcile_attempt_count = delivery_reconcile_attempt_count + 1,
+            updated_at = NOW()
+        WHERE job.id = (
+            SELECT candidate.id
+            FROM kommo_message_jobs candidate
+            WHERE candidate.status = 'waiting_for_delivery'
+              AND candidate.channel = 'instagram'
+              AND candidate.interaction_type = 'private_message'
+              AND candidate.delivery_reconcile_after_at <= NOW()
+            ORDER BY candidate.delivery_reconcile_after_at, candidate.created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        RETURNING job.*
+        """,
+        {"interval_seconds": DELIVERY_RECONCILE_INTERVAL_SECONDS},
+    )
+
+
+async def _reconcile_waiting_for_delivery_job(job: dict) -> None:
+    outbound_rows = await db.fetch_all(
+        """
+        SELECT id, status, provider_message_id
+        FROM kommo_outbound_deliveries
+        WHERE job_id = CAST(:job_id AS uuid)
+          AND transport = 'chats_api'
+        ORDER BY created_at
+        """,
+        {"job_id": job["id"]},
+    )
+    if not outbound_rows:
+        logger.warning(
+            "Kommo delivery reconciliation deferred: job_id=%s talk_id=%s "
+            "provider_message_id=missing provider_delivery_status=missing_outbound",
+            job["id"],
+            job.get("talk_id"),
+        )
+        return
+
+    client = KommoClient.from_config()
+    all_delivered = True
+    for outbound_record in outbound_rows:
+        outbound = dict(outbound_record)
+        provider_message_id = str(outbound.get("provider_message_id") or "").strip()
+        if outbound.get("status") == "confirmed":
+            continue
+        if outbound.get("status") == "failed":
+            await _fail_waiting_delivery(
+                job,
+                provider_message_id,
+                "error",
+            )
+            return
+        if outbound.get("status") != "accepted" or not provider_message_id:
+            all_delivered = False
+            continue
+        try:
+            provider_status = await client.get_talk_message_delivery_status(
+                str(job.get("talk_id") or ""),
+                provider_message_id,
+            )
+        except Exception as error:
+            logger.warning(
+                "Kommo delivery reconciliation lookup failed: job_id=%s talk_id=%s "
+                "provider_message_id=%s provider_delivery_status=lookup_failed error=%s",
+                job["id"],
+                job.get("talk_id"),
+                provider_message_id,
+                sanitize_job_error(error),
+            )
+            return
+
+        logger.info(
+            "Kommo delivery reconciliation observed: job_id=%s talk_id=%s "
+            "provider_message_id=%s provider_delivery_status=%s",
+            job["id"],
+            job.get("talk_id"),
+            provider_message_id,
+            provider_status or "missing",
+        )
+        if provider_status in {"delivered", "seen"}:
+            await _confirm_waiting_delivery(outbound["id"], provider_message_id)
+            continue
+        if provider_status == "error":
+            await _fail_waiting_delivery(job, provider_message_id, provider_status)
+            return
+        all_delivered = False
+
+    if all_delivered:
+        await _finalize_waiting_delivery(job["id"])
+
+
+async def _confirm_waiting_delivery(outbound_id, provider_message_id: str) -> None:
+    await db.execute(
+        """
+        UPDATE kommo_outbound_deliveries
+        SET status = 'confirmed',
+            confirmed_at = COALESCE(confirmed_at, NOW()),
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE id = :id
+          AND provider_message_id = :provider_message_id
+          AND status = 'accepted'
+        """,
+        {"id": outbound_id, "provider_message_id": provider_message_id},
+    )
+
+
+async def _fail_waiting_delivery(
+    job: dict,
+    provider_message_id: str,
+    provider_status: str,
+) -> None:
+    diagnostic = sanitize_job_error(
+        f"Kommo provider delivery_status={provider_status} for message {provider_message_id}"
+    )
+    async with db.get_db().transaction():
+        await db.execute(
+            """
+            UPDATE kommo_outbound_deliveries
+            SET status = 'failed',
+                last_error = :last_error,
+                updated_at = NOW()
+            WHERE job_id = CAST(:job_id AS uuid)
+              AND transport = 'chats_api'
+              AND provider_message_id = :provider_message_id
+              AND status IN ('accepted', 'failed')
+            """,
+            {
+                "job_id": job["id"],
+                "provider_message_id": provider_message_id,
+                "last_error": diagnostic,
+            },
+        )
+        await db.execute(
+            """
+            UPDATE kommo_message_jobs
+            SET status = 'failed',
+                last_error = :last_error,
+                pending_assistant_message = NULL,
+                delivery_reconcile_after_at = NULL,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = :id
+              AND status = 'waiting_for_delivery'
+            """,
+            {"id": job["id"], "last_error": diagnostic},
+        )
+    logger.warning(
+        "Kommo direct Instagram delivery failed: job_id=%s talk_id=%s "
+        "provider_message_id=%s provider_delivery_status=%s",
+        job["id"],
+        job.get("talk_id"),
+        provider_message_id,
+        provider_status,
+    )
+
+
+async def _finalize_waiting_delivery(job_id: str) -> None:
+    job_record = await db.fetch_one(
+        """
+        SELECT * FROM kommo_message_jobs
+        WHERE id = :id AND status = 'waiting_for_delivery'
+        """,
+        {"id": job_id},
+    )
+    if not job_record:
+        return
+    job = dict(job_record)
+    payload = _json_dict(job.get("pending_assistant_message"))
+    await _persist_waiting_assistant_message(job, payload)
+    final_status = payload.get("final_status")
+    if final_status not in {"sent", "discarded"}:
+        final_status = "sent"
+    updated = await db.fetch_one(
+        """
+        UPDATE kommo_message_jobs
+        SET status = :final_status,
+            last_error = CASE WHEN :final_status = 'sent' THEN NULL ELSE last_error END,
+            pending_assistant_message = NULL,
+            delivery_reconcile_after_at = NULL,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = :id
+          AND status = 'waiting_for_delivery'
+          AND (
+              assistant_message_persisted_at IS NOT NULL
+              OR pending_assistant_message IS NULL
+              OR COALESCE(pending_assistant_message->>'customer_id', '') = ''
+          )
+        RETURNING id, talk_id
+        """,
+        {"id": job_id, "final_status": final_status},
+    )
+    if updated:
+        provider_ids = _provider_message_ids(job)
+        logger.info(
+            "Kommo direct Instagram delivery finalized: job_id=%s talk_id=%s "
+            "provider_message_id=%s provider_delivery_status=delivered",
+            job_id,
+            updated["talk_id"],
+            ",".join(provider_ids),
+        )
+
+
+async def _persist_waiting_assistant_message(job: dict, payload: dict) -> None:
+    customer_id = str(payload.get("customer_id") or "").strip()
+    content = str(payload.get("content") or "")
+    attachments = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
+    if not customer_id or (not content and not attachments):
+        return
+    async with db.get_db().transaction():
+        locked = await db.fetch_one(
+            """
+            SELECT assistant_message_persisted_at
+            FROM kommo_message_jobs
+            WHERE id = :id AND status = 'waiting_for_delivery'
+            FOR UPDATE
+            """,
+            {"id": job["id"]},
+        )
+        if not locked or locked["assistant_message_persisted_at"]:
+            return
+        await conversations.store_message(
+            customer_id=customer_id,
+            role="assistant",
+            content=content,
+            channel=str(payload.get("channel") or "instagram"),
+            function_calls=payload.get("function_calls"),
+            source_id=_conversation_source_id(job),
+            attachments=attachments or None,
+            interaction_type="private_message",
+        )
+        await db.execute(
+            """
+            UPDATE kommo_message_jobs
+            SET assistant_message_persisted_at = NOW(), updated_at = NOW()
+            WHERE id = :id
+              AND status = 'waiting_for_delivery'
+              AND assistant_message_persisted_at IS NULL
+            """,
+            {"id": job["id"]},
+        )
+
+
+def _json_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _provider_message_ids(job: dict) -> list[str]:
+    response = _json_dict(job.get("continuation_response"))
+    values = response.get("provider_message_ids")
+    return [str(value) for value in values] if isinstance(values, list) else []
 
 
 async def persist_salesbot_callback(data: SalesbotWidgetData, return_url: str, claims: dict | None = None) -> dict:
@@ -502,7 +810,7 @@ async def diagnostics_summary() -> dict:
         {"minutes": STALE_PROCESSING_MINUTES},
     )
     return {
-        "pending_job_count": counts.get("pending", 0) + counts.get("prepared", 0) + counts.get("waiting_for_salesbot", 0) + counts.get("waiting_for_context", 0) + counts.get("ready", 0) + counts.get("processing", 0) + counts.get("continuing", 0),
+        "pending_job_count": counts.get("pending", 0) + counts.get("prepared", 0) + counts.get("waiting_for_salesbot", 0) + counts.get("waiting_for_context", 0) + counts.get("waiting_for_delivery", 0) + counts.get("ready", 0) + counts.get("processing", 0) + counts.get("continuing", 0),
         "failed_job_count": counts.get("failed", 0) + counts.get("delivery_unknown", 0),
         "stale_job_count": stale["cnt"] if stale else 0,
         "last_successful_incoming_webhook_at": timestamps["last_incoming"] if timestamps else None,
@@ -534,7 +842,7 @@ async def _claim_due_pending_job():
               )
                AND NOT EXISTS (
                    SELECT 1 FROM kommo_message_jobs active
-                   WHERE active.status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing')
+                   WHERE active.status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'waiting_for_delivery', 'ready', 'processing', 'continuing')
                     AND active.id <> candidate.id
                     AND (
                         (candidate.lead_id IS NOT NULL AND active.lead_id = candidate.lead_id)
@@ -577,7 +885,7 @@ async def _log_pending_claim_diagnostics() -> None:
                salesbot_launched_at, processing_started_at, created_at, updated_at, last_error
         FROM kommo_message_jobs
         WHERE correlation_id = :correlation_id
-          AND status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing')
+          AND status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'waiting_for_delivery', 'ready', 'processing', 'continuing')
           AND id <> :id
         ORDER BY updated_at DESC
         LIMIT 3
@@ -1168,21 +1476,21 @@ async def _process_ready_job(job: dict) -> None:
         )
         if _is_direct_instagram_dm(job):
             media_delivery_succeeded = True
-            await _store_assistant_message_after_delivery(
-                customer,
-                job,
-                result,
-                delivery_result.customer_text,
-                delivered_attachments=delivery_result.delivered_attachments,
-                expected_job_status="processing",
-            )
-            if not await _mark_direct_job_sent(
+            if not await _mark_direct_job_waiting_for_delivery(
                 job["id"],
                 job.get("processing_lease_id"),
+                str(job.get("talk_id") or ""),
                 delivery_result.provider_message_ids,
+                _pending_assistant_payload(
+                    customer,
+                    result,
+                    delivery_result.customer_text,
+                    delivery_result.delivered_attachments,
+                    final_status="sent",
+                ),
             ):
                 raise KommoDeliveryStateError(
-                    "Kommo direct Instagram job could not be marked sent after delivery acceptance"
+                    "Kommo direct Instagram job could not enter delivery reconciliation"
                 )
             return
         if delivery_result.transport == "salesbot":
@@ -2223,22 +2531,22 @@ async def _continue_and_discard_job(
                 customer_text=direct_message,
                 client=client,
             )
-            if customer:
-                await _store_assistant_message_after_delivery(
-                    customer,
-                    job,
-                    {},
-                    delivery_result.customer_text,
-                    expected_job_status="processing",
-                )
-            if not await _mark_direct_job_discarded_after_delivery(
+            if not await _mark_direct_job_waiting_for_delivery(
                 job["id"],
                 job.get("processing_lease_id"),
-                reason,
+                str(job.get("talk_id") or ""),
                 delivery_result.provider_message_ids,
+                _pending_assistant_payload(
+                    customer,
+                    {},
+                    delivery_result.customer_text,
+                    [],
+                    final_status="discarded",
+                ),
+                reason=reason,
             ):
                 raise KommoDeliveryStateError(
-                    "Kommo direct Instagram fallback could not be finalized after acceptance"
+                    "Kommo direct Instagram fallback could not enter delivery reconciliation"
                 )
         except KommoDeliveryAbortedError as error:
             logger.info(
@@ -2471,29 +2779,51 @@ async def _mark_job_sent(job_id: str, processing_lease_id: str | None, response_
     return bool(updated)
 
 
-async def _mark_direct_job_sent(
+async def _mark_direct_job_waiting_for_delivery(
     job_id: str,
     processing_lease_id: str | None,
+    talk_id: str,
     provider_message_ids: list[str],
+    pending_assistant_message: dict,
+    *,
+    reason: str | None = None,
 ) -> bool:
     updated = await db.fetch_one(
         """
         UPDATE kommo_message_jobs
-        SET status = 'sent',
-            last_error = NULL,
+        SET status = 'waiting_for_delivery',
+            last_error = :last_error,
             continuation_response = CAST(:delivery_response AS jsonb),
+            pending_assistant_message = CAST(:pending_assistant_message AS jsonb),
+            delivery_wait_started_at = NOW(),
+            delivery_reconcile_after_at = NOW(),
+            delivery_reconcile_attempt_count = 0,
             processing_started_at = NULL,
             processing_lease_id = NULL,
-            completed_at = NOW(),
+            completed_at = NULL,
             updated_at = NOW()
         WHERE id = :id
           AND status = 'processing'
           AND processing_lease_id = CAST(:processing_lease_id AS uuid)
+          AND EXISTS (
+              SELECT 1
+              FROM kommo_outbound_deliveries outbound
+              WHERE outbound.job_id = kommo_message_jobs.id
+                AND outbound.transport = 'chats_api'
+                AND outbound.status IN ('accepted', 'confirmed')
+                AND outbound.provider_message_id = ANY(CAST(:provider_message_ids AS text[]))
+          )
         RETURNING id
         """,
         {
             "id": job_id,
             "processing_lease_id": processing_lease_id,
+            "last_error": sanitize_job_error(reason) if reason else None,
+            "pending_assistant_message": json.dumps(
+                pending_assistant_message,
+                ensure_ascii=False,
+            ),
+            "provider_message_ids": provider_message_ids,
             "delivery_response": json.dumps(
                 {
                     "transport": "chats_api",
@@ -2503,44 +2833,32 @@ async def _mark_direct_job_sent(
         },
     )
     if updated:
-        logger.info("Kommo direct Instagram delivery accepted: job_id=%s", job_id)
+        logger.info(
+            "Kommo direct Instagram delivery awaiting reconciliation: job_id=%s "
+            "talk_id=%s provider_message_id=%s provider_delivery_status=accepted",
+            job_id,
+            talk_id,
+            ",".join(provider_message_ids),
+        )
     return bool(updated)
 
 
-async def _mark_direct_job_discarded_after_delivery(
-    job_id: str,
-    processing_lease_id: str | None,
-    reason: str | None,
-    provider_message_ids: list[str],
-) -> bool:
-    updated = await db.fetch_one(
-        """
-        UPDATE kommo_message_jobs
-        SET status = 'discarded',
-            last_error = :last_error,
-            continuation_response = CAST(:delivery_response AS jsonb),
-            processing_started_at = NULL,
-            processing_lease_id = NULL,
-            completed_at = NOW(),
-            updated_at = NOW()
-        WHERE id = :id
-          AND status = 'processing'
-          AND processing_lease_id = CAST(:processing_lease_id AS uuid)
-        RETURNING id
-        """,
-        {
-            "id": job_id,
-            "processing_lease_id": processing_lease_id,
-            "last_error": sanitize_job_error(reason) if reason else None,
-            "delivery_response": json.dumps(
-                {
-                    "transport": "chats_api",
-                    "provider_message_ids": provider_message_ids,
-                }
-            ),
-        },
-    )
-    return bool(updated)
+def _pending_assistant_payload(
+    customer: dict | None,
+    result: dict,
+    customer_text: str | None,
+    delivered_attachments: list[dict],
+    *,
+    final_status: str,
+) -> dict:
+    return {
+        "customer_id": str(customer["id"]) if customer and customer.get("id") else None,
+        "channel": "instagram",
+        "content": customer_text or result.get("text") or "",
+        "function_calls": result.get("function_calls"),
+        "attachments": delivered_attachments,
+        "final_status": final_status,
+    }
 
 
 def _log_continuation_prepared(

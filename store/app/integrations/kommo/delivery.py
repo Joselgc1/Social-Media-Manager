@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -24,6 +25,8 @@ from app.integrations.kommo.files import (
     KommoPDFSendUnsupportedError,
     KommoUploadedFile,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -549,6 +552,7 @@ async def _claim_delivery(
         "job_id": job_id,
         "request_fingerprint": request_fingerprint,
         "attachment_metadata": insert_values["attachment_metadata"],
+        "require_direct_instagram_fence": require_direct_instagram_fence,
     }
     existing_values = {
         "job_id": job_id,
@@ -655,7 +659,16 @@ async def _claim_delivery(
             WHERE job_id = CAST(:job_id AS uuid)
               AND transport = 'chats_api'
               AND request_fingerprint = :request_fingerprint
-              AND status IN ('prepared', 'failed')
+              AND (
+                  status = 'prepared'
+                  OR (
+                      status = 'failed'
+                      AND (
+                          NOT :require_direct_instagram_fence
+                          OR provider_message_id IS NULL
+                      )
+                  )
+              )
             RETURNING status, provider_message_id
             """,
             claim_values,
@@ -756,6 +769,12 @@ async def _send_claimed_delivery(
         ) from error
     if not accepted:
         raise KommoDeliveryStateError("Kommo delivery acceptance could not be persisted")
+    logger.info(
+        "Kommo Chats API message accepted: job_id=%s talk_id=%s provider_message_id=%s",
+        job_id,
+        talk_id,
+        provider_message_id.strip(),
+    )
     return provider_message_id.strip()
 
 
@@ -792,27 +811,6 @@ async def _mark_delivery_error(
             "last_error": sanitize_kommo_error(error),
         },
     )
-
-
-async def confirm_outbound_delivery(provider_message_id: str | None) -> bool:
-    """Confirm an accepted Chats API delivery from an outgoing webhook."""
-    message_id = str(provider_message_id or "").strip()
-    if not message_id:
-        return False
-    confirmed = await db.fetch_one(
-        """
-        UPDATE kommo_outbound_deliveries
-        SET status = 'confirmed',
-            confirmed_at = COALESCE(confirmed_at, NOW()),
-            updated_at = NOW()
-        WHERE transport = 'chats_api'
-          AND provider_message_id = :provider_message_id
-          AND status = 'accepted'
-        RETURNING id
-        """,
-        {"provider_message_id": message_id},
-    )
-    return bool(confirmed)
 
 
 async def monthly_usage_summary(monthly_limit: int | None) -> dict:

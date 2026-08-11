@@ -332,7 +332,12 @@ async def _refresh_catalog_pdf():
 
 async def _process_kommo_jobs():
     try:
-        from app.integrations.kommo.jobs import process_pending_jobs, process_ready_jobs, recover_stale_jobs
+        from app.integrations.kommo.jobs import (
+            process_pending_jobs,
+            process_ready_jobs,
+            process_waiting_for_delivery_jobs,
+            recover_stale_jobs,
+        )
 
         await recover_stale_jobs()
         config = get_config()
@@ -345,6 +350,7 @@ async def _process_kommo_jobs():
             await release_timed_out_context_jobs(limit=10)
         await process_pending_jobs(limit=10)
         await process_ready_jobs(limit=5)
+        await process_waiting_for_delivery_jobs(limit=10)
     except Exception as e:
         logger.error(f"Kommo job processor failed: {e}")
 

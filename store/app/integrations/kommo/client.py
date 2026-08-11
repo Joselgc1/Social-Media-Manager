@@ -293,6 +293,32 @@ class KommoClient:
             raise KommoAPIError("Kommo send-message response is missing the message ID")
         return response
 
+    async def get_talk_message_delivery_status(
+        self,
+        talk_id: str,
+        message_id: str,
+    ) -> str | None:
+        """Return Kommo's downstream delivery status for one conversation message."""
+        try:
+            normalized_talk_id = int(str(talk_id).strip())
+        except (TypeError, ValueError) as error:
+            raise KommoAPIError("Kommo delivery status identifiers are invalid") from error
+        normalized_message_id = str(message_id).strip()
+        if normalized_talk_id <= 0 or not normalized_message_id:
+            raise KommoAPIError("Kommo delivery status identifiers are invalid")
+
+        response = await self._request(
+            "GET",
+            f"/api/v4/talks/{normalized_talk_id}/messages?limit=250",
+            idempotent=True,
+        )
+        embedded = response.get("_embedded") if isinstance(response, dict) else None
+        messages = embedded.get("messages") if isinstance(embedded, dict) else None
+        for message in messages if isinstance(messages, list) else []:
+            if isinstance(message, dict) and str(message.get("id") or "") == normalized_message_id:
+                return str(message.get("delivery_status") or "").strip().lower() or None
+        return None
+
     async def run_salesbot(
         self,
         entity_id: int | str,

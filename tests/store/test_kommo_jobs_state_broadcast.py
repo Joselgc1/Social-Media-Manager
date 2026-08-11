@@ -618,7 +618,7 @@ async def test_atomic_job_claiming_prevents_concurrent_salesbot_runs(monkeypatch
     assert "FOR UPDATE SKIP LOCKED" in query
     assert "NOT EXISTS" in query
     assert "waiting_for_salesbot" in query
-    assert "active.status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'ready', 'processing', 'continuing')" in query
+    assert "active.status IN ('prepared', 'waiting_for_salesbot', 'waiting_for_context', 'waiting_for_delivery', 'ready', 'processing', 'continuing')" in query
     assert "active.lead_id = candidate.lead_id" in query
     assert "active.contact_id = candidate.contact_id" in query
     assert "pg_try_advisory_xact_lock" in query
@@ -1304,7 +1304,7 @@ async def test_valid_contact_callback_uses_exact_update_bind_parameters(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_ready_instagram_dm_delivers_directly_and_marks_sent(monkeypatch):
+async def test_ready_instagram_dm_waits_for_delivery_without_persisting_history(monkeypatch):
     from app.integrations.kommo import jobs
 
     mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
@@ -1329,27 +1329,21 @@ async def test_ready_instagram_dm_delivers_directly_and_marks_sent(monkeypatch):
     assert deliver.await_args.kwargs["customer_text"] == "Respuesta directa"
     client.run_salesbot.assert_not_awaited()
     client.continue_salesbot.assert_not_awaited()
-    store_message.assert_awaited_once_with(
-        customer_id="customer",
-        role="assistant",
-        content="Respuesta directa",
-        channel="instagram",
-        function_calls=None,
-        source_id="kommo-job:job",
-        attachments=None,
-        interaction_type="private_message",
-    )
-    sent_call = next(
+    store_message.assert_not_awaited()
+    waiting_call = next(
         call
         for call in mock_db.fetch_one.await_args_list
-        if "SET status = 'sent'" in call.args[0]
+        if "SET status = 'waiting_for_delivery'" in call.args[0]
     )
-    assert "status = 'processing'" in sent_call.args[0]
-    assert "status = 'continuing'" not in sent_call.args[0]
-    assert json.loads(sent_call.args[1]["delivery_response"]) == {
+    assert "status = 'processing'" in waiting_call.args[0]
+    assert json.loads(waiting_call.args[1]["delivery_response"]) == {
         "transport": "chats_api",
         "provider_message_ids": ["instagram-message"],
     }
+    pending = json.loads(waiting_call.args[1]["pending_assistant_message"])
+    assert pending["content"] == "Respuesta directa"
+    assert pending["customer_id"] == "customer"
+    assert pending["final_status"] == "sent"
 
 
 @pytest.mark.asyncio
@@ -1422,11 +1416,15 @@ async def test_ready_instagram_product_image_persists_only_semantic_image(
 
     assert deliver.await_args.kwargs["customer_text"] == "Aqui tienes la foto."
     assert image_url not in deliver.await_args.kwargs["customer_text"]
-    store_message.assert_awaited_once()
-    assert store_message.await_args.kwargs["attachments"] == [semantic_image]
-    assert all(item["type"] != "catalog_pdf" for item in store_message.await_args.kwargs["attachments"])
+    store_message.assert_not_awaited()
+    waiting_call = next(
+        call for call in mock_db.fetch_one.await_args_list
+        if "SET status = 'waiting_for_delivery'" in call.args[0]
+    )
+    pending = json.loads(waiting_call.args[1]["pending_assistant_message"])
+    assert pending["attachments"] == [semantic_image]
+    assert all(item["type"] != "catalog_pdf" for item in pending["attachments"])
     client.continue_salesbot.assert_not_awaited()
-    assert any("SET status = 'sent'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -1441,7 +1439,7 @@ async def test_ready_instagram_catalog_handoff_persists_text_without_pdf(monkeyp
         delivered_attachments=[],
         provider_message_ids=["instagram-text"],
     )
-    _mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
+    mock_db, client, _generate, deliver, store_message = _install_direct_ready_job(
         monkeypatch,
         jobs,
         ai_result={
@@ -1466,7 +1464,12 @@ async def test_ready_instagram_catalog_handoff_persists_text_without_pdf(monkeyp
     )
 
     assert deliver.await_args.kwargs["customer_text"] == handoff
-    assert store_message.await_args.kwargs["attachments"] is None
+    store_message.assert_not_awaited()
+    waiting_call = next(
+        call for call in mock_db.fetch_one.await_args_list
+        if "SET status = 'waiting_for_delivery'" in call.args[0]
+    )
+    assert json.loads(waiting_call.args[1]["pending_assistant_message"])["attachments"] == []
     client.continue_salesbot.assert_not_awaited()
 
 
@@ -1608,9 +1611,14 @@ async def test_instagram_image_preflight_failure_sends_one_safe_direct_fallback(
         text=jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE,
     )
     client.continue_salesbot.assert_not_awaited()
-    store_message.assert_awaited_once()
-    assert store_message.await_args.kwargs["content"] == jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE
-    assert any("SET status = 'discarded'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
+    store_message.assert_not_awaited()
+    waiting_call = next(
+        call for call in mock_db.fetch_one.await_args_list
+        if "SET status = 'waiting_for_delivery'" in call.args[0]
+    )
+    pending = json.loads(waiting_call.args[1]["pending_assistant_message"])
+    assert pending["content"] == jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE
+    assert pending["final_status"] == "discarded"
     if failure_stage == "download":
         files.upload_downloaded_image.assert_not_awaited()
     else:
@@ -1715,7 +1723,7 @@ async def test_direct_instagram_no_reply_paths_never_continue_salesbot(
         deliver.assert_awaited_once()
         assert deliver.await_args.kwargs["customer_text"] == jobs.UNSUPPORTED_ATTACHMENT_MESSAGE
         assert deliver.await_args.kwargs["job"]["direct_delivery_purpose"] == "fallback"
-        assert any("SET status = 'discarded'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
+        assert any("SET status = 'waiting_for_delivery'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
     else:
         deliver.assert_not_awaited()
         terminal_values = mock_db.execute.await_args.args[1]
@@ -1749,9 +1757,9 @@ async def test_direct_instagram_ai_failure_sends_safe_fallback_without_salesbot(
     deliver.assert_awaited_once()
     assert deliver.await_args.kwargs["customer_text"] == jobs.CUSTOMER_DELIVERY_FAILURE_MESSAGE
     assert deliver.await_args.kwargs["job"]["direct_delivery_purpose"] == "fallback"
-    store_message.assert_awaited_once()
+    store_message.assert_not_awaited()
     client.continue_salesbot.assert_not_awaited()
-    assert any("SET status = 'discarded'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
+    assert any("SET status = 'waiting_for_delivery'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -1784,7 +1792,7 @@ async def test_direct_instagram_lost_lease_aborts_without_customer_send(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_direct_instagram_explicit_fallback_persists_delivered_message(monkeypatch):
+async def test_direct_instagram_explicit_fallback_waits_before_persisting_message(monkeypatch):
     from app.integrations.kommo import jobs
     from app.integrations.kommo.delivery import DeliveryResult
 
@@ -1819,9 +1827,224 @@ async def test_direct_instagram_explicit_fallback_persists_delivered_message(mon
     )
 
     deliver.assert_awaited_once()
-    store_message.assert_awaited_once()
-    assert store_message.await_args.kwargs["content"] == jobs.UNSUPPORTED_ATTACHMENT_MESSAGE
-    assert any("SET status = 'discarded'" in call.args[0] for call in mock_db.fetch_one.await_args_list)
+    store_message.assert_not_awaited()
+    waiting_call = next(
+        call for call in mock_db.fetch_one.await_args_list
+        if "SET status = 'waiting_for_delivery'" in call.args[0]
+    )
+    pending = json.loads(waiting_call.args[1]["pending_assistant_message"])
+    assert pending["content"] == jobs.UNSUPPORTED_ATTACHMENT_MESSAGE
+    assert pending["final_status"] == "discarded"
+
+
+@pytest.mark.asyncio
+async def test_waiting_instagram_delivery_delivered_confirms_and_finalizes(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_all = AsyncMock(
+        return_value=[
+            {"id": "outbound", "status": "accepted", "provider_message_id": "message-1"}
+        ]
+    )
+    monkeypatch.setattr(jobs, "db", mock_db)
+    client = SimpleNamespace(
+        get_talk_message_delivery_status=AsyncMock(return_value="delivered")
+    )
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+    confirm = AsyncMock()
+    finalize = AsyncMock()
+    fail = AsyncMock()
+    monkeypatch.setattr(jobs, "_confirm_waiting_delivery", confirm)
+    monkeypatch.setattr(jobs, "_finalize_waiting_delivery", finalize)
+    monkeypatch.setattr(jobs, "_fail_waiting_delivery", fail)
+
+    await jobs._reconcile_waiting_for_delivery_job(
+        {"id": "job", "talk_id": "300", "channel": "instagram"}
+    )
+
+    client.get_talk_message_delivery_status.assert_awaited_once_with("300", "message-1")
+    confirm.assert_awaited_once_with("outbound", "message-1")
+    finalize.assert_awaited_once_with("job")
+    fail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_waiting_instagram_delivery_error_fails_without_finalizing(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_all = AsyncMock(
+        return_value=[
+            {"id": "outbound", "status": "accepted", "provider_message_id": "message-1"}
+        ]
+    )
+    monkeypatch.setattr(jobs, "db", mock_db)
+    client = SimpleNamespace(get_talk_message_delivery_status=AsyncMock(return_value="error"))
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+    confirm = AsyncMock()
+    finalize = AsyncMock()
+    fail = AsyncMock()
+    monkeypatch.setattr(jobs, "_confirm_waiting_delivery", confirm)
+    monkeypatch.setattr(jobs, "_finalize_waiting_delivery", finalize)
+    monkeypatch.setattr(jobs, "_fail_waiting_delivery", fail)
+    job = {"id": "job", "talk_id": "300", "channel": "instagram"}
+
+    await jobs._reconcile_waiting_for_delivery_job(job)
+
+    fail.assert_awaited_once_with(job, "message-1", "error")
+    confirm.assert_not_awaited()
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delivery_error_marks_outbound_and_job_failed_with_safe_diagnostic(
+    monkeypatch,
+    caplog,
+):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    job = {"id": "job", "talk_id": "300"}
+
+    await jobs._fail_waiting_delivery(job, "message-1", "error")
+
+    assert mock_db.execute.await_count == 2
+    outbound_call, job_call = mock_db.execute.await_args_list
+    assert "SET status = 'failed'" in outbound_call.args[0]
+    assert "provider_message_id = :provider_message_id" in outbound_call.args[0]
+    assert "SET status = 'failed'" in job_call.args[0]
+    assert "status = 'waiting_for_delivery'" in job_call.args[0]
+    assert outbound_call.args[1]["last_error"] == job_call.args[1]["last_error"]
+    assert "delivery_status=error" in outbound_call.args[1]["last_error"]
+    assert "job_id=job" in caplog.text
+    assert "talk_id=300" in caplog.text
+    assert "provider_message_id=message-1" in caplog.text
+    assert "provider_delivery_status=error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_waiting_instagram_delivery_sent_remains_pending_without_resend(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.fetch_all = AsyncMock(
+        return_value=[
+            {"id": "outbound", "status": "accepted", "provider_message_id": "message-1"}
+        ]
+    )
+    monkeypatch.setattr(jobs, "db", mock_db)
+    client = SimpleNamespace(get_talk_message_delivery_status=AsyncMock(return_value="sent"))
+    monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
+    confirm = AsyncMock()
+    finalize = AsyncMock()
+    fail = AsyncMock()
+    monkeypatch.setattr(jobs, "_confirm_waiting_delivery", confirm)
+    monkeypatch.setattr(jobs, "_finalize_waiting_delivery", finalize)
+    monkeypatch.setattr(jobs, "_fail_waiting_delivery", fail)
+
+    await jobs._reconcile_waiting_for_delivery_job({"id": "job", "talk_id": "300"})
+
+    confirm.assert_not_awaited()
+    finalize.assert_not_awaited()
+    fail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_delivery_finalization_persists_assistant_once(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    pending = {
+        "customer_id": "customer",
+        "content": "Respuesta",
+        "attachments": [],
+        "final_status": "sent",
+    }
+    job = {
+        "id": "job",
+        "talk_id": "300",
+        "status": "waiting_for_delivery",
+        "pending_assistant_message": pending,
+        "continuation_response": {"provider_message_ids": ["message-1"]},
+    }
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(
+        side_effect=[job, {"id": "job", "talk_id": "300"}, None]
+    )
+    monkeypatch.setattr(jobs, "db", mock_db)
+    persist = AsyncMock()
+    monkeypatch.setattr(jobs, "_persist_waiting_assistant_message", persist)
+
+    await jobs._finalize_waiting_delivery("job")
+    await jobs._finalize_waiting_delivery("job")
+
+    persist.assert_awaited_once_with(job, pending)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_assistant_persistence_is_exactly_once(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    state = {"persisted": False}
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+
+    async def fetch_one(_query, _values=None):
+        return {
+            "assistant_message_persisted_at": "already"
+            if state["persisted"]
+            else None
+        }
+
+    async def execute(_query, _values=None):
+        state["persisted"] = True
+
+    mock_db.fetch_one = AsyncMock(side_effect=fetch_one)
+    mock_db.execute = AsyncMock(side_effect=execute)
+    monkeypatch.setattr(jobs, "db", mock_db)
+    store_message = AsyncMock()
+    monkeypatch.setattr(jobs.conversations, "store_message", store_message)
+    job = {"id": "job", "channel": "instagram", "interaction_type": "private_message"}
+    payload = {
+        "customer_id": "customer",
+        "channel": "instagram",
+        "content": "Respuesta",
+        "function_calls": None,
+        "attachments": [],
+    }
+
+    await jobs._persist_waiting_assistant_message(job, payload)
+    await jobs._persist_waiting_assistant_message(job, payload)
+
+    store_message.assert_awaited_once_with(
+        customer_id="customer",
+        role="assistant",
+        content="Respuesta",
+        channel="instagram",
+        function_calls=None,
+        source_id="kommo-job:job",
+        attachments=None,
+        interaction_type="private_message",
+    )
+
+
+@pytest.mark.asyncio
+async def test_outgoing_webhook_trigger_does_not_confirm_delivery(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    fetch_one = AsyncMock(return_value={"id": "job"})
+    monkeypatch.setattr(jobs.db, "fetch_one", fetch_one)
+
+    assert await jobs.request_delivery_reconciliation("message-1") is True
+
+    query, values = fetch_one.await_args.args
+    assert "delivery_reconcile_after_at = NOW()" in query
+    assert "status = 'waiting_for_delivery'" in query
+    assert "status = 'confirmed'" not in query
+    assert values == {"provider_message_id": "message-1"}
 
 
 @pytest.mark.asyncio

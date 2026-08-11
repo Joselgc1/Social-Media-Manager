@@ -26,7 +26,7 @@ from app.payment_methods import (
 from app.runtime_settings import RUNTIME_SETTING_DEFAULTS
 
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_VERSION = 15
+EXPECTED_SCHEMA_VERSION = 16
 SLOW_DB_OPERATION_MS = 500.0
 
 _db: _InstrumentedDatabase | None = None
@@ -217,13 +217,13 @@ async def verify_schema_version() -> None:
 
     versions = {int(row["version"]) for row in rows}
     accepted_versions = (
-        {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
-        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+        {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
     )
     if versions not in accepted_versions:
         raise RuntimeError(
             f"Store database schema version mismatch: expected one of {[sorted(item) for item in accepted_versions]}, found {sorted(versions)}. "
-            "Apply Store migrations through store/migrations/015_conversation_interaction_scope.sql."
+            "Apply Store migrations through store/migrations/016_kommo_waiting_for_delivery.sql."
         )
 
     required_meta_columns = {

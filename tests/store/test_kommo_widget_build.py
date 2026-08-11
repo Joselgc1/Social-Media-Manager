@@ -140,7 +140,7 @@ def _flow_exit_codes(flow: list[dict]) -> set[str]:
 def test_manifest_is_installable_and_visible_in_settings_and_salesbot():
     manifest = _source_manifest()
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.14"
+    assert manifest["widget"]["version"] == "1.2.15"
     assert manifest["locations"] == ["settings", "salesbot_designer"]
     assert manifest["settings"]["backend_url"] == {
         "name": "settings.backend_url",
@@ -214,7 +214,7 @@ def test_widget_build_substitutes_widget_code_and_includes_expected_archive_cont
     assert "manifest.json" in names
     assert "__WIDGET_CODE__" not in json.dumps(manifest)
     assert manifest["widget"]["installation"] is True
-    assert manifest["widget"]["version"] == "1.2.14"
+    assert manifest["widget"]["version"] == "1.2.15"
     assert "settings" in manifest
     assert {"settings", "salesbot_designer"}.issubset(set(manifest["locations"]))
     assert manifest["salesbot_designer"]["logo"] == "/widgets/social_media_manager_kommo_v2/images/logo_small.png"

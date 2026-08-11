@@ -45,7 +45,13 @@ def evaluate_automation_state(
         return AutomationDecision(False, "local_blocked")
     if local_conversation_state == "escalated":
         return AutomationDecision(False, "local_escalated")
-    if job_status in {"sent", "discarded", "failed", "delivery_unknown"}:
+    if job_status in {
+        "waiting_for_delivery",
+        "sent",
+        "discarded",
+        "failed",
+        "delivery_unknown",
+    }:
         return AutomationDecision(False, f"job_{job_status}")
     if kommo_ai_mode_enum_id is None:
         return AutomationDecision(False, "kommo_ai_mode_empty", needs_ai_mode_initialization=True)

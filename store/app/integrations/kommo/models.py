@@ -23,6 +23,7 @@ KommoJobStatus = Literal[
     "prepared",
     "waiting_for_salesbot",
     "waiting_for_context",
+    "waiting_for_delivery",
     "ready",
     "processing",
     "continuing",
