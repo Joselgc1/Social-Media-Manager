@@ -297,7 +297,7 @@ Broadcast commands are omitted from `/start` when `CHANNEL_BACKEND=kommo`, where
 Open `/admin/login` in a browser, sign in with `ADMIN_PASSWORD`, and the app will set an HTTP-only session cookie before redirecting to `/admin/dashboard`. Six tabs:
 
 - **Resumen**: Stats cards, per-channel breakdown, LLM usage by provider, AI on/off toggle
-- **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once. In Kommo mode, manual reactivation first sets the Kommo lead `AI Mode` to `AI Active` and verifies it before clearing local history.
+- **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once. In Kommo mode, individual and bulk pauses set and verify the lead `AI Mode` as `Paused` before changing local state; manual reactivation similarly verifies `AI Active` before clearing local history.
 - **Pedidos**: Sortable order table with status badges
 - **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset stuck broadcasts
 - **Instagram**: Search, filter, and sort mappings for posts, Reels, carousels, and current Stories; map one or more brand-labelled catalog products and archive/restore records. Current Stories are synchronized from Meta when the list loads, and a current `/stories/{username}/{story-id}/` URL can be verified and mapped manually.

@@ -280,7 +280,7 @@ async def test_update_customer_to_active_uses_activation_helper(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_customer_to_manual_escalation_uses_metadata_service(monkeypatch):
+async def test_update_customer_to_manual_escalation_uses_pause_sync_helper(monkeypatch):
     from app.admin import settings
 
     mock_db = MagicMock()
@@ -293,15 +293,47 @@ async def test_update_customer_to_manual_escalation_uses_metadata_service(monkey
         }
     )
     monkeypatch.setattr(settings, "db", mock_db)
-    manual = AsyncMock(return_value={"id": "customer", "conversation_state": "escalated", "escalation_source": "manual"})
-    monkeypatch.setattr(settings.escalations, "escalate_customer_manually", manual)
+    pause = AsyncMock(return_value=SimpleNamespace(
+        customer={"id": "customer", "conversation_state": "escalated", "escalation_source": "manual"},
+        status="paused",
+    ))
+    monkeypatch.setattr(settings, "pause_customer_for_admin", pause)
     monkeypatch.setattr(settings.customer_crm, "update_customer", AsyncMock())
 
     response = await settings.update_customer("customer", settings.CustomerUpdate(conversation_state="escalated"))
 
     assert response["customer"]["escalation_source"] == "manual"
-    manual.assert_awaited_once_with("customer", channel=None)
+    pause.assert_awaited_once_with(dict(mock_db.fetch_one.return_value), channel="whatsapp")
     settings.customer_crm.update_customer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_customer_pause_failure_returns_502_without_local_fallback(monkeypatch):
+    from app.admin import settings
+
+    row = {
+        "id": "customer",
+        "channel": "whatsapp",
+        "platform_id": "58412",
+        "conversation_state": "active",
+    }
+    mock_db = MagicMock()
+    mock_db.fetch_one = AsyncMock(return_value=row)
+    monkeypatch.setattr(settings, "db", mock_db)
+    monkeypatch.setattr(
+        settings,
+        "pause_customer_for_admin",
+        AsyncMock(side_effect=settings.ManualPauseError("Kommo pause failed: timeout", customer_id="customer")),
+    )
+    local_pause = AsyncMock()
+    monkeypatch.setattr(settings.escalations, "escalate_customer_manually", local_pause)
+
+    with pytest.raises(HTTPException) as exc:
+        await settings.update_customer("customer", settings.CustomerUpdate(conversation_state="escalated"))
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail == "Kommo pause failed: timeout"
+    local_pause.assert_not_awaited()
 
 
 @pytest.mark.asyncio

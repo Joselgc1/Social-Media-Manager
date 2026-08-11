@@ -49,7 +49,7 @@ async def test_bulk_payment_status_updates_only_after_all_orders_exist():
 
 
 @pytest.mark.asyncio
-async def test_bulk_customer_state_uses_existing_safe_escalation_flow():
+async def test_bulk_customer_state_uses_provider_synced_pause_flow():
     from app.admin import settings
 
     customer_id = UUID("33333333-3333-3333-3333-333333333333")
@@ -58,10 +58,10 @@ async def test_bulk_customer_state_uses_existing_safe_escalation_flow():
         "channel": "whatsapp",
         "conversation_state": "active",
     }])
-    escalate = AsyncMock()
+    pause = AsyncMock()
     with (
         patch.object(settings.db, "fetch_all", fetch_all),
-        patch.object(settings.escalations, "escalate_customer_manually", escalate),
+        patch.object(settings, "pause_customer_for_admin", pause),
     ):
         result = await settings.bulk_update_customer_state(
             settings.BulkCustomerStateUpdate(
@@ -71,4 +71,4 @@ async def test_bulk_customer_state_uses_existing_safe_escalation_flow():
         )
 
     assert result["conversation_state"] == "escalated"
-    escalate.assert_awaited_once_with(str(customer_id), channel="whatsapp")
+    pause.assert_awaited_once_with(dict(fetch_all.return_value[0]), channel="whatsapp")

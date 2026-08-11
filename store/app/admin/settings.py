@@ -18,7 +18,12 @@ from pydantic import BaseModel
 
 from app import db
 from app.admin.auth import require_admin
-from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
+from app.admin.customer_activation import (
+    ManualActivationError,
+    ManualPauseError,
+    activate_customer_for_admin,
+    pause_customer_for_admin,
+)
 from app.admin.telegram_bot import setup_telegram_webhook
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs, list_providers
 from app.catalog.pdf_generator import (
@@ -1072,7 +1077,7 @@ async def bulk_update_customer_state(body: BulkCustomerStateUpdate):
     updated_ids = []
     for customer_id in customer_ids:
         customer = customers_by_id[customer_id]
-        if customer["conversation_state"] == state:
+        if customer["conversation_state"] == state and state != "escalated":
             updated_ids.append(customer_id)
             continue
         if state == "active":
@@ -1081,7 +1086,10 @@ async def bulk_update_customer_state(body: BulkCustomerStateUpdate):
             except ManualActivationError as error:
                 raise HTTPException(status_code=502, detail=error.safe_detail) from error
         elif state == "escalated":
-            await escalations.escalate_customer_manually(customer_id, channel=customer["channel"])
+            try:
+                await pause_customer_for_admin(customer, channel=customer["channel"])
+            except ManualPauseError as error:
+                raise HTTPException(status_code=502, detail=error.safe_detail) from error
         else:
             await escalations.mark_customer_blocked(customer_id, channel=customer["channel"])
         updated_ids.append(customer_id)
@@ -1191,7 +1199,14 @@ async def update_customer(customer_id: str, body: CustomerUpdate):
 
     requested_state = updates.get("conversation_state")
     if requested_state == "escalated":
-        updated = await escalations.escalate_customer_manually(str(row["id"]), channel=updates.get("channel"))
+        try:
+            result = await pause_customer_for_admin(
+                dict(row),
+                channel=updates.get("channel") or row["channel"],
+            )
+        except ManualPauseError as e:
+            raise HTTPException(status_code=502, detail=e.safe_detail) from e
+        updated = result.customer
     elif requested_state == "blocked":
         updated = await escalations.mark_customer_blocked(str(row["id"]), channel=updates.get("channel"))
     else:
