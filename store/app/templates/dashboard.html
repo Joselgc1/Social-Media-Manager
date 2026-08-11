@@ -442,7 +442,7 @@
               <button class="btn btn-secondary text-xs whitespace-nowrap" onclick="addPaymentMethod()">+ Agregar método</button>
             </div>
             <div id="payment-methods-empty" class="text-sm text-gray-500 dark:text-gray-400 py-3" style="display:none">No hay métodos configurados. Agrega los que quieras ofrecer en esta tienda.</div>
-            <div id="payment-methods-list" class="space-y-3"></div>
+            <div id="payment-methods-list"></div>
             <div class="mt-4 pt-3 border-t border-indigo-100 dark:border-indigo-900/60 flex justify-end">
               <button class="btn btn-primary text-sm" onclick="savePaymentSettings()">Guardar métodos de pago</button>
             </div>
@@ -465,8 +465,8 @@
             </div>
           </div>
 
-          <div class="grid xl:grid-cols-12 gap-5 pt-5">
-            <div class="xl:col-span-7 rounded-xl border border-sky-100 dark:border-sky-900/60 bg-sky-50/50 dark:bg-sky-950/15 p-4">
+          <div class="grid gap-5 pt-5">
+            <div class="rounded-xl border border-sky-100 dark:border-sky-900/60 bg-sky-50/50 dark:bg-sky-950/15 p-4">
               <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
                 <div>
                   <div class="flex items-center gap-2">
@@ -481,7 +481,7 @@
               <div id="home-delivery-cities-empty" class="text-sm text-gray-500 dark:text-gray-400 rounded-lg border border-dashed border-sky-200 dark:border-sky-900 px-3 py-4 text-center" style="display:none">
                 Agrega una ciudad para habilitar la entrega a domicilio.
               </div>
-              <div id="home-delivery-cities-list" class="space-y-2"></div>
+              <div id="home-delivery-cities-list"></div>
 
               <div class="mt-5 pt-5 border-t border-sky-100 dark:border-sky-900/60">
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
@@ -492,11 +492,11 @@
                   <button id="add-home-delivery-zone-btn" class="btn btn-secondary text-xs whitespace-nowrap" type="button" onclick="addHomeDeliveryZone()">+ Agregar zona</button>
                 </div>
                 <div id="home-delivery-zones-empty" class="text-sm text-gray-500 dark:text-gray-400 py-3" style="display:none">Aún no hay zonas configuradas.</div>
-                <div id="home-delivery-zones-list" class="space-y-2"></div>
+                <div id="home-delivery-zones-list"></div>
               </div>
             </div>
 
-            <div class="xl:col-span-5 rounded-xl border border-violet-100 dark:border-violet-900/60 bg-violet-50/50 dark:bg-violet-950/15 p-4">
+            <div class="rounded-xl border border-violet-100 dark:border-violet-900/60 bg-violet-50/50 dark:bg-violet-950/15 p-4">
               <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
                 <div>
                   <div class="flex items-center gap-2">
@@ -508,7 +508,7 @@
                 <button class="btn btn-secondary text-xs whitespace-nowrap" type="button" onclick="addCourierDestinationRate()">+ Agregar ciudad</button>
               </div>
               <div id="courier-destination-rates-empty" class="text-sm text-gray-500 dark:text-gray-400 py-3" style="display:none">Aún no hay tarifas para retiro en agencia.</div>
-              <div id="courier-destination-rates-list" class="space-y-2"></div>
+              <div id="courier-destination-rates-list"></div>
             </div>
           </div>
 

@@ -1807,28 +1807,28 @@ function renderPaymentMethods(paymentMethods) {
   const list = document.getElementById('payment-methods-list');
   if (!list) return;
 
-  list.innerHTML = (paymentMethods || []).map((method, index) => `
-    <div class="payment-method-card border border-gray-200 dark:border-gray-700 rounded-xl p-4" data-payment-id="${escapeHtml(method.id || '')}">
-      <div class="flex items-center justify-between gap-3 mb-3">
-        <div class="text-sm font-semibold text-gray-700 dark:text-gray-200">
-          Método <span class="payment-method-number">${index + 1}</span>
-        </div>
-        <button type="button" class="btn btn-danger btn-icon text-sm" onclick="removePaymentMethod(this)" title="Eliminar método" aria-label="Eliminar método">${renderDeleteIcon('Eliminar método')}</button>
-      </div>
-      <div class="grid md:grid-cols-[minmax(220px,280px)_1fr] gap-4">
-        <div>
-          <label class="block text-xs text-gray-500 mb-1">Nombre</label>
-          <input type="text" class="w-full payment-method-name" value="${escapeHtml(method.name || '')}" placeholder="Ej. Zelle, Pago móvil, Wise">
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 mb-1">Información</label>
-          <textarea rows="3" class="w-full payment-field payment-method-info" placeholder="Correo, número, instrucciones o cuenta">${escapeHtml(method.information || '')}</textarea>
-        </div>
-      </div>
-    </div>
-  `).join('');
+  const rows = (paymentMethods || []).map((method, index) => paymentMethodRow(method, index)).join('');
+  list.innerHTML = settingsRecordTable(
+    ['#', 'Nombre', 'Información para el cliente', 'Acciones'],
+    rows,
+    'payment-methods-rows',
+    'payment-methods-table',
+  );
 
   updatePaymentMethodsState();
+}
+
+function paymentMethodRow(method = {}, index = 0) {
+  return `<tr class="payment-method-card" data-payment-id="${escapeHtml(method.id || '')}">
+    <td data-label="Método" class="settings-record-number"><span class="payment-method-number">${index + 1}</span></td>
+    <td data-label="Nombre"><input type="text" class="w-full payment-method-name" value="${escapeHtml(method.name || '')}" placeholder="Ej. Zelle, Pago móvil, Wise"></td>
+    <td data-label="Información para el cliente"><textarea rows="2" class="w-full payment-field payment-method-info" placeholder="Correo, número, instrucciones o cuenta">${escapeHtml(method.information || '')}</textarea></td>
+    <td data-label="Acciones" class="settings-record-actions"><button type="button" class="btn btn-danger btn-icon text-sm" onclick="removePaymentMethod(this)" title="Eliminar método" aria-label="Eliminar método">${renderDeleteIcon('Eliminar método')}</button></td>
+  </tr>`;
+}
+
+function settingsRecordTable(headers, rows, bodyId, extraClass = '') {
+  return `<div class="overflow-x-auto settings-record-table-wrap"><table class="w-full customers-table settings-record-table ${extraClass}"><thead><tr class="text-left text-gray-500 dark:text-gray-400 border-b">${headers.map((header, index) => `<th class="${index === headers.length - 1 ? 'text-right' : ''}">${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody id="${escapeHtml(bodyId)}">${rows}</tbody></table></div>`;
 }
 
 function updatePaymentMethodsState() {
@@ -1842,36 +1842,23 @@ function updatePaymentMethodsState() {
   if (empty) {
     empty.style.display = cards.length ? 'none' : 'block';
   }
+  const list = document.getElementById('payment-methods-list');
+  if (list) list.style.display = cards.length ? '' : 'none';
 }
 
 function addPaymentMethod(method = {}) {
   const list = document.getElementById('payment-methods-list');
   if (!list) return;
-
-  const nextIndex = list.querySelectorAll('.payment-method-card').length;
-  list.insertAdjacentHTML('beforeend', `
-    <div class="payment-method-card border border-gray-200 dark:border-gray-700 rounded-xl p-4" data-payment-id="${escapeHtml(method.id || '')}">
-      <div class="flex items-center justify-between gap-3 mb-3">
-        <div class="text-sm font-semibold text-gray-700 dark:text-gray-200">
-          Método <span class="payment-method-number">${nextIndex + 1}</span>
-        </div>
-        <button type="button" class="btn btn-danger btn-icon text-sm" onclick="removePaymentMethod(this)" title="Eliminar método" aria-label="Eliminar método">${renderDeleteIcon('Eliminar método')}</button>
-      </div>
-      <div class="grid md:grid-cols-[minmax(220px,280px)_1fr] gap-4">
-        <div>
-          <label class="block text-xs text-gray-500 mb-1">Nombre</label>
-          <input type="text" class="w-full payment-method-name" value="${escapeHtml(method.name || '')}" placeholder="Ej. Zelle, Pago móvil, Wise">
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 mb-1">Información</label>
-          <textarea rows="3" class="w-full payment-field payment-method-info" placeholder="Correo, número, instrucciones o cuenta">${escapeHtml(method.information || '')}</textarea>
-        </div>
-      </div>
-    </div>
-  `);
+  let rows = document.getElementById('payment-methods-rows');
+  if (!rows) {
+    renderPaymentMethods([]);
+    rows = document.getElementById('payment-methods-rows');
+  }
+  const nextIndex = rows?.querySelectorAll('.payment-method-card').length || 0;
+  rows?.insertAdjacentHTML('beforeend', paymentMethodRow(method, nextIndex));
 
   updatePaymentMethodsState();
-  list.lastElementChild?.querySelector('.payment-method-name')?.focus();
+  rows?.lastElementChild?.querySelector('.payment-method-name')?.focus();
 }
 
 function removePaymentMethod(trigger) {
@@ -1915,10 +1902,6 @@ async function savePaymentSettings() {
   await loadSettings();
 }
 
-function shippingRateCard(content) {
-  return `<div class="shipping-rate-card rounded-lg border border-gray-200/80 dark:border-gray-700 bg-white/80 dark:bg-gray-900/40 p-3">${content}</div>`;
-}
-
 function renderShippingPolicy(policy = {}) {
   const cities = policy.home_delivery_cities || [];
   const zones = policy.home_delivery_zones || [];
@@ -1928,80 +1911,59 @@ function renderShippingPolicy(policy = {}) {
   const ratesList = document.getElementById('courier-destination-rates-list');
   if (!citiesList || !zonesList || !ratesList) return;
 
-  citiesList.innerHTML = cities.map(city => homeDeliveryCityMarkup(city)).join('');
-  zonesList.innerHTML = zones.map(zone => homeDeliveryZoneMarkup(zone, cities)).join('');
-  ratesList.innerHTML = rates.map(rate => courierDestinationRateMarkup(rate)).join('');
+  citiesList.innerHTML = settingsRecordTable(
+    ['Ciudad o municipio', 'Alias', 'Acciones'],
+    cities.map(city => homeDeliveryCityMarkup(city)).join(''),
+    'home-delivery-cities-rows',
+    'shipping-cities-table',
+  );
+  zonesList.innerHTML = settingsRecordTable(
+    ['Ciudad', 'Zona', 'Tarifa USD', 'Acciones'],
+    zones.map(zone => homeDeliveryZoneMarkup(zone, cities)).join(''),
+    'home-delivery-zones-rows',
+    'shipping-zones-table',
+  );
+  ratesList.innerHTML = settingsRecordTable(
+    ['Ciudad de destino', 'MRW USD', 'Zoom USD', 'Acciones'],
+    rates.map(rate => courierDestinationRateMarkup(rate)).join(''),
+    'courier-destination-rates-rows',
+    'shipping-courier-table',
+  );
   updateShippingCollectionStates();
 }
 
 function homeDeliveryCityMarkup(city = {}) {
-  return shippingRateCard(`
-    <div class="flex items-start gap-3">
-      <div class="flex-1 grid sm:grid-cols-[minmax(160px,1fr)_minmax(220px,1.25fr)] gap-3">
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Ciudad o municipio</label>
-          <input class="w-full shipping-home-city-name" value="${escapeHtml(city.name || '')}" placeholder="Ej. Valencia" oninput="refreshHomeDeliveryZoneCityOptions()">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Alias <span class="font-normal text-gray-400">opcional, separados por coma</span></label>
-          <input class="w-full shipping-home-city-aliases" value="${escapeHtml((city.aliases || []).join(', '))}" placeholder="Ej. Valencia, Carabobo">
-        </div>
-      </div>
-      <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeHomeDeliveryCity(this)" title="Eliminar ciudad" aria-label="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button>
-    </div>
-  `);
+  return `<tr class="shipping-rate-card">
+    <td data-label="Ciudad o municipio"><input class="w-full shipping-home-city-name" value="${escapeHtml(city.name || '')}" placeholder="Ej. Valencia" oninput="refreshHomeDeliveryZoneCityOptions()"></td>
+    <td data-label="Alias"><input class="w-full shipping-home-city-aliases" value="${escapeHtml((city.aliases || []).join(', '))}" placeholder="Opcional, separados por coma"></td>
+    <td data-label="Acciones" class="settings-record-actions"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="removeHomeDeliveryCity(this)" title="Eliminar ciudad" aria-label="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button></td>
+  </tr>`;
 }
 
 function homeDeliveryZoneMarkup(zone = {}, cities = homeDeliveryCitiesFromInputs()) {
-  return shippingRateCard(`
-    <div class="flex items-start gap-3">
-      <div class="flex-1 grid sm:grid-cols-[minmax(145px,.8fr)_minmax(145px,1fr)_minmax(100px,.55fr)] gap-3">
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Ciudad</label>
-          <select class="w-full shipping-zone-city">${homeDeliveryCityOptions(cities, zone.city)}</select>
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Zona</label>
-          <input class="w-full shipping-zone-name" value="${escapeHtml(zone.name || '')}" placeholder="Ej. El Viñedo">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">USD</label>
-          <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zone-fee" value="${escapeHtml(zone.fee_usd ?? '')}" placeholder="0.00">
-        </div>
-      </div>
-      <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeShippingRateCard(this)" title="Eliminar zona" aria-label="Eliminar zona">${renderDeleteIcon('Eliminar zona')}</button>
-    </div>
-  `);
+  return `<tr class="shipping-rate-card">
+    <td data-label="Ciudad"><select class="w-full shipping-zone-city">${homeDeliveryCityOptions(cities, zone.city)}</select></td>
+    <td data-label="Zona"><input class="w-full shipping-zone-name" value="${escapeHtml(zone.name || '')}" placeholder="Ej. El Viñedo"></td>
+    <td data-label="Tarifa USD"><input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zone-fee" value="${escapeHtml(zone.fee_usd ?? '')}" placeholder="0.00"></td>
+    <td data-label="Acciones" class="settings-record-actions"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="removeShippingRateCard(this)" title="Eliminar zona" aria-label="Eliminar zona">${renderDeleteIcon('Eliminar zona')}</button></td>
+  </tr>`;
 }
 
 function courierDestinationRateMarkup(rate = {}) {
-  return shippingRateCard(`
-    <div class="flex items-start gap-3">
-      <div class="flex-1 grid sm:grid-cols-[minmax(145px,1fr)_minmax(90px,.55fr)_minmax(90px,.55fr)] gap-3">
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Ciudad de destino</label>
-          <input class="w-full shipping-courier-city" value="${escapeHtml(rate.city || '')}" placeholder="Ej. Caracas">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">MRW USD</label>
-          <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-mrw-fee" value="${escapeHtml(rate.mrw_fee_usd ?? '')}" placeholder="0.00">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Zoom USD</label>
-          <input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zoom-fee" value="${escapeHtml(rate.zoom_fee_usd ?? '')}" placeholder="0.00">
-        </div>
-      </div>
-      <button type="button" class="btn btn-danger btn-icon text-xs shrink-0" onclick="removeShippingRateCard(this)" title="Eliminar ciudad" aria-label="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button>
-    </div>
-  `);
+  return `<tr class="shipping-rate-card">
+    <td data-label="Ciudad de destino"><input class="w-full shipping-courier-city" value="${escapeHtml(rate.city || '')}" placeholder="Ej. Caracas"></td>
+    <td data-label="MRW USD"><input type="number" min="0" max="100000" step="0.01" class="w-full shipping-mrw-fee" value="${escapeHtml(rate.mrw_fee_usd ?? '')}" placeholder="0.00"></td>
+    <td data-label="Zoom USD"><input type="number" min="0" max="100000" step="0.01" class="w-full shipping-zoom-fee" value="${escapeHtml(rate.zoom_fee_usd ?? '')}" placeholder="0.00"></td>
+    <td data-label="Acciones" class="settings-record-actions"><button type="button" class="btn btn-danger btn-icon text-xs" onclick="removeShippingRateCard(this)" title="Eliminar ciudad" aria-label="Eliminar ciudad">${renderDeleteIcon('Eliminar ciudad')}</button></td>
+  </tr>`;
 }
 
 function addHomeDeliveryCity(city = {}) {
-  const list = document.getElementById('home-delivery-cities-list');
-  if (!list) return;
-  list.insertAdjacentHTML('beforeend', homeDeliveryCityMarkup(city));
+  const rows = document.getElementById('home-delivery-cities-rows');
+  if (!rows) return;
+  rows.insertAdjacentHTML('beforeend', homeDeliveryCityMarkup(city));
   refreshHomeDeliveryZoneCityOptions();
-  list.lastElementChild?.querySelector('.shipping-home-city-name')?.focus();
+  rows.lastElementChild?.querySelector('.shipping-home-city-name')?.focus();
 }
 
 function addHomeDeliveryZone(zone = {}) {
@@ -2010,19 +1972,19 @@ function addHomeDeliveryZone(zone = {}) {
     toast('Primero agrega una ciudad con entrega a domicilio', '#dc2626');
     return;
   }
-  const list = document.getElementById('home-delivery-zones-list');
-  if (!list) return;
-  list.insertAdjacentHTML('beforeend', homeDeliveryZoneMarkup({city: cities[0].name, ...zone}, cities));
+  const rows = document.getElementById('home-delivery-zones-rows');
+  if (!rows) return;
+  rows.insertAdjacentHTML('beforeend', homeDeliveryZoneMarkup({city: cities[0].name, ...zone}, cities));
   updateShippingCollectionStates();
-  list.lastElementChild?.querySelector('.shipping-zone-name')?.focus();
+  rows.lastElementChild?.querySelector('.shipping-zone-name')?.focus();
 }
 
 function addCourierDestinationRate(rate = {}) {
-  const list = document.getElementById('courier-destination-rates-list');
-  if (!list) return;
-  list.insertAdjacentHTML('beforeend', courierDestinationRateMarkup(rate));
+  const rows = document.getElementById('courier-destination-rates-rows');
+  if (!rows) return;
+  rows.insertAdjacentHTML('beforeend', courierDestinationRateMarkup(rate));
   updateShippingCollectionStates();
-  list.lastElementChild?.querySelector('.shipping-courier-city')?.focus();
+  rows.lastElementChild?.querySelector('.shipping-courier-city')?.focus();
 }
 
 function removeHomeDeliveryCity(trigger) {
@@ -2078,6 +2040,9 @@ function updateShippingCollectionStates() {
   setVisible('home-delivery-cities-empty', cityCount === 0);
   setVisible('home-delivery-zones-empty', zoneCount === 0);
   setVisible('courier-destination-rates-empty', rateCount === 0);
+  setVisible('home-delivery-cities-list', cityCount > 0);
+  setVisible('home-delivery-zones-list', zoneCount > 0);
+  setVisible('courier-destination-rates-list', rateCount > 0);
   if (zoneButton) zoneButton.disabled = !hasCities;
 }
 

@@ -222,6 +222,50 @@ textarea { resize: vertical; min-height: 88px; }
 .instagram-mappings-table .instagram-inventory-cell,
 .instagram-mappings-table .instagram-status-cell { min-width: 130px; }
 .instagram-mappings-table .instagram-actions-cell { min-width: 170px; text-align: right; }
+.settings-record-table-wrap {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.dark .settings-record-table-wrap {
+  border-color: #374151;
+  background: rgba(17, 24, 39, 0.45);
+}
+.settings-record-table th {
+  padding: 12px 10px;
+  background: rgba(248, 250, 252, 0.9);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.dark .settings-record-table th { background: rgba(31, 41, 55, 0.72); }
+.settings-record-table td {
+  padding: 12px 10px;
+  vertical-align: middle;
+}
+.settings-record-table input,
+.settings-record-table select,
+.settings-record-table textarea { min-width: 0; }
+.settings-record-table textarea { resize: vertical; }
+.settings-record-number {
+  width: 48px;
+  color: #64748b;
+  font-weight: 600;
+  text-align: center;
+}
+.settings-record-actions {
+  width: 90px;
+  text-align: right;
+}
+.payment-methods-table .payment-method-name { min-width: 180px; }
+.payment-methods-table .payment-method-info { min-width: 320px; }
+.shipping-cities-table .shipping-home-city-name,
+.shipping-cities-table .shipping-home-city-aliases,
+.shipping-zones-table .shipping-zone-city,
+.shipping-zones-table .shipping-zone-name,
+.shipping-courier-table .shipping-courier-city { min-width: 170px; }
+.shipping-zones-table .shipping-zone-fee,
+.shipping-courier-table .shipping-mrw-fee,
+.shipping-courier-table .shipping-zoom-fee { min-width: 110px; }
 .customers-table .customer-name-cell {
   min-width: 230px;
 }
@@ -451,4 +495,63 @@ textarea { resize: vertical; min-height: 88px; }
     flex: 1 1 100%;
     text-align: center;
   }
+  .settings-record-table-wrap {
+    overflow: visible;
+    border: 0;
+    background: transparent;
+  }
+  .dark .settings-record-table-wrap { background: transparent; }
+  .settings-record-table,
+  .settings-record-table tbody { display: block; }
+  .settings-record-table thead { display: none; }
+  .settings-record-table tbody {
+    display: grid;
+    gap: 12px;
+  }
+  .settings-record-table tbody tr {
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.82);
+  }
+  .dark .settings-record-table tbody tr {
+    border-color: #374151;
+    background: rgba(17, 24, 39, 0.55);
+  }
+  .settings-record-table tbody tr + tr td { border-top: 0; }
+  .settings-record-table td {
+    display: grid;
+    grid-template-columns: minmax(100px, 0.42fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    width: 100%;
+    padding: 0;
+    text-align: left;
+  }
+  .settings-record-table td::before {
+    content: attr(data-label);
+    color: #64748b;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .dark .settings-record-table td::before { color: #9ca3af; }
+  .settings-record-table .settings-record-actions {
+    justify-items: end;
+    text-align: right;
+  }
+  .settings-record-table input,
+  .settings-record-table select,
+  .settings-record-table textarea,
+  .payment-methods-table .payment-method-name,
+  .payment-methods-table .payment-method-info,
+  .shipping-cities-table .shipping-home-city-name,
+  .shipping-cities-table .shipping-home-city-aliases,
+  .shipping-zones-table .shipping-zone-city,
+  .shipping-zones-table .shipping-zone-name,
+  .shipping-zones-table .shipping-zone-fee,
+  .shipping-courier-table .shipping-courier-city,
+  .shipping-courier-table .shipping-mrw-fee,
+  .shipping-courier-table .shipping-zoom-fee { min-width: 0; width: 100%; }
 }
