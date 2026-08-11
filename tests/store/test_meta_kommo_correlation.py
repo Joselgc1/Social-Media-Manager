@@ -326,6 +326,44 @@ def test_raw_meta_sender_and_kommo_author_ids_are_not_compared_as_customer_ident
     assert "customer_identity" not in candidate.signals
 
 
+def test_comment_text_and_time_without_identity_or_content_never_correlates():
+    from app.integrations.meta_context import correlation
+
+    event = _event(username="meta-user", comment_id="meta-comment")
+    job = _job(username=None, comment_id=None)
+
+    assert correlation._score_candidate(event, job, 45) is None
+
+
+def test_comment_matching_media_identity_can_correlate_without_username():
+    from app.integrations.meta_context import correlation
+
+    event = _event(username=None, comment_id=None)
+    job = _job(username=None, comment_id=None)
+    job["public_comment_context"] = {"media_id": "media-1"}
+
+    candidate = correlation._score_candidate(event, job, 45)
+
+    assert candidate is not None
+    assert "content_identity" in candidate.signals
+
+
+@pytest.mark.asyncio
+async def test_cross_post_same_text_callback_stays_pending_without_strong_signal(monkeypatch):
+    event = _event(username="meta-user", comment_id="event-comment")
+    event["media_id"] = "post-a"
+    event["media_permalink"] = "https://www.instagram.com/p/POST_A/"
+    job = _job(username=None, comment_id=None)
+    job["public_comment_context"] = {}
+    correlation, fake = _install(monkeypatch, [event], [job])
+
+    result = await correlation.correlate_kommo_job("job-1")
+
+    assert result == {"status": "pending"}
+    assert fake.events["event-1"]["matched_kommo_job_id"] is None
+    assert fake.jobs["job-1"]["meta_context_event_id"] is None
+
+
 @pytest.mark.asyncio
 async def test_correlation_uses_best_timestamp_for_delayed_callback(monkeypatch):
     event = _event(seconds=0)
