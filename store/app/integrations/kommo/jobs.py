@@ -1268,6 +1268,17 @@ async def _process_ready_job(job: dict) -> None:
         lead_id = job.get("lead_id") or _single_contact_lead_id(contact)
         lead = await client.get_lead(lead_id) if lead_id else None
         ai_mode_enum = extract_ai_mode_enum_from_lead(lead or {}, config) if lead else None
+        if lead and _job_interaction_type(job) == "instagram_comment":
+            ai_mode_enum, initialized_now = await ensure_ai_mode_initialized(
+                client,
+                str(lead_id),
+                lead,
+            )
+            if initialized_now:
+                logger.info(
+                    "Initialized Kommo AI Mode for Instagram comment lead %s",
+                    lead_id,
+                )
         profile = build_kommo_customer_profile(job=job, contact=contact)
         customer = await resolve_customer_from_kommo_job(job, lead=lead, contact=contact, profile=profile)
         if _has_unsupported_attachment(job):

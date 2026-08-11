@@ -3836,8 +3836,14 @@ async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_format
     from app.integrations.kommo import jobs
 
     mock_db = _install_ready_job_db(monkeypatch, jobs, settings={"ai_enabled": True, "kommo_emoji_mode_instagram": "preserve"})
-    monkeypatch.setattr(jobs, "get_config", lambda: SimpleNamespace(kommo_ai_active_enum_id=1))
+    monkeypatch.setattr(
+        jobs,
+        "get_config",
+        lambda: SimpleNamespace(kommo_ai_active_enum_id=1, kommo_ai_mode_field_id=10),
+    )
     monkeypatch.setattr(jobs, "sync_local_state_from_ai_mode", AsyncMock())
+    ensure_ai_mode = AsyncMock(return_value=(1, True))
+    monkeypatch.setattr(jobs, "ensure_ai_mode_initialized", ensure_ai_mode)
     monkeypatch.setattr(
         jobs,
         "evaluate_automation_state",
@@ -3853,6 +3859,7 @@ async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_format
     monkeypatch.setattr(jobs, "upsert_mapping", AsyncMock())
 
     client = MagicMock()
+    client.get_lead = AsyncMock(return_value={"id": 100, "custom_fields_values": None})
     client.continue_salesbot = AsyncMock(return_value={"accepted": True})
     monkeypatch.setattr(jobs.KommoClient, "from_config", lambda: client)
 
@@ -3864,6 +3871,7 @@ async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_format
             "combined_message": "Precio?",
             "channel": "instagram",
             "interaction_type": "instagram_comment",
+            "lead_id": "100",
             "public_comment_context": {
                 "media_id": "media-1",
                 "post_url": "https://www.instagram.com/p/ABC123/",
@@ -3874,6 +3882,7 @@ async def test_comment_ready_job_passes_interaction_type_to_ai_and_public_format
         })
 
     assert jobs.generate_response.await_args.kwargs["integration_context"]["interaction_type"] == "instagram_comment"
+    ensure_ai_mode.assert_awaited_once_with(client, "100", {"id": 100, "custom_fields_values": None})
     assert jobs.generate_response.await_args.kwargs["integration_context"]["public_comment_context"]["context_provider"] == "meta"
     message = client.continue_salesbot.await_args.kwargs["data"]["message"]
     assert "**" not in message
