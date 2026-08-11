@@ -555,3 +555,18 @@ textarea { resize: vertical; min-height: 88px; }
   .shipping-courier-table .shipping-mrw-fee,
   .shipping-courier-table .shipping-zoom-fee { min-width: 0; width: 100%; }
 }
+
+@media (max-width: 479px) {
+  .settings-record-table td {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .settings-record-table .settings-record-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    justify-items: stretch;
+  }
+  .settings-record-table .settings-record-actions .btn {
+    justify-self: end;
+  }
+}

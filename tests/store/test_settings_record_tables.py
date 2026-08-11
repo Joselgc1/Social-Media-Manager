@@ -47,3 +47,12 @@ def test_settings_tables_become_labelled_cards_on_mobile():
     assert ".settings-record-table thead { display: none; }" in styles
     assert "content: attr(data-label)" in styles
     assert ".settings-record-table tbody tr + tr td { border-top: 0; }" in styles
+
+
+def test_settings_cards_stack_fields_on_narrow_phones():
+    styles = Path("store/app/static/css/dashboard.css").read_text()
+
+    narrow_phone_styles = styles.split("@media (max-width: 479px)", 1)[1]
+    assert ".settings-record-table td" in narrow_phone_styles
+    assert "grid-template-columns: minmax(0, 1fr);" in narrow_phone_styles
+    assert ".settings-record-table .settings-record-actions" in narrow_phone_styles
