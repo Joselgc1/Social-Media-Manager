@@ -638,19 +638,6 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
         and event_username not in job_usernames
     ):
         return None
-    username_match = bool(event_username and event_username in job_usernames)
-    content_identity_match = (
-        event.get("event_type") == "comment"
-        and _comment_content_identity_matches(event, context)
-    )
-    if (
-        event.get("event_type") == "comment"
-        and not exact_comment_id
-        and not identity_match
-        and not username_match
-        and not content_identity_match
-    ):
-        return None
 
     score = 0
     signals = []
@@ -660,10 +647,7 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
     if identity_match:
         score += 120
         signals.append("customer_identity")
-    if content_identity_match:
-        score += 80
-        signals.append("content_identity")
-    if username_match:
+    if event_username and event_username in job_usernames:
         score += 40
         signals.append("username")
     if exact_text:
@@ -696,30 +680,6 @@ def _score_candidate(event: dict, job: dict, window_seconds: int) -> Candidate |
             else _job_correlation_timestamp_source(job)
         ),
     )
-
-
-def _comment_content_identity_matches(event: dict, context: dict) -> bool:
-    event_media_id = str(event.get("media_id") or "").strip()
-    context_media_ids = {
-        str(context.get("media_id") or "").strip(),
-        str(context.get("post_id") or "").strip(),
-    }
-    if event_media_id and event_media_id in context_media_ids:
-        return True
-
-    event_url = _normalized_content_url(event.get("media_permalink"))
-    context_urls = {
-        _normalized_content_url(context.get("post_url")),
-        _normalized_content_url(context.get("comment_url")),
-    }
-    return bool(event_url and event_url in context_urls)
-
-
-def _normalized_content_url(value) -> str | None:
-    text = str(value or "").strip().lower()
-    if not text:
-        return None
-    return text.split("?", 1)[0].rstrip("/")
 
 
 def _job_usernames(job: dict) -> set[str]:
