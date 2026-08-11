@@ -1083,7 +1083,7 @@ Open the Instagram content mapping section.
 
 For the first, simplest test:
 
-1. Choose a normal Zona Pink post or Reel. Manual mappings accept public `/p/` and `/reel/` URLs; discovered Stories use their stable media ID and do not require a public permalink.
+1. Choose a normal Zona Pink post, Reel, or current Story. Manual mappings accept public `/p/`, `/reel/`, and `/stories/{username}/{story-id}/` URLs. Story URLs are verified against the connected account's current Stories response and are rejected after expiry; Highlights are not supported.
 2. Use a post advertising exactly one product.
 3. Copy its public Instagram URL.
 4. Paste the URL into the mapping form.
@@ -1091,7 +1091,7 @@ For the first, simplest test:
 6. Save the mapping.
 7. Confirm the mapping is active.
 
-The mapping API normalizes post/Reel URLs, validates catalog SKUs, preserves display order, and stores one or more product relations. Story rows are discovered automatically and can then be assigned products from the dashboard. Multiple-product public comments request clarification for generic price/availability questions and can answer when an explicit reference resolves one mapped product.
+The mapping API normalizes post/Reel/Story URLs, validates catalog SKUs, preserves display order, and stores one or more product relations. Loading the mapping list fetches up to 50 current Stories from Meta and upserts their rows. Story URL creation requires `INSTAGRAM_ACCESS_TOKEN` and `INSTAGRAM_ACCOUNT_ID`, and the Story must still appear in that current response. A `422` means the Story URL is unsupported, expired, or did not match the connected account; a `502` means Meta verification failed. Story mappings expire according to `INSTAGRAM_STORY_MAPPING_TTL_HOURS` and remain visible as historical records but are excluded from message matching. Multiple-product public comments request clarification for generic price/availability questions and can answer when an explicit reference resolves one mapped product.
 
 Start with:
 

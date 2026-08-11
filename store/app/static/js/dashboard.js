@@ -423,7 +423,7 @@ function renderInstagramMappings() {
     : 'No hay contenidos';
   const unmappedStories = visibleMappings.filter(mapping => mapping.content_type === 'story' && mapping.status === 'active' && !mapping.is_expired && (mapping.mapping_status === 'assignment_required' || !(mapping.products || []).length));
   const storyAlert = unmappedStories.length ? `<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Hay ${unmappedStories.length} Historia${unmappedStories.length === 1 ? '' : 's'} de Instagram sin productos asignados. <button class="font-semibold underline" onclick="editInstagramMapping('${escapeHtml(unmappedStories[0].id)}')">Mapear ahora</button></div>` : '';
-  const storyDisabledAlert = _instagramContextStatus && !_instagramContextStatus.story_enabled ? '<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">El descubrimiento automático de Historias está desactivado. Aún puedes mapear una Historia manualmente usando su URL.</div>' : '';
+  const storyDisabledAlert = _instagramContextStatus && !_instagramContextStatus.story_enabled ? '<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">El descubrimiento automático de Historias está desactivado. Solo puedes mapear una Historia actual mediante su URL si las credenciales de Meta para esta cuenta están configuradas.</div>' : '';
   if (!visibleMappings.length) {
     container.innerHTML = `${storyDisabledAlert}<div class="orders-empty">No hay contenidos que coincidan con los filtros.</div>`;
     return;

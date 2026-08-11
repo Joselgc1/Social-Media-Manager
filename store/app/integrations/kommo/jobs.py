@@ -897,6 +897,8 @@ async def diagnostics_summary() -> dict:
     return {
         "pending_job_count": counts.get("pending", 0) + counts.get("prepared", 0) + counts.get("waiting_for_salesbot", 0) + counts.get("waiting_for_context", 0) + counts.get("waiting_for_delivery", 0) + counts.get("ready", 0) + counts.get("processing", 0) + counts.get("continuing", 0),
         "failed_job_count": counts.get("failed", 0) + counts.get("delivery_unknown", 0),
+        "waiting_for_delivery_job_count": counts.get("waiting_for_delivery", 0),
+        "delivery_unknown_job_count": counts.get("delivery_unknown", 0),
         "stale_job_count": stale["cnt"] if stale else 0,
         "last_successful_incoming_webhook_at": timestamps["last_incoming"] if timestamps else None,
         "last_successful_salesbot_launch_at": timestamps["last_launch"] if timestamps else None,

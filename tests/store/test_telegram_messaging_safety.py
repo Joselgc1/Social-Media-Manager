@@ -3,7 +3,7 @@ Tests for Telegram outbound messaging safety and admin command hardening.
 
 Covers: markdown escaping, 4096-char chunking, Telegram API status checks,
 graceful failure handling, /order authoritative statuses, /settings
-conciseness, and /customers recency sorting.
+conciseness, /kommo read-only diagnostics, and /customers recency sorting.
 """
 
 from types import SimpleNamespace
@@ -575,11 +575,92 @@ async def test_cmd_settings_is_concise_owner_summary_without_secrets():
     assert "Backend: kommo" in result
     assert "media en chats" in result
     assert "PDF de catálogo" in result
+    assert "Instagram DM: Chats API" in result
+    assert "verificación manual requerida" in result
+    assert "Usa /kommo" in result
     assert "openai_api_key" not in result
     assert "sk-should-never-appear" not in result
     assert "llm_temperature" not in result
     assert "payment_methods" not in result
     assert len(result) < 1500
+
+
+@pytest.mark.asyncio
+async def test_cmd_kommo_reports_read_only_delivery_health_and_manual_warning():
+    from app.admin import telegram_bot
+
+    config = SimpleNamespace(
+        channel_backend="kommo",
+        kommo_chats_api_monthly_limit=1000,
+    )
+    diagnostics = {
+        "pending_job_count": 4,
+        "waiting_for_delivery_job_count": 2,
+        "failed_job_count": 3,
+        "delivery_unknown_job_count": 1,
+        "stale_job_count": 1,
+    }
+    usage = {
+        "attempted_requests": 120,
+        "text_requests": 90,
+        "product_image_requests": 30,
+        "delivery_unknown_deliveries": 1,
+        "warning_level": "normal",
+        "estimated_remaining_requests": 880,
+    }
+    with (
+        patch.object(telegram_bot, "get_config", return_value=config),
+        patch(
+            "app.integrations.kommo.jobs.diagnostics_summary",
+            AsyncMock(return_value=diagnostics),
+        ),
+        patch(
+            "app.integrations.kommo.delivery.monthly_usage_summary",
+            AsyncMock(return_value=usage),
+        ),
+    ):
+        result = await telegram_bot._cmd_kommo()
+
+    assert "Instagram DM: Chats API" in result
+    assert "verificación manual requerida" in result
+    assert "Esperando confirmación de entrega: 2" in result
+    assert "Resultado de entrega desconocido: 1" in result
+    assert "Revisa la conversación en Kommo antes de reenviar" in result
+    assert "Intentos totales: 120" in result
+    assert "Intentos estimados restantes: 880" in result
+    assert "solo lectura" in result
+
+
+@pytest.mark.asyncio
+async def test_cmd_kommo_reports_inactive_backend_without_diagnostics():
+    from app.admin import telegram_bot
+
+    with patch.object(
+        telegram_bot,
+        "get_config",
+        return_value=SimpleNamespace(channel_backend="meta"),
+    ):
+        result = await telegram_bot._cmd_kommo()
+
+    assert "backend activo no es Kommo" in result
+
+
+def test_start_menu_includes_kommo_command():
+    from app.admin import telegram_bot
+
+    assert "/kommo - Estado de transporte" in telegram_bot._cmd_start()
+
+
+@pytest.mark.asyncio
+async def test_command_dispatcher_routes_kommo_command():
+    from app.admin import telegram_bot
+
+    handler = AsyncMock(return_value="estado kommo")
+    with patch.object(telegram_bot, "_cmd_kommo", handler):
+        result = await telegram_bot._handle_command("/kommo", "")
+
+    assert result == "estado kommo"
+    handler.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

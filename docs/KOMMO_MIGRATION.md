@@ -172,7 +172,7 @@ KOMMO_CHATS_PDF_ATTACHMENT_TYPE=
 
 ## Database Migration
 
-Run `python3 store/scripts/migrate.py` through Railway pre-deploy or against the intended database. The current Store schema version is `15`. The runner applies the fresh baseline and every normal numbered migration through `015_conversation_interaction_scope.sql`; `002_consolidated_upgrade.sql` is a manual pre-consolidation recovery migration and is not part of the normal runner. Migrations 009-012 add outbound media history, uniqueness, cache, and content hashes; 013-014 add inbound voice type and ordered inbound attachment metadata; 015 isolates private-message and Instagram-comment history. Let `store/app/db.py` validate the complete migration set rather than checking only `MAX(version)`.
+Run `python3 store/scripts/migrate.py` through Railway pre-deploy or against the intended database. The current Store schema version is `16`. The runner applies the fresh baseline and every normal numbered migration through `016_kommo_waiting_for_delivery.sql`; `002_consolidated_upgrade.sql` is a manual pre-consolidation recovery migration and is not part of the normal runner. Migrations 009-012 add outbound media history, uniqueness, cache, and content hashes; 013-014 add inbound voice type and ordered inbound attachment metadata; 015 isolates private-message and Instagram-comment history; 016 adds `waiting_for_delivery`, delivery reconciliation scheduling, and pending assistant-history persistence for direct Instagram sends. Let `store/app/db.py` validate the complete migration set rather than checking only `MAX(version)`.
 
 ## Widget Build
 
@@ -263,7 +263,7 @@ When using the master dashboard to deploy credentials, store all Kommo variables
 
 ```text
 [ ] Store Railway root directory is store/
-[ ] python3 store/scripts/migrate.py completed and store/app/db.py accepts the complete migration set through version 15
+[ ] python3 store/scripts/migrate.py completed and store/app/db.py accepts the complete migration set through version 16
 [ ] CHANNEL_BACKEND=kommo is set in the store environment
 [ ] All required KOMMO_* variables are set
 [ ] KOMMO_SUBDOMAIN is only the subdomain, not a full URL
@@ -341,6 +341,17 @@ Text-only WhatsApp responses remain on Salesbot. Instagram private-message text 
 The Files API upload/cache lifecycle is separate from outgoing Chats API message usage. The metered operation is `POST /api/v4/talks/{talk_id}/send_message`; ordinary Salesbot text replies do not consume that outgoing Chats API pool.
 
 Only incoming external Kommo messages create AI jobs. Outgoing `add_outgoing_message` webhooks only reconcile an existing outbound delivery when the provider message ID matches; they never trigger Eva or create another `kommo_message_job`.
+
+### Direct Instagram Delivery Reconciliation
+
+An HTTP `202 Accepted` response for a direct Instagram send is not treated as final customer delivery. The durable job enters `waiting_for_delivery`, stores the current provider message IDs and pending assistant-history payload, and becomes eligible for reconciliation immediately. The scheduler polls Kommo every 15 seconds; a matching outgoing-message webhook only advances the next reconciliation time and never confirms delivery by itself.
+
+- `delivered` or `seen` confirms the outbound record, persists the assistant turn once, and finalizes the job.
+- `sent`, a missing status, or a temporary lookup failure leaves the job pending without resending.
+- `error` is definitive. A failed requested product image may queue one direct text-only Instagram fallback that explains the issue and links to WhatsApp; this is not a Salesbot fallback.
+- `delivery_unknown` means Kommo may have accepted a send whose outcome cannot be established. Inspect the Kommo conversation before any manual replacement and never retry it automatically.
+
+Queue monitoring must include `waiting_for_delivery`. The pending assistant payload is intentionally retained until confirmation so conversation history never claims an undelivered image was sent.
 
 Conversation history stores one logical assistant turn regardless of transport. `conversations.attachments` contains only semantic product-image or catalog-PDF context. Kommo Drive UUIDs, provider message IDs, request fingerprints, and raw provider payloads stay in Kommo delivery/cache records and are never supplied to the LLM. Signed inbound attachment URLs are stored temporarily in the durable job's `inbound_attachments` metadata so audio/images survive debounce and retries.
 
@@ -425,9 +436,11 @@ For `POST /admin/settings/kommo/test`, `ok` and `automatic_checks_ok` describe o
 
 `GET /admin/settings/kommo/status` also reports current-calendar-month Chats API attempts, including separate text, product-image, and catalog-PDF request counts, final-state accepted/confirmed, failed, and `delivery_unknown` delivery counts, the configured monitoring allowance, estimated remaining requests, utilization percentage, and warning level. `attempted_requests` is the authoritative local total and includes text plus media attempts. Each claimed send increments transport-only attempt metadata; `sending` and `delivery_unknown` attempts count conservatively because the request may already have reached Kommo. Final-state delivery counts describe current durable records rather than every historical retry outcome. These values are local estimates from `kommo_outbound_deliveries`, not Kommo billing records, and do not enforce a hard quota. Direct manual calls such as `verify_kommo_media.py --send` do not have a durable job row and are not included in this local estimate; account for them separately and use Kommo as the billing source of truth.
 
+Telegram `/kommo` exposes a concise read-only subset of these local diagnostics for phone-based operations. It does not send test messages, verify the external-chat permission automatically, or retry jobs.
+
 ## Staged Media Rollout
 
-1. Run `python3 store/scripts/migrate.py` and confirm Store schema version 15 is accepted.
+1. Run `python3 store/scripts/migrate.py` and confirm Store schema version 16 is accepted.
 2. Deploy with `KOMMO_CHATS_MEDIA_ENABLED=false`, `KOMMO_CHATS_PRODUCT_IMAGES_ENABLED=false`, and `KOMMO_CHATS_CATALOG_PDF_ENABLED=false`.
 3. Verify `POST /admin/settings/kommo/test` returns `ok=true`, `automatic_checks_ok=true`, and `readiness_status=manual_verification_required`; then complete its separate `manual_unverified` `Sending to external chats` check.
 4. Run `KOMMO_CHATS_MEDIA_ENABLED=true python3 store/scripts/verify_kommo_media.py --talk-id DEVELOPMENT_TALK_ID --send` against a development talk. The command-scoped global override enables the low-level diagnostic while the deployed media-specific flags remain false; `--send` makes one real metered Chats API request.
@@ -445,7 +458,7 @@ Jobs or outbound deliveries marked `delivery_unknown` mean the backend started a
 
 ## Media Rollback
 
-Set `KOMMO_CHATS_MEDIA_ENABLED=false` and redeploy. Ordinary Salesbot text processing continues without reverting migrations. Leave all migrations through 14 and existing delivery/cache/job records in place for auditability and safe future re-enablement.
+Set `KOMMO_CHATS_MEDIA_ENABLED=false` and redeploy. Ordinary Salesbot text processing continues without reverting migrations. Leave all migrations through 16 and existing delivery/cache/job records in place for auditability and safe future re-enablement.
 
 ## Troubleshooting
 

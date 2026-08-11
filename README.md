@@ -251,6 +251,8 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 - Product images can be enabled for WhatsApp and Instagram under the global media kill switch. Catalog PDF delivery remains strictly WhatsApp-only.
 - Incoming Kommo `voice` and `audio` attachments in private WhatsApp and Instagram DMs are downloaded safely and transcribed before the AI turn. This path requires `OPENAI_API_KEY` even when Anthropic is the active chat provider. Direct Meta audio is not transcribed.
 - Durable jobs and outbound records track `delivery_unknown` when Salesbot or Chats API acceptance cannot be confirmed; inspect Kommo before manual retry.
+- Accepted direct Instagram sends remain `waiting_for_delivery` until Kommo reports `delivered` or `seen`. The scheduler polls every 15 seconds and matching outgoing webhooks accelerate the next check; reconciliation never resends an accepted message, and assistant history is persisted only after confirmation.
+- If Kommo definitively reports `error` for a requested product image, the backend sends one text-only Instagram fallback explaining the delivery issue and linking to WhatsApp. A valid `store_phone_number` creates the clickable link, with the product name in the prefilled message when it can be resolved safely. Unknown delivery outcomes never trigger this replacement.
 - Chats API diagnostics count direct Instagram text under `text_requests`; `attempted_requests` remains the authoritative total across text and media and is monitoring-only.
 - Kommo may mirror native Instagram comments through the general webhook as `origin=instagram_business`, `message_type=text`, which looks like a private Instagram message. The native comment Salesbot callback is the source of truth; durable reconciliation discards the mirrored private-message job before direct Instagram processing.
 
@@ -259,7 +261,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 ```text
 /start          - Welcome + command list
 /stats          - Today's conversation and order stats
-/customers      - Recent customers (alphabetical) with IDs and tags
+/customers      - Recent customers by activity with IDs and tags
 /customers vip  - Filter by tag
 /orders         - Recent orders (alphabetical by customer)
 /order ID STATUS - Update order status
@@ -276,6 +278,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 /send ID        - Send a broadcast
 /preview TAGS   - Preview broadcast reach
 /settings       - View current settings
+/kommo          - Kommo transport, queue, and Chats API status
 /usage          - Token usage and costs
 /conversion     - Sales funnel stats
 /performance    - Response time stats
@@ -291,7 +294,7 @@ Open `/admin/login` in a browser, sign in with `ADMIN_PASSWORD`, and the app wil
 - **Clientes**: Sortable customer table, retractable filters, tag management, inline channel/state editing with auto-save, delete customer, resolve escalations individually or all at once. In Kommo mode, manual reactivation first sets the Kommo lead `AI Mode` to `AI Active` and verifies it before clearing local history.
 - **Pedidos**: Sortable order table with status badges
 - **Broadcasts**: Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset stuck broadcasts
-- **Instagram**: Map posts, Reels, carousels, and discovered Stories to one or more catalog products
+- **Instagram**: Search, filter, and sort mappings for posts, Reels, carousels, and current Stories; map one or more brand-labelled catalog products and archive/restore records. Current Stories are synchronized from Meta when the list loads, and a current `/stories/{username}/{story-id}/` URL can be verified and mapped manually.
 - **Configuracion**: LLM provider/model/temperature/max tokens/conversation history, orchestration mode, fallback settings, daily exchange rate, dynamic payment methods, and catalog PDF generation/download
 
 Dark mode toggle in the header (persists via localStorage, auto-detects OS preference).
@@ -311,6 +314,8 @@ These values are stored in the store database and can be changed without redeplo
 Store-only payment methods are persisted separately under `payment_methods` in the same `settings` table. They are edited only from the store dashboard through `GET/PUT /admin/settings/payment-methods`, and the bot uses the configured method names plus their stored instructions at checkout. Scheduler timings are edited only from the master dashboard.
 
 Exchange-rate settings are stored in the same `settings` table and are used when customers ask things like `¿a qué tasa recibes?`. Instagram is informational: Eva can answer product, general shipping/payment-option, and read-only support questions and can send product images there. Buying, payment, checkout-specific delivery details, checkout continuation, and PDF delivery hand off to WhatsApp. Trusted backend code builds a clickable `wa.me` handoff from the database-backed `store_phone_number`; configure that setting with the full international country code. It also controls public Instagram comment fallback replies; when empty, those comments invite only to DM and private handoffs use the profile/store-contact fallback without generating a broken URL.
+
+Kommo Instagram customers resolve first through persisted provider identifiers. If those identifiers are new but the webhook provides an exact case-insensitive Instagram handle already stored on a customer, the existing customer is reused under a PostgreSQL advisory lock. This is exact identity reuse, not fuzzy customer merging.
 
 The generated customer PDF catalog intentionally omits the internal `SKU` and `Stock` columns. It only shows customer-facing product information. The `send_catalog_pdf` AI tool remains available only on supported WhatsApp delivery; Instagram requests for the PDF receive the WhatsApp handoff instead. The Google Sheets catalog can be modeled as one row per size variant with `SKU`, `Parent SKU`, and a singular `Size` column; see [store/DEPLOYMENT.md](store/DEPLOYMENT.md) for the exact sheet format.
 

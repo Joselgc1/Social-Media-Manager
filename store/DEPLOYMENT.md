@@ -41,7 +41,7 @@ In the Railway project, add a PostgreSQL service named `StorePostgres`. Deploy t
 DATABASE_URL=${{StorePostgres.DATABASE_URL}}
 ```
 
-`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The runner applies the normal migration sequence through Store schema version `14`; a failure blocks the deployment. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`. Do not run individual SQL files for a normal install or upgrade.
+`store/railway.toml` runs `python scripts/migrate.py` before every deployment and starts the Store with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The runner applies the normal migration sequence through Store schema version `16`; a failure blocks the deployment. For local development use a normal URL such as `postgresql://postgres:password@localhost:5432/store_db` and run `cd store && python scripts/migrate.py`. Do not run individual SQL files for a normal install or upgrade.
 
 Back up before changing an existing database. See [Railway PostgreSQL Deployment](../docs/RAILWAY_POSTGRES.md) for Store/Master setup, legacy recovery migrations, backup, and cutover instructions.
 
@@ -359,7 +359,7 @@ Test: Send "Hola, tienen pijamas?" from WhatsApp. The bot should respond within 
 
 Only do this when `CHANNEL_BACKEND=kommo`.
 
-1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 15.
+1. Run `python scripts/migrate.py` and confirm `store/app/db.py` accepts the complete migration set through version 16.
 2. Build and upload the private widget from `store/kommo-widget/` with `python3 build_widget.py --widget-code <kommo-widget-code>`.
 3. Create the WhatsApp Salesbot with its matching widget block. Route `success` to a WhatsApp-restricted Message step using `{{json.message}}`, `media` to a silent end, and `fail` to a silent end or human fallback. Instagram DMs do not use Salesbot; they require webhook `talk_id` and are answered directly through Talks/Chats API.
 4. Create the public-comment Kommo Salesbot with Kommo's native `When a comment is received` trigger, the `Ask Eva AI for Instagram comments` widget step, and a Comment step with `{{json.message}}` on `success`.
@@ -512,7 +512,8 @@ Test:
 
 ```text
 /stats        -> Today's stats
-/settings     -> All current settings
+/settings     -> Concise configuration summary
+/kommo        -> Kommo transport, queue, and Chats API diagnostics
 /usage        -> Token usage
 ```
 
@@ -616,10 +617,10 @@ Open `https://your-app.railway.app/admin/login` in any browser, sign in, and you
 - **Clientes:** Sortable customer table, inline tag management (add/remove), inline state/channel editing, and resolve escalations individually or all at once. In Kommo mode, dashboard reactivation verifies the lead's `AI Mode=AI Active` before local history is cleared.
 - **Pedidos:** Sortable order table with status badges
 - **Broadcasts:** Sortable broadcast table, create/preview/send broadcasts, inspect `partial` sends, reset failed broadcasts
-- **Instagram:** Map posts, Reels, carousels, and discovered Stories to one or more catalog products
+- **Instagram:** Search, filter, and sort mappings for posts, Reels, carousels, and current Stories; assign one or more brand-labelled products and archive/restore records. Loading the list synchronizes current Stories from Meta. Manual Story URLs must match `/stories/{username}/{story-id}/` and still be present in the connected account's current Stories response.
 - **Configuracion:** Switch LLM provider/model, adjust temperature/max tokens/conversation history, choose orchestration mode, configure fallback, manage store-only payment methods, and generate/download the catalog PDF. Scheduled-job timings are shown read-only here and are managed from `master/`.
 
-All tables in Clientes, Pedidos, and Broadcasts are sortable by clicking column headers. Click once for ascending, again for descending.
+Tables in Clientes, Pedidos, Broadcasts, and Instagram are sortable by clicking column headers. Click once for ascending, again for descending.
 
 Dark mode toggle in the header (🌙/☀️). Persists via localStorage and auto-detects OS preference on first visit.
 
@@ -802,7 +803,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 
 ```text
 [ ] /stats -> Today's numbers
-[ ] /customers -> Customer list (alphabetical with IDs)
+[ ] /customers -> Recent customer list by activity with IDs
 [ ] /customers vip -> Filtered by tag
 [ ] /tags [ID] -> Shows all tags for a customer
 [ ] /tag [ID] add vip -> Adds tag
@@ -816,7 +817,8 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 [ ] /ai on -> Resumes AI responses
 [ ] /provider anthropic -> Switches provider
 [ ] /usage -> Token costs
-[ ] /settings -> All settings
+[ ] /settings -> Concise configuration summary
+[ ] /kommo -> Read-only transport, queue, scope, and Chats API diagnostics
 [ ] /catalogpdf -> Generates PDF catalog
 [ ] /conversion -> Sales funnel
 [ ] /performance -> Response times
@@ -845,7 +847,7 @@ For Meta mode, test direct Instagram Messaging API behavior. For Kommo mode, tes
 ### 10.6 Kommo Mode
 
 ```text
-[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 15
+[ ] python scripts/migrate.py completes and store/app/db.py accepts the full migration set through version 16
 [ ] Widget ZIP uploaded to private Kommo integration
 [ ] WhatsApp Salesbot contains its widget step and success/media/fail exits
 [ ] Private integration has `Sending to external chats`; access was granted again if the scope was added after initial authorization

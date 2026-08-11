@@ -125,4 +125,5 @@ def test_story_mapping_form_accepts_manual_story_urls_and_reports_disabled_disco
     assert "meta-instagram-context/status" in dashboard
     assert "!_instagramContextStatus.story_enabled" in dashboard
     assert "El descubrimiento automático de Historias está desactivado" in dashboard
+    assert "credenciales de Meta" in dashboard
     assert "mapping.status === 'active' && !mapping.is_expired" in dashboard

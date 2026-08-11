@@ -15,7 +15,15 @@ Commands:
     /send ID        - Execute a draft/scheduled broadcast immediately
     /preview TAGS   - Preview how many customers match tag filters
     /settings       - View current settings
+    /kommo          - View Kommo transport and durable-job diagnostics
     /usage          - Today's LLM token usage and cost
+    /conversion     - Sales conversion funnel
+    /performance    - Response-time statistics
+    /products       - Popular products
+    /catalogpdf     - Generate the customer catalog PDF
+    /ai on|off      - Resume or pause automatic replies
+    /tags ID        - View customer tags
+    /tag ID ACTION  - Add or remove customer tags
 """
 
 import hmac
@@ -115,6 +123,8 @@ async def _handle_command(command: str, args: str) -> str:
             return await _cmd_preview(args)
         elif command == "/settings":
             return await _cmd_settings()
+        elif command == "/kommo":
+            return await _cmd_kommo()
         elif command == "/usage":
             return await _cmd_usage()
         elif command == "/conversion":
@@ -145,7 +155,8 @@ def _cmd_start() -> str:
         "📊 *Monitoreo*\n"
         "/stats - Estadísticas de hoy\n"
         "/usage - Uso de tokens y costos\n"
-        "/settings - Ver configuración actual\n\n"
+        "/settings - Ver configuración actual\n"
+        "/kommo - Estado de transporte y trabajos Kommo\n\n"
         "👥 *Clientes*\n"
         "/customers - Clientes recientes\n"
         "/customers vip - Filtrar por tag\n"
@@ -535,9 +546,82 @@ async def _cmd_settings() -> str:
             kommo_notes.append("PDF de catálogo")
         suffix = f" ({', '.join(kommo_notes)})" if kommo_notes else ""
         lines.append(f"• Backend: kommo{escape_markdown(suffix)}")
+        lines.append("• Instagram DM: Chats API")
+        lines.append('• Permiso "Sending to external chats": verificación manual requerida')
+        lines.append("• Usa /kommo para ver colas, fallos y consumo")
     else:
         lines.append("• Backend: meta")
 
+    return "\n".join(lines)
+
+
+async def _cmd_kommo() -> str:
+    config = get_config()
+    if getattr(config, "channel_backend", "meta") != "kommo":
+        return "🔌 *Kommo*\n\nEl backend activo no es Kommo."
+
+    from app.integrations.kommo.delivery import monthly_usage_summary
+    from app.integrations.kommo.jobs import diagnostics_summary
+
+    try:
+        diagnostics = await diagnostics_summary()
+    except Exception as error:
+        logger.warning("Telegram Kommo job diagnostics unavailable: %s", error)
+        diagnostics = None
+    try:
+        usage = await monthly_usage_summary(
+            getattr(config, "kommo_chats_api_monthly_limit", None)
+        )
+    except Exception as error:
+        logger.warning("Telegram Kommo usage diagnostics unavailable: %s", error)
+        usage = None
+
+    lines = [
+        "🔌 *Estado Kommo*\n",
+        "• Instagram DM: Chats API",
+        '• Permiso "Sending to external chats": verificación manual requerida',
+        "• Fallback de Instagram por Salesbot: no disponible",
+    ]
+    if diagnostics is None:
+        lines.append("\n⚠️ No se pudieron leer los trabajos durables.")
+    else:
+        pending = int(diagnostics.get("pending_job_count", 0) or 0)
+        waiting = int(diagnostics.get("waiting_for_delivery_job_count", 0) or 0)
+        failed = int(diagnostics.get("failed_job_count", 0) or 0)
+        unknown = int(diagnostics.get("delivery_unknown_job_count", 0) or 0)
+        stale = int(diagnostics.get("stale_job_count", 0) or 0)
+        lines.extend([
+            "\n📬 *Trabajos durables*",
+            f"• Pendientes: {pending}",
+            f"• Esperando confirmación de entrega: {waiting}",
+            f"• Fallidos (incluye desconocidos): {failed}",
+            f"• Resultado de entrega desconocido: {unknown}",
+            f"• Estancados: {stale}",
+        ])
+        if failed or unknown or stale:
+            lines.append("⚠️ Revisa la conversación en Kommo antes de reenviar. No reintentes a ciegas.")
+
+    if usage is None:
+        lines.append("\n⚠️ No se pudo leer el consumo local de Chats API.")
+    else:
+        attempted = int(usage.get("attempted_requests", 0) or 0)
+        text_requests = int(usage.get("text_requests", 0) or 0)
+        image_requests = int(usage.get("product_image_requests", 0) or 0)
+        unknown_deliveries = int(usage.get("delivery_unknown_deliveries", 0) or 0)
+        warning_level = str(usage.get("warning_level") or "normal")
+        lines.extend([
+            "\n📊 *Chats API este mes*",
+            f"• Intentos totales: {attempted}",
+            f"• Texto: {text_requests}",
+            f"• Imágenes de producto: {image_requests}",
+            f"• Entregas desconocidas: {unknown_deliveries}",
+            f"• Nivel de consumo: {escape_markdown(warning_level)}",
+        ])
+        remaining = usage.get("estimated_remaining_requests")
+        if remaining is not None:
+            lines.append(f"• Intentos estimados restantes: {int(remaining)}")
+
+    lines.append("\nEste diagnóstico es local y de solo lectura; Kommo sigue siendo la fuente autoritativa.")
     return "\n".join(lines)
 
 

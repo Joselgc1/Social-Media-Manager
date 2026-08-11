@@ -166,7 +166,7 @@ def start_scheduler(*, outbound_processing_enabled: bool = True):
             _process_kommo_jobs,
             trigger=IntervalTrigger(seconds=15),
             id="kommo_job_processor",
-            name="Process durable Kommo Salesbot jobs",
+            name="Process durable Kommo jobs",
             replace_existing=True,
         )
     context_config = get_config()

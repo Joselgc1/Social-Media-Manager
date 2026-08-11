@@ -50,7 +50,7 @@ Master pre-deploy: python scripts/migrate.py
 Master start:      uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-The runners use `asyncpg`, take a PostgreSQL advisory lock, and exit non-zero on failure without printing database URLs or credentials. The Store runner applies its normal sequence through schema version `14`; the Master runner applies its `001_master_schema.sql` baseline. Railway does not activate a deployment when its pre-deploy command fails.
+The runners use `asyncpg`, take a PostgreSQL advisory lock, and exit non-zero on failure without printing database URLs or credentials. The Store runner applies its normal sequence through schema version `16`; the Master runner applies its `001_master_schema.sql` baseline. Railway does not activate a deployment when its pre-deploy command fails.
 
 Run the same command locally after exporting the relevant `DATABASE_URL`:
 
