@@ -154,7 +154,8 @@ def map_ai_response_to_salesbot(
         product_image_is_native = "product_image" in native_payload_names
         if product_image_is_native:
             caption = _without_native_media_urls(caption, result, {"product_image"})
-        _append_customer_part(customer_parts, caption)
+        if not product_image_is_native or not reply_text:
+            _append_customer_part(customer_parts, caption)
         if not product_image_is_native and _is_public_url(product_image.get("image_url")):
             _append_customer_part(customer_parts, product_image["image_url"])
 

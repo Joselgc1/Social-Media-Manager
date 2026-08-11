@@ -1844,7 +1844,12 @@ async def test_waiting_instagram_delivery_delivered_confirms_and_finalizes(monke
     mock_db = MagicMock()
     mock_db.fetch_all = AsyncMock(
         return_value=[
-            {"id": "outbound", "status": "accepted", "provider_message_id": "message-1"}
+            {
+                "id": "outbound",
+                "media_type": "text",
+                "status": "accepted",
+                "provider_message_id": "message-1",
+            }
         ]
     )
     monkeypatch.setattr(jobs, "db", mock_db)
@@ -1860,7 +1865,12 @@ async def test_waiting_instagram_delivery_delivered_confirms_and_finalizes(monke
     monkeypatch.setattr(jobs, "_fail_waiting_delivery", fail)
 
     await jobs._reconcile_waiting_for_delivery_job(
-        {"id": "job", "talk_id": "300", "channel": "instagram"}
+        {
+            "id": "job",
+            "talk_id": "300",
+            "channel": "instagram",
+            "continuation_response": {"provider_message_ids": ["message-1"]},
+        }
     )
 
     client.get_talk_message_delivery_status.assert_awaited_once_with("300", "message-1")
@@ -1876,7 +1886,12 @@ async def test_waiting_instagram_delivery_error_fails_without_finalizing(monkeyp
     mock_db = MagicMock()
     mock_db.fetch_all = AsyncMock(
         return_value=[
-            {"id": "outbound", "status": "accepted", "provider_message_id": "message-1"}
+            {
+                "id": "outbound",
+                "media_type": "product_image",
+                "status": "accepted",
+                "provider_message_id": "message-1",
+            }
         ]
     )
     monkeypatch.setattr(jobs, "db", mock_db)
@@ -1888,11 +1903,21 @@ async def test_waiting_instagram_delivery_error_fails_without_finalizing(monkeyp
     monkeypatch.setattr(jobs, "_confirm_waiting_delivery", confirm)
     monkeypatch.setattr(jobs, "_finalize_waiting_delivery", finalize)
     monkeypatch.setattr(jobs, "_fail_waiting_delivery", fail)
-    job = {"id": "job", "talk_id": "300", "channel": "instagram"}
+    job = {
+        "id": "job",
+        "talk_id": "300",
+        "channel": "instagram",
+        "continuation_response": {"provider_message_ids": ["message-1"]},
+    }
 
     await jobs._reconcile_waiting_for_delivery_job(job)
 
-    fail.assert_awaited_once_with(job, "message-1", "error")
+    fail.assert_awaited_once_with(
+        job,
+        "message-1",
+        "error",
+        media_type="product_image",
+    )
     confirm.assert_not_awaited()
     finalize.assert_not_awaited()
 
@@ -1910,7 +1935,7 @@ async def test_delivery_error_marks_outbound_and_job_failed_with_safe_diagnostic
     monkeypatch.setattr(jobs, "db", mock_db)
     job = {"id": "job", "talk_id": "300"}
 
-    await jobs._fail_waiting_delivery(job, "message-1", "error")
+    await jobs._fail_waiting_delivery(job, "message-1", "error", media_type="text")
 
     assert mock_db.execute.await_count == 2
     outbound_call, job_call = mock_db.execute.await_args_list
@@ -1927,13 +1952,152 @@ async def test_delivery_error_marks_outbound_and_job_failed_with_safe_diagnostic
 
 
 @pytest.mark.asyncio
+async def test_media_delivery_error_queues_original_text_without_attachment(monkeypatch):
+    from app.integrations.kommo import jobs
+
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=_DBHandle())
+    mock_db.get_settings = AsyncMock(return_value={"store_phone_number": "+58 412 1234567"})
+    mock_db.execute = AsyncMock()
+    monkeypatch.setattr(jobs, "db", mock_db)
+    job = {
+        "id": "job",
+        "talk_id": "300",
+        "pending_assistant_message": {
+            "customer_id": "customer",
+            "content": "La bruma cuesta $24.",
+            "attachments": [{"type": "product_image", "product_name": "Bruma"}],
+            "final_status": "sent",
+        },
+    }
+
+    await jobs._fail_waiting_delivery(
+        job,
+        "message-1",
+        "error",
+        media_type="product_image",
+    )
+
+    assert mock_db.execute.await_count == 2
+    job_call = mock_db.execute.await_args_list[1]
+    assert "SET status = 'ready'" in job_call.args[0]
+    pending = json.loads(job_call.args[1]["pending_assistant_message"])
+    assert pending["content"].startswith("Parece que hay un error aquí en Instagram")
+    assert "Intenta escribirnos por WhatsApp aquí y seguro te ayudamos:" in pending["content"]
+    assert "https://wa.me/584121234567" in pending["content"]
+    assert "?text=" in pending["content"]
+    assert pending["whatsapp_handoff"]["prefilled_message"] == "Hola, quiero la foto de Bruma."
+    assert pending["attachments"] == []
+    assert pending["delivery_failure_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_error_text_fallback_delivers_without_running_ai(monkeypatch):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import DeliveryResult
+
+    deliver = AsyncMock(
+        return_value=DeliveryResult(
+            transport="chats_api",
+            customer_text="La bruma cuesta $24.",
+            delivered_attachments=[],
+            provider_message_ids=["fallback-message"],
+        )
+    )
+    mark_waiting = AsyncMock(return_value=True)
+    monkeypatch.setattr(jobs, "deliver_response", deliver)
+    monkeypatch.setattr(jobs, "_mark_direct_job_waiting_for_delivery", mark_waiting)
+    client = MagicMock()
+    job = {
+        "id": "job",
+        "processing_lease_id": LEASE_ID,
+        "channel": "instagram",
+        "interaction_type": "private_message",
+        "talk_id": "300",
+        "last_error": "provider error",
+    }
+    pending = {
+        "customer_id": "customer",
+        "content": "La bruma cuesta $24.",
+        "attachments": [],
+        "final_status": "sent",
+        "delivery_failure_fallback": True,
+    }
+
+    await jobs._process_provider_error_text_fallback(client, job, pending)
+
+    deliver.assert_awaited_once()
+    assert deliver.await_args.kwargs["result"] == {}
+    assert deliver.await_args.kwargs["customer_text"] == "La bruma cuesta $24."
+    assert (
+        deliver.await_args.kwargs["job"]["direct_delivery_purpose"]
+        == "provider_error_fallback"
+    )
+    mark_waiting.assert_awaited_once()
+    waiting_payload = mark_waiting.await_args.args[4]
+    assert waiting_payload["attachments"] == []
+    assert waiting_payload["delivery_failure_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_error_text_fallback_is_unknown_if_accepted_state_cannot_persist(
+    monkeypatch,
+):
+    from app.integrations.kommo import jobs
+    from app.integrations.kommo.delivery import DeliveryResult
+
+    monkeypatch.setattr(
+        jobs,
+        "deliver_response",
+        AsyncMock(
+            return_value=DeliveryResult(
+                transport="chats_api",
+                customer_text="La bruma cuesta $24.",
+                delivered_attachments=[],
+                provider_message_ids=["fallback-message"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "_mark_direct_job_waiting_for_delivery",
+        AsyncMock(return_value=False),
+    )
+    mark_job = AsyncMock()
+    monkeypatch.setattr(jobs, "_mark_job", mark_job)
+    job = {
+        "id": "job",
+        "processing_lease_id": LEASE_ID,
+        "channel": "instagram",
+        "interaction_type": "private_message",
+        "talk_id": "300",
+    }
+
+    await jobs._process_provider_error_text_fallback(
+        MagicMock(),
+        job,
+        {
+            "content": "La bruma cuesta $24.",
+            "delivery_failure_fallback": True,
+        },
+    )
+
+    assert mark_job.await_args.args[1] == "delivery_unknown"
+
+
+@pytest.mark.asyncio
 async def test_waiting_instagram_delivery_sent_remains_pending_without_resend(monkeypatch):
     from app.integrations.kommo import jobs
 
     mock_db = MagicMock()
     mock_db.fetch_all = AsyncMock(
         return_value=[
-            {"id": "outbound", "status": "accepted", "provider_message_id": "message-1"}
+            {
+                "id": "outbound",
+                "media_type": "text",
+                "status": "accepted",
+                "provider_message_id": "message-1",
+            }
         ]
     )
     monkeypatch.setattr(jobs, "db", mock_db)
@@ -1946,7 +2110,13 @@ async def test_waiting_instagram_delivery_sent_remains_pending_without_resend(mo
     monkeypatch.setattr(jobs, "_finalize_waiting_delivery", finalize)
     monkeypatch.setattr(jobs, "_fail_waiting_delivery", fail)
 
-    await jobs._reconcile_waiting_for_delivery_job({"id": "job", "talk_id": "300"})
+    await jobs._reconcile_waiting_for_delivery_job(
+        {
+            "id": "job",
+            "talk_id": "300",
+            "continuation_response": {"provider_message_ids": ["message-1"]},
+        }
+    )
 
     confirm.assert_not_awaited()
     finalize.assert_not_awaited()

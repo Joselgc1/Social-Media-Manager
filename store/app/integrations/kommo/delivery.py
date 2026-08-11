@@ -562,7 +562,7 @@ async def _claim_delivery(
         if require_direct_instagram_fence:
             locked_job = await db.fetch_one(
                 """
-                SELECT id
+                SELECT id, pending_assistant_message
                 FROM kommo_message_jobs
                 WHERE id = CAST(:job_id AS uuid)
                   AND status = 'processing'
@@ -580,6 +580,17 @@ async def _claim_delivery(
                 raise KommoDeliveryAbortedError(
                     "Kommo direct delivery aborted because its processing lease was lost"
                 )
+            pending_assistant = locked_job["pending_assistant_message"]
+            if isinstance(pending_assistant, str):
+                try:
+                    pending_assistant = json.loads(pending_assistant)
+                except json.JSONDecodeError:
+                    pending_assistant = {}
+            allow_provider_error_fallback = bool(
+                attachment_metadata.get("delivery_purpose") == "provider_error_fallback"
+                and isinstance(pending_assistant, dict)
+                and pending_assistant.get("delivery_failure_fallback") is True
+            )
             conflicting_delivery = await db.fetch_one(
                 """
                 SELECT id
@@ -589,12 +600,23 @@ async def _claim_delivery(
                   AND request_fingerprint IS DISTINCT FROM :request_fingerprint
                   AND (
                       status IN ('sending', 'accepted', 'confirmed', 'delivery_unknown')
-                      OR attachment_metadata->>'send_attempt_count' ~ '^[1-9][0-9]*$'
+                      OR (
+                          attachment_metadata->>'send_attempt_count' ~ '^[1-9][0-9]*$'
+                          AND NOT (
+                              :allow_provider_error_fallback
+                              AND status = 'failed'
+                              AND provider_message_id IS NOT NULL
+                              AND last_error LIKE 'Kommo provider delivery_status=error%%'
+                          )
+                      )
                   )
                 LIMIT 1
                 FOR UPDATE
                 """,
-                existing_values,
+                {
+                    **existing_values,
+                    "allow_provider_error_fallback": allow_provider_error_fallback,
+                },
             )
             if conflicting_delivery:
                 raise KommoDeliveryAbortedError(

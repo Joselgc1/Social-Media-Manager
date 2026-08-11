@@ -109,40 +109,71 @@ async def send_whatsapp_handoff(args: dict, context: ToolExecutionContext) -> di
 
     reason = str(args.get("handoff_reason") or "purchase").strip().lower()
     product_name, size, quantity = _validated_handoff_product_context(args)
+    payload = build_whatsapp_handoff_payload(
+        reason=reason,
+        store_phone_number=context.store_phone_number,
+        product_name=product_name,
+        size=size,
+        quantity=quantity,
+    )
+    if not payload["url"]:
+        logger.warning("WhatsApp handoff unavailable: store_phone_number is missing or invalid")
+    return payload
+
+
+def build_whatsapp_handoff_payload(
+    *,
+    reason: str,
+    store_phone_number: str | None,
+    product_name: str | None = None,
+    size: str | None = None,
+    quantity: int | None = None,
+) -> dict:
+    """Build a trusted WhatsApp CTA for AI and deterministic delivery fallbacks."""
     prefilled_message = _build_whatsapp_prefilled_message(
         reason=reason,
         product_name=product_name,
         size=size,
         quantity=quantity,
     )
-    phone_digits = normalize_whatsapp_phone_number(context.store_phone_number)
-    if not phone_digits:
-        logger.warning("WhatsApp handoff unavailable: store_phone_number is missing or invalid")
-        fallback = (
+    phone_digits = normalize_whatsapp_phone_number(store_phone_number)
+    image_failure = reason == "product_image_delivery_failed"
+    if image_failure:
+        cta = (
+            "Parece que hay un error aquí en Instagram y no puedo enviarte la imagen correctamente. "
+            "Intenta escribirnos por WhatsApp aquí y seguro te ayudamos:"
+        )
+        missing_phone_text = (
+            "Parece que hay un error aquí en Instagram y no puedo enviarte la imagen correctamente. "
+            "Intenta escribirnos al contacto de WhatsApp disponible en el perfil o en la información "
+            "de la tienda y seguro te ayudamos."
+        )
+    elif reason == "catalog_pdf":
+        cta = "Para enviarte el catálogo PDF y ayudarte mejor, continuamos por WhatsApp:"
+        missing_phone_text = (
             "Para enviarte el catálogo PDF, continuamos por WhatsApp. Escríbenos al contacto de WhatsApp "
             "disponible en el perfil o en la información de la tienda."
-            if reason == "catalog_pdf"
-            else (
-                "Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp. "
-                "Escríbenos al contacto de WhatsApp disponible en el perfil o en la información de la tienda."
-            )
         )
+    else:
+        cta = "Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp:"
+        missing_phone_text = (
+            "Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp. "
+            "Escríbenos al contacto de WhatsApp disponible en el perfil o en la información de la tienda."
+        )
+    if not phone_digits:
         return {
             "type": "whatsapp_handoff",
             "url": None,
-            "customer_text": fallback,
+            "customer_text": missing_phone_text,
             "prefilled_message": prefilled_message,
         }
 
-    url = f"https://wa.me/{phone_digits}?text={quote(prefilled_message, safe='')}"
-    cta = (
-        "Para enviarte el catálogo PDF y ayudarte mejor, continuamos por WhatsApp:"
-        if reason == "catalog_pdf"
-        else "Para ayudarte mejor con el pedido, el pago y el envío, continuamos las compras por WhatsApp:"
-    )
+    display_url = f"https://wa.me/{phone_digits}"
+    url = f"{display_url}?text={quote(prefilled_message, safe='')}"
     return {
         "type": "whatsapp_handoff",
         "url": url,
+        "display_url": display_url,
         "customer_text": f"{cta}\n{url}",
         "prefilled_message": prefilled_message,
     }
@@ -191,6 +222,9 @@ def _build_whatsapp_prefilled_message(
     size: str | None,
     quantity: int | None,
 ) -> str:
+    if reason == "product_image_delivery_failed":
+        product_text = f" de {product_name}" if product_name else " del producto"
+        return f"Hola, quiero la foto{product_text}."
     if reason == "catalog_pdf":
         return "Hola, vengo de Instagram y quiero recibir el catálogo PDF. ¿Me pueden ayudar?"
     if not product_name:

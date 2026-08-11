@@ -130,6 +130,38 @@ async def test_meta_media_client_fetches_read_only_fields_without_token_in_url(m
 
 
 @pytest.mark.asyncio
+async def test_meta_story_client_lists_current_stories_without_token_in_url(monkeypatch):
+    from app.integrations.meta_context import client
+
+    fake = _HTTPClient(
+        _Response(
+            payload={
+                "data": [
+                    {
+                        "id": "story-media-1",
+                        "permalink": "https://www.instagram.com/stories/store/123",
+                        "media_type": "IMAGE",
+                        "media_url": "https://cdn.example/story.jpg",
+                        "timestamp": "2026-08-11T10:00:00Z",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(client.httpx, "AsyncClient", lambda **_kwargs: fake)
+
+    result = await client.MetaContextClient("secret-token", "v21.0").get_stories(
+        "instagram-account"
+    )
+
+    assert [story.id for story in result] == ["story-media-1"]
+    url, kwargs = fake.request
+    assert url == "https://graph.facebook.com/v21.0/instagram-account/stories"
+    assert "secret-token" not in url
+    assert kwargs["headers"] == {"Authorization": "Bearer secret-token"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response", "error", "expected"),
     [

@@ -1024,7 +1024,10 @@ async def test_direct_claim_locks_job_before_establishing_sending_fence(monkeypa
     execute = AsyncMock()
     fetch_one = AsyncMock(
         side_effect=[
-            {"id": DIRECT_INSTAGRAM_JOB["id"]},
+            {
+                "id": DIRECT_INSTAGRAM_JOB["id"],
+                "pending_assistant_message": None,
+            },
             None,
             {"status": "sending", "provider_message_id": None},
         ]
@@ -1058,7 +1061,10 @@ async def test_direct_fallback_claim_aborts_after_another_send_began(monkeypatch
     execute = AsyncMock()
     fetch_one = AsyncMock(
         side_effect=[
-            {"id": DIRECT_INSTAGRAM_JOB["id"]},
+            {
+                "id": DIRECT_INSTAGRAM_JOB["id"],
+                "pending_assistant_message": None,
+            },
             {"id": "original-delivery"},
         ]
     )
@@ -1077,6 +1083,41 @@ async def test_direct_fallback_claim_aborts_after_another_send_began(monkeypatch
         )
 
     execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_error_fallback_claim_can_cross_failed_original_send_fence(monkeypatch):
+    database = _TransactionDB()
+    execute = AsyncMock()
+    fetch_one = AsyncMock(
+        side_effect=[
+            {
+                "id": DIRECT_INSTAGRAM_JOB["id"],
+                "pending_assistant_message": {"delivery_failure_fallback": True},
+            },
+            None,
+            {"status": "sending", "provider_message_id": None},
+        ]
+    )
+    monkeypatch.setattr(delivery.db, "get_db", lambda: database)
+    monkeypatch.setattr(delivery.db, "execute", execute)
+    monkeypatch.setattr(delivery.db, "fetch_one", fetch_one)
+
+    claim = await delivery._claim_delivery(
+        job_id=DIRECT_INSTAGRAM_JOB["id"],
+        media_type="text",
+        request_fingerprint="provider-error-fallback",
+        attachment_metadata={
+            "delivery_type": "text",
+            "delivery_purpose": "provider_error_fallback",
+        },
+        processing_lease_id=DIRECT_INSTAGRAM_JOB["processing_lease_id"],
+        require_direct_instagram_fence=True,
+    )
+
+    assert claim.send_allowed is True
+    conflict_call = fetch_one.await_args_list[1]
+    assert conflict_call.args[1]["allow_provider_error_fallback"] is True
 
 
 @pytest.mark.asyncio

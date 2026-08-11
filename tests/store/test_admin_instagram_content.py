@@ -12,11 +12,17 @@ from pydantic import ValidationError
 CONTENT_ID = "11111111-1111-1111-1111-111111111111"
 
 
+@pytest.fixture(autouse=True)
+def _disable_live_story_sync(monkeypatch):
+    monkeypatch.setattr(instagram_content, "_current_instagram_stories", AsyncMock(return_value=[]))
+
+
 def _products():
     return [
         {
             "sku": "PARENT-1",
             "product_name": "Pijama rosa",
+            "brand": "Victoria's Secret",
             "category": "Pijamas",
             "price_usd": 30,
             "stock": 0,
@@ -77,6 +83,7 @@ async def test_product_endpoint_uses_grouped_reference_catalog_with_zero_stock(m
     assert result == [{
         "sku": "PARENT-1",
         "name": "Pijama rosa",
+        "brand": "Victoria's Secret",
         "category": "Pijamas",
         "price": 30.0,
         "total_stock": 0,
@@ -149,6 +156,92 @@ async def test_create_reel_mapping_with_multiple_skus(monkeypatch):
         "https://www.instagram.com/reel/Reel_123/"
     )
     assert result["product_skus"] == ["PARENT-1", "PARENT-2"]
+
+
+@pytest.mark.asyncio
+async def test_create_story_mapping_persists_stable_story_id(monkeypatch):
+    monkeypatch.setattr(instagram_content, "_reference_products", AsyncMock(return_value=_products()))
+    monkeypatch.setattr(instagram_content.db, "get_db", lambda: _database())
+    story = SimpleNamespace(
+        id="18203958385364316",
+        permalink=(
+            "https://www.instagram.com/stories/royalminiperfume/"
+            "3960710848477371812"
+        ),
+        media_type="IMAGE",
+        media_url="https://cdn.example/story.jpg",
+        thumbnail_url=None,
+        timestamp=None,
+    )
+    monkeypatch.setattr(
+        instagram_content,
+        "_current_instagram_stories",
+        AsyncMock(return_value=[story]),
+    )
+    upsert_story = AsyncMock(return_value=CONTENT_ID)
+    monkeypatch.setattr(instagram_content, "_upsert_current_story", upsert_story)
+    monkeypatch.setattr(instagram_content.db, "execute", AsyncMock())
+
+    result = await instagram_content.create_instagram_content(
+        instagram_content.InstagramContentCreate(
+            post_url=(
+                "https://www.instagram.com/stories/royalminiperfume/"
+                "3960710848477371812/?igsh=test"
+            ),
+            product_skus=["PARENT-1"],
+        )
+    )
+
+    upsert_story.assert_awaited_once_with(story)
+    assert result["normalized_url"] == (
+        "https://www.instagram.com/stories/royalminiperfume/"
+        "3960710848477371812/"
+    )
+    assert result["product_skus"] == ["PARENT-1"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_current_story_persists_graph_media_id(monkeypatch):
+    story = SimpleNamespace(
+        id="18203958385364316",
+        permalink=(
+            "https://www.instagram.com/stories/royalminiperfume/"
+            "3960710848477371812"
+        ),
+        media_type="IMAGE",
+        media_url="https://cdn.example/story.jpg",
+        thumbnail_url=None,
+        timestamp=None,
+    )
+    monkeypatch.setattr(
+        instagram_content,
+        "get_config",
+        lambda: SimpleNamespace(instagram_story_mapping_ttl_hours=24),
+    )
+    fetch_one = AsyncMock(return_value={"id": CONTENT_ID})
+    monkeypatch.setattr(instagram_content.db, "fetch_one", fetch_one)
+
+    assert await instagram_content._upsert_current_story(story) == CONTENT_ID
+
+    values = fetch_one.await_args.args[1]
+    assert values["media_id"] == "18203958385364316"
+    assert values["shortcode"] == "3960710848477371812"
+    assert values["normalized_permalink"].endswith("/3960710848477371812/")
+
+
+@pytest.mark.asyncio
+async def test_sync_current_stories_upserts_every_graph_story(monkeypatch):
+    stories = [SimpleNamespace(id="story-1"), SimpleNamespace(id="story-2")]
+    monkeypatch.setattr(
+        instagram_content,
+        "_current_instagram_stories",
+        AsyncMock(return_value=stories),
+    )
+    upsert = AsyncMock(side_effect=["content-1", "content-2"])
+    monkeypatch.setattr(instagram_content, "_upsert_current_story", upsert)
+
+    assert await instagram_content._sync_current_instagram_stories() == stories
+    assert [call.args[0] for call in upsert.await_args_list] == stories
 
 
 def test_mapping_input_limits_are_enforced():

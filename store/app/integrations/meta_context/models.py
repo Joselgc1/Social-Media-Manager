@@ -31,3 +31,12 @@ class MetaMediaDetails(BaseModel):
     media_product_type: str | None = None
     timestamp: datetime | None = None
     thumbnail_url: str | None = None
+
+
+class MetaStoryDetails(BaseModel):
+    id: str
+    permalink: str
+    media_type: str | None = None
+    media_url: str | None = None
+    thumbnail_url: str | None = None
+    timestamp: datetime | None = None

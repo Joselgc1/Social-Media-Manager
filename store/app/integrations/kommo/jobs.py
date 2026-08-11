@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 from app import db
 from app.ai.engine import generate_response
+from app.ai.tools.messaging import build_whatsapp_handoff_payload
 from app.ai.transcription import AudioTranscriptionError, transcribe_audio_url
 from app.config import get_config
 from app.crm import conversations, escalations, sessions
@@ -339,15 +340,25 @@ async def _claim_waiting_for_delivery_job():
 
 
 async def _reconcile_waiting_for_delivery_job(job: dict) -> None:
+    provider_message_ids = _provider_message_ids(job)
+    if not provider_message_ids:
+        logger.warning(
+            "Kommo delivery reconciliation deferred: job_id=%s talk_id=%s "
+            "provider_message_id=missing provider_delivery_status=missing_job_provider_id",
+            job["id"],
+            job.get("talk_id"),
+        )
+        return
     outbound_rows = await db.fetch_all(
         """
-        SELECT id, status, provider_message_id
+        SELECT id, media_type, status, provider_message_id
         FROM kommo_outbound_deliveries
         WHERE job_id = CAST(:job_id AS uuid)
           AND transport = 'chats_api'
+          AND provider_message_id = ANY(CAST(:provider_message_ids AS text[]))
         ORDER BY created_at
         """,
-        {"job_id": job["id"]},
+        {"job_id": job["id"], "provider_message_ids": provider_message_ids},
     )
     if not outbound_rows:
         logger.warning(
@@ -370,6 +381,7 @@ async def _reconcile_waiting_for_delivery_job(job: dict) -> None:
                 job,
                 provider_message_id,
                 "error",
+                media_type=str(outbound.get("media_type") or ""),
             )
             return
         if outbound.get("status") != "accepted" or not provider_message_id:
@@ -403,7 +415,12 @@ async def _reconcile_waiting_for_delivery_job(job: dict) -> None:
             await _confirm_waiting_delivery(outbound["id"], provider_message_id)
             continue
         if provider_status == "error":
-            await _fail_waiting_delivery(job, provider_message_id, provider_status)
+            await _fail_waiting_delivery(
+                job,
+                provider_message_id,
+                provider_status,
+                media_type=str(outbound.get("media_type") or ""),
+            )
             return
         all_delivered = False
 
@@ -431,10 +448,35 @@ async def _fail_waiting_delivery(
     job: dict,
     provider_message_id: str,
     provider_status: str,
+    *,
+    media_type: str,
 ) -> None:
     diagnostic = sanitize_job_error(
         f"Kommo provider delivery_status={provider_status} for message {provider_message_id}"
     )
+    pending_assistant = _json_dict(job.get("pending_assistant_message"))
+    queue_text_fallback = bool(
+        media_type in {"product_image", "catalog_pdf"}
+        and provider_status == "error"
+        and pending_assistant.get("content")
+        and pending_assistant.get("delivery_failure_fallback") is not True
+    )
+    if queue_text_fallback:
+        attachments = pending_assistant.get("attachments")
+        product_name = next(
+            (
+                str(attachment.get("product_name") or "").strip()
+                for attachment in attachments
+                if isinstance(attachment, dict) and attachment.get("type") == "product_image"
+            ),
+            "",
+        ) if isinstance(attachments, list) else ""
+        settings = await db.get_settings()
+        handoff = build_whatsapp_handoff_payload(
+            reason="product_image_delivery_failed",
+            store_phone_number=str(settings.get("store_phone_number") or ""),
+            product_name=product_name or None,
+        )
     async with db.get_db().transaction():
         await db.execute(
             """
@@ -453,20 +495,54 @@ async def _fail_waiting_delivery(
                 "last_error": diagnostic,
             },
         )
-        await db.execute(
-            """
-            UPDATE kommo_message_jobs
-            SET status = 'failed',
-                last_error = :last_error,
-                pending_assistant_message = NULL,
-                delivery_reconcile_after_at = NULL,
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE id = :id
-              AND status = 'waiting_for_delivery'
-            """,
-            {"id": job["id"], "last_error": diagnostic},
-        )
+        if queue_text_fallback:
+            fallback_payload = {
+                **pending_assistant,
+                "content": handoff["customer_text"],
+                "attachments": [],
+                "final_status": "sent",
+                "delivery_failure_fallback": True,
+                "whatsapp_handoff": handoff,
+            }
+            await db.execute(
+                """
+                UPDATE kommo_message_jobs
+                SET status = 'ready',
+                    last_error = :last_error,
+                    pending_assistant_message = CAST(:pending_assistant_message AS jsonb),
+                    continuation_response = NULL,
+                    delivery_reconcile_after_at = NULL,
+                    delivery_reconcile_attempt_count = 0,
+                    ai_started_at = NULL,
+                    completed_at = NULL,
+                    updated_at = NOW()
+                WHERE id = :id
+                  AND status = 'waiting_for_delivery'
+                """,
+                {
+                    "id": job["id"],
+                    "last_error": diagnostic,
+                    "pending_assistant_message": json.dumps(
+                        fallback_payload,
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+        else:
+            await db.execute(
+                """
+                UPDATE kommo_message_jobs
+                SET status = 'failed',
+                    last_error = :last_error,
+                    pending_assistant_message = NULL,
+                    delivery_reconcile_after_at = NULL,
+                    completed_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :id
+                  AND status = 'waiting_for_delivery'
+                """,
+                {"id": job["id"], "last_error": diagnostic},
+            )
     logger.warning(
         "Kommo direct Instagram delivery failed: job_id=%s talk_id=%s "
         "provider_message_id=%s provider_delivery_status=%s",
@@ -475,6 +551,15 @@ async def _fail_waiting_delivery(
         provider_message_id,
         provider_status,
     )
+    if queue_text_fallback:
+        logger.info(
+            "Kommo direct Instagram text fallback queued: job_id=%s talk_id=%s "
+            "failed_provider_message_id=%s failed_media_type=%s",
+            job["id"],
+            job.get("talk_id"),
+            provider_message_id,
+            media_type,
+        )
 
 
 async def _finalize_waiting_delivery(job_id: str) -> None:
@@ -1263,6 +1348,10 @@ async def _process_ready_job(job: dict) -> None:
     customer = None
     try:
         logger.info("Kommo ready job processing started: %s", _job_log_context(job))
+        pending_assistant = _json_dict(job.get("pending_assistant_message"))
+        if pending_assistant.get("delivery_failure_fallback") is True:
+            await _process_provider_error_text_fallback(client, job, pending_assistant)
+            return
         settings = await db.get_settings()
         contact = await _fetch_contact_for_job(client, job)
         lead_id = job.get("lead_id") or _single_contact_lead_id(contact)
@@ -1713,6 +1802,68 @@ async def _process_ready_job(job: dict) -> None:
             if continuation_started or media_delivery_succeeded
             else "failed",
             sanitize_job_error(e),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
+
+
+async def _process_provider_error_text_fallback(
+    client: KommoClient,
+    job: dict,
+    pending_assistant: dict,
+) -> None:
+    """Deliver the original response text once after a definitive media rejection."""
+    customer_text = str(pending_assistant.get("content") or "").strip()
+    delivery_accepted = False
+    if not _is_direct_instagram_dm(job) or not customer_text:
+        await _mark_job(
+            job["id"],
+            "failed",
+            "invalid_provider_error_text_fallback",
+            processing_lease_id=job.get("processing_lease_id"),
+        )
+        return
+    try:
+        delivery_result = await deliver_response(
+            job={**job, "direct_delivery_purpose": "provider_error_fallback"},
+            result={},
+            customer_text=customer_text,
+            client=client,
+        )
+        delivery_accepted = True
+        fallback_payload = {
+            **pending_assistant,
+            "content": delivery_result.customer_text,
+            "attachments": [],
+            "final_status": "sent",
+            "delivery_failure_fallback": True,
+        }
+        if not await _mark_direct_job_waiting_for_delivery(
+            job["id"],
+            job.get("processing_lease_id"),
+            str(job.get("talk_id") or ""),
+            delivery_result.provider_message_ids,
+            fallback_payload,
+            reason=job.get("last_error"),
+        ):
+            raise KommoDeliveryStateError(
+                "Kommo provider-error text fallback could not enter delivery reconciliation"
+            )
+    except (
+        KommoDeliveryUnknownError,
+        KommoPartialDeliveryError,
+        KommoDeliveryStateError,
+    ) as error:
+        await _mark_job(
+            job["id"],
+            "delivery_unknown" if delivery_accepted else "failed",
+            sanitize_job_error(error),
+            processing_lease_id=job.get("processing_lease_id"),
+        )
+    except Exception as error:
+        await _mark_job(
+            job["id"],
+            "failed",
+            sanitize_job_error(error),
             processing_lease_id=job.get("processing_lease_id"),
         )
 

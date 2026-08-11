@@ -8,6 +8,10 @@ from urllib.parse import urlsplit
 from app import db
 
 _SUPPORTED_CONTENT_PATH = re.compile(r"^/(p|reel)/([A-Za-z0-9_-]+)/?$", re.IGNORECASE)
+_STORY_CONTENT_PATH = re.compile(
+    r"^/stories/([A-Za-z0-9._]{1,30})/([0-9]{1,30})/?$",
+    re.IGNORECASE,
+)
 
 
 class InstagramContentUrlError(ValueError):
@@ -17,12 +21,13 @@ class InstagramContentUrlError(ValueError):
 @dataclass(frozen=True)
 class NormalizedInstagramUrl:
     normalized_url: str
-    shortcode: str
+    shortcode: str | None
     content_type: str
+    media_id: str | None = None
 
 
 def normalize_instagram_url(value: str) -> NormalizedInstagramUrl:
-    """Normalize a public Instagram post or Reel URL without fetching it."""
+    """Normalize a public Instagram post, Reel, or Story URL without fetching it."""
     raw_url = str(value or "").strip()
     try:
         parsed = urlsplit(raw_url)
@@ -41,7 +46,18 @@ def normalize_instagram_url(value: str) -> NormalizedInstagramUrl:
 
     path_match = _SUPPORTED_CONTENT_PATH.fullmatch(parsed.path)
     if not path_match:
-        raise InstagramContentUrlError("Only Instagram post and Reel URLs are supported.")
+        story_match = _STORY_CONTENT_PATH.fullmatch(parsed.path)
+        if not story_match or story_match.group(1).lower() == "highlights":
+            raise InstagramContentUrlError(
+                "Only Instagram post, Reel, and Story URLs are supported."
+            )
+        username, story_id = story_match.groups()
+        return NormalizedInstagramUrl(
+            normalized_url=f"https://www.instagram.com/stories/{username}/{story_id}/",
+            shortcode=story_id,
+            content_type="story",
+            media_id=None,
+        )
 
     path_type, shortcode = path_match.groups()
     path_type = path_type.lower()
@@ -51,6 +67,7 @@ def normalize_instagram_url(value: str) -> NormalizedInstagramUrl:
         normalized_url=normalized_url,
         shortcode=shortcode,
         content_type=content_type,
+        media_id=None,
     )
 
 

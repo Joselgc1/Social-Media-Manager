@@ -1,7 +1,7 @@
 """Authenticated administration of Instagram content-to-product mappings."""
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -15,7 +15,9 @@ from app.catalog.sheets import (
     get_cached_reference_catalog,
     group_catalog_products,
 )
+from app.config import get_config
 from app.instagram_content.service import InstagramContentUrlError, normalize_instagram_url
+from app.integrations.meta_context.client import MetaContextAPIError, MetaContextClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -46,6 +48,7 @@ def _serialize_reference_product(product: dict) -> dict:
     return {
         "sku": product["sku"],
         "name": product.get("product_name", ""),
+        "brand": product.get("brand", ""),
         "category": product.get("category", ""),
         "price": _current_product_price(product),
         "total_stock": int(product.get("stock", 0) or 0),
@@ -115,6 +118,63 @@ async def _replace_product_mappings(content_id: str, product_skus: list[str]) ->
         )
 
 
+async def _current_instagram_stories() -> list:
+    config = get_config()
+    if not config.instagram_access_token or not config.instagram_account_id:
+        return []
+    return await MetaContextClient.from_config().get_stories(config.instagram_account_id)
+
+
+async def _upsert_current_story(story) -> str | None:
+    try:
+        normalized = normalize_instagram_url(story.permalink)
+    except InstagramContentUrlError:
+        return None
+    if normalized.content_type != "story":
+        return None
+    config = get_config()
+    published_at = story.timestamp or datetime.now(UTC)
+    expires_at = published_at + timedelta(hours=config.instagram_story_mapping_ttl_hours)
+    row = await db.fetch_one(
+        """
+        INSERT INTO instagram_content (
+            content_type, permalink, normalized_permalink, shortcode, media_id,
+            thumbnail_url, published_at, expires_at
+        ) VALUES (
+            'story', :permalink, :normalized_permalink, :shortcode, :media_id,
+            :thumbnail_url, :published_at, :expires_at
+        )
+        ON CONFLICT (media_id) WHERE media_id IS NOT NULL DO UPDATE
+        SET permalink = EXCLUDED.permalink,
+            normalized_permalink = EXCLUDED.normalized_permalink,
+            shortcode = EXCLUDED.shortcode,
+            thumbnail_url = COALESCE(EXCLUDED.thumbnail_url, instagram_content.thumbnail_url),
+            published_at = COALESCE(instagram_content.published_at, EXCLUDED.published_at),
+            expires_at = COALESCE(instagram_content.expires_at, EXCLUDED.expires_at),
+            updated_at = NOW()
+        WHERE instagram_content.content_type = 'story'
+        RETURNING id
+        """,
+        {
+            "permalink": story.permalink,
+            "normalized_permalink": normalized.normalized_url,
+            "shortcode": normalized.shortcode,
+            "media_id": story.id,
+            "thumbnail_url": story.thumbnail_url or story.media_url,
+            "published_at": published_at,
+            "expires_at": expires_at,
+        },
+    )
+    return str(row["id"]) if row else None
+
+
+async def _sync_current_instagram_stories() -> list:
+    stories = await _current_instagram_stories()
+    for story in stories:
+        await _upsert_current_story(story)
+    return stories
+
+
 @router.get("/products")
 async def list_mapping_products():
     """Return grouped active products, including products with no current stock."""
@@ -123,6 +183,10 @@ async def list_mapping_products():
 
 @router.get("")
 async def list_instagram_content():
+    try:
+        await _sync_current_instagram_stories()
+    except MetaContextAPIError as exc:
+        logger.warning("Current Instagram Story discovery unavailable: %s", exc)
     rows = await db.fetch_all(
         """
         SELECT id, content_type, permalink, normalized_permalink, shortcode,
@@ -206,26 +270,57 @@ async def list_instagram_content():
 async def create_instagram_content(body: InstagramContentCreate):
     normalized = _normalize_or_422(body.post_url)
     product_skus = _validate_product_skus(body.product_skus, await _reference_products())
+    resolved_story = None
+    if normalized.content_type == "story":
+        try:
+            stories = await _current_instagram_stories()
+        except MetaContextAPIError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Current Instagram Stories could not be verified.",
+            ) from exc
+        for story in stories:
+            try:
+                story_url = normalize_instagram_url(story.permalink)
+            except InstagramContentUrlError:
+                continue
+            if story_url.normalized_url == normalized.normalized_url:
+                resolved_story = story
+                break
+        if resolved_story is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This Story is not currently available on the connected "
+                    "Instagram account."
+                ),
+            )
     database = db.get_db()
     try:
         async with database.transaction():
-            row = await db.fetch_one(
-                """
-                INSERT INTO instagram_content (
-                    content_type, permalink, normalized_permalink, shortcode
-                ) VALUES (
-                    :content_type, :permalink, :normalized_permalink, :shortcode
+            if normalized.content_type == "story":
+                content_id = await _upsert_current_story(resolved_story)
+                if not content_id:
+                    raise HTTPException(status_code=409, detail="This Story conflicts with another mapping.")
+            else:
+                row = await db.fetch_one(
+                    """
+                    INSERT INTO instagram_content (
+                        content_type, permalink, normalized_permalink, shortcode, media_id
+                    ) VALUES (
+                        :content_type, :permalink, :normalized_permalink, :shortcode, :media_id
+                    )
+                    RETURNING id
+                    """,
+                    {
+                        "content_type": normalized.content_type,
+                        "permalink": body.post_url.strip(),
+                        "normalized_permalink": normalized.normalized_url,
+                        "shortcode": normalized.shortcode,
+                        "media_id": normalized.media_id,
+                    },
                 )
-                RETURNING id
-                """,
-                {
-                    "content_type": normalized.content_type,
-                    "permalink": body.post_url.strip(),
-                    "normalized_permalink": normalized.normalized_url,
-                    "shortcode": normalized.shortcode,
-                },
-            )
-            content_id = str(row["id"])
+                content_id = str(row["id"])
             await _replace_product_mappings(content_id, product_skus)
     except Exception as exc:
         if _is_unique_violation(exc):
@@ -264,7 +359,7 @@ async def update_instagram_content(content_id: UUID, body: InstagramContentUpdat
                 "content_type = :content_type",
                 "normalized_permalink = :normalized_permalink",
                 "shortcode = :shortcode",
-                "media_id = NULL",
+                "media_id = :media_id" if normalized.media_id else "media_id = NULL",
                 "caption_snapshot = NULL",
             ])
             values.update({
@@ -272,6 +367,8 @@ async def update_instagram_content(content_id: UUID, body: InstagramContentUpdat
                 "normalized_permalink": normalized.normalized_url,
                 "shortcode": normalized.shortcode,
             })
+            if normalized.media_id:
+                values["media_id"] = normalized.media_id
     if body.status is not None:
         updates.append("status = :status")
         values["status"] = body.status

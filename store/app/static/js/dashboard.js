@@ -76,6 +76,8 @@ let _broadcastsData = [];
 let _instagramMappingsData = [];
 let _instagramProductsData = [];
 let _instagramProductsAvailable = true;
+let _instagramContextStatus = null;
+let _showArchivedInstagramMappings = false;
 let _instagramEditingId = null;
 let _sort = { customers: {col: null, asc: true}, orders: {col: null, asc: true}, broadcasts: {col: null, asc: true} };
 const MOBILE_BREAKPOINT = 768;
@@ -243,14 +245,16 @@ function switchTabByName(name) {
 
 // -- Instagram content mappings --
 async function loadInstagramMappings() {
-  const [productsResult, mappingsResult] = await Promise.allSettled([
+  const [productsResult, mappingsResult, contextStatusResult] = await Promise.allSettled([
     apiFetch(INSTAGRAM_CONTENT_API + '/products').then(r => r.json()),
     apiFetch(INSTAGRAM_CONTENT_API).then(r => r.json()),
+    apiFetch(API + '/meta-instagram-context/status').then(r => r.json()),
   ]);
   if (mappingsResult.status === 'rejected') throw mappingsResult.reason;
   _instagramProductsAvailable = productsResult.status === 'fulfilled';
   _instagramProductsData = _instagramProductsAvailable ? productsResult.value : [];
   _instagramMappingsData = mappingsResult.value;
+  _instagramContextStatus = contextStatusResult.status === 'fulfilled' ? contextStatusResult.value : null;
   renderInstagramProductOptions();
   renderInstagramMappings();
 }
@@ -259,11 +263,15 @@ function renderInstagramProductOptions() {
   const select = document.getElementById('instagram-product-skus');
   if (!select) return;
   const selected = new Set([...select.selectedOptions].map(option => option.value));
-  select.innerHTML = _instagramProductsData.map(product => `<option value="${escapeHtml(product.sku)}">${escapeHtml(product.name)} · ${escapeHtml(product.sku)}</option>`).join('');
+  select.innerHTML = _instagramProductsData.map(product => `<option value="${escapeHtml(product.sku)}">${escapeHtml(instagramProductLabel(product))}</option>`).join('');
   [...select.options].forEach(option => { option.selected = selected.has(option.value); });
   const picker = document.getElementById('instagram-product-picker');
-  if (picker) picker.innerHTML = _instagramProductsAvailable ? _instagramProductsData.map(product => `<label class="flex cursor-pointer items-center gap-2 rounded px-2 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"><input type="checkbox" value="${escapeHtml(product.sku)}" ${selected.has(product.sku) ? 'checked' : ''} onchange="toggleInstagramProduct(this.value, this.checked)"><span class="text-sm">${escapeHtml(product.name)} <span class="text-gray-500">· ${escapeHtml(product.sku)}</span></span></label>`).join('') : '<p class="p-2 text-sm text-gray-500">Catálogo temporalmente no disponible</p>';
+  if (picker) picker.innerHTML = _instagramProductsAvailable ? _instagramProductsData.map(product => `<label class="flex cursor-pointer items-center gap-2 rounded px-2 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"><input type="checkbox" value="${escapeHtml(product.sku)}" ${selected.has(product.sku) ? 'checked' : ''} onchange="toggleInstagramProduct(this.value, this.checked)"><span class="text-sm">${escapeHtml(instagramProductLabel(product))}</span></label>`).join('') : '<p class="p-2 text-sm text-gray-500">Catálogo temporalmente no disponible</p>';
   renderSelectedInstagramProducts();
+}
+
+function instagramProductLabel(product) {
+  return [product.name, product.brand, product.sku].filter(Boolean).join(' - ');
 }
 
 function toggleInstagramProduct(sku, selected) {
@@ -302,14 +310,24 @@ function renderInstagramMappings() {
   const container = document.getElementById('instagram-mappings-list');
   const count = document.getElementById('instagram-mappings-count');
   if (!container || !count) return;
-  count.textContent = `${_instagramMappingsData.length} contenido${_instagramMappingsData.length === 1 ? '' : 's'}`;
-  const unmappedStories = _instagramMappingsData.filter(mapping => mapping.content_type === 'story' && (mapping.mapping_status === 'assignment_required' || !(mapping.products || []).length));
+  const archivedCount = _instagramMappingsData.filter(mapping => mapping.status === 'archived').length;
+  const visibleMappings = _showArchivedInstagramMappings
+    ? _instagramMappingsData
+    : _instagramMappingsData.filter(mapping => mapping.status !== 'archived');
+  count.textContent = `${visibleMappings.length} contenido${visibleMappings.length === 1 ? '' : 's'}${!_showArchivedInstagramMappings && archivedCount ? ` · ${archivedCount} archivado${archivedCount === 1 ? '' : 's'} oculto${archivedCount === 1 ? '' : 's'}` : ''}`;
+  const archivedToggleLabel = document.getElementById('instagram-show-archived-label');
+  if (archivedToggleLabel) archivedToggleLabel.textContent = `Mostrar archivados${archivedCount ? ` (${archivedCount})` : ''}`;
+  const unmappedStories = visibleMappings.filter(mapping => mapping.content_type === 'story' && mapping.status === 'active' && !mapping.is_expired && (mapping.mapping_status === 'assignment_required' || !(mapping.products || []).length));
   const storyAlert = unmappedStories.length ? `<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Hay ${unmappedStories.length} Historia${unmappedStories.length === 1 ? '' : 's'} de Instagram sin productos asignados. <button class="font-semibold underline" onclick="editInstagramMapping('${escapeHtml(unmappedStories[0].id)}')">Mapear ahora</button></div>` : '';
-  if (!_instagramMappingsData.length) {
-    container.innerHTML = '<div class="text-gray-500 dark:text-gray-400 py-5 text-center">Aún no hay contenidos de Instagram.</div>';
+  const storyDisabledAlert = _instagramContextStatus && !_instagramContextStatus.story_enabled ? '<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">El descubrimiento automático de Historias está desactivado. Aún puedes mapear una Historia manualmente usando su URL.</div>' : '';
+  if (!visibleMappings.length) {
+    const emptyMessage = archivedCount && !_showArchivedInstagramMappings
+      ? 'No hay contenidos activos. Activa “Mostrar archivados” para ver el historial.'
+      : 'Aún no hay contenidos de Instagram.';
+    container.innerHTML = `${storyDisabledAlert}<div class="text-gray-500 dark:text-gray-400 py-5 text-center">${emptyMessage}</div>`;
     return;
   }
-  container.innerHTML = `${storyAlert}<div class="grid gap-3">${_instagramMappingsData.map(mapping => {
+  container.innerHTML = `${storyDisabledAlert}${storyAlert}<div class="grid gap-3">${visibleMappings.map(mapping => {
     const products = mapping.products || [];
     const assignmentRequired = mapping.mapping_status === 'assignment_required' || !products.length;
     const productNames = products.map(product => product.name || 'Producto no disponible').join(', ') || 'Sin asignar';
@@ -365,6 +383,11 @@ function renderInstagramMappings() {
       ${storyDetails}
     </article>`;
   }).join('')}</div>`;
+}
+
+function toggleArchivedInstagramMappings(checked) {
+  _showArchivedInstagramMappings = Boolean(checked);
+  renderInstagramMappings();
 }
 
 function formatInstagramContentDate(value) {

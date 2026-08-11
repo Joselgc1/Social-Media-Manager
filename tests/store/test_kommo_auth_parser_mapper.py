@@ -516,6 +516,38 @@ def test_native_image_mapping_normalizes_equivalent_source_urls_and_caption_punc
     assert "cdn.example.com" not in output.customer_text
 
 
+def test_native_image_mapping_keeps_ai_text_without_appending_distinct_tool_caption():
+    output = map_ai_response_to_salesbot(
+        {
+            "text": "La bruma Coconut Passion cuesta $24 y tiene aroma dulce.",
+            "product_image": {
+                "type": "product_image",
+                "caption": "Coconut Passion - $24 - disponible",
+                "image_url": "https://cdn.example.com/coconut-passion.jpg",
+            },
+        },
+        native_media=True,
+    )
+
+    assert output.customer_text == "La bruma Coconut Passion cuesta $24 y tiene aroma dulce."
+
+
+def test_native_image_mapping_uses_tool_caption_when_ai_text_is_empty():
+    output = map_ai_response_to_salesbot(
+        {
+            "text": "",
+            "product_image": {
+                "type": "product_image",
+                "caption": "Coconut Passion - $24 - disponible",
+                "image_url": "https://cdn.example.com/coconut-passion.jpg",
+            },
+        },
+        native_media=True,
+    )
+
+    assert output.customer_text == "Coconut Passion - $24 - disponible"
+
+
 def test_native_media_mapping_removes_bare_googleusercontent_url():
     output = map_ai_response_to_salesbot(
         {

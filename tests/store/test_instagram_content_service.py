@@ -39,11 +39,33 @@ def test_normalizes_equivalent_reel_urls_without_query_or_fragment(url):
 @pytest.mark.parametrize(
     "url",
     [
+        "https://instagram.com/stories/example.user/123456789",
+        "https://www.instagram.com/stories/example.user/123456789/",
+        "https://www.instagram.com/stories/example.user/123456789/?igsh=anything#fragment",
+    ],
+)
+def test_normalizes_story_urls_with_stable_media_id(url):
+    result = normalize_instagram_url(url)
+
+    assert result.normalized_url == (
+        "https://www.instagram.com/stories/example.user/123456789/"
+    )
+    assert result.shortcode == "123456789"
+    assert result.content_type == "story"
+    assert result.media_id is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
         "http://www.instagram.com/p/ABC123/",
         "https://instagram.example/p/ABC123/",
         "https://user:password@instagram.com/p/ABC123/",
         "https://www.instagram.com/example_profile/",
-        "https://www.instagram.com/stories/example/123/",
+        "https://www.instagram.com/stories/example/",
+        "https://www.instagram.com/stories/example/not-a-story-id/",
+        "https://www.instagram.com/stories/highlights/123/",
+        "https://www.instagram.com/stories/example/123/extra",
         "https://www.instagram.com/p/ABC123/extra",
         "https://www.instagram.com/reel/Reel_123/extra",
         "https://www.instagram.com/reels/Reel_123/",

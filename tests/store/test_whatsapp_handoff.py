@@ -4,7 +4,10 @@ import pytest
 from app.ai.tools import catalog as tool_catalog
 from app.ai.tools.context import ToolExecutionContext
 from app.ai.tools.executor import execute_tool
-from app.ai.tools.messaging import normalize_whatsapp_phone_number
+from app.ai.tools.messaging import (
+    build_whatsapp_handoff_payload,
+    normalize_whatsapp_phone_number,
+)
 from app.integrations.kommo.response_mapper import map_ai_response_to_salesbot
 
 
@@ -115,3 +118,24 @@ def test_kommo_mapper_keeps_clickable_handoff_url_once():
 
     assert output.discarded is False
     assert output.customer_text.count(url) == 1
+
+
+def test_image_delivery_failure_handoff_acknowledges_failure_and_links_to_whatsapp():
+    result = build_whatsapp_handoff_payload(
+        reason="product_image_delivery_failed",
+        store_phone_number="+58 412 1234567",
+        product_name="Acqua di Gio",
+    )
+
+    assert result["customer_text"] == (
+        "Parece que hay un error aquí en Instagram y no puedo enviarte la imagen correctamente. "
+        "Intenta escribirnos por WhatsApp aquí y seguro te ayudamos:\n"
+        f"{result['url']}"
+    )
+    assert result["display_url"] in result["customer_text"]
+    assert "?text=" in result["customer_text"]
+    parsed = urlparse(result["url"])
+    assert parsed.path == "/584121234567"
+    assert parse_qs(parsed.query)["text"] == [
+        "Hola, quiero la foto de Acqua di Gio."
+    ]
