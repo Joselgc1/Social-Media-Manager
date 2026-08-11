@@ -173,7 +173,7 @@ def _timestamp(value: object) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
-    if isinstance(value, (int, float)) or str(value).replace(".", "", 1).isdigit():
+    if isinstance(value, int | float) or str(value).replace(".", "", 1).isdigit():
         number = float(value)
         if number > 10_000_000_000:
             number /= 1000

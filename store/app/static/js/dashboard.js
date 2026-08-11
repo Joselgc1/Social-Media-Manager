@@ -142,7 +142,12 @@ function renderDeleteIcon(label) {
 }
 
 function renderCustomerTags(customerId, tags) {
-  return `<div class="customer-tags">${tags.map(tag => `<span class="badge badge-blue">${escapeHtml(tag)}</span>`).join('')}</div>`;
+  const safeCustomerId = escapeHtml(customerId);
+  const tagChips = tags.map(tag => {
+    const safeTag = escapeHtml(tag);
+    return `<button type="button" class="badge badge-blue tag-chip tag-remove-chip" data-customer-id="${safeCustomerId}" data-tag="${safeTag}" title="Quitar tag">${safeTag} ✕</button>`;
+  }).join('');
+  return `<div class="customer-tags">${tagChips}<button type="button" class="badge badge-gray tag-add-chip" data-customer-id="${safeCustomerId}" title="Agregar tag">+ Tag</button></div>`;
 }
 
 // -- Dark Mode --

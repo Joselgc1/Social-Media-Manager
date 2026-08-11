@@ -908,7 +908,7 @@ def _job_correlation_timestamp_source(job: dict) -> str:
 
 def _jwt_iat_datetime(claims) -> datetime | None:
     issued_at = claims.get("iat") if isinstance(claims, dict) else None
-    if not isinstance(issued_at, (int, float)) or isinstance(issued_at, bool):
+    if not isinstance(issued_at, int | float) or isinstance(issued_at, bool):
         return None
     try:
         numeric_issued_at = float(issued_at)
