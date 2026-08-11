@@ -648,7 +648,34 @@ async def test_cmd_kommo_reports_inactive_backend_without_diagnostics():
 def test_start_menu_includes_kommo_command():
     from app.admin import telegram_bot
 
-    assert "/kommo - Estado de transporte" in telegram_bot._cmd_start()
+    with patch.object(
+        telegram_bot,
+        "get_config",
+        return_value=SimpleNamespace(channel_backend="kommo"),
+    ):
+        menu = telegram_bot._cmd_start()
+
+    assert "/kommo - Estado de transporte" in menu
+    assert "/payments - Métodos de pago registrados" in menu
+    assert "/shipping - Métodos y opciones de entrega" in menu
+    assert "/instagram - Productos y URLs de Instagram" in menu
+    assert "/pause ID - Pausar AI para un cliente" in menu
+    assert "*Broadcasts*" not in menu
+    assert "/broadcast" not in menu
+
+
+def test_start_menu_keeps_broadcast_commands_for_meta_backend():
+    from app.admin import telegram_bot
+
+    with patch.object(
+        telegram_bot,
+        "get_config",
+        return_value=SimpleNamespace(channel_backend="meta"),
+    ):
+        menu = telegram_bot._cmd_start()
+
+    assert "*Broadcasts*" in menu
+    assert "/broadcast - Ver broadcasts" in menu
 
 
 @pytest.mark.asyncio
@@ -661,6 +688,114 @@ async def test_command_dispatcher_routes_kommo_command():
 
     assert result == "estado kommo"
     handler.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_cmd_payments_lists_registered_details():
+    from app.admin import telegram_bot
+
+    settings = {
+        "payment_methods": [
+            {"id": "method-1", "name": "Pago Móvil", "information": "0412-1234567"},
+            {"id": "method-2", "name": "Zelle", "information": "pagos@example.com"},
+        ]
+    }
+    with patch.object(telegram_bot.db, "get_settings", AsyncMock(return_value=settings)):
+        result = await telegram_bot._cmd_payments()
+
+    assert "Pago Móvil" in result
+    assert "0412-1234567" in result
+    assert "Zelle" in result
+    assert "pagos@example.com" in result
+
+
+@pytest.mark.asyncio
+async def test_cmd_shipping_lists_home_and_agency_options():
+    from app.admin import telegram_bot
+
+    settings = {
+        "shipping_policy": {
+            "currency": "USD",
+            "home_delivery_cities": [{"name": "Valencia", "aliases": ["Valencia Norte"]}],
+            "home_delivery_zones": [
+                {"city": "Valencia", "name": "El Viñedo", "aliases": [], "fee_usd": 4}
+            ],
+            "courier_destination_rates": [
+                {"city": "Caracas", "aliases": [], "mrw_fee_usd": 6, "zoom_fee_usd": 7}
+            ],
+        }
+    }
+    with patch.object(telegram_bot.db, "get_settings", AsyncMock(return_value=settings)):
+        result = await telegram_bot._cmd_shipping()
+
+    assert "Entrega a domicilio" in result
+    assert "Valencia Norte" in result
+    assert "El Viñedo: $4.00" in result
+    assert "Retiro en agencia" in result
+    assert "MRW $6.00 / Zoom $7.00" in result
+
+
+@pytest.mark.asyncio
+async def test_cmd_instagram_lists_products_and_urls():
+    from app.admin import telegram_bot
+
+    rows = [{
+        "id": "content-1",
+        "content_type": "reel",
+        "permalink": "https://www.instagram.com/reel/ABC_123/",
+        "shortcode": "ABC_123",
+        "status": "active",
+        "product_skus": ["RM-003"],
+    }]
+    products = [{"sku": "RM-003", "product_name": "Mini Set", "variants": []}]
+    with (
+        patch.object(telegram_bot.db, "fetch_all", AsyncMock(return_value=rows)),
+        patch.object(telegram_bot, "get_cached_reference_catalog", return_value=products),
+        patch.object(telegram_bot, "group_catalog_products", return_value=products),
+    ):
+        result = await telegram_bot._cmd_instagram_mappings()
+
+    assert "Mini Set (RM-003)" in result
+    assert "https://www.instagram.com/reel/ABC\\_123/" in result
+
+
+@pytest.mark.asyncio
+async def test_cmd_pause_syncs_customer_state_by_id_prefix():
+    from app.admin import telegram_bot
+
+    customer = {
+        "id": "abc12345-1111-2222-3333-444444444444",
+        "display_name": "Cliente Uno",
+        "channel": "instagram",
+        "platform_id": "cliente_uno",
+        "conversation_state": "active",
+    }
+    pause = AsyncMock(return_value=SimpleNamespace(status="paused"))
+    with (
+        patch.object(telegram_bot.db, "fetch_all", AsyncMock(return_value=[customer])),
+        patch.object(telegram_bot, "pause_customer_for_admin", pause),
+    ):
+        result = await telegram_bot._cmd_pause("abc12345")
+
+    assert "AI pausada" in result
+    assert "Kommo y localmente" in result
+    assert "/resolve abc12345" in result
+    pause.assert_awaited_once_with(customer, channel="instagram")
+
+
+@pytest.mark.asyncio
+async def test_cmd_pause_rejects_ambiguous_customer_prefix():
+    from app.admin import telegram_bot
+
+    pause = AsyncMock()
+    with (
+        patch.object(telegram_bot.db, "fetch_all", AsyncMock(return_value=[{"id": "a"}, {"id": "b"}])),
+        patch.object(telegram_bot, "pause_customer_for_admin", pause),
+    ):
+        result = await telegram_bot._cmd_pause("a")
+
+    assert "ambiguo" in result
+    pause.assert_not_awaited()
 
 
 @pytest.mark.asyncio

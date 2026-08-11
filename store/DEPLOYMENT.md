@@ -513,9 +513,15 @@ Test:
 ```text
 /stats        -> Today's stats
 /settings     -> Concise configuration summary
+/payments     -> Registered payment methods and details
+/shipping     -> Delivery cities, zones, and agency rates
+/instagram    -> Instagram product and URL mappings
+/pause ID     -> Pause AI for one customer after Kommo synchronization
 /kommo        -> Kommo transport, queue, and Chats API diagnostics
 /usage        -> Token usage
 ```
+
+In Kommo mode, `/start` hides broadcast commands because this backend cannot deliver direct broadcasts.
 
 
 
@@ -1008,8 +1014,8 @@ Testing (DEBUG=true, direct loopback only, forwarding headers rejected):
 ### All Telegram Commands
 
 ```text
-/start /stats /customers /orders /order /resolve /provider
-/broadcast /send /preview /settings /usage /conversion
+/start /stats /customers /orders /order /pause /resolve /provider
+/broadcast /send /preview /settings /payments /shipping /instagram /kommo /usage /conversion
 /performance /products /catalogpdf
 /ai /tags /tag
 ```

@@ -10,6 +10,7 @@ def _kommo_config(**overrides):
         "channel_backend": "kommo",
         "kommo_ai_mode_field_id": 111,
         "kommo_ai_active_enum_id": 222,
+        "kommo_ai_paused_enum_id": 333,
     }
     data.update(overrides)
     return SimpleNamespace(**data)
@@ -135,6 +136,79 @@ async def test_admin_activation_in_meta_backend_is_local_only_without_mapping_lo
 
     assert result.status == "local_only"
     get_mapping.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_admin_pause_syncs_kommo_before_local_manual_escalation(monkeypatch):
+    from app.admin import customer_activation
+
+    events = []
+    monkeypatch.setattr(customer_activation, "get_config", lambda: _kommo_config())
+    monkeypatch.setattr(
+        customer_activation,
+        "get_mapping_by_customer",
+        AsyncMock(return_value={"external_lead_id": "100"}),
+    )
+    client = MagicMock()
+
+    async def update_ai_mode(lead_id, enum_id):
+        events.append(("kommo_update", lead_id, enum_id))
+
+    async def get_lead(lead_id):
+        events.append(("kommo_get", lead_id))
+        return _lead_with_ai_mode(333)
+
+    client.update_ai_mode = AsyncMock(side_effect=update_ai_mode)
+    client.get_lead = AsyncMock(side_effect=get_lead)
+    monkeypatch.setattr(customer_activation.KommoClient, "from_config", lambda: client)
+
+    async def mark_paused(customer_id, *, channel=None):
+        events.append(("local_pause", customer_id, channel))
+        return {"id": customer_id, "conversation_state": "escalated"}
+
+    monkeypatch.setattr(
+        customer_activation.escalations,
+        "escalate_customer_manually",
+        AsyncMock(side_effect=mark_paused),
+    )
+
+    result = await customer_activation.pause_customer_for_admin(
+        {"id": "customer"},
+        channel="instagram",
+    )
+
+    assert result.status == "paused"
+    assert result.kommo_lead_id == "100"
+    assert events == [
+        ("kommo_update", "100", 333),
+        ("kommo_get", "100"),
+        ("local_pause", "customer", "instagram"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admin_pause_failure_does_not_change_local_state(monkeypatch):
+    from app.admin import customer_activation
+
+    monkeypatch.setattr(customer_activation, "get_config", lambda: _kommo_config())
+    monkeypatch.setattr(
+        customer_activation,
+        "get_mapping_by_customer",
+        AsyncMock(return_value={"external_lead_id": "100"}),
+    )
+    client = MagicMock()
+    client.update_ai_mode = AsyncMock(side_effect=RuntimeError("Bearer secret-token"))
+    client.get_lead = AsyncMock()
+    monkeypatch.setattr(customer_activation.KommoClient, "from_config", lambda: client)
+    mark_paused = AsyncMock()
+    monkeypatch.setattr(customer_activation.escalations, "escalate_customer_manually", mark_paused)
+
+    with pytest.raises(customer_activation.ManualPauseError) as exc:
+        await customer_activation.pause_customer_for_admin({"id": "customer"})
+
+    assert "secret-token" not in exc.value.safe_detail
+    assert "redacted" in exc.value.safe_detail.lower()
+    mark_paused.assert_not_awaited()
 
 
 @pytest.mark.asyncio

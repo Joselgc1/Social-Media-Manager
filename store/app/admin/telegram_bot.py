@@ -9,12 +9,16 @@ Commands:
     /customers      - Recent customers with tags
     /orders         - Recent orders and their status
     /order ID STATUS - Update an order's status
+    /pause ID       - Pause AI responses for one customer
     /resolve ID     - Resolve an escalated conversation (return to AI)
     /provider NAME  - Switch LLM provider (openai/anthropic)
     /broadcast      - List recent broadcasts
     /send ID        - Execute a draft/scheduled broadcast immediately
     /preview TAGS   - Preview how many customers match tag filters
     /settings       - View current settings
+    /payments       - View registered payment methods
+    /shipping       - View registered delivery options
+    /instagram      - View Instagram product/URL mappings
     /kommo          - View Kommo transport and durable-job diagnostics
     /usage          - Today's LLM token usage and cost
     /conversion     - Sales conversion funnel
@@ -34,20 +38,27 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from app import db
-from app.admin.customer_activation import ManualActivationError, activate_customer_for_admin
+from app.admin.customer_activation import (
+    ManualActivationError,
+    ManualPauseError,
+    activate_customer_for_admin,
+    pause_customer_for_admin,
+)
 from app.admin.notify import notify_owner
 from app.admin.telegram_sender import escape_markdown
 from app.ai.providers import AVAILABLE_MODELS, get_model_costs
 from app.analytics import get_conversion_funnel, get_popular_products, get_response_time_stats
 from app.broadcast.sender import execute_broadcast, list_broadcasts, preview_broadcast
 from app.catalog.pdf_generator import generate_catalog_pdf, get_pdf_metadata
-from app.catalog.sheets import get_cached_catalog
+from app.catalog.sheets import get_cached_catalog, get_cached_reference_catalog, group_catalog_products
 from app.config import get_config
 from app.crm import orders
 from app.crm.customers import add_tags, remove_tag
 from app.exchange_rates import format_rate_for_customer, selected_exchange_rate
 from app.log_redaction import install_secret_redaction_filter
+from app.payment_methods import normalize_payment_methods
 from app.request_limits import limiter
+from app.shipping import normalize_shipping_policy
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -113,6 +124,8 @@ async def _handle_command(command: str, args: str) -> str:
             return await _cmd_update_order(args)
         elif command == "/resolve":
             return await _cmd_resolve(args)
+        elif command == "/pause":
+            return await _cmd_pause(args)
         elif command == "/provider":
             return await _cmd_switch_provider(args)
         elif command == "/broadcast":
@@ -123,6 +136,12 @@ async def _handle_command(command: str, args: str) -> str:
             return await _cmd_preview(args)
         elif command == "/settings":
             return await _cmd_settings()
+        elif command == "/payments":
+            return await _cmd_payments()
+        elif command == "/shipping":
+            return await _cmd_shipping()
+        elif command == "/instagram":
+            return await _cmd_instagram_mappings()
         elif command == "/kommo":
             return await _cmd_kommo()
         elif command == "/usage":
@@ -149,6 +168,14 @@ async def _handle_command(command: str, args: str) -> str:
 
 
 def _cmd_start() -> str:
+    broadcasts = ""
+    if getattr(get_config(), "channel_backend", "meta") != "kommo":
+        broadcasts = (
+            "📢 *Broadcasts*\n"
+            "/broadcast - Ver broadcasts\n"
+            "/send ID - Enviar broadcast\n"
+            "/preview tag1,tag2 - Vista previa\n\n"
+        )
     return (
         "🤖 *VS Chatbot Admin*\n\n"
         "Comandos disponibles:\n\n"
@@ -160,6 +187,7 @@ def _cmd_start() -> str:
         "👥 *Clientes*\n"
         "/customers - Clientes recientes\n"
         "/customers vip - Filtrar por tag\n"
+        "/pause ID - Pausar AI para un cliente\n"
         "/resolve - Ver clientes escalados\n"
         "/resolve ID - Resolver uno\n"
         "/resolve all - Resolver todos\n"
@@ -169,11 +197,11 @@ def _cmd_start() -> str:
         "📦 *Pedidos*\n"
         "/orders - Pedidos recientes\n"
         "/order ID confirmed - Actualizar estado\n\n"
-        "📢 *Broadcasts*\n"
-        "/broadcast - Ver broadcasts\n"
-        "/send ID - Enviar broadcast\n"
-        "/preview tag1,tag2 - Vista previa\n\n"
+        f"{broadcasts}"
         "⚙️ *Configuración*\n"
+        "/payments - Métodos de pago registrados\n"
+        "/shipping - Métodos y opciones de entrega\n"
+        "/instagram - Productos y URLs de Instagram\n"
         "/provider openai - Cambiar proveedor\n"
         "/provider anthropic - Cambiar proveedor\n\n"
         "📈 *Analíticas*\n"
@@ -399,6 +427,38 @@ async def _cmd_resolve(args: str) -> str:
     return f"✅ Escalación resuelta para *{name}*. El bot volverá a atenderle con un chat nuevo."
 
 
+async def _cmd_pause(args: str) -> str:
+    customer_id_prefix = args.strip().lower()
+    if not customer_id_prefix:
+        return "Uso: /pause CUSTOMER_ID"
+
+    rows = await db.fetch_all(
+        """
+        SELECT id, display_name, channel, platform_id, conversation_state
+        FROM customers
+        WHERE id::text LIKE :prefix
+          AND conversation_state IS DISTINCT FROM 'blocked'
+        ORDER BY id
+        LIMIT 2
+        """,
+        {"prefix": f"{customer_id_prefix}%"},
+    )
+    if not rows:
+        return f"No se encontró cliente con ID que empiece con '{escape_markdown(customer_id_prefix)}'"
+    if len(rows) > 1:
+        return "El ID es ambiguo. Usa más caracteres del ID del cliente."
+
+    customer = dict(rows[0])
+    try:
+        result = await pause_customer_for_admin(customer, channel=customer["channel"])
+    except ManualPauseError as e:
+        return f"⚠️ No pude pausar este cliente: {escape_markdown(e.safe_detail)}"
+
+    name = escape_markdown(customer["display_name"] or customer["platform_id"] or str(customer["id"])[:8])
+    provider_text = " en Kommo y localmente" if result.status == "paused" else " localmente"
+    return f"⏸️ AI pausada para *{name}*{provider_text}. Usa /resolve {escape_markdown(str(customer['id'])[:8])} para reactivarla."
+
+
 async def _cmd_switch_provider(args: str) -> str:
     config = get_config()
     if config.llm_managed_externally:
@@ -552,6 +612,104 @@ async def _cmd_settings() -> str:
     else:
         lines.append("• Backend: meta")
 
+    lines.extend([
+        "\n📋 *Detalles configurados*",
+        "• /payments - Métodos de pago",
+        "• /shipping - Entrega y tarifas",
+        "• /instagram - Mapeos de contenido",
+    ])
+
+    return "\n".join(lines)
+
+
+async def _cmd_payments() -> str:
+    settings = await db.get_settings()
+    methods = normalize_payment_methods(settings.get("payment_methods", []))
+    if not methods:
+        return "💳 *Métodos de pago*\n\nNo hay métodos registrados."
+
+    lines = ["💳 *Métodos de pago registrados:*\n"]
+    for method in methods:
+        lines.append(
+            f"• *{escape_markdown(method['name'])}*\n"
+            f"  {escape_markdown(method['information'])}"
+        )
+    return "\n".join(lines)
+
+
+async def _cmd_shipping() -> str:
+    settings = await db.get_settings()
+    policy = normalize_shipping_policy(settings.get("shipping_policy"))
+    currency = escape_markdown(policy["currency"])
+    lines = ["🚚 *Métodos y opciones de entrega:*\n"]
+
+    cities = policy["home_delivery_cities"]
+    zones = policy["home_delivery_zones"]
+    rates = policy["courier_destination_rates"]
+    lines.append("🏠 *Entrega a domicilio*")
+    if not cities:
+        lines.append("• No configurada")
+    for city in cities:
+        aliases = city.get("aliases") or []
+        alias_text = f" (alias: {escape_markdown(', '.join(aliases))})" if aliases else ""
+        lines.append(f"• {escape_markdown(city['name'])}{alias_text}")
+        for zone in (item for item in zones if item["city"] == city["name"]):
+            lines.append(
+                f"  - {escape_markdown(zone['name'])}: ${float(zone['fee_usd']):.2f} {currency}"
+            )
+
+    lines.append("\n📦 *Retiro en agencia (cobro a destino)*")
+    if not rates:
+        lines.append("• No hay tarifas por ciudad configuradas")
+    for rate in rates:
+        lines.append(
+            f"• {escape_markdown(rate['city'])}: "
+            f"MRW ${float(rate['mrw_fee_usd']):.2f} / "
+            f"Zoom ${float(rate['zoom_fee_usd']):.2f} {currency}"
+        )
+    return "\n".join(lines)
+
+
+async def _cmd_instagram_mappings() -> str:
+    rows = await db.fetch_all(
+        """
+        SELECT content.id, content.content_type, content.permalink, content.shortcode,
+               content.status,
+               COALESCE(
+                   array_agg(mapping.product_sku ORDER BY mapping.display_order)
+                       FILTER (WHERE mapping.product_sku IS NOT NULL),
+                   ARRAY[]::text[]
+               ) AS product_skus
+        FROM instagram_content content
+        LEFT JOIN instagram_content_products mapping ON mapping.content_id = content.id
+        GROUP BY content.id
+        ORDER BY content.status = 'active' DESC, content.created_at DESC
+        """
+    )
+    if not rows:
+        return "📸 *Mapeos de Instagram*\n\nNo hay contenidos registrados."
+
+    products = group_catalog_products(get_cached_reference_catalog())
+    names_by_sku = {
+        str(product["sku"]): str(product.get("product_name") or product["sku"])
+        for product in products
+    }
+    lines = ["📸 *Productos y URLs de Instagram:*\n"]
+    for row in rows:
+        skus = list(row["product_skus"] or [])
+        mapped_products = ", ".join(
+            f"{names_by_sku.get(str(sku), str(sku))} ({sku})" for sku in skus
+        ) or "Sin producto asignado"
+        url = row["permalink"] or (
+            f"https://www.instagram.com/{'reel' if row['content_type'] == 'reel' else 'p'}/{row['shortcode']}/"
+            if row["shortcode"]
+            else "URL no disponible"
+        )
+        lines.append(
+            f"• *{escape_markdown(row['content_type'])}* [{escape_markdown(row['status'])}]\n"
+            f"  Producto: {escape_markdown(mapped_products)}\n"
+            f"  URL: {escape_markdown(url)}"
+        )
     return "\n".join(lines)
 
 

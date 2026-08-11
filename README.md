@@ -265,6 +265,7 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 /customers vip  - Filter by tag
 /orders         - Recent orders (alphabetical by customer)
 /order ID STATUS - Update order status
+/pause ID       - Pause AI responses for one customer
 /resolve        - List escalated customers
 /resolve ID     - Resolve one escalation
 /resolve all    - Resolve all escalations
@@ -278,6 +279,9 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 /send ID        - Send a broadcast
 /preview TAGS   - Preview broadcast reach
 /settings       - View current settings
+/payments       - Registered payment methods and details
+/shipping       - Registered delivery methods, zones, and rates
+/instagram      - Instagram product and URL mappings
 /kommo          - Kommo transport, queue, and Chats API status
 /usage          - Token usage and costs
 /conversion     - Sales funnel stats
@@ -285,6 +289,8 @@ curl -X POST "http://localhost:8000/admin/settings/instagram/setup-ice-breakers?
 /products       - Popular products
 /catalogpdf     - Generate PDF catalog
 ```
+
+Broadcast commands are omitted from `/start` when `CHANNEL_BACKEND=kommo`, where direct broadcasts are unavailable.
 
 ## Admin Dashboard Features
 

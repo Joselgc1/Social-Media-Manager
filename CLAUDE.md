@@ -309,8 +309,8 @@ Testing:        GET /test/ui, GET /test/db-check, GET /test/crypto, POST /test/s
 ## Telegram admin commands
 
 ```text
-/start /stats /customers /orders /order /resolve /provider
-/broadcast /send /preview /settings /kommo /usage /conversion
+/start /stats /customers /orders /order /pause /resolve /provider
+/broadcast /send /preview /settings /payments /shipping /instagram /kommo /usage /conversion
 /performance /products /catalogpdf
 /ai /tags /tag
 ```
