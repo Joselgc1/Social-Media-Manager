@@ -323,6 +323,68 @@ async def test_required_handoff_executes_backend_tool_when_model_omits_it(monkey
 
 
 @pytest.mark.asyncio
+async def test_handoff_uses_resolved_product_when_model_omits_product_name(monkeypatch):
+    provider = _provider(LLMResponse(tool_calls=[_tool_call(
+        "send_product_image",
+        {"product_query": "Bombshell"},
+    )]))
+    provider.continue_after_tool.side_effect = [
+        LLMResponse(tool_calls=[_tool_call("send_whatsapp_handoff", {"handoff_reason": "purchase"})]),
+        LLMResponse(text="Continuamos por WhatsApp."),
+    ]
+    execute_tool = AsyncMock(side_effect=[
+        {
+            "type": "product_image",
+            "product_name": "Victoria's Secret Bombshell Gift Set",
+            "image_url": "https://example.com/bombshell.jpg",
+            "caption": "Bombshell Gift Set",
+        },
+        {
+            "type": "whatsapp_handoff",
+            "url": "https://wa.me/584121234567?text=Bombshell",
+            "customer_text": "Continuamos por WhatsApp:\nhttps://wa.me/584121234567?text=Bombshell",
+            "prefilled_message": "Quiero comprar Victoria's Secret Bombshell Gift Set",
+        },
+    ])
+    monkeypatch.setattr("app.ai.runner._list_providers", lambda: ["openai"])
+    monkeypatch.setattr("app.ai.runner.get_provider", lambda name: provider)
+    monkeypatch.setattr("app.ai.runner.execute_tool", execute_tool)
+
+    await AgentRunner().run(
+        LEGACY_AGENT,
+        "prompt",
+        [],
+        _settings(),
+        _context(channel="instagram", latest_user_message="Quiero comprar Bombshell"),
+    )
+
+    assert execute_tool.await_args_list[1].args[1] == {
+        "handoff_reason": "purchase",
+        "product_name": "Victoria's Secret Bombshell Gift Set",
+    }
+
+
+def test_handoff_resolves_unique_product_named_in_latest_customer_message(monkeypatch):
+    from app.ai import runner
+
+    monkeypatch.setattr(
+        runner,
+        "get_cached_catalog",
+        lambda: [
+            {"product_name": "Victoria's Secret Bombshell Gift Set"},
+            {"product_name": "Victoria's Secret Mini Gift Set"},
+        ],
+    )
+
+    assert runner._resolved_handoff_product_name(
+        None,
+        [],
+        "Quisiera comprar el primero que nombraste, Bombshell",
+    ) == "Victoria's Secret Bombshell Gift Set"
+    assert runner._resolved_handoff_product_name(None, [], "Quisiera comprar un Gift Set") is None
+
+
+@pytest.mark.asyncio
 async def test_required_handoff_prefers_url_text_over_interactive_payload(monkeypatch):
     url = "https://wa.me/584121234567?text=Hola%20Instagram"
     provider = _provider(LLMResponse(tool_calls=[_tool_call(

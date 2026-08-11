@@ -17,6 +17,7 @@ from app.ai.providers import AVAILABLE_MODELS, get_provider
 from app.ai.providers import list_providers as _list_providers
 from app.ai.providers.base import LLMResponse
 from app.ai.safety import sanitize_customer_facing_text
+from app.ai.tools.catalog import normalize_catalog_text
 from app.ai.tools.context import ToolExecutionContext
 from app.ai.tools.executor import execute_tool
 from app.ai.tools.registry import get_tool_schemas
@@ -158,6 +159,14 @@ class AgentRunner:
                     ),
                 }
             else:
+                if name == "send_whatsapp_handoff" and not args.get("product_name"):
+                    product_name = _resolved_handoff_product_name(
+                        product_image_payload,
+                        tool_log,
+                        context.latest_user_message,
+                    )
+                    if product_name:
+                        args = {**args, "product_name": product_name}
                 result = await execute_tool(name, args, tool_context)
                 if name in {"create_order", "update_payment_status", "finalize_checkout", "escalate_to_human", "request_agent_handoff", "send_whatsapp_handoff"} and result.get("status") != "error":
                     single_use_tool_results[name] = result
@@ -215,6 +224,13 @@ class AgentRunner:
             and "send_whatsapp_handoff" in allowed_tool_names
         ):
             handoff_args = {"handoff_reason": context.required_whatsapp_handoff_reason}
+            product_name = _resolved_handoff_product_name(
+                product_image_payload,
+                tool_log,
+                context.latest_user_message,
+            )
+            if product_name:
+                handoff_args["product_name"] = product_name
             handoff_result = await execute_tool("send_whatsapp_handoff", handoff_args, tool_context)
             tool_log.append({"name": "send_whatsapp_handoff", "args": handoff_args, "result": handoff_result})
             if handoff_result.get("type") == "whatsapp_handoff":
@@ -443,6 +459,53 @@ def _resolve_reply_text(
     else:
         reply_text = response_text or DEFAULT_FALLBACK_TEXT
     return clean_assistant_reply_text(reply_text) or DEFAULT_FALLBACK_TEXT
+
+
+def _resolved_handoff_product_name(
+    product_image_payload: dict | None,
+    tool_log: list[dict],
+    latest_user_message: str,
+) -> str | None:
+    image_name = str((product_image_payload or {}).get("product_name") or "").strip()
+    if image_name:
+        return image_name
+
+    for entry in reversed(tool_log):
+        result = entry.get("result") if isinstance(entry, dict) else None
+        if not isinstance(result, dict):
+            continue
+        result_name = str(result.get("product_name") or "").strip()
+        if result_name:
+            return result_name
+        products = result.get("products")
+        if isinstance(products, list) and len(products) == 1 and isinstance(products[0], dict):
+            product_name = str(products[0].get("product_name") or "").strip()
+            if product_name:
+                return product_name
+
+    message_terms = set(normalize_catalog_text(latest_user_message).split())
+    if not message_terms:
+        return None
+    scores: dict[str, int] = {}
+    for product in get_cached_catalog():
+        product_name = str(product.get("product_name") or "").strip()
+        normalized_name = normalize_catalog_text(product_name)
+        if not normalized_name:
+            continue
+        distinctive_terms = {
+            term for term in normalized_name.split()
+            if len(term) >= 5 and term not in {"collection", "miniatures"}
+        }
+        matched_terms = distinctive_terms & message_terms
+        if normalized_name in normalize_catalog_text(latest_user_message):
+            scores[product_name] = 1000 + len(normalized_name)
+        elif matched_terms:
+            scores[product_name] = sum(len(term) for term in matched_terms)
+    if not scores:
+        return None
+    best_score = max(scores.values())
+    best_names = {name for name, score in scores.items() if score == best_score}
+    return next(iter(best_names)) if len(best_names) == 1 else None
 
 
 def _ensure_whatsapp_handoff_text(reply_text: str, payload: dict) -> str:
