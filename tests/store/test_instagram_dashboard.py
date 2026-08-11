@@ -11,15 +11,14 @@ def test_archived_instagram_mappings_render_restore_action():
     assert "Archivar" in dashboard
 
 
-def test_archived_instagram_mappings_are_hidden_by_default_with_toggle():
+def test_archived_instagram_mappings_are_hidden_by_default_with_lifecycle_filter():
     template = Path("store/app/templates/dashboard.html").read_text()
     dashboard = Path("store/app/static/js/dashboard.js").read_text()
 
-    assert 'id="instagram-show-archived"' in template
-    assert "Mostrar archivados" in template
-    assert "_showArchivedInstagramMappings = false" in dashboard
-    assert "mapping.status !== 'archived'" in dashboard
-    assert "toggleArchivedInstagramMappings(this.checked)" in template
+    assert 'id="instagram-filter-lifecycle"' in template
+    assert '<option value="current">No archivados</option>' in template
+    assert '<option value="archived">Archivados</option>' in template
+    assert "lifecycleValue === 'current' && lifecycle === 'archived'" in dashboard
 
 
 def test_mapping_list_renders_when_product_selector_request_fails():
@@ -34,11 +33,25 @@ def test_mapping_list_renders_when_product_selector_request_fails():
 def test_mapping_list_renders_authoritative_post_identifiers():
     dashboard = Path("store/app/static/js/dashboard.js").read_text()
 
-    assert "URL normalizada" in dashboard
-    assert "Shortcode" in dashboard
-    assert "Meta media ID" in dashboard
     assert "mapping.normalized_url" in dashboard
     assert "mapping.media_id" in dashboard
+    assert "mapping.shortcode" in dashboard
+    assert "ID de Meta pendiente" in dashboard
+
+
+def test_mapping_list_uses_client_style_table_filters_and_mobile_cards():
+    template = Path("store/app/templates/dashboard.html").read_text()
+    dashboard = Path("store/app/static/js/dashboard.js").read_text()
+
+    assert 'id="instagram-filter-toggle"' in template
+    assert 'id="instagram-filter-search"' in template
+    assert 'id="instagram-filter-type"' in template
+    assert 'id="instagram-filter-mapping"' in template
+    assert "function getVisibleInstagramMappings()" in dashboard
+    assert 'class="w-full customers-table instagram-mappings-table"' in dashboard
+    assert "isMobileViewport()" in dashboard
+    assert 'class="card mobile-data-card"' in dashboard
+    assert "instagram-actions-cell" in dashboard
 
 
 def test_instagram_mapping_form_submits_multiple_product_skus():
@@ -60,6 +73,14 @@ def test_instagram_product_picker_shows_name_brand_and_sku():
     assert "escapeHtml(instagramProductLabel(product))" in dashboard
 
 
+def test_customer_table_rows_have_subtle_dividers():
+    styles = Path("store/app/static/css/dashboard.css").read_text()
+
+    assert ".customers-table tbody tr + tr td" in styles
+    assert "border-top: 1px solid #f1f5f9" in styles
+    assert ".dark .customers-table tbody tr + tr td" in styles
+
+
 def test_instagram_mapping_edit_restores_and_clears_all_selections():
     dashboard = Path("store/app/static/js/dashboard.js").read_text()
 
@@ -77,15 +98,12 @@ def test_instagram_mapping_form_can_remove_one_selected_product():
     assert "if (option) option.selected = false" in dashboard
 
 
-def test_story_content_renders_preview_timing_and_assignment_status():
+def test_story_content_renders_preview_and_mapping_status():
     dashboard = Path("store/app/static/js/dashboard.js").read_text()
 
-    assert "Story ID" in dashboard
     assert "mapping.preview_url" in dashboard
-    assert "mapping.discovered_at" in dashboard
-    assert "mapping.published_at" in dashboard
-    assert "mapping.expires_at" in dashboard
-    assert "Asignación requerida" in dashboard
+    assert "view.mapped ? 'Mapeado' : 'Sin productos'" in dashboard
+    assert "lifecycleStatus === 'expired'" in dashboard
 
 
 def test_story_edit_assigns_products_without_submitting_permalink():

@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -344,6 +345,80 @@ async def test_existing_instagram_customer_missing_handle_is_enriched_on_next_ev
     assert result["instagram_handle"] == "maria.bonita"
     assert "source=webhook_author_username" in caplog.text
     assert "maria.bonita" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_new_kommo_identity_reuses_customer_with_same_instagram_handle(monkeypatch):
+    from app.crm import channel_mappings
+    from app.integrations.kommo.customer_profile import KommoCustomerProfile
+
+    existing = {
+        "id": "customer-ig-1",
+        "channel": "instagram",
+        "platform_id": "old-contact",
+        "instagram_handle": "joselgc",
+    }
+    database = MagicMock()
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    database.transaction = transaction
+    mock_db = MagicMock()
+    mock_db.get_db = MagicMock(return_value=database)
+    mock_db.fetch_one = AsyncMock(return_value={"locked": True})
+    monkeypatch.setattr(channel_mappings, "db", mock_db)
+    monkeypatch.setattr(
+        channel_mappings,
+        "_lookup_existing_kommo_mapping",
+        AsyncMock(side_effect=[None, None]),
+    )
+    monkeypatch.setattr(
+        channel_mappings,
+        "_lookup_instagram_customer_by_handle",
+        AsyncMock(return_value=existing),
+    )
+    monkeypatch.setattr(channel_mappings.customers, "get_or_create_customer", AsyncMock())
+    upsert = AsyncMock(return_value={"id": "mapping"})
+    enrich = AsyncMock(return_value=existing)
+    monkeypatch.setattr(channel_mappings, "upsert_mapping", upsert)
+    monkeypatch.setattr(channel_mappings, "enrich_customer_profile", enrich)
+
+    result = await channel_mappings.resolve_customer_from_kommo_job(
+        {
+            "channel": "instagram",
+            "contact_id": "new-contact",
+            "chat_id": "new-chat",
+            "author_id": "new-author",
+        },
+        profile=KommoCustomerProfile(
+            instagram_handle="joselgc",
+            instagram_handle_source="webhook_author_username",
+        ),
+    )
+
+    channel_mappings.customers.get_or_create_customer.assert_not_awaited()
+    assert result["id"] == "customer-ig-1"
+    assert upsert.await_args.kwargs["customer_id"] == "customer-ig-1"
+    assert upsert.await_args.kwargs["external_contact_id"] == "new-contact"
+    assert "pg_advisory_xact_lock" in mock_db.fetch_one.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_instagram_handle_lookup_is_case_insensitive_and_deterministic(monkeypatch):
+    from app.crm import channel_mappings
+
+    fetch_one = AsyncMock(return_value={"id": "customer-1"})
+    monkeypatch.setattr(channel_mappings.db, "fetch_one", fetch_one)
+
+    assert await channel_mappings._lookup_instagram_customer_by_handle("JoseLGC") == {
+        "id": "customer-1"
+    }
+    query, values = fetch_one.await_args.args
+    assert "LOWER(instagram_handle) = LOWER(:instagram_handle)" in query
+    assert "ORDER BY total_orders DESC, last_active DESC, first_contact ASC" in query
+    assert values == {"instagram_handle": "JoseLGC"}
 
 
 @pytest.mark.asyncio

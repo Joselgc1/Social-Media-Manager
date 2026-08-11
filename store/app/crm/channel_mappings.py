@@ -248,6 +248,42 @@ async def resolve_customer_from_kommo_job(
             )
             return await enrich_customer_profile(dict(customer), profile, identifiers=identifiers)
 
+    if channel == "instagram" and profile.instagram_handle:
+        async with db.get_db().transaction():
+            await db.fetch_one(
+                "SELECT pg_advisory_xact_lock(hashtext(:identity_lock))",
+                {"identity_lock": f"instagram-handle:{profile.instagram_handle.casefold()}"},
+            )
+            mapping = await _lookup_existing_kommo_mapping(job)
+            customer = None
+            if mapping:
+                customer = await db.fetch_one(
+                    "SELECT * FROM customers WHERE id = :id",
+                    {"id": mapping["customer_id"]},
+                )
+            if not customer:
+                customer = await _lookup_instagram_customer_by_handle(profile.instagram_handle)
+            if not customer:
+                customer = await customers.get_or_create_customer(
+                    channel=channel,
+                    platform_id=platform_id,
+                    instagram_handle=profile.instagram_handle,
+                    allow_platform_phone_fallback=False,
+                )
+            customer = dict(customer)
+            await upsert_mapping(
+                customer_id=str(customer["id"]),
+                provider="kommo",
+                channel=channel,
+                external_contact_id=job.get("contact_id"),
+                external_lead_id=job.get("lead_id"),
+                external_chat_id=job.get("chat_id"),
+                external_talk_id=job.get("talk_id"),
+                external_author_id=job.get("author_id"),
+                external_origin=job.get("origin"),
+            )
+            return await enrich_customer_profile(customer, profile, identifiers=identifiers)
+
     customer = await customers.get_or_create_customer(
         channel=channel,
         platform_id=platform_id,
@@ -265,6 +301,21 @@ async def resolve_customer_from_kommo_job(
         external_origin=job.get("origin"),
     )
     return await enrich_customer_profile(customer, profile, identifiers=identifiers)
+
+
+async def _lookup_instagram_customer_by_handle(instagram_handle: str) -> dict | None:
+    row = await db.fetch_one(
+        """
+        SELECT *
+        FROM customers
+        WHERE channel = 'instagram'
+          AND LOWER(instagram_handle) = LOWER(:instagram_handle)
+        ORDER BY total_orders DESC, last_active DESC, first_contact ASC
+        LIMIT 1
+        """,
+        {"instagram_handle": instagram_handle},
+    )
+    return dict(row) if row else None
 
 
 async def resolve_customer_from_kommo_event(event, lead: dict | None = None) -> dict:

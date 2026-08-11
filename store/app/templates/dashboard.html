@@ -251,16 +251,49 @@
         </div>
         <div class="card">
           <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
-            <div>
+            <div class="min-w-0">
               <h3 class="font-semibold text-gray-900 dark:text-gray-100">Contenido de Instagram</h3>
               <p id="instagram-mappings-count" class="text-sm text-gray-500 dark:text-gray-400 mt-1">Cargando...</p>
             </div>
-            <div class="flex flex-wrap items-center gap-3">
-              <label class="inline-flex cursor-pointer items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
-                <input id="instagram-show-archived" type="checkbox" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" onchange="toggleArchivedInstagramMappings(this.checked)">
-                <span id="instagram-show-archived-label">Mostrar archivados</span>
-              </label>
-              <button class="btn btn-primary text-sm" onclick="showInstagramMappingForm()">Agregar mapeo</button>
+            <div class="flex flex-wrap justify-end gap-2">
+              <button id="instagram-filter-toggle" class="btn btn-secondary text-sm whitespace-nowrap" onclick="toggleInstagramFilters()">Filtros &#x25BC;</button>
+              <button class="btn btn-primary text-sm whitespace-nowrap" onclick="showInstagramMappingForm()">Agregar mapeo</button>
+            </div>
+          </div>
+          <div id="instagram-filters" class="grid sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-4" style="display:none">
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Buscar</label>
+              <input id="instagram-filter-search" class="w-full" placeholder="Producto, SKU o contenido" oninput="applyInstagramFilters()">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Tipo</label>
+              <select id="instagram-filter-type" class="w-full" onchange="applyInstagramFilters()">
+                <option value="">Todos</option>
+                <option value="post">Post</option>
+                <option value="reel">Reel</option>
+                <option value="story">Historia</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Mapeo</label>
+              <select id="instagram-filter-mapping" class="w-full" onchange="applyInstagramFilters()">
+                <option value="">Todos</option>
+                <option value="mapped">Con productos</option>
+                <option value="unmapped">Sin productos</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Estado</label>
+              <select id="instagram-filter-lifecycle" class="w-full" onchange="applyInstagramFilters()">
+                <option value="current">No archivados</option>
+                <option value="active">Activos</option>
+                <option value="expired">Expirados</option>
+                <option value="archived">Archivados</option>
+                <option value="all">Todos</option>
+              </select>
+            </div>
+            <div class="flex items-end">
+              <button class="btn btn-secondary w-full" onclick="resetInstagramFilters()">Limpiar filtros</button>
             </div>
           </div>
           <div id="instagram-mappings-list" class="text-sm dark:text-gray-300">Cargando...</div>

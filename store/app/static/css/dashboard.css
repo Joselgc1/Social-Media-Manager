@@ -215,6 +215,13 @@ textarea { resize: vertical; min-height: 88px; }
   padding-top: 18px;
   padding-bottom: 18px;
 }
+.customers-table tbody tr + tr td { border-top: 1px solid #f1f5f9; }
+.dark .customers-table tbody tr + tr td { border-top-color: #273244; }
+.instagram-mappings-table .instagram-content-cell { min-width: 230px; max-width: 320px; }
+.instagram-mappings-table .instagram-products-cell { min-width: 240px; max-width: 380px; }
+.instagram-mappings-table .instagram-inventory-cell,
+.instagram-mappings-table .instagram-status-cell { min-width: 130px; }
+.instagram-mappings-table .instagram-actions-cell { min-width: 170px; text-align: right; }
 .customers-table .customer-name-cell {
   min-width: 230px;
 }
